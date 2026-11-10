@@ -1777,6 +1777,25 @@ def freeable_tokens(messages: List[Dict[str, Any]], keep_recent: int) -> int:
                for _, m in _evictable(messages, keep_recent))
 
 
+def estimate_messages_tokens(messages: List[Dict[str, Any]]) -> int:
+    """What these messages add to a prompt, by the same chars/4 estimate: each message's
+    text (a block list counts its text blocks) and the name and arguments of its calls.
+    Used to project the next request from the last measured one (loop.py), so it is a
+    sum over what was appended, never an estimate of a whole prompt."""
+    total = 0
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):
+            total += sum(estimate_tokens(str(b.get("text", ""))) for b in content
+                         if isinstance(b, dict) and b.get("type") == "text")
+        elif content:
+            total += estimate_tokens(str(content))
+        for call in m.get("tool_calls") or ():
+            fn = call.get("function") or {}
+            total += estimate_tokens(f"{fn.get('name', '')}{fn.get('arguments', '')}")
+    return total
+
+
 def evicted_calls(messages: List[Dict[str, Any]], keep_recent: int) -> str:
     """The results a cut keeping `keep_recent` rounds replaces, for the log line:
     `tool:chars@address`, at most _EVICTED_LOGGED of them, then a count."""

@@ -31,7 +31,7 @@ from .utils import (
     sanitize_tool_args_for_log, sanitize_tool_result_for_log, get_agent_root,
     load_agent_config,
 )
-from .context import CompactionState, apply_compaction
+from .context import CompactionState, apply_compaction, estimate_messages_tokens
 from . import prompt_divergence
 from .tool_ledger import record_attempt, sweep_unfinished
 from dpc_protocol.protocol import PeerRefused
@@ -2218,9 +2218,8 @@ async def run_llm_loop(
     hooks.register(ResearchLimitGuard())
     hooks.register(LoopGuard())
     hooks.register(BudgetLimitGuard(budget_remaining_usd=budget_remaining_usd))
-    # The sixth: the loop watched rounds, tools, research, repetition and money,
-    # and did not watch the one resource a long task actually exhausts.
-    hooks.register(ContextLimitGuard())
+    # The sixth, ContextLimitGuard, is registered below, once the compaction state exists:
+    # its stop text says whether a summariser was there to try.
 
     ctx = HookContext(
         agent_id="",
@@ -2258,6 +2257,11 @@ async def run_llm_loop(
         except Exception:
             pass
     _compaction_state = CompactionState(_compaction_cfg)
+    # The sixth: the loop watched rounds, tools, research, repetition and money,
+    # and did not watch the one resource a long task actually exhausts. Last in the chain
+    # (nothing else registers after it) and read after the round's cut, ADR-045 decision 6.
+    hooks.register(ContextLimitGuard(
+        compaction_on=_compaction_state.enabled and _compaction_llm is not None))
 
     # Ark's measure of cache reuse: how often a request rewrote the prefix the
     # previous request sent, rather than only appending to it. The first request
@@ -2422,8 +2426,12 @@ async def run_llm_loop(
     last_cut_at: Optional[str] = None
     # The last of the words was cut in its text, so the next reply joins it character by character.
     words_end_at_the_cut = False
-    # What the last prompt does not hold yet, for the next round's window checks.
+    # What the last prompt does not hold yet, for the next round's window checks: the model's
+    # own words counted by the engine (the output-limit continue) ...
     tokens_since_the_last_prompt = 0
+    # ... and, from this index on, the messages appended after the last request went out (its
+    # reply, the tool results it asked for, a retry's request), which are estimated.
+    messages_sent = 0
 
     def _a_continue_is_left() -> bool:
         return (output_limit_continues_since_the_last_tool < MAX_OUTPUT_LIMIT_CONTINUES_SINCE_A_TOOL
@@ -2487,17 +2495,41 @@ async def run_llm_loop(
                     window=ctx.state.context_window,
                 ))
 
-            # RoundLimitGuard + BudgetLimitGuard + ContextLimitGuard checkpoint.
-            # The context pair is written here rather than after the call, because
-            # this is the moment a guard can still refuse cheaply: the numbers are
-            # the previous round's real input size and the window it was measured
-            # against, which is exactly what compaction triggers on below.
-            next_prompt_tokens = accumulated_usage["last_prompt_tokens"] + tokens_since_the_last_prompt
+            # Project the next request: the last measured prompt plus what the round just
+            # run added to it (the reply, the tool results, a retry's request). The measured
+            # size is one request stale, and one oversized tool result is exactly what it
+            # misses. Round one has no measured size and is not projected.
+            next_prompt_tokens = accumulated_usage["last_prompt_tokens"]
+            if next_prompt_tokens > 0:
+                next_prompt_tokens += tokens_since_the_last_prompt + estimate_messages_tokens(
+                    messages[messages_sent:])
             tokens_since_the_last_prompt = 0
-            ctx.state.last_prompt_tokens = next_prompt_tokens
             ctx.state.context_window = int(
                 _compaction_state.window if _compaction_state.window else (context_window or 0)
             )
+
+            # Compact old tool history (ADR-033, ADR-045 decision 4) at the projected size,
+            # before any guard reads it: compaction first, ContextLimitGuard the last line
+            # (ADR-045 decision 6). The pressure cut acts here on the request about to go
+            # out, not on the one before it.
+            before_the_cut = messages
+            messages = await apply_compaction(
+                messages,
+                state=_compaction_state,
+                last_prompt_tokens=next_prompt_tokens,
+                llm_manager=_compaction_llm,
+                notify=lambda m: emit_progress(m, None, round_idx),
+                round_idx=round_idx,
+            )
+            if messages is not before_the_cut and next_prompt_tokens > 0:
+                # What the cut took out of the prompt, by the same estimate that projected it.
+                next_prompt_tokens = max(0, next_prompt_tokens - max(
+                    0, estimate_messages_tokens(before_the_cut) - estimate_messages_tokens(messages)))
+
+            # RoundLimitGuard + BudgetLimitGuard + ContextLimitGuard checkpoint. The first two
+            # read the round count and the money, which a cut does not change; the third reads
+            # the projected size left after the cut, the number the request would carry.
+            ctx.state.last_prompt_tokens = next_prompt_tokens
             if await hooks.fire(HookLifecycle.BETWEEN_ROUNDS, ctx) is not None:
                 return _with_the_words(await _finalize_after_guard_stop(
                     hooks, messages, llm, on_stream_chunk, conversation_id,
@@ -2514,19 +2546,8 @@ async def run_llm_loop(
                     window=ctx.state.context_window,
                 ))
 
-            # Compact old tool history when needed (ADR-033). last_prompt_tokens is the
-            # previous round's real input size — one request stale; the incremental pass
-            # keeps it compact and overflow-recovery covers spikes.
-            messages = await apply_compaction(
-                messages,
-                state=_compaction_state,
-                last_prompt_tokens=next_prompt_tokens,
-                llm_manager=_compaction_llm,
-                notify=lambda m: emit_progress(m, None, round_idx),
-                round_idx=round_idx,
-            )
-
             # --- LLM call ---
+            messages_sent = len(messages)
             _seen = _observe_request(messages, tool_schemas, reasoning_effort)
             _row_id = None
             # A wait inside the call (a peer host's model loading) speaks on
@@ -2763,6 +2784,8 @@ async def run_llm_loop(
                     # Coming back in the next prompt. Reasoning does not, on a turn with no call.
                     tokens_since_the_last_prompt = int(usage.get("content_tokens", usage.get("completion_tokens", 0)) or 0)
                     _ask_again(messages, _piece, _continue_request(_cut_at))
+                    # The engine counted the words; the request that follows them is left out, as before.
+                    messages_sent = len(messages)
                     continue
 
                 if _answered and _written and not written_call_retried_since_the_last_tool \

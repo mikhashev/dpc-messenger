@@ -436,11 +436,12 @@ class ContextLimitGuard(GuardMiddleware):
     reaches only tool results outside the recent rounds and reduces each of them
     once.
 
-    A ceiling rather than a predictor, deliberately. It reads the previous
-    round's real input size, which is the same number compaction triggers on, and
-    fires only when that already sits above `ratio` of the window. By then
-    compaction has had every round to work and the size is still there, so what
-    is left is the part it cannot reach. Stopping here ends the turn with its work
+    The last line, after compaction (ADR-045 decision 6). It reads the number the
+    loop projects for the request about to go out: the previous round's measured
+    input size plus an estimate of what the round added, less what this round's
+    cut took out. That is the number compaction triggered on a moment earlier, and
+    it fires only when it still sits above `ratio` of the window, so what is left
+    is the part the cut cannot reach. Stopping here ends the turn with its work
     intact and a named reason, instead of discovering the limit inside the engine
     — where on this platform the likelier answer is not an error but the driver
     paging and prefill collapsing, which reads as an agent that became slow.
@@ -449,9 +450,11 @@ class ContextLimitGuard(GuardMiddleware):
     interrupted, low enough to leave room for one more round's growth.
     """
 
-    def __init__(self, ratio: float = CONTEXT_LIMIT_RATIO) -> None:
+    def __init__(self, ratio: float = CONTEXT_LIMIT_RATIO, compaction_on: Optional[bool] = None) -> None:
         self._ratio = ratio
         self._seen_ratio: Optional[float] = None
+        # Whether a summariser was there to try. None: not said, and the text names no setting.
+        self._compaction_on = compaction_on
 
     async def between_rounds(self, ctx: HookContext) -> Optional[HookAction]:
         window = ctx.context_window
@@ -465,7 +468,7 @@ class ContextLimitGuard(GuardMiddleware):
             return None
         self._seen_ratio = ratio
         log.warning(
-            "ContextLimitGuard: last prompt %d tokens is %.1f%% of the %d-token "
+            "ContextLimitGuard: projected next prompt %d tokens is %.1f%% of the %d-token "
             "window (limit %.0f%%) — stopping before the round that would not fit",
             used, ratio * 100, window, self._ratio * 100,
         )
@@ -473,9 +476,19 @@ class ContextLimitGuard(GuardMiddleware):
 
     def stop_message(self) -> str:
         seen = f"{self._seen_ratio * 100:.0f}%" if self._seen_ratio else "the limit"
+        if self._compaction_on is None:
+            tried = "the cut of old tool results could not bring it under"
+            then = "Start a new task, or raise the agent's context_window if the model has room."
+        elif self._compaction_on:
+            tried = "compaction cut the old tool results and could not bring it under"
+            then = "Start a new task, or raise the agent's context_window if the model has room."
+        else:
+            tried = ("compaction is off for this agent, so there is no summariser, and the plain "
+                     "cut of old tool results could not bring it under")
+            then = ("Start a new task, raise the agent's context_window if the model has room, "
+                    "or turn compaction on for this agent.")
         return (
-            f"[CONTEXT_LIMIT] The conversation reached {seen} of the model's context "
-            "window and compaction could not reduce it further. Stopping with the work "
-            "so far rather than failing inside the engine. Start a new task, or raise "
-            "the agent's context_window if the model has room."
+            f"[CONTEXT_LIMIT] The next request would be {seen} of the model's context "
+            f"window, and {tried}. Stopping with the work so far rather than failing "
+            f"inside the engine. {then}"
         )

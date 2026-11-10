@@ -947,8 +947,10 @@ def test_the_context_cut_is_told_the_same_size_as_the_guard(tmp_path, monkeypatc
 
     monkeypatch.setattr("dpc_client_core.dpc_agent.loop.apply_compaction", _compaction)
     _loop(tmp_path, monkeypatch, _Script(_cut("the sen"), _called(1), _done("Done.")))
-    # Once: the next round's own prompt holds the words.
-    assert seen == [0, STOPPED["prompt_tokens"] + CEILING, STOPPED["prompt_tokens"]]
+    # Once: the next round's own prompt holds the words. The third is the measured size plus the
+    # estimate of the tool round just run (its reply and result), which the old reading left out.
+    assert seen[:2] == [0, STOPPED["prompt_tokens"] + CEILING]
+    assert STOPPED["prompt_tokens"] < seen[2] < STOPPED["prompt_tokens"] + 100
 
 
 def test_a_context_cut_leaves_the_cut_words_and_the_note_alone():
