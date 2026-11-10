@@ -180,8 +180,12 @@ def messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
                         text_parts.append(text)
             content = "\n\n".join(text_parts)
 
-        # Skip empty content
-        if not content or not str(content).strip():
+        # Skip empty content, but never a turn that carries tool calls: the
+        # loop emits content='' tool-only turns, and dropping one leaves its
+        # tool result orphaned.
+        if (not content or not str(content).strip()) and not (
+            role == "assistant" and msg.get("tool_calls")
+        ):
             continue
 
         # Format based on role
@@ -1122,24 +1126,34 @@ class DpcLlmAdapter:
         )
         if not usage.get("total_tokens") and not provider_reported_drop:
             model_name = self.default_model()
+            # The whole prompt, as ADR-033 Q1 assumes: system and tool schemas
+            # go on the wire beside the messages, and a tool call's arguments
+            # are part of the history that is sent again.
+            generated = self._generated_text(response_msg)
             if self._token_counter:
-                prompt_tokens = self._token_counter.count_tokens(str(anthropic_messages), model_name)
-                completion_tokens = self._token_counter.count_tokens(raw.get("content", ""), model_name)
+                prompt_tokens = self._token_counter.count_tokens(
+                    f"{system}\n{json.dumps(anthropic_tools, default=str)}\n{anthropic_messages}", model_name)
+                completion_tokens = self._token_counter.count_tokens(generated, model_name)
             else:
                 # `thinking` counts too where a provider replays it: this number is
                 # what compaction and the context guard trigger on, and a history
                 # whose carried notes are invisible to it compacts late.
-                prompt_tokens = sum(
-                    len(str(m.get("content", ""))) + len(str(m.get("thinking") or ""))
+                prompt_chars = sum(
+                    len(str(m.get("content", "")))
+                    + len(str(m.get("thinking") or ""))
+                    + len(self._tool_call_text(m.get("tool_calls")))
                     for m in messages
-                ) // 4
-                completion_tokens = len(raw.get("content", "")) // 4
+                )
+                prompt_chars += len(json.dumps(anthropic_tools, default=str))
+                prompt_tokens = prompt_chars // 4
+                completion_tokens = len(generated) // 4
             usage = {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
-                # Counted over `content` alone; `thinking` came apart from it.
-                "output_includes_thinking": "excludes",
+                # The completion holds `thinking` where the response carried
+                # any, and the visible text and tool arguments only otherwise.
+                "output_includes_thinking": "includes" if response_msg.get("thinking") else "excludes",
             }
             self._note_call(counts_source="ours")
         else:
@@ -1148,6 +1162,24 @@ class DpcLlmAdapter:
         self._price_usage(usage, provider, self.default_model())
 
         return response_msg, usage
+
+    @staticmethod
+    def _tool_call_text(tool_calls: Any) -> str:
+        """The names and arguments of a message's tool calls, as text to count."""
+        return "".join(
+            f"{(tc.get('function') or {}).get('name', '')}{(tc.get('function') or {}).get('arguments', '')}"
+            for tc in (tool_calls or [])
+            if isinstance(tc, dict)
+        )
+
+    @classmethod
+    def _generated_text(cls, response_msg: Dict[str, Any]) -> str:
+        """What the model generated in one response: text, thinking, tool calls."""
+        return (
+            str(response_msg.get("content") or "")
+            + str(response_msg.get("thinking") or "")
+            + cls._tool_call_text(response_msg.get("tool_calls"))
+        )
 
     @staticmethod
     def _convert_messages_to_anthropic(
