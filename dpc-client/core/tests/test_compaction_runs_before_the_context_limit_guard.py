@@ -166,9 +166,9 @@ def _stopped_text(tmp_path, monkeypatch, config, compaction_llm=None, keep_the_l
     llm = _Llm(tool_rounds=2, measured=int(WINDOW * 0.99))
     tools = _Tools([100, 100])
     if keep_the_list:
-        async def _no_cut(messages, **kwargs):
-            return messages
-        monkeypatch.setattr(loop_module, "apply_compaction", _no_cut)
+        async def _a_cut_that_is_not_enough(messages, **kwargs):
+            return list(messages)  # a new list: the pass changed the prompt, the guard still fires
+        monkeypatch.setattr(loop_module, "apply_compaction", _a_cut_that_is_not_enough)
     text, _, _ = _run(tmp_path, monkeypatch, llm, tools, config=config,
                       spy_compaction=not keep_the_list, compaction_llm=compaction_llm)
     return text

@@ -26,18 +26,24 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from ..managers.llama_server_supervisor import card_held_for
-from .llm_adapter import DpcLlmAdapter, local_alias_of
+from .llm_adapter import DpcLlmAdapter, local_alias_of, local_engine_of
 from .run_gate import RunGate, hold as hold_run_gate, turn_title
 from .tools.registry import ToolRegistry, ToolContext
 from .memory import Memory, generate_smart_index
 from .memory_config import get_memory_config
 from .skill_store import SkillStore
 from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
-from .context import _mark_morning_brief_consumed, build_llm_messages, recall_off_loop
+from .context import (
+    CONTEXT_ROUND_RESERVE_TOKENS, _mark_morning_brief_consumed, build_llm_messages,
+    context_reserve_of, recall_off_loop, text_of_messages,
+)
 from .sent_annotations import SentAnnotationStore
-from .loop import run_llm_loop, RECORDED_USAGE_FIELDS, task_cost_fields, unmeasured_task_cost
+from .loop import (
+    CallKilled, _chat_unless_killed, run_llm_loop, RECORDED_USAGE_FIELDS, task_cost_fields,
+    unmeasured_task_cost,
+)
 from .utils import (
-    get_agent_root, ensure_agent_dirs, utc_now_iso, append_jsonl
+    get_agent_root, ensure_agent_dirs, utc_now_iso, append_jsonl, load_agent_config
 )
 from .task_queue import TaskQueue, TaskPriority, Task
 from .task_types import TaskTypeDefinition, BUILTIN_TASK_TYPES
@@ -47,8 +53,6 @@ from .budget import BillingModel, HybridBudget
 if TYPE_CHECKING:
     from ..llm_manager import LLMManager
 log = logging.getLogger(__name__)
-
-CONTEXT_ROUND_RESERVE_TOKENS = 16384
 
 # The agent bot's turn written by the owner himself: from the user id in the agent's
 # `telegram_owner_user_id`, in a private chat with the bot, every message of the burst
@@ -724,6 +728,14 @@ class DpcAgent:
         # Log context window usage — warn if approaching limit or sections were trimmed
         _estimated = cap_info.get("estimated_tokens_before", 0)
         _ctx_window = (session_state or {}).get("tokens_limit") or 204800
+        # On a local engine the prompt is counted by the engine and the window is the one it
+        # reports, not chars/4 against the alias number (ADR-033 amendment, 2026-11-11).
+        _engine = local_engine_of(getattr(self, "llm", None))
+        if _engine is not None and not (stop_event is not None and stop_event.is_set()):
+            _on_engine = await self._measure_on_the_engine(
+                _engine, messages, conversation_id, stop_event, kill_event)
+            if _on_engine is not None:
+                _estimated, _ctx_window = _on_engine
         _real_last = (session_state or {}).get("tokens_after_last_response") or 0
         if _real_last > _estimated:
             log.debug(
@@ -750,8 +762,7 @@ class DpcAgent:
 
         # Hard block: refuse to call LLM if context window is nearly full.
         # Without this guard the LLM call hangs silently (AGENT-CTX-1).
-        _reserve = max(int(_ctx_window * 0.05),
-                       min(CONTEXT_ROUND_RESERVE_TOKENS, int(_ctx_window * 0.2)))
+        _reserve = context_reserve_of(_ctx_window)
         if _ctx_window - _estimated < _reserve:
             _pct = _estimated / _ctx_window * 100
             log.error(
@@ -918,6 +929,45 @@ class DpcAgent:
         )
 
         return response
+
+    async def _measure_on_the_engine(
+        self, engine: Any, messages: List[Dict[str, Any]], conversation_id: Optional[str],
+        stop_event: Optional[asyncio.Event], kill_event: Optional[asyncio.Event],
+    ) -> Optional[tuple]:
+        """(prompt tokens, window) for this turn as the local engine behind it says them, or
+        None when it cannot be asked (said in the log, and the caller keeps its estimate: the
+        first request will report an engine that is really down in its own words).
+
+        Asking starts the child if it is not up, which is what the first request does next;
+        so it is asked under the same hold on the card, and a Stop ends the wait. The
+        window is capped by the agent's own `context_window` when that is lower. The count
+        is the messages' text as one request (chat template included); the tool schemas
+        that ride with it are not in it, as they were not in the estimate."""
+        async def _ask() -> tuple:
+            window = int(await engine.engine_context_window())
+            tokens = await engine.engine_token_count(text_of_messages(messages), as_prompt=True)
+            return tokens, window
+
+        try:
+            async with card_held_for(local_alias_of(self.llm), "accepted_request",
+                                     agent_id=self.agent_root.name, conversation_id=conversation_id):
+                tokens, window = await _chat_unless_killed(
+                    _chat_unless_killed(_ask(), stop_event), kill_event)
+        except CallKilled:
+            return None  # the Stop is read by the loop's first round
+        except Exception as e:
+            log.warning("Pre-turn check: the local engine could not be asked for the prompt's "
+                        "tokens or its window (%s: %s); using the estimate and the alias window",
+                        type(e).__name__, e)
+            return None
+        try:
+            explicit = int(load_agent_config(self.agent_root.name).get("context_window") or 0)
+        except Exception:
+            explicit = 0
+        if explicit > 0:
+            window = min(window, explicit)
+        log.debug("Pre-turn check on the engine: prompt %d tokens, window %d", tokens, window)
+        return tokens, window
 
     def _update_usage_stats(self, cost: float, total_tokens: int) -> None:
         """Write per-task usage stats to state.json.

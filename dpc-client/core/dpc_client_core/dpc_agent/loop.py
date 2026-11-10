@@ -31,12 +31,18 @@ from .utils import (
     sanitize_tool_args_for_log, sanitize_tool_result_for_log, get_agent_root,
     load_agent_config,
 )
-from .context import CompactionState, apply_compaction, estimate_messages_tokens
+from .context import (
+    CompactionState, apply_compaction, context_reserve_of, estimate_messages_tokens,
+    text_of_messages,
+)
 from . import prompt_divergence
 from .tool_ledger import record_attempt, sweep_unfinished
 from dpc_protocol.protocol import PeerRefused
 
-from .llm_adapter import CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading, _llm_manager_for_agent, local_alias_of
+from .llm_adapter import (
+    CALL_PROGRESS, DpcLlmAdapter, PeerStillLoading, _llm_manager_for_agent, local_alias_of,
+    local_engine_of,
+)
 from ..managers.llama_server_supervisor import (
     TakenOutOfTheCardQueue,
     card_hold_follows,
@@ -2276,6 +2282,9 @@ async def run_llm_loop(
         getattr(llm, "_llm_manager", None), getattr(llm, "_compute_host", ""),
         getattr(llm, "_caller", None),
     )
+    # What the agent's own config says, before the alias fills the gap: on a local engine this
+    # alone caps the engine's window (the owner's choice wins), an alias number does not.
+    _explicit_window = int(_compaction_cfg.get("context_window") or 0)
     # Resolve the agent's real context window when config.json does not store one
     # (local models leave it null). The trigger denominator must be the actual model
     # window, not CompactionState's generic fallback — otherwise the fallback can be
@@ -2294,6 +2303,7 @@ async def run_llm_loop(
         except Exception:
             pass
     _compaction_state = CompactionState(_compaction_cfg)
+    _base_window = _compaction_state.window
     # The sixth: the loop watched rounds, tools, research, repetition and money,
     # and did not watch the one resource a long task actually exhausts. Last in the chain
     # (nothing else registers after it) and read after the round's cut, ADR-045 decision 6.
@@ -2469,6 +2479,25 @@ async def run_llm_loop(
     # ... and, from this index on, the messages appended after the last request went out (its
     # reply, the tool results it asked for, a retry's request), which are estimated.
     messages_sent = 0
+    # A local engine's own numbers (ADR-033 amendment, 2026-11-11). The window is read from the
+    # engine once it has answered a request of this loop (the child is up, so asking starts
+    # nothing), never before; until then, and for any provider that does not count on its
+    # engine, the alias numbers stand. The count of what a round appended is asked of the
+    # engine too, once per round; the first failure is said once and the rest of the turn
+    # falls back to the estimate, so a sick engine costs one timeout and not one per round.
+    engine_answered = None      # the provider whose engine last answered this loop
+    engine_window_of = None     # the provider `engine_window` was read from
+    engine_window = 0
+    engine_count_failed = False
+    engine_trouble_said = False
+
+    def _engine_trouble(what: str, error: Exception) -> None:
+        nonlocal engine_trouble_said
+        if not engine_trouble_said:
+            engine_trouble_said = True
+            log.warning("Round %d: the local engine could not be asked %s (%s: %s); the loop "
+                        "goes on with the alias window and the estimate", round_idx, what,
+                        type(error).__name__, error)
 
     def _a_continue_is_left() -> bool:
         return (output_limit_continues_since_the_last_tool < MAX_OUTPUT_LIMIT_CONTINUES_SINCE_A_TOOL
@@ -2532,18 +2561,52 @@ async def run_llm_loop(
                     window=ctx.state.context_window,
                 ))
 
-            # Project the next request: the last measured prompt plus what the round just
-            # run added to it (the reply, the tool results, a retry's request). The measured
-            # size is one request stale, and one oversized tool result is exactly what it
-            # misses. Round one has no measured size and is not projected.
-            next_prompt_tokens = accumulated_usage["last_prompt_tokens"]
-            if next_prompt_tokens > 0:
-                next_prompt_tokens += tokens_since_the_last_prompt + estimate_messages_tokens(
-                    messages[messages_sent:])
-            tokens_since_the_last_prompt = 0
+            # A local engine's window, read after its first answer; the alias numbers otherwise.
+            engine = local_engine_of(llm)
+            if engine is not None and engine is engine_answered and engine is not engine_window_of:
+                try:
+                    engine_window = int(await engine.engine_context_window())
+                    engine_window_of = engine
+                except Exception as e:
+                    _engine_trouble("for its window", e)
+            on_the_engine = engine is not None and engine is engine_window_of and engine_window > 0
+            if on_the_engine:
+                # The engine's window; the agent's own context_window caps it when lower.
+                _compaction_state.window = (
+                    min(engine_window, _explicit_window) if _explicit_window else engine_window)
+            else:
+                _compaction_state.window = _base_window
             ctx.state.context_window = int(
                 _compaction_state.window if _compaction_state.window else (context_window or 0)
             )
+            # The answer reserve a local engine's turn keeps (the pre-flight's rule): the guard
+            # stops at the window less this. Cloud and peer routes keep the ratio.
+            ctx.state.context_reserve = context_reserve_of(ctx.state.context_window) if on_the_engine else 0
+            _strip_window = ctx.state.context_window if on_the_engine else context_window
+            _strip_reserve = ctx.state.context_reserve if on_the_engine else context_reserve
+
+            # Project the next request: the last measured prompt plus what the round just
+            # run added to it (the reply, the tool results, a retry's request). The measured
+            # size is one request stale, and one oversized tool result is exactly what it
+            # misses. Round one has no measured size and is not projected. What was appended
+            # is counted by the local engine when there is one (chars/4 is ~38% under on
+            # Cyrillic), else estimated.
+            next_prompt_tokens = accumulated_usage["last_prompt_tokens"]
+            count_scale = 1.0
+            if next_prompt_tokens > 0:
+                appended = messages[messages_sent:]
+                appended_tokens = estimate_messages_tokens(appended)
+                if on_the_engine and not engine_count_failed and appended:
+                    try:
+                        counted = await engine.engine_token_count(text_of_messages(appended))
+                        if appended_tokens >= 256:  # the engine's share over the estimate, for the cut's savings
+                            count_scale = min(2.5, max(1.0, counted / appended_tokens))
+                        appended_tokens = counted
+                    except Exception as e:
+                        engine_count_failed = True
+                        _engine_trouble("to count what the round appended", e)
+                next_prompt_tokens += tokens_since_the_last_prompt + appended_tokens
+            tokens_since_the_last_prompt = 0
 
             # Compact old tool history (ADR-033, ADR-045 decision 4) at the projected size,
             # before any guard reads it: compaction first, ContextLimitGuard the last line
@@ -2558,10 +2621,13 @@ async def run_llm_loop(
                 notify=lambda m: emit_progress(m, None, round_idx),
                 round_idx=round_idx,
             )
+            ctx.state.cut_this_round = messages is not before_the_cut
             if messages is not before_the_cut and next_prompt_tokens > 0:
-                # What the cut took out of the prompt, by the same estimate that projected it.
-                next_prompt_tokens = max(0, next_prompt_tokens - max(
-                    0, estimate_messages_tokens(before_the_cut) - estimate_messages_tokens(messages)))
+                # What the cut took out of the prompt, by the same estimate that projected it
+                # (scaled by what the engine counted over the estimate on the appended part).
+                next_prompt_tokens = max(0, next_prompt_tokens - int(max(
+                    0, estimate_messages_tokens(before_the_cut) - estimate_messages_tokens(messages))
+                    * count_scale))
 
             # RoundLimitGuard + BudgetLimitGuard + ContextLimitGuard checkpoint. The first two
             # read the round count and the money, which a cut does not change; the third reads
@@ -2611,6 +2677,7 @@ async def run_llm_loop(
                 _row_id = (usage or {}).get("request_id")
                 accumulate_call_usage(accumulated_usage, usage)
                 round_prompt_tokens = accumulated_usage["last_prompt_tokens"]
+                engine_answered = engine
                 if reasoning_effort:
                     # Recorded, not summed: it is the word this task was run
                     # with, and it is what joins a cost to a decision.
@@ -2628,8 +2695,8 @@ async def run_llm_loop(
                     usage.get("speed"),
                     round_idx=round_idx,
                     prompt_tokens=round_prompt_tokens,
-                    context_window=context_window,
-                    context_reserve=context_reserve,
+                    context_window=_strip_window,
+                    context_reserve=_strip_reserve,
                 )
             except CallKilled:
                 log.warning("Agent killed by user mid-call in round %d", round_idx)

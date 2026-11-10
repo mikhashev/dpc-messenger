@@ -276,6 +276,13 @@ def local_alias_of(llm: Any) -> Optional[str]:
     return alias_of() if alias_of is not None else None
 
 
+def local_engine_of(llm: Any) -> Optional[Any]:
+    """`DpcLlmAdapter.local_engine` of whatever runs the loop: the provider whose local engine
+    counts tokens and reports its window, else None (a vendor, a peer route, a test's double)."""
+    engine_of = getattr(llm, "local_engine", None)
+    return engine_of() if engine_of is not None else None
+
+
 class DpcLlmAdapter:
     """
     Adapts DPC's LLMManager to the interface expected by the Ouroboros agent loop.
@@ -402,6 +409,17 @@ class DpcLlmAdapter:
             return alias if alias and runs_on_a_local_engine(providers.get(alias)) else None
         except Exception:
             return None  # as `chat` reads the alias: a call that cannot route will say so itself
+
+    def local_engine(self) -> Optional[Any]:
+        """The provider of `local_alias()` when the engine behind it counts tokens and reports
+        its window (`counts_on_its_engine`), re-read per call like the alias. It only looks:
+        asking the provider anything is what may start the child."""
+        alias = self.local_alias()
+        if alias is None:
+            return None
+        provider = self._llm_manager.providers.get(alias)
+        asks = getattr(provider, "counts_on_its_engine", None)
+        return provider if callable(asks) and asks() is True else None
 
     def _get_agent_provider(self) -> Optional[Any]:
         """Get the agent's provider instance."""

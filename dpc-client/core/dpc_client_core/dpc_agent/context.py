@@ -1727,16 +1727,16 @@ async def compact_tool_history_llm(
     rounds_to_compact = set(tool_round_starts[:-keep_recent])
     result: List[Dict[str, Any]] = []
     failure: Optional[BaseException] = None
+    # Rounds holding a large result nobody bought a summary for (the call that failed, or
+    # the ones skipped after it): never marked, so the next batch buys them.
+    unfinished: set = set()
+    failed_at = len(messages)  # the index of the result whose summary failed
 
     for i, msg in enumerate(messages):
         if i in rounds_to_compact and msg.get("role") == "assistant" and not msg.get("_compacted"):
-            # Same rule as the deterministic compactor: once this round's results
-            # are summaries, its notes go with them. The notes stay on the recent
-            # tail, which is where they are read. The mark is what `uncut_rounds`
-            # counts, so a round is cut once and the boundary stays put after it.
-            aged = {k: v for k, v in msg.items() if k != "thinking"}
-            aged["_compacted"] = True
-            result.append(aged)
+            # Marked below, once the round's results are known: its notes go with its
+            # results, and a round that still holds a raw large result is not cut.
+            result.append(msg)
             continue
 
         if msg.get("role") == "tool" and not msg.get("_compacted"):
@@ -1748,7 +1748,8 @@ async def compact_tool_history_llm(
             if parent_round in rounds_to_compact:
                 content = str(msg.get("content") or "")
                 if len(content) > _KEEP_ASIS_CHARS:
-                    if failure is not None:  # no more paid calls after a failure
+                    if failure is not None:  # no more paid calls after a failure, and no marks
+                        unfinished.add(parent_round)
                         result.append(msg)
                         continue
                     try:
@@ -1761,18 +1762,38 @@ async def compact_tool_history_llm(
                         if not summary:
                             raise RuntimeError("compaction model returned an empty summary")
                     except Exception as e:
-                        failure = e
+                        failure, failed_at = e, i
+                        unfinished.add(parent_round)
                         result.append(msg)
                         continue
                     if msg.get("_output_at"):  # ADR-045: a summary is a cut too
                         summary += f"\n[Full output: {msg['_output_at']} (read_file reads it).]"
                     result.append({**msg, "content": summary, "_compacted": True})
                     continue
+                if failure is not None:  # nothing is marked once a call has failed
+                    result.append(msg)
+                    continue
                 # Small result: keep verbatim, but mark so we don't re-check it.
                 result.append({**msg, "_compacted": True})
                 continue
 
         result.append(msg)
+
+    # A round is marked cut when it lies wholly before the first failure and its results are
+    # all summaries or small: what a failed pass did not buy it does not mark, so the next
+    # batch buys it.
+    for start in rounds_to_compact:
+        if start >= failed_at or start in unfinished:
+            continue
+        parent = result[start]
+        if parent.get("role") == "assistant" and not parent.get("_compacted"):
+            # Same rule as the deterministic compactor: once this round's results
+            # are summaries, its notes go with them. The notes stay on the recent
+            # tail, which is where they are read. The mark is what `uncut_rounds`
+            # counts, so a round is cut once and the boundary stays put after it.
+            aged = {k: v for k, v in parent.items() if k != "thinking"}
+            aged["_compacted"] = True
+            result[start] = aged
 
     if failure is not None:
         raise PartialCompaction(failure, result)
@@ -1884,6 +1905,35 @@ def estimate_messages_tokens(messages: List[Dict[str, Any]]) -> int:
             fn = call.get("function") or {}
             total += estimate_tokens(f"{fn.get('name', '')}{fn.get('arguments', '')}")
     return total
+
+
+def text_of_messages(messages: List[Dict[str, Any]]) -> str:
+    """The text these messages put in a prompt, for an engine to count: each message's role
+    and text (a block list contributes its text blocks) and the name and arguments of its
+    calls. The same things `estimate_messages_tokens` sums, as one string; images and
+    anything else that is not text are left out here as there."""
+    parts: List[str] = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):
+            content = "\n".join(str(b.get("text", "")) for b in content
+                                if isinstance(b, dict) and b.get("type") == "text")
+        parts.append(f"{m.get('role', '')}: {content or ''}")
+        for call in m.get("tool_calls") or ():
+            fn = call.get("function") or {}
+            parts.append(f"{fn.get('name', '')}{fn.get('arguments', '')}")
+    return "\n".join(parts)
+
+
+# What an agent turn keeps free for the model's answer: the larger of 5 % of the window and
+# CONTEXT_ROUND_RESERVE_TOKENS, which is itself capped at 20 % of the window. The pre-turn check
+# (agent.py) refuses below it, the live strip shows it, and on a local engine ContextLimitGuard
+# stops at the window less this much.
+CONTEXT_ROUND_RESERVE_TOKENS = 16384
+
+
+def context_reserve_of(window: int) -> int:
+    return max(int(window * 0.05), min(CONTEXT_ROUND_RESERVE_TOKENS, int(window * 0.2)))
 
 
 def evicted_calls(messages: List[Dict[str, Any]], keep_recent: int) -> str:

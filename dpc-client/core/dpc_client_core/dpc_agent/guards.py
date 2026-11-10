@@ -448,6 +448,12 @@ class ContextLimitGuard(GuardMiddleware):
 
     Default 0.95: high enough that a run compaction can still rescue is never
     interrupted, low enough to leave room for one more round's growth.
+
+    On a local engine the loop sets `context_reserve` (the pre-flight's answer reserve)
+    and the limit is the window less that reserve instead of the ratio: the engine
+    refuses a request that leaves no room to answer, and 5% of a window can be less
+    than one answer. The stop text then says what this round's cut did (`cut_this_round`):
+    it changed the prompt and was not enough, or there was nothing left for it to take.
     """
 
     def __init__(self, ratio: float = CONTEXT_LIMIT_RATIO, compaction_on: Optional[bool] = None) -> None:
@@ -455,6 +461,10 @@ class ContextLimitGuard(GuardMiddleware):
         self._seen_ratio: Optional[float] = None
         # Whether a summariser was there to try. None: not said, and the text names no setting.
         self._compaction_on = compaction_on
+        # What the round that fired this guard knew: whether its cut changed the prompt
+        # (None: not said) and the answer reserve the limit left (0: the ratio's limit).
+        self._cut: Optional[bool] = None
+        self._reserve = 0
 
     async def between_rounds(self, ctx: HookContext) -> Optional[HookAction]:
         window = ctx.context_window
@@ -464,31 +474,51 @@ class ContextLimitGuard(GuardMiddleware):
         if window <= 0 or used <= 0:
             return None
         ratio = used / window
-        if ratio < self._ratio:
+        # On a local engine the limit is what the window leaves after the answer
+        # reserve (`ctx.state.context_reserve`, the pre-flight's own rule), which is never
+        # more than the ratio's share; elsewhere it is the ratio.
+        reserve = max(0, min(int(getattr(ctx.state, "context_reserve", 0) or 0), window))
+        if reserve:
+            if used < window - reserve:
+                return None
+        elif ratio < self._ratio:
             return None
         self._seen_ratio = ratio
+        self._reserve = reserve
+        self._cut = getattr(ctx.state, "cut_this_round", None)
         log.warning(
             "ContextLimitGuard: projected next prompt %d tokens is %.1f%% of the %d-token "
-            "window (limit %.0f%%) — stopping before the round that would not fit",
-            used, ratio * 100, window, self._ratio * 100,
+            "window (limit %s) — stopping before the round that would not fit",
+            used, ratio * 100, window,
+            f"{window - reserve} tokens, the window less the {reserve}-token answer reserve"
+            if reserve else f"{self._ratio * 100:.0f}%",
         )
         return HookAction.STOP_LOOP
 
     def stop_message(self) -> str:
         seen = f"{self._seen_ratio * 100:.0f}%" if self._seen_ratio else "the limit"
+        raise_it = "raise the agent's context_window if the model has room"
+        # Said by the round that fired: its cut changed the prompt (True), had nothing to
+        # take (False), or was not reported (None, told as a cut).
+        why = "(too few earlier tool rounds, or no old result large enough)"
         if self._compaction_on is None:
-            tried = "the cut of old tool results could not bring it under"
-            then = "Start a new task, or raise the agent's context_window if the model has room."
+            tried = (f"there was nothing left to cut this round {why}" if self._cut is False
+                     else "the cut of old tool results could not bring it under")
+            then = f"Start a new task, or {raise_it}."
         elif self._compaction_on:
-            tried = "compaction cut the old tool results and could not bring it under"
-            then = "Start a new task, or raise the agent's context_window if the model has room."
+            tried = (f"compaction found nothing left to cut this round {why}" if self._cut is False
+                     else "compaction cut the old tool results and could not bring it under")
+            then = f"Start a new task, or {raise_it}."
         else:
-            tried = ("compaction is off for this agent, so there is no summariser, and the plain "
-                     "cut of old tool results could not bring it under")
-            then = ("Start a new task, raise the agent's context_window if the model has room, "
-                    "or turn compaction on for this agent.")
+            tried = ("compaction is off for this agent, so there is no summariser, and "
+                     + (f"there was nothing left for the plain cut to take this round {why}"
+                        if self._cut is False
+                        else "the plain cut of old tool results could not bring it under"))
+            then = f"Start a new task, {raise_it}, or turn compaction on for this agent."
+        room = (f", which leaves less than {self._reserve} tokens for the answer"
+                if self._reserve else "")
         return (
             f"[CONTEXT_LIMIT] The next request would be {seen} of the model's context "
-            f"window, and {tried}. Stopping with the work so far rather than failing "
+            f"window{room}, and {tried}. Stopping with the work so far rather than failing "
             f"inside the engine. {then}"
         )

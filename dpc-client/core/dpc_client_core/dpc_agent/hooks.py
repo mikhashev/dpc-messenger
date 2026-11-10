@@ -76,6 +76,12 @@ class LoopState:
     #: stopped a run that filled its window.
     last_prompt_tokens: int = 0
     context_window: int = 0
+    #: The room a local engine's turn keeps for the answer, in tokens; 0 where the
+    #: window is not an engine's and the guard's ratio of it stands. Set by the loop.
+    context_reserve: int = 0
+    #: Whether this round's compaction pass changed the message list. None until a
+    #: round has run it. The guard's stop text says what was true, not what was hoped.
+    cut_this_round: Optional[bool] = None
 
 
 @dataclass
