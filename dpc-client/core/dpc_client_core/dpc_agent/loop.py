@@ -2160,6 +2160,7 @@ async def run_llm_loop(
     context_window: Optional[int] = None,
     context_reserve: Optional[int] = None,
     kill_event: Optional[asyncio.Event] = None,
+    after_first_answer: Optional[Callable[[], None]] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -2189,6 +2190,10 @@ async def run_llm_loop(
             for the live occupancy strip. Absent -> the strip shows speed only.
         context_reserve: The headroom the caller refuses a round below — shown
             beside the pair, never subtracted from it.
+        after_first_answer: Called once, after the first model request of the turn has
+            been answered (a reply came back; not a refusal, an error or a Kill). The
+            caller's "this prompt was seen" mark, e.g. the one-shot morning brief.
+            A failure inside it is logged and does not touch the turn.
 
     Returns:
         (final_text, accumulated_usage, llm_trace) tuple. A turn that ends
@@ -2667,6 +2672,13 @@ async def run_llm_loop(
             if msg is None:
                 llm_trace["turn_end"] = "failed"
                 return "⚠️ No response from LLM", accumulated_usage, llm_trace
+
+            if after_first_answer is not None:
+                _after_first_answer, after_first_answer = after_first_answer, None
+                try:
+                    _after_first_answer()
+                except Exception:
+                    log.warning("after_first_answer failed", exc_info=True)
 
             _cut_at = _output_limit_of(usage, ctx.state.context_window)
             # No model call helps here: another one only grows the prompt.

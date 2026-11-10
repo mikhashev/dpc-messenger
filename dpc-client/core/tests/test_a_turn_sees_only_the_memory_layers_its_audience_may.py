@@ -456,7 +456,7 @@ def test_with_l5_closed_no_memory_section_and_the_brief_is_not_consumed(world, l
     assert "## Morning Brief" not in tail and "BRIEF-MARK-55" not in tail
 
 
-def test_the_owner_s_prompt_keeps_every_section_and_consumes_the_brief(world):
+def test_the_owner_s_prompt_keeps_every_section_and_carries_the_brief(world):
     brief = _brief(world)
     system, tail = _system(world, ALL_MEMORY_LAYERS)
     for marker in ("## Scratchpad", "## Identity", SCRATCH_MARK, "INDEX-MARK-9"):
@@ -464,7 +464,9 @@ def test_the_owner_s_prompt_keeps_every_section_and_consumes_the_brief(world):
     # The brief is not in the system block; it is at the end of the turn's tail.
     assert "## Morning Brief" not in system and "BRIEF-MARK-55" not in system
     assert "BRIEF-MARK-55" in tail and "## Morning Brief" in tail
-    assert json.loads(brief.read_text(encoding="utf-8"))["consumed"] is True
+    # Building the prompt does not consume it: the first answered request does
+    # (ADR-014 amendment, correction 2026-11-11).
+    assert json.loads(brief.read_text(encoding="utf-8"))["consumed"] is False
     assert "/secret/project-tree" in tail
 
 

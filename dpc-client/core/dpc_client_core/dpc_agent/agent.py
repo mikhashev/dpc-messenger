@@ -33,7 +33,7 @@ from .memory import Memory, generate_smart_index
 from .memory_config import get_memory_config
 from .skill_store import SkillStore
 from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
-from .context import build_llm_messages, recall_off_loop
+from .context import _mark_morning_brief_consumed, build_llm_messages, recall_off_loop
 from .sent_annotations import SentAnnotationStore
 from .loop import run_llm_loop, RECORDED_USAGE_FIELDS, task_cost_fields, unmeasured_task_cost
 from .utils import (
@@ -694,21 +694,29 @@ class DpcAgent:
         # Remember the tail exactly as it went out, keyed by the message it went out
         # on; prune ids the history no longer holds while at it. This is what makes
         # the next prompt a pure append of this one (see sent_annotations.py). The
-        # morning brief, when this turn carried it, is cut out of what is remembered:
-        # it is sent once and is not replayed (ADR-014 amendment 2026-11-10).
-        _tail =cap_info.get("turn_context") or ""
-        if current_message_id and _tail:
-            try:
-                annotation_store.record(
-                    conversation_id, current_message_id, _tail,
-                    live_message_ids=[m.get("id") for m in full_history],
-                )
-            except Exception:
-                log.warning("sent_annotations: could not record tail for %s", conversation_id,
-                            exc_info=True)
-        elif _tail:
-            log.debug("sent_annotations: no message id for this turn in %s; tail not recorded",
-                      conversation_id)
+        # morning brief, when this turn carries it, is part of that tail and is replayed
+        # with it (ADR-014 amendment, option A 2026-11-11). Such a tail is recorded once
+        # the request has been answered (below), so a turn that never got an answer
+        # leaves no replayable brief for the next turn's own offer to double.
+        _tail = cap_info.get("turn_context") or ""
+        _brief_sent = cap_info.get("morning_brief")
+
+        def _record_tail() -> None:
+            if current_message_id and _tail:
+                try:
+                    annotation_store.record(
+                        conversation_id, current_message_id, _tail,
+                        live_message_ids=[m.get("id") for m in full_history],
+                    )
+                except Exception:
+                    log.warning("sent_annotations: could not record tail for %s", conversation_id,
+                                exc_info=True)
+            elif _tail:
+                log.debug("sent_annotations: no message id for this turn in %s; tail not recorded",
+                          conversation_id)
+
+        if not _brief_sent:
+            _record_tail()
 
         # Store cap_info for agent_manager to include in next request's session_state
         self._last_cap_info = cap_info
@@ -805,6 +813,15 @@ class DpcAgent:
             "text_preview": message[:200] if message else "",
         })
 
+        # The brief this prompt carries is consumed when the first request with it has
+        # been answered, not when the prompt was built: a pre-flight refusal, a guard, a
+        # provider refusal or a Kill before that leaves it for the next turn.
+        def _consume_brief() -> None:
+            try:
+                _mark_morning_brief_consumed(self.memory, _brief_sent)
+            finally:
+                _record_tail()
+
         # Run LLM loop. The request stands on its local alias from the first round to the
         # last, so its holder is busy between them too (ADR-044, amendment 2026-11-02, the
         # card queue, rule 1); the loop moves the hold when a switch lands between rounds.
@@ -830,6 +847,7 @@ class DpcAgent:
                 # existed only in a DEBUG line nobody watching the agent can see.
                 context_window=_ctx_window,
                 context_reserve=_reserve,
+                after_first_answer=_consume_brief if _brief_sent else None,
             )
 
         # Store last usage and trace for session state access by agent_manager

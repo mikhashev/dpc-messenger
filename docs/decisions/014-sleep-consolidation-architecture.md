@@ -116,19 +116,26 @@ changes once belongs in front of the history.
 2. **Dual Injection is superseded.** The brief no longer appears in the agent's scratchpad or Block
    2. Of the two places the S66 amendment named, the chat message stays: it is a history message,
    which the model reads on every turn of that session. The second place is the first turn's tail.
-3. **It is not replayed.** What the runtime records for replay in `sent_annotations` is the tail
-   *without* the brief, so a later turn replays the first message byte-for-byte as it was minus the
-   brief. The brief costs one turn: the engine's cached prefix diverges at the brief's place in that
-   one user message and nowhere ahead of it. This follows [ADR-045](045-agent-context-is-a-projection-of-a-kept-transcript.md)
-   decision 7 (agent memory is not moved into the replayed turn tail) and
-   [ADR-048](048-memory-layer-audience.md) (the brief is L5 memory).
+3. **It is replayed as part of that one message.** What the runtime records for replay in
+   `sent_annotations` is the tail exactly as sent, the brief included, so a later turn replays the
+   first message byte-for-byte ([ADR-040](040-local-inference-second-path-as-a-dpc-owned-llama-server.md)
+   F2) and the model has the brief for the rest of the session. It is in that message once and is
+   never appended to a later one. The cost is the brief's size, about 2-3K tokens of the window for
+   the session, and no cold prefill after the first turn. On a later turn with L5 closed
+   ([ADR-048](048-memory-layer-audience.md): the brief is L5 memory) the replayed tail goes without
+   the brief, cut by its heading (`strip_closed_layers`), at the cost of one cold prefill. A tail
+   that carries the brief is recorded once the request has been answered, so a turn that never got
+   an answer leaves no replayable brief for the next offer to double.
 4. **The L5 gate moves with it.** With L5 closed for the turn (ADR-048) the tail carries no brief
    and the brief is not marked consumed; the first turn that has L5 open gets it.
-5. **One-shot means one placement.** The brief is marked consumed when it has been put in a turn's
-   tail, or when a chat post has carried it into the history (the 1:1 agent's start-up check and the
+5. **One-shot means one placement.** The brief is marked consumed when the request that carries it
+   has been sent and answered, not when the prompt was built: a pre-flight refusal, a guard, a
+   provider refusal or a Kill before that leaves it unconsumed for the next turn. Or it is marked
+   when a chat post has carried it into the history (the 1:1 agent's start-up check and the
    sleep-completion post of a 1:1 agent). It is never offered a second time by either route.
 6. **The group path is unchanged.** A group sleep posts the brief to the group chat at sleep time and
    marks `morning_brief_group_<group>.json` consumed at once; it never enters a prompt block. The
    Telegram bridge only formats the brief.
 
-Mike's call, 2026-11-10.
+Mike's call, 2026-11-10; consume point corrected 2026-11-11 after review; point 3 changed:
+Mike's call, 2026-11-11 (option A).

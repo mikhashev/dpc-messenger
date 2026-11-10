@@ -519,6 +519,7 @@ def _build_memory_sections(memory: Memory) -> List[str]:
     The morning brief is not here: it changes once and is gone, so in this block it
     changed the system prefix for one turn and again on the next. It rides in the
     first turn's tail instead (_pending_morning_brief, ADR-014 amendment 2026-11-10).
+    That tail is recorded and replayed with it, so it stays in that message.
     """
     sections = []
 
@@ -546,6 +547,9 @@ def _build_memory_sections(memory: Memory) -> List[str]:
     return sections
 
 
+_MORNING_BRIEF_HEADING = "## Morning Brief (Sleep Consolidation)"
+
+
 def _morning_brief_path(memory: Memory) -> pathlib.Path:
     conv_dir = memory.agent_root.parent.parent / "conversations" / memory.agent_root.name
     return conv_dir / "morning_brief.json"
@@ -555,7 +559,8 @@ def _pending_morning_brief(memory: Memory) -> Optional[Tuple[str, Dict[str, Any]
     """The 1:1 agent's morning brief that no turn and no chat post has used yet.
 
     Returns (the section as the model reads it, the brief as stored) or None. Reads
-    only; _mark_morning_brief_consumed is called once the section is in a tail.
+    only; _mark_morning_brief_consumed is called by whoever sent the request that
+    carried the section, once the model has answered it (see run_llm_loop).
     """
     try:
         path = _morning_brief_path(memory)
@@ -564,7 +569,7 @@ def _pending_morning_brief(memory: Memory) -> Optional[Tuple[str, Dict[str, Any]
         brief = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(brief, dict) or brief.get("consumed", False):
             return None
-        parts = ["## Morning Brief (Sleep Consolidation)\n"]
+        parts = [_MORNING_BRIEF_HEADING + "\n"]
         if brief.get("summary"):
             parts.append(brief["summary"])
         decisions = brief.get("key_decisions", [])
@@ -584,12 +589,12 @@ def _pending_morning_brief(memory: Memory) -> Optional[Tuple[str, Dict[str, Any]
 
 
 def _mark_morning_brief_consumed(memory: Memory, brief: Dict[str, Any]) -> None:
-    """Record that the brief has been put in a turn's tail: it is not offered again."""
+    """Record that a request carrying the brief was answered: it is not offered again."""
     try:
         brief["consumed"] = True
         _morning_brief_path(memory).write_text(
             json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
-        log.info("Morning brief put in the first turn's tail and marked consumed")
+        log.info("Morning brief answered in the first turn's tail and marked consumed")
     except Exception:
         # Not marked: the next turn offers it again, which is the lesser loss.
         log.warning("Morning brief could not be marked consumed", exc_info=True)
@@ -763,13 +768,17 @@ _RECALL_BLOCK_RE = re.compile(
     r"Active Recall\n(?:--- ACTIVE RECALL ---\n.*?--- END RECALL ---\n"
     r"|--- RECALL HINTS: .*? ---\n)(?:\n\n)?", re.S)
 _HINT_KEY_RE = re.compile(r"\[(?:EXT|L\d+)\]\s+(\S+)")
+_MORNING_BRIEF_RE = re.compile(
+    r"\n\n" + re.escape(_MORNING_BRIEF_HEADING) + r"\n.*?(?=\n" + re.escape("</turn_context>") + r"$)",
+    re.S)
 _EXTENDED_LIST_RE = re.compile(
     r"## Extended access\n(?:  - `[^`\n]*` \((?:read-only|read-write)\)(?:\n|$))+")
 
 
 def strip_closed_layers(tail: str, open_layers: frozenset) -> str:
-    """A replayed tail without the recall blocks that name a closed layer, and
-    without extended path names when EXT is closed."""
+    """A replayed tail without the recall blocks that name a closed layer, without
+    extended path names when EXT is closed, and without the morning brief (L5 memory,
+    the last section of the tail) when L5 is closed."""
     from .active_recall import layer_of
 
     def _recall(match: "re.Match") -> str:
@@ -778,6 +787,8 @@ def strip_closed_layers(tail: str, open_layers: frozenset) -> str:
         return "" if closed else match.group(0)
 
     out = _RECALL_BLOCK_RE.sub(_recall, tail)
+    if "L5" not in open_layers:
+        out = _MORNING_BRIEF_RE.sub("", out)
     if "EXT" not in open_layers:
         out = _EXTENDED_LIST_RE.sub(
             lambda m: EXTENDED_ACCESS_CLOSED + ("\n" if m.group(0).endswith("\n") else ""), out)
@@ -1008,7 +1019,9 @@ def build_llm_messages(
             - messages: List of message dicts ready for LLM
             - cap_info: Dict with token trimming metadata; carries `turn_context`,
               the tail appended to the current user message, for the caller to
-              record against the message id.
+              record against the message id, and `morning_brief`, the brief as
+              stored, only when this prompt carries it: the caller marks it
+              consumed once the request has been answered.
     """
     # --- Load memory ---
     memory.ensure_files()
@@ -1124,8 +1137,7 @@ def build_llm_messages(
     turn_parts.append(_build_sandbox_paths_section(sandbox_read_only, sandbox_read_write)
                       if ext_open else EXTENDED_ACCESS_CLOSED)
     turn_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
-    # Last, so that the recorded tail below is this one with this part cut out and
-    # the two differ only from here on.
+    # Last, so that strip_closed_layers can cut it from a replayed tail as one piece.
     if morning_brief:
         turn_parts.append(morning_brief[0])
 
@@ -1238,23 +1250,25 @@ def build_llm_messages(
                 name = f"Active Recall ({', '.join(_files)})"
         _context_breakdown.append({"name": name, "tokens": estimate_tokens(_p)})
 
-    # The morning brief is sent once. What is recorded for replay (cap_info
-    # "turn_context", sent_annotations) is the tail without it: a replayed tail
-    # comes back on every later turn, and ADR-045 decision 7 keeps agent memory out
-    # of it. The prefix a local engine cached diverges at the brief's place in this
-    # one message and nowhere ahead of it; the system block is untouched.
-    sent_turn_context = format_turn_context(turn_parts)
-    if morning_brief and turn_parts and turn_parts[-1] == morning_brief[0]:
-        turn_context = format_turn_context(turn_parts[:-1])
-    else:
-        turn_context = sent_turn_context
+    # What is recorded for replay (cap_info "turn_context", sent_annotations) is the
+    # tail exactly as sent, the brief included: the message is replayed byte for byte
+    # (ADR-040 F2), so the model keeps the brief for the session. A later turn with L5
+    # closed cuts it from the replay (strip_closed_layers). The system block is untouched.
+    turn_context = format_turn_context(turn_parts)
+    if morning_brief and not (turn_parts and turn_parts[-1] == morning_brief[0]):
         morning_brief = None
-    messages.append({"role": "user", "content": append_turn_context(user_content, sent_turn_context)})
-    if morning_brief:
-        _mark_morning_brief_consumed(memory, morning_brief[1])
+    messages.append({"role": "user", "content": append_turn_context(user_content, turn_context)})
     cap_info["context_breakdown"] = _context_breakdown
     cap_info["turn_context"] = turn_context
     cap_info["replayed_tails"] = _replayed
+    # The brief as stored, when this prompt carries it: building the prompt does not
+    # consume it. The caller marks it (_mark_morning_brief_consumed) once the first
+    # request that carries it has been answered; a turn stopped, refused or killed
+    # before that leaves it unconsumed and the next turn offers it again.
+    # The tail of that turn is recorded after the answer too (agent.py), so a turn that
+    # never got one leaves no replayable brief behind for the next offer to double.
+    if morning_brief:
+        cap_info["morning_brief"] = morning_brief[1]
 
     return messages, cap_info
 
@@ -1270,9 +1284,11 @@ TURN_CONTEXT_NOTE = (
     "Each user message may end with a block between " + TURN_CONTEXT_OPEN + " and "
     + TURN_CONTEXT_CLOSE + ". The runtime appends it, not the user: recall hints, "
     "runtime state (clock, budget, session counters) and recent activity as they were "
-    "when that message was sent. The first message after a sleep cycle also carries the "
-    "morning brief, once; later messages do not repeat it. In earlier messages the block "
-    "describes that moment, not now; the block on the latest message is current."
+    "when that message was sent. The morning brief after a sleep cycle normally arrives as "
+    "a chat message; only if that post did not happen does it ride at the end of the block "
+    "of the first message after the sleep, and stay in that message for the rest of the "
+    "session. In earlier messages the block describes that moment, not now; the block on "
+    "the latest message is current."
 )
 
 
