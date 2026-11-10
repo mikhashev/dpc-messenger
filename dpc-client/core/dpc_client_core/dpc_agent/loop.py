@@ -1669,6 +1669,23 @@ class CallKilled(Exception):
     """The user pressed Kill while a model call was in flight."""
 
 
+CANCEL_UNWIND_WAIT_S = 2.0
+
+
+async def _cancel_and_unwind(task: "asyncio.Future") -> None:
+    """Cancel a model-call task and give it `CANCEL_UNWIND_WAIT_S` to unwind.
+
+    The unwind is what closes the provider's HTTP stream, and the engine frees
+    its slot when the client disconnects. The wait is bounded: a task that has
+    not finished after it is left to finish cancelling on its own, so the stream
+    may close later than the caller moves on (then only the engine sees it)."""
+    if not task.done():
+        task.cancel()
+        await asyncio.wait({task}, timeout=CANCEL_UNWIND_WAIT_S)
+    if task.done() and not task.cancelled():
+        task.exception()  # retrieved, so it is not logged as never retrieved
+
+
 def peer_refusal_notice(e: PeerRefused) -> str:
     """What the person reads when the host refused the agent's call.
 
@@ -1708,11 +1725,7 @@ async def _chat_unless_killed(coro, kill_event: Optional[asyncio.Event]):
         kill_task.cancel()
     if chat_task.done():
         return chat_task.result()
-    chat_task.cancel()
-    # Let the cancellation reach the HTTP layer, but never hang on it.
-    await asyncio.wait({chat_task}, timeout=2.0)
-    if chat_task.done() and not chat_task.cancelled():
-        chat_task.exception()  # retrieved, so it is not logged as never retrieved
+    await _cancel_and_unwind(chat_task)
     raise CallKilled()
 
 
@@ -1804,6 +1817,7 @@ async def _one_finalising_call(
     `_window_full` and `_cut_calls` (`_take_out_cut_calls`): no call here goes on from a cut."""
     seen = observe_request(messages, tools_sent, reasoning_effort) if observe_request else None
     row_id = None
+    chat_task = None
     extra = {"tool_choice": tool_choice} if tool_choice else {}
     card_hold_follows(local_alias_of(llm))
     try:
@@ -1823,8 +1837,7 @@ async def _one_finalising_call(
             finally:
                 cancel_task.cancel()
             if not chat_task.done():
-                chat_task.cancel()
-                return None
+                return None  # the finally below cancels it and waits for the unwind
         final_msg, final_usage = await chat_task
         row_id = (final_usage or {}).get("request_id")
         accumulate_call_usage(accumulated_usage, final_usage or {}, counts_as_round=False)
@@ -1834,6 +1847,10 @@ async def _one_finalising_call(
         reply["_cut_calls"] = _take_out_cut_calls(reply, reply["_cut_at"])
         return reply
     finally:
+        # Every exit that abandons the call (the cancel event, this coroutine
+        # being cancelled, an error while waiting) ends its generation too.
+        if chat_task is not None and not chat_task.done():
+            await _cancel_and_unwind(chat_task)
         prompt_divergence.log_observation(seen, row_id)
 
 
