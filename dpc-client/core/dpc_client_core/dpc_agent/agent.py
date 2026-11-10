@@ -693,8 +693,10 @@ class DpcAgent:
 
         # Remember the tail exactly as it went out, keyed by the message it went out
         # on; prune ids the history no longer holds while at it. This is what makes
-        # the next prompt a pure append of this one (see sent_annotations.py).
-        _tail = cap_info.get("turn_context") or ""
+        # the next prompt a pure append of this one (see sent_annotations.py). The
+        # morning brief, when this turn carried it, is cut out of what is remembered:
+        # it is sent once and is not replayed (ADR-014 amendment 2026-11-10).
+        _tail =cap_info.get("turn_context") or ""
         if current_message_id and _tail:
             try:
                 annotation_store.record(

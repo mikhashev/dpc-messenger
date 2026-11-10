@@ -514,7 +514,12 @@ def _build_runtime_section(
 
 
 def _build_memory_sections(memory: Memory) -> List[str]:
-    """Build scratchpad, identity, dialogue summary, morning brief sections."""
+    """Build the scratchpad, identity and dialogue summary sections.
+
+    The morning brief is not here: it changes once and is gone, so in this block it
+    changed the system prefix for one turn and again on the next. It rides in the
+    first turn's tail instead (_pending_morning_brief, ADR-014 amendment 2026-11-10).
+    """
     sections = []
 
     scratchpad_raw = memory.load_scratchpad()
@@ -530,35 +535,6 @@ def _build_memory_sections(memory: Memory) -> List[str]:
         )
     sections.append(scratchpad_section)
 
-    # Morning brief injection (ADR-014 Sleep Consolidation)
-    try:
-        import json as _json
-        _conv_dir = memory.agent_root.parent.parent / "conversations" / memory.agent_root.name
-        _brief_path = _conv_dir / "morning_brief.json"
-        if _brief_path.exists():
-            _brief = _json.loads(_brief_path.read_text(encoding="utf-8"))
-            if not _brief.get("consumed", False):
-                _summary = _brief.get("summary", "")
-                _decisions = _brief.get("key_decisions", [])
-                _unresolved = _brief.get("unresolved", [])
-                _parts = ["## Morning Brief (Sleep Consolidation)\n"]
-                if _summary:
-                    _parts.append(_summary)
-                if _decisions:
-                    _parts.append("\n**Key decisions:**")
-                    for _d in _decisions[:5]:
-                        _parts.append(f"- {_d.get('decision', '')} ({_d.get('session', '')})")
-                if _unresolved:
-                    _parts.append("\n**Unresolved:**")
-                    for _u in _unresolved[:5]:
-                        _parts.append(f"- {_u.get('topic', '')}")
-                sections.append("\n".join(_parts))
-                _brief["consumed"] = True
-                _brief_path.write_text(_json.dumps(_brief, ensure_ascii=False, indent=2), encoding="utf-8")
-                log.info("Morning brief injected into agent context and marked consumed")
-    except Exception as _e:
-        log.debug("Morning brief injection skipped: %s", _e)
-
     identity_raw = memory.load_identity()
     sections.append("## Identity\n\n" + clip_text(identity_raw, 80000))
 
@@ -568,6 +544,55 @@ def _build_memory_sections(memory: Memory) -> List[str]:
         sections.append("## Dialogue Summary\n\n" + clip_text(summary_text, 20000))
 
     return sections
+
+
+def _morning_brief_path(memory: Memory) -> pathlib.Path:
+    conv_dir = memory.agent_root.parent.parent / "conversations" / memory.agent_root.name
+    return conv_dir / "morning_brief.json"
+
+
+def _pending_morning_brief(memory: Memory) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """The 1:1 agent's morning brief that no turn and no chat post has used yet.
+
+    Returns (the section as the model reads it, the brief as stored) or None. Reads
+    only; _mark_morning_brief_consumed is called once the section is in a tail.
+    """
+    try:
+        path = _morning_brief_path(memory)
+        if not path.exists():
+            return None
+        brief = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(brief, dict) or brief.get("consumed", False):
+            return None
+        parts = ["## Morning Brief (Sleep Consolidation)\n"]
+        if brief.get("summary"):
+            parts.append(brief["summary"])
+        decisions = brief.get("key_decisions", [])
+        if decisions:
+            parts.append("\n**Key decisions:**")
+            for d in decisions[:5]:
+                parts.append(f"- {d.get('decision', '')} ({d.get('session', '')})")
+        unresolved = brief.get("unresolved", [])
+        if unresolved:
+            parts.append("\n**Unresolved:**")
+            for u in unresolved[:5]:
+                parts.append(f"- {u.get('topic', '')}")
+        return "\n".join(parts), brief
+    except Exception as e:
+        log.debug("Morning brief read skipped: %s", e)
+        return None
+
+
+def _mark_morning_brief_consumed(memory: Memory, brief: Dict[str, Any]) -> None:
+    """Record that the brief has been put in a turn's tail: it is not offered again."""
+    try:
+        brief["consumed"] = True
+        _morning_brief_path(memory).write_text(
+            json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+        log.info("Morning brief put in the first turn's tail and marked consumed")
+    except Exception:
+        # Not marked: the next turn offers it again, which is the lesser loss.
+        log.warning("Morning brief could not be marked consumed", exc_info=True)
 
 
 def _build_recent_sections(memory: Memory, task_id: str = "") -> List[str]:
@@ -968,8 +993,8 @@ def build_llm_messages(
                         caller off the event loop (recall_off_loop); [] means none.
                         None searches here, inline, on the calling thread.
         open_layers: The memory layers this turn may see (agent.open_layers, ADR-048).
-                     Without L5 the memory sections (Scratchpad, Identity, Morning
-                     Brief, Dialogue Summary) and the knowledge index stay out and
+                     Without L5 the memory sections (Scratchpad, Identity, Dialogue
+                     Summary), the knowledge index and the morning brief stay out and
                      the brief is not consumed; without EXT no extended path is
                      named; recall rows and replayed hint tails of closed layers are
                      dropped. None is every layer (callers before the marks).
@@ -1014,8 +1039,13 @@ def build_llm_messages(
     semi_stable_parts = []
     l5_open = open_layers is None or "L5" in open_layers
     ext_open = open_layers is None or "EXT" in open_layers
+    morning_brief = None
     if l5_open:
         semi_stable_parts.extend(_build_memory_sections(memory))
+        # The brief is L5 memory (ADR-048), so it is read only when L5 is open, and a
+        # closed turn leaves it unconsumed. It never joins the system block: it goes
+        # at the end of this turn's tail, below.
+        morning_brief = _pending_morning_brief(memory)
 
     # Knowledge base index
     kb_index_path = memory.knowledge_index_path()
@@ -1094,6 +1124,10 @@ def build_llm_messages(
     turn_parts.append(_build_sandbox_paths_section(sandbox_read_only, sandbox_read_write)
                       if ext_open else EXTENDED_ACCESS_CLOSED)
     turn_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
+    # Last, so that the recorded tail below is this one with this part cut out and
+    # the two differ only from here on.
+    if morning_brief:
+        turn_parts.append(morning_brief[0])
 
     # Context breakdown for UI tooltip (token estimates per component)
     def _section_name(text: str) -> str:
@@ -1204,8 +1238,20 @@ def build_llm_messages(
                 name = f"Active Recall ({', '.join(_files)})"
         _context_breakdown.append({"name": name, "tokens": estimate_tokens(_p)})
 
-    turn_context = format_turn_context(turn_parts)
-    messages.append({"role": "user", "content": append_turn_context(user_content, turn_context)})
+    # The morning brief is sent once. What is recorded for replay (cap_info
+    # "turn_context", sent_annotations) is the tail without it: a replayed tail
+    # comes back on every later turn, and ADR-045 decision 7 keeps agent memory out
+    # of it. The prefix a local engine cached diverges at the brief's place in this
+    # one message and nowhere ahead of it; the system block is untouched.
+    sent_turn_context = format_turn_context(turn_parts)
+    if morning_brief and turn_parts and turn_parts[-1] == morning_brief[0]:
+        turn_context = format_turn_context(turn_parts[:-1])
+    else:
+        turn_context = sent_turn_context
+        morning_brief = None
+    messages.append({"role": "user", "content": append_turn_context(user_content, sent_turn_context)})
+    if morning_brief:
+        _mark_morning_brief_consumed(memory, morning_brief[1])
     cap_info["context_breakdown"] = _context_breakdown
     cap_info["turn_context"] = turn_context
     cap_info["replayed_tails"] = _replayed
@@ -1224,8 +1270,9 @@ TURN_CONTEXT_NOTE = (
     "Each user message may end with a block between " + TURN_CONTEXT_OPEN + " and "
     + TURN_CONTEXT_CLOSE + ". The runtime appends it, not the user: recall hints, "
     "runtime state (clock, budget, session counters) and recent activity as they were "
-    "when that message was sent. In earlier messages the block describes that moment, "
-    "not now; the block on the latest message is current."
+    "when that message was sent. The first message after a sleep cycle also carries the "
+    "morning brief, once; later messages do not repeat it. In earlier messages the block "
+    "describes that moment, not now; the block on the latest message is current."
 )
 
 

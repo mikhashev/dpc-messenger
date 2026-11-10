@@ -451,13 +451,19 @@ def test_with_l5_closed_no_memory_section_and_the_brief_is_not_consumed(world, l
         assert marker not in system, marker
     assert json.loads(brief.read_text(encoding="utf-8"))["consumed"] is False
     assert "/secret/project-tree" not in tail
+    # The brief rides in the first turn's tail now (ADR-014 amendment 2026-11-10); a
+    # turn with L5 closed gets it nowhere.
+    assert "## Morning Brief" not in tail and "BRIEF-MARK-55" not in tail
 
 
 def test_the_owner_s_prompt_keeps_every_section_and_consumes_the_brief(world):
     brief = _brief(world)
     system, tail = _system(world, ALL_MEMORY_LAYERS)
-    for marker in ("## Scratchpad", "## Identity", SCRATCH_MARK, "BRIEF-MARK-55", "INDEX-MARK-9"):
+    for marker in ("## Scratchpad", "## Identity", SCRATCH_MARK, "INDEX-MARK-9"):
         assert marker in system, marker
+    # The brief is not in the system block; it is at the end of the turn's tail.
+    assert "## Morning Brief" not in system and "BRIEF-MARK-55" not in system
+    assert "BRIEF-MARK-55" in tail and "## Morning Brief" in tail
     assert json.loads(brief.read_text(encoding="utf-8"))["consumed"] is True
     assert "/secret/project-tree" in tail
 

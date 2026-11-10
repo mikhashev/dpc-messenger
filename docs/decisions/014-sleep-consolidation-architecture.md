@@ -57,6 +57,7 @@ Pipeline completion triggers automatic wakeup — no manual button press needed.
 Morning brief appears in TWO places:
 1. **Chat message**: posted as agent assistant message in history.json — visible to Mike in UI
 2. **Scratchpad**: injected into Block 2 of agent context — available to Ark for reasoning
+   *(superseded 2026-11-10: see the amendment at the end; the brief rides once in the first turn's tail)*
 
 ### No Telegram Notification (S66 amendment)
 
@@ -96,3 +97,38 @@ Telegram notification for sleep completion deferred — not needed for v1.
 - User controls when analysis happens (DDA-compatible, no autonomous behavior)
 - Evolution gets real data when re-enabled instead of vacuum analysis
 - Morning brief provides continuity between sessions
+
+## Amendment, 2026-11-10 — the morning brief rides once in the first turn's tail
+
+The original text above stands, except the **Dual Injection (S66 amendment)** point and the
+"injected into agent scratchpad" line under *Output*, which this amendment supersedes.
+
+The brief was put into the semi-stable system block (Block 2, between Scratchpad and Identity) the
+first time a turn read it, and marked consumed. The system prefix changed for that one turn and
+changed back on the next: two cold prefills on a local engine, and after the first turn the model
+no longer had the brief. [ADR-040](040-local-inference-second-path-as-a-dpc-owned-llama-server.md) (F)
+makes a prefix-stable prompt within an agent the precondition for everything else, and nothing that
+changes once belongs in front of the history.
+
+1. **Where a 1:1 agent's brief goes.** The brief rides once, at the end of the `<turn_context>` tail
+   of the first turn after sleep that reads it (ADR-040 F2). It is not in the system block, so the
+   system block is the same bytes with a pending brief and without one.
+2. **Dual Injection is superseded.** The brief no longer appears in the agent's scratchpad or Block
+   2. Of the two places the S66 amendment named, the chat message stays: it is a history message,
+   which the model reads on every turn of that session. The second place is the first turn's tail.
+3. **It is not replayed.** What the runtime records for replay in `sent_annotations` is the tail
+   *without* the brief, so a later turn replays the first message byte-for-byte as it was minus the
+   brief. The brief costs one turn: the engine's cached prefix diverges at the brief's place in that
+   one user message and nowhere ahead of it. This follows [ADR-045](045-agent-context-is-a-projection-of-a-kept-transcript.md)
+   decision 7 (agent memory is not moved into the replayed turn tail) and
+   [ADR-048](048-memory-layer-audience.md) (the brief is L5 memory).
+4. **The L5 gate moves with it.** With L5 closed for the turn (ADR-048) the tail carries no brief
+   and the brief is not marked consumed; the first turn that has L5 open gets it.
+5. **One-shot means one placement.** The brief is marked consumed when it has been put in a turn's
+   tail, or when a chat post has carried it into the history (the 1:1 agent's start-up check and the
+   sleep-completion post of a 1:1 agent). It is never offered a second time by either route.
+6. **The group path is unchanged.** A group sleep posts the brief to the group chat at sleep time and
+   marks `morning_brief_group_<group>.json` consumed at once; it never enters a prompt block. The
+   Telegram bridge only formats the brief.
+
+Mike's call, 2026-11-10.
