@@ -286,6 +286,10 @@ _PEAK_FLOORS = (
 
 # What a refused spawn of a killed turn says (the model reads it as a tool result).
 TURN_KILLED_NOT_STARTED = "the turn was killed; the command was not started"
+# The same Kill landing after the child was born, in the instant between the spawn
+# check and `register`: the child existed, was stopped at once, and may have left an
+# effect, so the model is told to look rather than that nothing ran.
+TURN_KILLED_STARTED_AND_STOPPED = "the turn was killed; the command had started and was stopped at once"
 
 
 class ProcessRegistryClosed(RuntimeError):

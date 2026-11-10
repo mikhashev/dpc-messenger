@@ -33,6 +33,7 @@ from ..run_gate import turn_waits_for
 from ...process_registry import (
     SPAWN_ORIGIN,
     TURN_KILLED_NOT_STARTED,
+    TURN_KILLED_STARTED_AND_STOPPED,
     ProcessRegistryClosed,
     get_registry,
 )
@@ -2320,6 +2321,24 @@ def unregister_approval_watcher(name: str) -> None:
     _approval_watchers.discard(name)
 
 
+# Taken by whoever writes an approval's decision on the shell.py side, so that the
+# check "no decision yet" and the write are one step. The desktop and Telegram answers
+# are written by `CoreService.resolve_shell_approval`, which does not take it: see
+# `release_approvals_of_turn` for what that leaves.
+_approval_decision_lock = threading.Lock()
+
+
+def _refusal_before_the_child(reason: str, command: str) -> str:
+    """The tool result for a spawn the registry refused, starting with the warning
+    mark every refusal starts with (the loop's `is_error` reads it).
+
+    `reason` is the registry's sentence. A child that was born and stopped at once
+    (`TURN_KILLED_STARTED_AND_STOPPED`) is not "not run": the model is told to check."""
+    if reason == TURN_KILLED_STARTED_AND_STOPPED:
+        return f"⚠️ {reason}; check what it left before relying on it. `{command}`"
+    return f"⚠️ Not run: {reason}. `{command}`"
+
+
 def release_approvals_of_turn(turn_id: str) -> int:
     """A person's Kill ended `turn_id`: answer each of its pending approvals as not
     approved, so the waiting executor thread wakes at once (ADR-046, amendment
@@ -2328,16 +2347,26 @@ def release_approvals_of_turn(turn_id: str) -> int:
     The decision is the existing `rejected`, with a result that says the command was
     not started because the turn was killed. The woken thread withdraws the card
     (`_request_approval`), and `turn_waits_for` ends the turn's `approval` wait as it
-    leaves the `with`. An approval that comes after this finds no pending request."""
+    leaves the `with`. An approval that comes after this finds no pending request.
+
+    An entry that already carries a decision is left as it is, and the check and the
+    write are one step under `_approval_decision_lock`. The service's own write of a
+    person's answer is not under it, so two orders remain: the person's write lands
+    after this one, and the woken thread reads `turn_killed` first (`_request_approval`),
+    so a late yes starts nothing; or it lands between the check and the write here, and
+    the entry reads rejected, which is also what a Kill is. Either way nothing starts."""
     if not turn_id:
         return 0
     released = 0
     for entry in list(_pending_approvals.values()):
-        if entry.get("turn_id") != turn_id or entry.get("decision"):
+        if entry.get("turn_id") != turn_id:
             continue
-        entry["decision"] = "rejected"
-        entry["result"] = f"Not run: {TURN_KILLED_NOT_STARTED}. `{entry.get('command', '')}`"
-        entry["turn_killed"] = True
+        with _approval_decision_lock:
+            if entry.get("decision"):
+                continue
+            entry["decision"] = "rejected"
+            entry["result"] = _refusal_before_the_child(TURN_KILLED_NOT_STARTED, entry.get("command", ""))
+            entry["turn_killed"] = True
         event = entry.get("event")
         if event:
             event.set()
@@ -2435,7 +2464,7 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     # this reads the record. A Kill that came first is not asked about: nobody waits.
     if turn_id and get_registry().turn_was_killed(turn_id):
         _pending_approvals.pop(request_id, None)
-        return f"Not run: {TURN_KILLED_NOT_STARTED}. `{command}`"
+        return _refusal_before_the_child(TURN_KILLED_NOT_STARTED, command)
 
     main_loop = getattr(ctx, "_event_loop", None)
     _origin_id, _origin_title = conversation_origin(ctx)
@@ -2508,7 +2537,9 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
             f"{who} is not focused on current task now. Not run: `{command}`"
         )
 
-    if entry.get("decision") == "rejected":
+    # A Kill answered first: whatever a later write put in `decision` (a yes that
+    # raced it), nothing starts in a killed turn.
+    if entry.get("turn_killed") or entry.get("decision") == "rejected":
         if entry.get("turn_killed") and dpc_service is not None:
             # The Kill answered, not a person: withdraw the card from the surfaces
             # still showing it, with a closure that is not a decision.
@@ -2531,6 +2562,9 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     # Who approved, and from where, before the output: the agent knows where a
     # turn came from and should know where an approval did.
     note = entry.get("note")
+    if note and output.startswith("⚠️"):
+        # A refusal keeps the mark first: the loop reads it to tell an error.
+        return f"{output}\n{note}"
     return f"{note}\n{output}" if note else output
 
 
@@ -2711,7 +2745,7 @@ def _execute_shell_command(
         # Refused before the child existed: the backend is stopping, or the turn was
         # killed. Nothing ran, and the result says so in the words of the refusal.
         log.info("run_shell not started: %s", e)
-        return f"Not run: {e}. `{command}`"
+        return _refusal_before_the_child(str(e), command)
     except Exception as e:
         log.error("run_shell failed: %s", e)
         return f"Error: {e}"

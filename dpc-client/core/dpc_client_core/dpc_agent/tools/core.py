@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 from ..run_gate import turn_waits_for
+from ...process_registry import SPAWN_ORIGIN, get_registry
 from ..memory import _BACKFILL_SKIP
 from ..utils import AUTO_COMMIT_GIT_TIMEOUT_SEC, auto_commit_agent_change, clip_text
 
@@ -1622,6 +1624,14 @@ _SCHEDULE_APPROVAL_TTL_SECONDS = 60
 # request_id -> {"event": threading.Event, "approved": bool}
 _pending_schedule_approvals: dict = {}
 
+# What a person's Kill leaves as the reason (ADR-046, amendment 2026-11-10).
+_SCHEDULE_TURN_KILLED = "the turn was killed"
+
+# One step for "has this request been answered" and the write of the answer, taken by
+# the person's answer (`resolve_schedule_approval`) and the Kill's
+# (`release_schedule_approvals_of_turn`), so neither overwrites the other.
+_schedule_decision_lock = threading.Lock()
+
 
 def _schedule_needs_approval(ctx) -> bool:
     """Whether this agent must ask before queueing a wake-up.
@@ -1693,16 +1703,27 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
             "so nobody could see the request"
         )
 
+    # The turn this call belongs to, from the origin the dispatcher set on this thread.
+    origin = SPAWN_ORIGIN.get()
+    turn_id = (origin.turn_id if origin is not None else "") or ""
+
     request_id = str(uuid.uuid4())[:8]
     event = threading.Event()
     agent_id = getattr(getattr(ctx, "agent_root", None), "name", "") or ""
     _pending_schedule_approvals[request_id] = {
         "event": event,
         "approved": False,
+        "decided": False,
+        "turn_id": turn_id,
         # Which agent asked, so the surfaces it was offered on can be found
         # again when it is answered or expires.
         "agent_id": agent_id,
     }
+    # After the entry is in the queue, so that a Kill is seen by one of the two: it
+    # records the turn, then releases the queue, and this reads the record.
+    if turn_id and get_registry().turn_was_killed(turn_id):
+        _pending_schedule_approvals.pop(request_id, None)
+        return False, _SCHEDULE_TURN_KILLED
 
     # `conversation_id` used to be `ctx.current_task_id` — on this path that is
     # the id of the task being scheduled, not the chat the request came from, so
@@ -1764,6 +1785,19 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
         except Exception as e:
             log.warning("Failed to announce schedule_approval_closed: %s", e)
         return False, f"nobody answered within {_SCHEDULE_APPROVAL_TTL_SECONDS}s"
+    if entry.get("turn_killed"):
+        # The Kill answered, not a person: withdraw the card from the surfaces still
+        # showing it. `announce_schedule_approval_closed` has no `resolved_via`.
+        try:
+            _on_main_loop(dpc_service.announce_schedule_approval_closed(
+                request_id=request_id,
+                agent_id=agent_id,
+                outcome="⛔ The turn was killed; this was not scheduled.",
+                resolution="superseded",
+            ))
+        except Exception as e:
+            log.warning("Failed to announce schedule_approval_closed: %s", e)
+        return False, _SCHEDULE_TURN_KILLED
     if not entry.get("approved"):
         return False, "the user declined"
     return True, ""
@@ -1780,9 +1814,39 @@ def resolve_schedule_approval(request_id: str, approved: bool) -> bool:
     entry = _pending_schedule_approvals.get(request_id)
     if entry is None:
         return False
-    entry["approved"] = bool(approved)
+    with _schedule_decision_lock:
+        if entry.get("decided"):
+            # The Kill answered first; there is nothing left to approve.
+            return False
+        entry["approved"] = bool(approved)
+        entry["decided"] = True
     entry["event"].set()
     return True
+
+
+def release_schedule_approvals_of_turn(turn_id: str) -> int:
+    """A person's Kill ended `turn_id`: answer each of its pending queue requests as
+    not approved, so the waiting executor thread wakes at once (ADR-046, amendment
+    2026-11-10; the shell's twin is `shell.release_approvals_of_turn`). Returns how many.
+
+    A request that already carries an answer is left as it is. The woken thread
+    withdraws the card (`superseded`) and `schedule_task` returns that nothing was
+    scheduled because the turn was killed."""
+    if not turn_id:
+        return 0
+    released = 0
+    for entry in list(_pending_schedule_approvals.values()):
+        if entry.get("turn_id") != turn_id:
+            continue
+        with _schedule_decision_lock:
+            if entry.get("decided"):
+                continue
+            entry["approved"] = False
+            entry["decided"] = True
+            entry["turn_killed"] = True
+        entry["event"].set()
+        released += 1
+    return released
 
 
 def schedule_task(

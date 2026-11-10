@@ -181,7 +181,7 @@ def test_an_approval_already_given_when_the_kill_lands_still_starts_nothing(born
     pr.get_registry().note_kill_of_turn(KILLED)
     with spawn_origin(_origin(KILLED)):
         result = shell._execute_shell_command("echo hi", None, 5)
-    assert result.startswith("Not run: ") and TURN_KILLED_NOT_STARTED in result
+    assert result.startswith("⚠️ Not run: ") and TURN_KILLED_NOT_STARTED in result
     assert born == []
     assert pr.get_registry().open_entries("tool") == []
 
@@ -272,3 +272,260 @@ def test_the_record_of_killed_turns_is_bounded_and_forgets_the_oldest_first():
     for turn_id in (f"late-{n}" for n in range(KILLED_TURNS_MAX - 1)):
         registry.note_kill_of_turn(turn_id)
     assert registry.turn_was_killed(ids[-KILLED_TURNS_MAX])
+
+
+# --- follow-ups of 2026-11-11 after review (ADR-046 amendment) ---------------------
+
+from dpc_client_core.dpc_agent.tools import core as core_tool  # noqa: E402
+from dpc_client_core.process_registry import TURN_KILLED_STARTED_AND_STOPPED  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _clean_schedule():
+    core_tool._pending_schedule_approvals.clear()
+    yield
+    core_tool._pending_schedule_approvals.clear()
+
+
+class _ScheduleService(_Service):
+    async def announce_schedule_approval_request(self, **kwargs):
+        pass
+
+    async def announce_schedule_approval_closed(self, **kwargs):
+        self.closed.append(kwargs)
+
+
+class _RegistryThatCannotRecord:
+    """A registry whose record of a killed turn raises; the rest of a Kill goes on."""
+
+    def note_kill_of_turn(self, turn_id):
+        raise RuntimeError("registry broke")
+
+    def stop_commands_of(self, origin):
+        return []
+
+
+def test_a_registry_that_fails_to_record_the_kill_still_releases_the_approval(tmp_path, born, monkeypatch, caplog):
+    service = _Service()
+    with _Loop() as loop:
+        out: dict = {}
+        thread = _ask_in_a_tool_thread(_ctx(tmp_path, service, loop), _origin(KILLED), out)
+        _wait_for_the_question()
+        monkeypatch.setattr(agent_loop, "get_registry", lambda: _RegistryThatCannotRecord())
+        with caplog.at_level("ERROR"):
+            agent_loop._end_killed_turn(_origin(KILLED))
+        thread.join(5)
+        assert not thread.is_alive(), "the approval was not released when the registry raised"
+        time.sleep(0.2)
+
+    assert out["waited"] < 5
+    assert out["result"].startswith("⚠️ Not run: ") and TURN_KILLED_NOT_STARTED in out["result"]
+    assert born == []
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert any("process registry failed" in m for m in messages)
+    assert not any("shell approvals" in m for m in messages)
+
+
+def test_a_failing_shell_release_does_not_stop_the_schedule_release(monkeypatch, caplog):
+    def _broken(turn_id):
+        raise RuntimeError("shell release broke")
+
+    monkeypatch.setattr(shell, "release_approvals_of_turn", _broken)
+    event = threading.Event()
+    core_tool._pending_schedule_approvals["r1"] = {
+        "event": event, "approved": False, "decided": False, "turn_id": KILLED, "agent_id": AGENT,
+    }
+    with caplog.at_level("ERROR"):
+        agent_loop._end_killed_turn(_origin(KILLED))
+    assert event.is_set()
+    assert any("shell approvals" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+
+
+def test_a_child_born_in_the_register_window_is_reported_as_started_and_stopped(monkeypatch):
+    """The Kill lands after the check before `Popen` and before `register`: the child
+    existed, so the result must not say it was not started."""
+    registry = pr.get_registry()
+    stopped: list = []
+
+    def _popen(*args, **kwargs):
+        registry.note_kill_of_turn(KILLED)  # the Kill, between the check and register
+        return types.SimpleNamespace(pid=7_993_001)
+
+    monkeypatch.setattr(process_tool.subprocess, "Popen", _popen)
+    monkeypatch.setattr(process_tool, "_new_command_job", lambda: None)
+    monkeypatch.setattr(process_tool, "_kill_process_tree", lambda p: stopped.append(p.pid) or "killed")
+
+    with spawn_origin(_origin(KILLED)):
+        result = shell._execute_shell_command("echo hi", None, 5)
+
+    assert stopped == [7_993_001]
+    assert result.startswith("⚠️ " + TURN_KILLED_STARTED_AND_STOPPED)
+    assert "not started" not in result and "Not run" not in result
+    assert "`echo hi`" in result
+    assert registry.open_entries("tool") == []
+
+
+def test_the_refusal_before_the_spawn_still_says_not_started_with_the_mark(born):
+    pr.get_registry().note_kill_of_turn(KILLED)
+    with spawn_origin(_origin(KILLED)):
+        result = shell._execute_shell_command("echo hi", None, 5)
+    assert result.startswith("⚠️ Not run: ")
+    assert "the command was not started" in result
+    assert TURN_KILLED_STARTED_AND_STOPPED not in result
+
+
+def test_the_backend_stopping_refusal_carries_the_mark_too(born):
+    pr.get_registry().begin_shutdown()
+    with spawn_origin(_origin(OTHER)):
+        result = shell._execute_shell_command("echo hi", None, 5)
+    assert result.startswith("⚠️ Not run: the backend is stopping")
+    assert born == []
+
+
+def _classified(tmp_path, text):
+    tools = types.SimpleNamespace(execute=lambda name, args, ctx=None: text)
+    tc = {"id": "call-1", "function": {"name": "run_shell", "arguments": "{}"}}
+    return agent_loop._execute_single_tool(tools, tc, tmp_path)
+
+
+def test_every_kill_refusal_result_is_an_error_in_the_loops_classifier(tmp_path, born):
+    texts = []
+    pr.get_registry().note_kill_of_turn(KILLED)
+    with spawn_origin(_origin(KILLED)):
+        texts.append(shell._execute_shell_command("echo hi", None, 5))  # not started
+    texts.append(shell._refusal_before_the_child(TURN_KILLED_STARTED_AND_STOPPED, "echo hi"))
+    texts.append(shell._refusal_before_the_child("the backend is stopping; it starts no new process", "echo hi"))
+    entry = {"turn_id": KILLED, "command": "echo hi", "event": threading.Event()}
+    shell._pending_approvals["x1"] = entry
+    shell.release_approvals_of_turn(KILLED)
+    texts.append(entry["result"])  # the release of a waiting approval
+    assert len(texts) == 4
+    for text in texts:
+        assert _classified(tmp_path, text)["is_error"] is True, text
+
+
+def test_an_approved_command_refused_at_the_spawn_keeps_the_mark_first(tmp_path, monkeypatch):
+    """The note of who approved sits after the refusal, so the result still starts with the mark."""
+    monkeypatch.setattr(
+        shell, "_execute_shell_command",
+        lambda *a, **k: shell._refusal_before_the_child(TURN_KILLED_NOT_STARTED, "rm -rf x"),
+    )
+    service = _Service()
+    with _Loop() as loop:
+        out: dict = {}
+        thread = _ask_in_a_tool_thread(_ctx(tmp_path, service, loop), _origin(OTHER), out)
+        _wait_for_the_question()
+        (entry,) = shell._pending_approvals.values()
+        entry["decision"] = "approved"  # what the service writes for a person's yes
+        entry["note"] = "Approved by Mike in the interface."
+        entry["event"].set()
+        thread.join(5)
+        assert not thread.is_alive()
+    assert out["result"].startswith("⚠️ Not run: ")
+    assert out["result"].endswith("Approved by Mike in the interface.")
+
+
+def test_a_schedule_approval_is_released_by_a_kill_and_withdrawn_as_superseded(tmp_path):
+    assert core_tool._SCHEDULE_APPROVAL_TTL_SECONDS >= 30
+    service = _ScheduleService()
+    out: dict = {}
+    with _Loop() as loop:
+        ctx = _ctx(tmp_path / AGENT, service, loop)
+
+        def _run():
+            with spawn_origin(_origin(KILLED, tool="schedule_task")):
+                started = time.monotonic()
+                out["result"] = core_tool._await_schedule_approval(
+                    ctx, task_type="check_back", when="in 5s", about="x",
+                )
+                out["waited"] = time.monotonic() - started
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        for _ in range(500):
+            if core_tool._pending_schedule_approvals:
+                break
+            time.sleep(0.01)
+        (request_id,) = list(core_tool._pending_schedule_approvals)
+        assert core_tool._pending_schedule_approvals[request_id]["turn_id"] == KILLED
+
+        agent_loop._end_killed_turn(_origin(KILLED))
+        thread.join(5)
+        assert not thread.is_alive(), "the schedule request kept waiting after the Kill"
+        time.sleep(0.2)
+        assert core_tool.resolve_schedule_approval(request_id, True) is False  # a late yes finds nothing
+
+    assert out["waited"] < 5
+    assert out["result"] == (False, "the turn was killed")
+    assert core_tool._pending_schedule_approvals == {}
+    assert [c["resolution"] for c in service.closed] == ["superseded"]
+
+
+def test_a_schedule_request_of_a_turn_already_killed_is_not_put_to_the_user(tmp_path):
+    pr.get_registry().note_kill_of_turn(KILLED)
+    service = _ScheduleService()
+    with _Loop() as loop:
+        with spawn_origin(_origin(KILLED, tool="schedule_task")):
+            result = core_tool._await_schedule_approval(
+                _ctx(tmp_path / AGENT, service, loop), task_type="check_back", when="in 5s", about="x",
+            )
+    assert result == (False, "the turn was killed")
+    assert core_tool._pending_schedule_approvals == {}
+
+
+def test_a_decision_a_person_already_wrote_is_not_overwritten_by_the_release():
+    for decision in ("approved", "rejected"):
+        event = threading.Event()
+        entry = {"turn_id": KILLED, "command": "x", "event": event, "decision": decision, "result": "theirs"}
+        shell._pending_approvals["p1"] = entry
+        assert shell.release_approvals_of_turn(KILLED) == 0
+        assert entry["decision"] == decision and entry["result"] == "theirs"
+        assert "turn_killed" not in entry and not event.is_set()
+        shell._pending_approvals.clear()
+
+    sched = {"event": threading.Event(), "approved": True, "decided": True, "turn_id": KILLED}
+    core_tool._pending_schedule_approvals["s1"] = sched
+    assert core_tool.release_schedule_approvals_of_turn(KILLED) == 0
+    assert sched["approved"] is True and "turn_killed" not in sched
+
+
+def test_a_schedule_answer_given_first_is_not_overwritten_and_one_given_after_is_refused():
+    event = threading.Event()
+    entry = {"event": event, "approved": False, "decided": False, "turn_id": KILLED}
+    core_tool._pending_schedule_approvals["s2"] = entry
+    assert core_tool.resolve_schedule_approval("s2", True) is True
+    assert core_tool.release_schedule_approvals_of_turn(KILLED) == 0
+    assert entry["approved"] is True and not entry.get("turn_killed")
+
+
+def test_the_release_waits_for_the_decision_lock_so_check_and_set_are_one_step():
+    event = threading.Event()
+    entry = {"turn_id": KILLED, "command": "x", "event": event}
+    shell._pending_approvals["p2"] = entry
+    done = threading.Event()
+    with shell._approval_decision_lock:
+        thread = threading.Thread(
+            target=lambda: (shell.release_approvals_of_turn(KILLED), done.set()), daemon=True,
+        )
+        thread.start()
+        assert not done.wait(0.3), "the release wrote without taking the lock"
+        assert "decision" not in entry
+    assert done.wait(5)
+    assert entry["decision"] == "rejected" and entry["turn_killed"] is True
+
+
+def test_a_yes_that_raced_the_release_into_the_entry_starts_nothing(tmp_path, born):
+    """The service writes `decision` without the shell's lock. If its write lands after the
+    release, the woken thread reads `turn_killed` first."""
+    service = _Service()
+    with _Loop() as loop:
+        out: dict = {}
+        thread = _ask_in_a_tool_thread(_ctx(tmp_path, service, loop), _origin(KILLED), out)
+        _wait_for_the_question()
+        (entry,) = shell._pending_approvals.values()
+        agent_loop._end_killed_turn(_origin(KILLED))
+        entry["decision"] = "approved"  # what the service writes for a person's yes, late
+        thread.join(5)
+        assert not thread.is_alive()
+    assert out["result"].startswith("⚠️ Not run: ")
+    assert born == []

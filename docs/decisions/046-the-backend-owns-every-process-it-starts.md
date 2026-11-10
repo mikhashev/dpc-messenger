@@ -68,7 +68,18 @@ session: "DPC Project group chat, 2026-10-25 — card THE-BACKEND-KEEPS-NO-LIST-
 > A refused spawn never started: it has no registry entry and no `exit_reason` (the eight
 > stay closed); the model reads a plain tool result, "Not run: the turn was killed; the
 > command was not started". The record holds the 256 newest killed turns, the oldest
-> forgotten first, and never blocks another turn. Mike's call, 2026-11-10.
+> forgotten first, and never blocks another turn. It lives in process memory and does not
+> survive a restart of the backend; a restart ends every turn anyway, so a turn id is not
+> asked about again. Mike's call, 2026-11-10; follow-ups 2026-11-11 after review:
+> the approvals of the killed turn (the shell's Tier 1 and `schedule_task`'s) are released
+> independently of the registry record, each in a step of its own, so a registry that fails
+> to record the Kill does not bring back the yes that starts the command; a `schedule_task`
+> request of the turn is answered as not approved and its card withdrawn `superseded`,
+> like the shell's; an approval already carrying a person's answer is not overwritten; a
+> child that was born and stopped at once in the window between the spawn check and
+> `register` is reported as that ("the turn was killed; the command had started and was
+> stopped at once"), not as "was not started"; and every refusal result starts with the
+> warning mark, so the ledger and the interface count it an error.
 >
 > **Axis `knowledge, network`.** `knowledge` because most spawns are an agent's tool
 > calls and the board card carries that axis; `network` because the two local engines of

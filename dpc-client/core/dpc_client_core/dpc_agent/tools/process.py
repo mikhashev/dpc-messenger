@@ -531,6 +531,24 @@ def kill_pid_tree(pid: int) -> str:
     return _kill_process_tree(_PidHandle(pid))
 
 
+def _started_then_killed(error: BaseException) -> Optional[BaseException]:
+    """The exception to raise when `error` is the registry refusing, at `register`, a
+    child that already exists because its turn was killed; None for any other error.
+
+    Imported here for the reason `_registry` is."""
+    try:
+        from dpc_client_core.process_registry import (
+            TURN_KILLED_NOT_STARTED,
+            TURN_KILLED_STARTED_AND_STOPPED,
+            ProcessRegistryClosed,
+        )
+    except ImportError:
+        return None
+    if isinstance(error, ProcessRegistryClosed) and str(error) == TURN_KILLED_NOT_STARTED:
+        return ProcessRegistryClosed(TURN_KILLED_STARTED_AND_STOPPED)
+    return None
+
+
 def _registry():
     """The process registry, or None where the module is loaded on its own.
 
@@ -1079,10 +1097,15 @@ def run_supervised(
                     cwd=cwd,
                     while_stopping=while_stopping,
                 )
-            except Exception:
+            except Exception as refusal:
                 # Closed in the instant between the check and here, or a malformed
                 # entry: either way the child exists and nobody would end it.
                 _kill_process_tree(process)
+                stopped_at_once = _started_then_killed(refusal)
+                if stopped_at_once is not None:
+                    # Not "was not started": the child lived for an instant and may
+                    # have done something, which the model is told to check.
+                    raise stopped_at_once from refusal
                 raise
         else:
             log.info(
