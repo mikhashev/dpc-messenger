@@ -1154,30 +1154,26 @@ async def close_browser_sessions_of(agent_id: str) -> int:
     return closed
 
 
-_session_locks: dict[str, asyncio.Lock] = {}
+_session_locks: dict[str, tuple[Optional[asyncio.AbstractEventLoop], asyncio.Lock]] = {}
 
 def _get_session_lock(agent_id: str) -> asyncio.Lock:
     """Return (creating if missing) a per-agent asyncio.Lock used by
     every `browser_*` tool handler to serialize concurrent calls
     against the same AuthBrowser instance (ADR-029 Task 006 §Failure
-    handling). Recreates the lock if the current event loop differs
-    from the one the lock was created on (happens when registry.py
-    execute() runs in a fresh loop via run_until_complete)."""
-    lock = _session_locks.get(agent_id)
+    handling). The cache stores the loop each lock was made for, and a
+    lock is replaced only when the running loop is a different one
+    (registry.py execute() runs handlers on a fresh loop). The loop is
+    recorded here, never read back from the lock: `asyncio.Lock._loop`
+    is None until first contended, so an unused lock looked foreign."""
     try:
-        current_loop = asyncio.get_running_loop()
+        current_loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
     except RuntimeError:
         current_loop = None
-    if lock is not None and current_loop is not None:
-        try:
-            lock_loop = lock._loop  # type: ignore[attr-defined]
-            if lock_loop is not current_loop:
-                lock = None
-        except AttributeError:
-            pass
-    if lock is None:
-        lock = asyncio.Lock()
-        _session_locks[agent_id] = lock
+    entry = _session_locks.get(agent_id)
+    if entry is not None and entry[0] is current_loop:
+        return entry[1]
+    lock = asyncio.Lock()
+    _session_locks[agent_id] = (current_loop, lock)
     return lock
 
 
