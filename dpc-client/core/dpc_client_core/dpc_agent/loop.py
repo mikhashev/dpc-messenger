@@ -1388,6 +1388,24 @@ def _answer_without_unrun_calls(
                               kept_at, retried, ran_earlier=_names_that_ran(names, llm_trace), cut_at=cut_at)
 
 
+def timeout_result_text(fn_name: str, timeout_sec: int) -> str:
+    """What the model reads when the loop stopped waiting for a tool.
+
+    The loop abandons the call, it does not cancel it: the worker thread runs
+    on and the effect may happen, or may already have. So this is not a
+    failure report; it says the outcome is unknown and what to do about it.
+    The first words keep the `TOOL_TIMEOUT` marker, which `_classify_tool_error`
+    and the logs read."""
+    return (
+        f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit. "
+        f"The outcome is UNKNOWN: the call was abandoned, not cancelled, and it may "
+        f"still complete or may already have taken effect. Do NOT report it as "
+        f"succeeded and do NOT report it as failed. Check the effect first (read the "
+        f"file, list the directory, query the state) and retry only if it is not "
+        f"there; tell the user the outcome was unknown."
+    )
+
+
 def _classify_tool_error(result: str) -> str:
     """Classify tool error category from result string prefix."""
     r = str(result)
@@ -1601,7 +1619,7 @@ async def _execute_with_timeout(
         return result
     except asyncio.TimeoutError:
         duration_ms = round((time.monotonic() - t0) * 1000)
-        result = f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit."
+        result = timeout_result_text(fn_name, timeout_sec)
         # Log to both events.jsonl and tools.jsonl (previously only events.jsonl)
         append_jsonl(logs_dir / "events.jsonl", {
             "ts": utc_now_iso(),
@@ -1632,6 +1650,7 @@ async def _execute_with_timeout(
             "fn_name": fn_name,
             "result": result,
             "is_error": True,
+            "timed_out": True,
             "args_for_log": timeout_log["args"],
         }
     finally:
@@ -2326,7 +2345,12 @@ async def run_llm_loop(
 
             # When a tool fails, wrap the result in an explicit failure envelope
             # so the LLM cannot misinterpret it as a success and hallucinate outcomes.
-            if exec_result["is_error"]:
+            if exec_result.get("timed_out"):
+                # Not the failed envelope: a timed-out call has no known outcome,
+                # and "FAILED" invites a retry of something that may have happened.
+                # The result text carries the instruction itself.
+                tool_content = safe_result
+            elif exec_result["is_error"]:
                 tool_content = (
                     f"[TOOL_FAILED: {exec_result['fn_name']}]\n"
                     f"{safe_result}\n"

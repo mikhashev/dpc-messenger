@@ -2292,6 +2292,18 @@ def _validate_command(
 _pending_approvals: dict = {}
 APPROVAL_TTL_SECONDS = 60
 
+# The longest a command may run (its own `timeout` is clamped to this), and the
+# loop's ceiling for one run_shell call: an approval wait is a person's latency,
+# then the command, then the kill and the bounded drain. The loop's clock must
+# outlast all three, so that the shell's own deadline, which kills the process
+# tree and answers with a known outcome (ADR-046), is the one that fires.
+# Derived, not typed, as `schedule_task` does for its approval wait.
+MAX_COMMAND_TIMEOUT_SECONDS = 300
+_LOOP_MARGIN_SECONDS = 30
+RUN_SHELL_TOOL_TIMEOUT_SECONDS = (
+    APPROVAL_TTL_SECONDS + MAX_COMMAND_TIMEOUT_SECONDS + _LOOP_MARGIN_SECONDS
+)
+
 # Answerers that are not transports the service knows about. Nothing in
 # production registers one; the eval harness does, so a headless benchmark is
 # not told there is nobody to ask while its own approver watches the queue. A
@@ -2622,7 +2634,7 @@ def _execute_shell_command(
     is kept so the agent can read it. None keeps nothing.
     """
     is_windows = platform.system() == "Windows"
-    timeout = min(max(timeout, 5), 300)
+    timeout = min(max(timeout, 5), MAX_COMMAND_TIMEOUT_SECONDS)
     env = _child_environment()
     spawn, use_shell = command, True
     if is_windows:
@@ -2731,7 +2743,8 @@ def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "")
     else:
         working_dir = str(ctx.agent_root)
 
-    log.info("run_shell: %s (cwd=%s, timeout=%ds)", command, working_dir, min(max(timeout, 5), 300))
+    log.info("run_shell: %s (cwd=%s, timeout=%ds)", command, working_dir,
+             min(max(timeout, 5), MAX_COMMAND_TIMEOUT_SECONDS))
     return _execute_shell_command(command, working_dir, timeout, store_at=_call_store(ctx))
 
 
@@ -2772,7 +2785,7 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=run_shell,
             is_code_tool=True,
-            timeout_sec=300,
+            timeout_sec=RUN_SHELL_TOOL_TIMEOUT_SECONDS,
             is_core=False,
             default_enabled=False,
         ),
