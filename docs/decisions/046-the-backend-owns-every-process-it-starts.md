@@ -56,6 +56,20 @@ session: "DPC Project group chat, 2026-10-25 — card THE-BACKEND-KEEPS-NO-LIST-
 > `engine_switch` stays out: it named the same thing under a rule written when no path to
 > it existed.
 >
+> **Amendment of 2026-11-10: a Kill ends the turn's later spawns, and the approval it
+> interrupts.** The Kill ends what the turn has started when it lands; it also ends what
+> the turn would start next. It records the turn (`turn_id`, the key the spawn origin
+> already carries) in the registry, under the registry's lock, and the registry refuses any
+> later `tool` spawn from that turn, at the check before the spawn and at `register`, so a
+> spawn racing the Kill is swept or refused, never born. A subsystem is the backend's and is
+> not refused. A pending approval of the killed turn (ADR-030, Tier 1 holds the executor
+> thread on an event) is answered as not approved at once, the card is withdrawn, and the
+> turn's `wait_reason` `approval` ends with the wait; a yes that comes after finds no request.
+> A refused spawn never started: it has no registry entry and no `exit_reason` (the eight
+> stay closed); the model reads a plain tool result, "Not run: the turn was killed; the
+> command was not started". The record holds the 256 newest killed turns, the oldest
+> forgotten first, and never blocks another turn. Mike's call, 2026-11-10.
+>
 > **Axis `knowledge, network`.** `knowledge` because most spawns are an agent's tool
 > calls and the board card carries that axis; `network` because the two local engines of
 > ADR-040 and ADR-044 (both `network`) join the same ownership. `honesty` was considered

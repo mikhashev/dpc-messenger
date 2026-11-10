@@ -1727,7 +1727,21 @@ def _end_killed_turn(origin: SpawnOrigin) -> None:
     of this turn, any round and tool (`stop_commands_of`), not an earlier turn's.
     The agent's browser sessions are closed too, whichever turn opened them
     (`close_browser_sessions_of`). Both wait for processes to go, so they run on
-    a thread of its own and the loop does not."""
+    a thread of its own and the loop does not.
+
+    Before that thread starts, the turn is recorded as killed and its pending
+    approvals are answered as not approved (ADR-046, amendment 2026-11-10): a
+    command waiting for a person's yes is not started by a yes that comes after
+    the Kill, and its call returns at once."""
+
+    try:
+        get_registry().note_kill_of_turn(origin.turn_id)
+        from .tools.shell import release_approvals_of_turn
+        released = release_approvals_of_turn(origin.turn_id)
+        if released:
+            log.info("Kill: %d pending approval(s) of turn %s answered as not approved", released, origin.turn_id)
+    except Exception:
+        log.warning("Kill: recording turn %s as killed failed", origin.turn_id, exc_info=True)
 
     def _run() -> None:
         try:

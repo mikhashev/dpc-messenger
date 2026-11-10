@@ -179,6 +179,7 @@ import signal as _signal
 import sys
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -236,6 +237,9 @@ COMMAND_MAX_CHARS = 120
 FULL_COMMAND_MAX_CHARS = 65536
 KEEP_FINISHED_MAX = 200
 KEEP_FINISHED_DAYS = 7
+# How many killed turns the registry remembers (ADR-046, amendment 2026-11-10): a
+# Kill is a person's press, so this many outlast any real session; the oldest goes first.
+KILLED_TURNS_MAX = 256
 HISTORY_DAYS = 7
 HISTORY_FILE_MAX_BYTES = 10 * 1024 * 1024
 HISTORY_TOTAL_MAX_BYTES = 50 * 1024 * 1024
@@ -280,8 +284,13 @@ _PEAK_FLOORS = (
 )
 
 
+# What a refused spawn of a killed turn says (the model reads it as a tool result).
+TURN_KILLED_NOT_STARTED = "the turn was killed; the command was not started"
+
+
 class ProcessRegistryClosed(RuntimeError):
-    """The registry is refusing new entries: the backend is stopping (point 7)."""
+    """The registry is refusing a new entry: the backend is stopping (point 7), or the
+    spawn is a tool's and its turn was killed (amendment 2026-11-10)."""
 
 
 # --- the spawn origin (ADR-046 point 3) ----------------------------------------
@@ -757,6 +766,8 @@ class ProcessRegistry:
         # Open entries read from the file: the children of an earlier run.
         self._inherited: List[ProcessEntry] = []
         self._stopping = False
+        # The `turn_id`s a person's Kill has ended, oldest first, at most KILLED_TURNS_MAX.
+        self._killed_turns: "OrderedDict[str, None]" = OrderedDict()
         self._ended_in_the_stop: List[ProcessEntry] = []
         self._backend_start_time: Optional[float] = None
         self._last_write_error: Optional[str] = None
@@ -779,17 +790,45 @@ class ProcessRegistry:
         launcher_kind: Optional[str] = None,
         *,
         while_stopping: bool = False,
+        origin: Optional[SpawnOrigin] = None,
     ) -> None:
         """Raise `ProcessRegistryClosed` when the backend is stopping. Called
         before a spawn, so that nothing is born after the stop began, except a
         `device_probe` subsystem whose caller passes `while_stopping`: the stop's
         own VRAM release check, where a refusal would read as an unreadable card
-        instead of a released one. The launcher's name alone lets nothing through."""
-        if not self._stopping:
+        instead of a released one. The launcher's name alone lets nothing through.
+
+        A `tool` spawn is also refused when its turn was killed (`note_kill_of_turn`):
+        the `origin`, or the `SPAWN_ORIGIN` of the calling thread, names the turn. A
+        subsystem is the backend's, not the turn's, and is never refused for a Kill."""
+        with self._lock:
+            if self._stopping:
+                if while_stopping and launcher_kind == "subsystem" and launcher in _BORN_WHILE_STOPPING:
+                    return
+                raise ProcessRegistryClosed("the backend is stopping; it starts no new process")
+            if launcher_kind == "tool":
+                seen = origin if origin is not None else SPAWN_ORIGIN.get()
+                if seen is not None and seen.turn_id and seen.turn_id in self._killed_turns:
+                    raise ProcessRegistryClosed(TURN_KILLED_NOT_STARTED)
+
+    def note_kill_of_turn(self, turn_id: str) -> None:
+        """A person's Kill ended this turn: no `tool` spawn of it is born from now on.
+
+        Under the lock `register` and `check_open` read it under, so a spawn racing
+        the Kill is either already in the list for `stop_commands_of` to sweep or
+        refused here. Bounded: past `KILLED_TURNS_MAX` the oldest is forgotten. A
+        `turn_id` is unique to its turn, so the record never blocks a new turn."""
+        if not turn_id:
             return
-        if while_stopping and launcher_kind == "subsystem" and launcher in _BORN_WHILE_STOPPING:
-            return
-        raise ProcessRegistryClosed("the backend is stopping; it starts no new process")
+        with self._lock:
+            self._killed_turns.pop(turn_id, None)
+            self._killed_turns[turn_id] = None
+            while len(self._killed_turns) > KILLED_TURNS_MAX:
+                self._killed_turns.popitem(last=False)
+
+    def turn_was_killed(self, turn_id: str) -> bool:
+        with self._lock:
+            return bool(turn_id) and turn_id in self._killed_turns
 
     def begin_shutdown(self) -> bool:
         """Refuse new entries from now on and turn every later stop into
@@ -1105,7 +1144,7 @@ class ProcessRegistry:
         out = log or logger
         origin = origin if origin is not None else SPAWN_ORIGIN.get()
         with self._lock:
-            self.check_open(launcher, launcher_kind, while_stopping=while_stopping)
+            self.check_open(launcher, launcher_kind, while_stopping=while_stopping, origin=origin)
             stale = self._open.get(pid)
             if stale is not None:
                 # The pid was reused, so the earlier child ended without anyone seeing it.
@@ -1631,9 +1670,12 @@ class ProcessRegistry:
         lost attribution. A killed git's `.git/index.lock` is named in the log.
         This is a person's act, so a command whose root has exited while its call
         waits loses what it left too; the rule that nothing is killed then binds what
-        is automatic (ADR-046). Returns the entries killed."""
+        is automatic (ADR-046). The turn is recorded as killed first (`note_kill_of_turn`),
+        so a command of it that is approved or spawned later is refused, not born.
+        Returns the entries killed."""
         if not origin.agent_id or not origin.turn_id:
             return []
+        self.note_kill_of_turn(origin.turn_id)
         if kill_tree is None:
             kill_tree = _kill_tree_of
 

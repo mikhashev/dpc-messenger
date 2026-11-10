@@ -30,6 +30,12 @@ from typing import List, NamedTuple, Optional, Tuple
 
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 from ..run_gate import turn_waits_for
+from ...process_registry import (
+    SPAWN_ORIGIN,
+    TURN_KILLED_NOT_STARTED,
+    ProcessRegistryClosed,
+    get_registry,
+)
 # Moved to `process.py` on 2026-08-26 so they cover every spawn this service
 # makes, not only this file's. Imported under their old names on purpose: the
 # tests monkeypatch `shell._MEMORY_CEILING_MB`, and a module global is what they
@@ -2302,6 +2308,31 @@ def unregister_approval_watcher(name: str) -> None:
     _approval_watchers.discard(name)
 
 
+def release_approvals_of_turn(turn_id: str) -> int:
+    """A person's Kill ended `turn_id`: answer each of its pending approvals as not
+    approved, so the waiting executor thread wakes at once (ADR-046, amendment
+    2026-11-10; the wait is ADR-030's Tier 1 `threading.Event`). Returns how many.
+
+    The decision is the existing `rejected`, with a result that says the command was
+    not started because the turn was killed. The woken thread withdraws the card
+    (`_request_approval`), and `turn_waits_for` ends the turn's `approval` wait as it
+    leaves the `with`. An approval that comes after this finds no pending request."""
+    if not turn_id:
+        return 0
+    released = 0
+    for entry in list(_pending_approvals.values()):
+        if entry.get("turn_id") != turn_id or entry.get("decision"):
+            continue
+        entry["decision"] = "rejected"
+        entry["result"] = f"Not run: {TURN_KILLED_NOT_STARTED}. `{entry.get('command', '')}`"
+        entry["turn_killed"] = True
+        event = entry.get("event")
+        if event:
+            event.set()
+        released += 1
+    return released
+
+
 def _cleanup_expired_approvals() -> None:
     """Remove pending approvals older than TTL."""
     import time
@@ -2354,6 +2385,10 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
             f"connected and this run did not come from Telegram. Not run: `{command}`"
         )
 
+    # The turn this call belongs to, from the origin the dispatcher set on this thread.
+    origin = SPAWN_ORIGIN.get()
+    turn_id = (origin.turn_id if origin is not None else "") or ""
+
     request_id = str(uuid.uuid4())[:8]
     agent_obj = getattr(ctx, "_agent", None)
     # Never the bare word "Agent": an unknown agent has to look unknown, and the
@@ -2377,11 +2412,18 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
         "agent_name": agent_name,
         "agent_profile": agent_profile,
         "agent_id": agent_id,
+        "turn_id": turn_id,
         "ctx": ctx,
         "created_at": time.time(),
         "event": event,
         "result": None,
     }
+    # After the entry is in the queue, so that a Kill is seen by one of the two: it
+    # records the turn, then releases the queue (`release_approvals_of_turn`), and
+    # this reads the record. A Kill that came first is not asked about: nobody waits.
+    if turn_id and get_registry().turn_was_killed(turn_id):
+        _pending_approvals.pop(request_id, None)
+        return f"Not run: {TURN_KILLED_NOT_STARTED}. `{command}`"
 
     main_loop = getattr(ctx, "_event_loop", None)
     _origin_id, _origin_title = conversation_origin(ctx)
@@ -2455,6 +2497,19 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
         )
 
     if entry.get("decision") == "rejected":
+        if entry.get("turn_killed") and dpc_service is not None:
+            # The Kill answered, not a person: withdraw the card from the surfaces
+            # still showing it, with a closure that is not a decision.
+            try:
+                _on_main_loop(dpc_service.announce_shell_approval_closed(
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    outcome="⛔ The turn was killed; this command was not started.",
+                    resolution="superseded",
+                    resolved_via="superseded",
+                ))
+            except Exception as e:
+                log.warning("Failed to announce shell_approval_closed: %s", e)
         return entry.get("result") or "Command manually rejected by User"
 
     log.info("Shell approval granted: %s — executing %r", request_id, command)
@@ -2640,6 +2695,11 @@ def _execute_shell_command(
 
         return "\n".join(parts) if parts else "(no output)"
 
+    except ProcessRegistryClosed as e:
+        # Refused before the child existed: the backend is stopping, or the turn was
+        # killed. Nothing ran, and the result says so in the words of the refusal.
+        log.info("run_shell not started: %s", e)
+        return f"Not run: {e}. `{command}`"
     except Exception as e:
         log.error("run_shell failed: %s", e)
         return f"Error: {e}"
