@@ -91,7 +91,11 @@ def test_a_provider_that_would_swallow_the_word_gets_no_tools(tmp_path):
     provider = _SwallowsKwargs()
     msg, _ = asyncio.run(_adapter(provider, tmp_path).chat(HISTORY, tools=TOOLS, tool_choice="none"))
     assert msg["content"] == "flat answer" and provider.tool_calls == []
-    assert "tool_call" not in provider.prompts[0]  # no tool descriptions injected
+    prompt = provider.prompts[0]
+    assert "# Available Tools" not in prompt  # no tool descriptions injected
+    # The call that ran is replayed before its result (it used to vanish, leaving the
+    # result orphaned); replaying history is not offering the tool again.
+    assert prompt.index('"name": "probe"') < prompt.index("[TOOL RESULT: t1]")
 
 
 def test_without_the_word_the_tools_path_is_unchanged(tmp_path):
