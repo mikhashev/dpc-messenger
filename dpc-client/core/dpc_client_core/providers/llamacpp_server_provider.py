@@ -33,7 +33,7 @@ from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
 import httpx
 from openai import AsyncOpenAI
 
-from .base import (AIProvider, REASONING_OFF, declared_reasoning_words, image_base64,
+from .base import (AIProvider, EngineCountError, REASONING_OFF, declared_reasoning_words, image_base64,
                    image_blocks_in_turns, positive_ceiling, tool_use_of, with_tool_call_blocks)
 from .deepseek_provider import DeepSeekProvider
 
@@ -844,6 +844,67 @@ class LlamaServerProvider(DeepSeekProvider):
         settings = sup.props.get("default_generation_settings")
         n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
         return n_ctx if isinstance(n_ctx, int) and n_ctx > 0 else None
+
+    # --- exact counts from the engine (Mike's call, 2026-11-09) ----------------------
+    # A local engine is asked, never estimated: the chars/4 fallback was 33% short on
+    # Cyrillic JSON and sent a 262 410-token prompt into a 261 120 window.
+
+    # Not `runs_on_a_local_engine` (llama_server_supervisor): that asks whether a
+    # supervisor stands behind the alias, so that a card hold means something. This
+    # asks whether the provider can answer a count, which a duck-typed alias in a
+    # caller (sleep) reads without importing the supervisor module.
+    def counts_on_its_engine(self) -> bool:
+        return True
+
+    async def _engine_post(self, path: str, body: Dict[str, Any], timeout: float = 60.0) -> Any:
+        """POST to the running child (started first if need be); any failure is an
+        `EngineCountError` that says what was asked. 60 s: a count is a tokenizer
+        pass, not a generation."""
+        try:
+            await self.supervisor.ensure_running()
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{self.supervisor.port}{path}", json=body)
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as e:
+            raise EngineCountError(
+                f"'{self.alias}': the engine could not be asked {path} for an exact "
+                f"token count ({type(e).__name__}: {e}); not guessing"
+            ) from e
+
+    async def engine_token_count(self, text: str, *, as_prompt: bool = False) -> int:
+        """llama-server `POST /tokenize` of `text`. With `as_prompt`, of the request
+        carrying `text` as one user turn: `POST /apply-template` renders the model's
+        own chat template (generation prompt included) and that string is tokenized."""
+        if as_prompt:
+            rendered = await self._engine_post(
+                "/apply-template", {"messages": [{"role": "user", "content": text}]})
+            text = rendered.get("prompt") if isinstance(rendered, dict) else None
+            if not isinstance(text, str):
+                raise EngineCountError(
+                    f"'{self.alias}': /apply-template answered without a prompt; not guessing")
+        data = await self._engine_post("/tokenize", {"content": text})
+        tokens = data.get("tokens") if isinstance(data, dict) else None
+        if not isinstance(tokens, list):
+            raise EngineCountError(
+                f"'{self.alias}': /tokenize answered without a token list; not guessing")
+        return len(tokens)
+
+    async def engine_context_window(self) -> int:
+        """The live child's own `n_ctx` (`_reported_window`), once it is up."""
+        try:
+            await self.supervisor.ensure_running()
+        except Exception as e:
+            raise EngineCountError(
+                f"'{self.alias}': the engine could not be started to read its window "
+                f"({type(e).__name__}: {e}); not guessing", kind="window",
+            ) from e
+        window = self._reported_window()
+        if window is None:
+            raise EngineCountError(
+                f"'{self.alias}': /props names no n_ctx; not guessing a window", kind="window")
+        return window
 
     def _start_window(self) -> Optional[int]:
         """`n_ctx` the start config would pass; split among the slots unless the pool is

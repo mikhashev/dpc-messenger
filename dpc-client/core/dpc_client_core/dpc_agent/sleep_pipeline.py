@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional
 
+from ..providers.base import EngineCountError
+
 log = logging.getLogger(__name__)
 
 SLEEP_STATE_FILE = "sleep_state.json"
@@ -260,7 +262,9 @@ def _select_findings_within_budget(
 
     Always includes at least one finding when input is non-empty, even if
     a single finding would exceed budget — degraded but non-empty synthesis
-    is better than empty findings_text.
+    is better than empty findings_text. This is the estimate path only: a local
+    engine takes `_select_findings_on_the_engine` and `_fit_prompt_on_the_engine`,
+    where a single finding that does not fit is an error, not a degraded answer.
 
     Returns (selected_findings, tokens_consumed_by_findings).
     """
@@ -281,6 +285,79 @@ def _select_findings_within_budget(
         tokens_used += finding_tokens
 
     return selected, tokens_used
+
+
+def _engine_prompt_limit(context_window: int) -> int:
+    """The one gate on a local engine: what the window leaves after the answer
+    reserve. No SYNTHESIS_BUDGET_FACTOR here (Mike's call, 2026-11-09): the prompt
+    is counted by the engine itself, so there is no estimate to keep a margin for.
+    The cloud estimate path keeps the factor in `_compute_synthesis_budget`."""
+    return context_window - _synthesis_output_reserve(context_window)
+
+
+def _engine_of(provider) -> Optional[Any]:
+    """The provider when a local engine behind it counts tokens and reports its window."""
+    asks = getattr(provider, "counts_on_its_engine", None)
+    return provider if callable(asks) and asks() is True else None
+
+
+async def _select_findings_on_the_engine(
+    findings_sorted_desc: List[Dict[str, Any]],
+    engine,
+    context_window: int,
+    template_overhead_tokens: int,
+) -> tuple[List[Dict[str, Any]], List[int]]:
+    """`_select_findings_within_budget` with every count asked of the engine, against
+    `_engine_prompt_limit` less the template's share. Returns the findings kept and
+    each one's count, so a later trim can re-sum."""
+    budget = _engine_prompt_limit(context_window) - template_overhead_tokens
+    selected: List[Dict[str, Any]] = []
+    counts: List[int] = []
+    for f in findings_sorted_desc:
+        finding_tokens = await engine.engine_token_count(
+            _render_finding_block(len(selected) + 1, f))
+        if selected and sum(counts) + finding_tokens > budget:
+            break
+        selected.append(f)
+        counts.append(finding_tokens)
+    return selected, counts
+
+
+async def _fit_prompt_on_the_engine(
+    selected: List[Dict[str, Any]],
+    build_prompt,
+    engine,
+    context_window: int,
+) -> tuple[str, List[Dict[str, Any]], int]:
+    """Count the assembled prompt on the engine; drop the oldest findings until it
+    leaves the answer reserve free. Returns (prompt, kept findings, prompt tokens).
+
+    The per-finding counts miss what only the whole prompt has (the `Session N`
+    numbers, the template), so this is the one gate: `_engine_prompt_limit`
+    against the whole prompt's count. A single finding that still does not fit
+    is an error, not a degraded answer: the engine would refuse it as well."""
+    limit = _engine_prompt_limit(context_window)
+    kept = list(selected)
+    while True:
+        prompt = build_prompt(kept)
+        tokens = await engine.engine_token_count(prompt, as_prompt=True)
+        if tokens <= limit:
+            return prompt, kept, tokens
+        if len(kept) <= 1:
+            raise EngineCountError(
+                f"sleep synthesis: the prompt is {tokens} tokens with {len(kept)} finding(s); "
+                f"the engine's window {context_window} less the {context_window - limit}-token "
+                f"answer reserve leaves {limit}", kind="fit",
+            )
+        # Oldest findings go; the average finding sizes the cut, so a large
+        # overshoot costs a few counts and not one per finding.
+        over = tokens - limit
+        drop = max(1, min(len(kept) - 1, -(-over // max(1, tokens // len(kept)))))
+        log.info(
+            "Sleep synthesis: prompt %d tokens > %d allowed on the engine; dropping %d oldest finding(s)",
+            tokens, limit, drop,
+        )
+        kept = kept[:len(kept) - drop]
 
 
 def _read_sleep_state(conversation_dir: Path) -> Dict[str, Any]:
@@ -1146,7 +1223,13 @@ async def run_sleep(
         target_provider = llm_manager.providers.get(target_alias) if target_alias else None
         target_model = target_provider.model if target_provider else None
 
-        context_window = llm_manager.alias_context_window(target_alias) if target_model else 0
+        # A local engine is asked for its window and for every count: no estimate
+        # stands in for either (EngineCountError ends the synthesis instead).
+        engine = _engine_of(target_provider)
+        if engine is not None:
+            context_window = await engine.engine_context_window()
+        else:
+            context_window = llm_manager.alias_context_window(target_alias) if target_model else 0
         if not context_window:
             context_window = 128000  # safe default for unknown providers
             log.warning(
@@ -1164,20 +1247,52 @@ async def run_sleep(
             findings="",
             entity_section=entity_section,
         )
-        if target_model:
-            template_overhead_tokens = llm_manager.count_tokens(template_skeleton, target_model)
+        if engine is not None:
+            template_overhead_tokens = await engine.engine_token_count(template_skeleton)
+            selected_findings, finding_counts = await _select_findings_on_the_engine(
+                findings_sorted_desc, engine, context_window, template_overhead_tokens,
+            )
+            tokens_used = sum(finding_counts)
         else:
-            template_overhead_tokens = len(template_skeleton) // 4
+            if target_model:
+                template_overhead_tokens = llm_manager.count_tokens(template_skeleton, target_model)
+            else:
+                template_overhead_tokens = len(template_skeleton) // 4
 
-        selected_findings, tokens_used = _select_findings_within_budget(
-            findings_sorted_desc,
-            llm_manager,
-            target_model,
-            context_window,
-            template_overhead_tokens,
-        )
+            selected_findings, tokens_used = _select_findings_within_budget(
+                findings_sorted_desc,
+                llm_manager,
+                target_model,
+                context_window,
+                template_overhead_tokens,
+            )
 
-        budget_available = _compute_synthesis_budget(context_window, template_overhead_tokens)
+        def _synthesis_prompt_of(findings: List[Dict[str, Any]]) -> str:
+            return SYNTHESIS_PROMPT.format(
+                n=len(findings),
+                period=period,
+                most_recent=most_recent_text,
+                findings="\n\n".join(
+                    _render_finding_block(i + 1, f) for i, f in enumerate(findings)
+                ),
+                entity_section=entity_section,
+            )
+
+        prompt_tokens_on_engine = None
+        if engine is not None:
+            synthesis_prompt, selected_findings, prompt_tokens_on_engine = (
+                await _fit_prompt_on_the_engine(
+                    selected_findings, _synthesis_prompt_of, engine, context_window,
+                )
+            )
+            # The trim drops the oldest, so what is kept is a prefix of the counted.
+            findings_tokens = sum(finding_counts[:len(selected_findings)])
+            tokens_used = prompt_tokens_on_engine
+
+        if engine is not None:
+            budget_available = _engine_prompt_limit(context_window)
+        else:
+            budget_available = _compute_synthesis_budget(context_window, template_overhead_tokens)
         synthesis_budget_info = {
             "total_findings": len(findings_sorted_desc),
             "included_findings": len(selected_findings),
@@ -1187,24 +1302,22 @@ async def run_sleep(
             "budget_tokens_used": tokens_used,
             "budget_tokens_available": budget_available,
         }
+        if prompt_tokens_on_engine is not None:
+            # On an engine the budget is the one limit, and "used" is the whole prompt
+            # counted against it; the findings' own share is kept beside.
+            synthesis_budget_info["prompt_tokens_on_engine"] = prompt_tokens_on_engine
+            synthesis_budget_info["findings_tokens_on_engine"] = findings_tokens
 
         log.info(
-            "Sleep synthesis budget: %d/%d findings, %d/%d tokens (context_window=%d, model=%s)",
+            "Sleep synthesis budget: %d/%d findings, %d/%d tokens (context_window=%d, model=%s%s)",
             len(selected_findings), len(findings_sorted_desc),
             tokens_used, budget_available, context_window, target_model or "unknown",
+            "" if prompt_tokens_on_engine is None
+            else f", counted on the engine, findings={findings_tokens}",
         )
 
-        findings_text = "\n\n".join(
-            _render_finding_block(i + 1, f) for i, f in enumerate(selected_findings)
-        )
-
-        synthesis_prompt = SYNTHESIS_PROMPT.format(
-            n=len(selected_findings),
-            period=period,
-            most_recent=most_recent_text,
-            findings=findings_text,
-            entity_section=entity_section,
-        )
+        if engine is None:
+            synthesis_prompt = _synthesis_prompt_of(selected_findings)
 
         response = await llm_manager.query(
             synthesis_prompt,
@@ -1367,7 +1480,9 @@ def _sleep_failure_reason(
 
     The cases that have happened get their own words: a peer model whose
     peer is not connected (Muse, 2026-11-06) and a synthesis answer that was
-    not JSON (Ark, same day). Anything else is the exception as logged.
+    not JSON (Ark, same day). A local engine that could not be asked for its window
+    or a count, or a prompt that does not fit, says so (Mike's call, 2026-11-09).
+    Anything else is the exception as logged.
     """
     if synthesis_unparsable:
         saved = (f"raw output saved to {synthesis_dump.name}" if synthesis_dump is not None
@@ -1378,6 +1493,18 @@ def _sleep_failure_reason(
     while link is not None and link not in chain:
         chain.append(link)
         link = link.__cause__ or link.__context__
+    engine_error = next((x for x in chain if isinstance(x, EngineCountError)), None)
+    if engine_error is not None:
+        from ..managers.llama_server_supervisor import engine_refusal_in
+        engine = alias or "the default model"
+        refusal = engine_refusal_in(engine_error)
+        if refusal is not None:  # no model was asked: the refusal's own words
+            return f"the engine behind {engine} would not take the request ({refusal}), so the synthesis was not started"
+        if engine_error.kind == "window":
+            return f"the engine behind {engine} did not report its window, so the synthesis was not started"
+        if engine_error.kind == "fit":
+            return f"the prompt does not fit {engine}'s window even with one finding, so the synthesis was not started"
+        return f"the engine behind {engine} could not count the prompt's tokens, so the synthesis was not started"
     peer_error = next((x for x in chain if getattr(x, "host_name", None)), None)
     if peer_error is not None:
         model = getattr(peer_error, "provider_alias", None) or alias or "?"

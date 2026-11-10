@@ -44,6 +44,19 @@ class ModelNotCachedError(Exception):
         )
         super().__init__(f"Model '{model_name}' not found in cache: {cache_path}")
 
+class EngineCountError(RuntimeError):
+    """A local engine could not be asked for an exact token count or window.
+
+    Raised instead of falling back to a character ratio: a caller that sizes a
+    prompt against the engine's window must not proceed on a guess. `kind` says
+    which question failed: `window` (no window known), `count` (a count could
+    not be had) or `fit` (the prompt does not fit with one finding)."""
+
+    def __init__(self, message: str, kind: str = "count"):
+        super().__init__(message)
+        self.kind = kind
+
+
 class ProviderRetryCancelled(Exception):
     """The interface abandoned a call that was waiting out a backoff.
 
@@ -1004,6 +1017,23 @@ class AIProvider:
         provider has no engine of its own to ask. `LLMManager.alias_context_window`
         reads it for an alias whose config names no `context_window`."""
         return None
+
+    def counts_on_its_engine(self) -> bool:
+        """True when `engine_token_count` and `engine_context_window` answer from a
+        local engine; every other provider counts with `TokenCountManager`."""
+        return False
+
+    async def engine_token_count(self, text: str, *, as_prompt: bool = False) -> int:
+        """Tokens of `text` as the engine behind this alias counts them; raises
+        `EngineCountError` when it cannot be asked. `as_prompt` asks for the whole
+        request carrying `text` as one user turn, chat template included, where
+        the engine can say so."""
+        raise NotImplementedError
+
+    async def engine_context_window(self) -> int:
+        """The window the engine itself reports for one request, in tokens; raises
+        `EngineCountError` when it cannot be asked."""
+        raise NotImplementedError
 
     def image_pixel_limit(self) -> Optional[int]:
         """The most pixels (width x height) one image may carry to this model, or None.

@@ -1095,7 +1095,21 @@ rewrites nothing above.
 
 Two named defaults stay and are not a window of this kind: the agent loop's 204800 for a run
 with no session behind it, and sleep's 128000 for the synthesis budget. Whether they should
-stand is the owner's question.
+stand is the owner's question. (On a local engine sleep no longer reaches that default: see
+the amendment of 2026-11-09 below.)
+
+## Amendment, 2026-11-09 — sleep synthesis reads the engine's window
+
+Mike's call, 2026-11-09. The 2026-11-03 amendment's point 1 puts the alias's own
+`context_window` first. For the sleep synthesis on a local engine (`llamacpp_server`,
+`strata`) the window is the engine's reported `n_ctx` (`/props`) instead, and every count
+against it is the engine's own (`/tokenize`, or Strata's `/v1/messages/count_tokens`).
+Synthesis is not a parked conversation: the alias's value is the size parking was measured
+at, and a prompt sized by it reached a 261,120 window as 262,410 tokens. One gate decides:
+the window less the answer reserve, with no margin factor; when the engine cannot be asked,
+or one finding does not fit, the sleep stops and says so. The alias's `context_window` still
+governs parking and live turns, and a provider with no engine keeps the estimate and its
+margin.
 
 ## Amendment, 2026-11-03 — a size short of RAM
 

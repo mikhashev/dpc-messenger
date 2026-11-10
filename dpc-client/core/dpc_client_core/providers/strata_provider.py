@@ -24,6 +24,7 @@ from ..managers.strata_supervisor import (
     StrataSupervisor, _flag_value, peer_being_served, reasoning_effort_error, strata_chat_template,
     strata_config_errors,
 )
+from .base import EngineCountError
 from .llamacpp_server_provider import _ACTIVE_SUPERVISORS, LlamaServerProvider, card_holder
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,9 @@ class StrataProvider(LlamaServerProvider):
         self._dropped_word_warned = False
         # (key, answer) of the last `_start_window`.
         self._start_window_cache: Optional[tuple] = None
+        # (props, model, tokens) of an empty user turn: the chat template's own share
+        # of a count. `props` is the child's /props dict, new on every (re)start.
+        self._empty_turn_tokens: Optional[tuple] = None
         super().__init__(alias, config)
         # The save refuses such a word (`strata_config_errors`); an alias saved
         # before that check still loads, and says so here.
@@ -237,6 +241,39 @@ class StrataProvider(LlamaServerProvider):
 
     def _model_name(self) -> str:
         return self.model or "strata"
+
+    async def _tokens_of_one_user_turn(self, text: str) -> int:
+        """Strata `POST /v1/messages/count_tokens`: the prompt the engine would read for
+        one user turn, chat template rendered and tokenized, the model not run. The
+        launcher has no raw `/tokenize` (verified against Strata v0.2.11 serve/server.py
+        and a live launcher: 404)."""
+        data = await self._engine_post("/v1/messages/count_tokens", {
+            "model": self._model_name(),
+            "messages": [{"role": "user", "content": text}],
+        })
+        count = data.get("input_tokens") if isinstance(data, dict) else None
+        if not isinstance(count, int) or count < 0:
+            raise EngineCountError(
+                f"'{self.alias}': count_tokens answered without input_tokens; not guessing")
+        return count
+
+    async def engine_token_count(self, text: str, *, as_prompt: bool = False) -> int:
+        """The prompt count as the engine gives it; without `as_prompt`, the text
+        alone: the template's own tokens (an empty turn, asked once per child start) are
+        taken off, so that counts of pieces add up to the count of their sum."""
+        whole = await self._tokens_of_one_user_turn(text)
+        if as_prompt:
+            return whole
+        props, model = self.supervisor.props, self._model_name()
+        cached = self._empty_turn_tokens
+        if cached is not None and props is not None and cached[0] is props and cached[1] == model:
+            empty = cached[2]
+        else:
+            empty = await self._tokens_of_one_user_turn("")
+            # Taken again after the call: a restart in between must not be cached under the old child.
+            props = self.supervisor.props
+            self._empty_turn_tokens = (props, model, empty) if props is not None else None
+        return max(0, whole - empty)
 
     @classmethod
     def _is_retryable(cls, error: Exception) -> bool:
