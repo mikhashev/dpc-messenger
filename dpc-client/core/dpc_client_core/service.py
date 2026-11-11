@@ -6385,30 +6385,40 @@ class CoreService:
                     # conversation_id format is "agent_001", which matches the agent_id
                     agent_manager = dpc_agent_provider._managers.get(conversation_id)
 
-                    if not agent_manager:
-                        # Manager not initialized yet — history may still exist on disk, delete it directly
+                    def _reset_from_disk() -> None:
+                        # No live monitor to ask: a throwaway one reads the file,
+                        # archives it as every reset does, and is dropped, so it
+                        # never competes with the agent manager's own monitor.
                         history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
-                        if history_path.exists():
-                            history_path.unlink()
-                            logger.info("Deleted history file for %s (agent manager not yet initialized)", conversation_id)
+                        if not history_path.exists():
+                            return
+                        scratch = ConversationMonitor(
+                            conversation_id=conversation_id,
+                            participants=[],
+                            llm_manager=self.llm_manager,
+                            settings=getattr(self, "settings", None),
+                        )
+                        scratch.load_history()
+                        firewall = getattr(self, "firewall", None)
+                        preserve, max_sessions = (
+                            firewall.get_history_settings(conversation_id) if firewall else (True, 0)
+                        )
+                        scratch.reset_conversation(preserve=preserve, max_sessions=max_sessions)
+
+                    if not agent_manager:
+                        # Manager not initialized yet (restart): history may be on disk
+                        _reset_from_disk()
                         await self.local_api.broadcast_event("conversation_reset", {"conversation_id": conversation_id})
                         return {"status": "success", "message": f"Agent conversation reset: {conversation_id}"}
 
-                    # Reset via agent manager (succeeds if monitor already exists in memory)
+                    # Reset via agent manager (hydrates its monitor from disk when needed)
                     success = agent_manager.reset_conversation(conversation_id)
 
                     if not success:
-                        # Monitor not in memory yet (user hasn't sent a message this session,
-                        # but history file exists on disk from a previous session).
-                        # Delete the history file directly so get_conversation_history returns 0.
-                        history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
-                        if history_path.exists():
-                            history_path.unlink()
-                            logger.info("Deleted orphaned history file for %s (monitor not yet initialized)", conversation_id)
-                            success = True
-                        else:
-                            logger.debug("No history file found for %s, nothing to reset", conversation_id)
-                            success = True  # Nothing to clear — treat as success
+                        # The manager found no monitor and no file; anything still
+                        # on disk is archived, never unlinked.
+                        _reset_from_disk()
+                        success = True
 
                     if success:
                         logger.info("Successfully reset agent conversation: %s", conversation_id)
