@@ -5821,7 +5821,7 @@ class CoreService:
         server = self.gateway
         enabled = self.settings.get_gateway_enabled()
         port = server.port if server is not None else self.settings.get_gateway_port()
-        serving_local, serving_vendor, serving_error = [], [], None
+        serving_local, serving_vendor, serving_error, serving_absent = [], [], None, []
         try:
             providers = self.llm_manager.providers or {}
             lists = self.firewall.classify_serving_lists({
@@ -5829,6 +5829,7 @@ class CoreService:
                 for alias, provider in providers.items()
             })
             serving_local, serving_vendor = list(lists.local), list(lists.vendor)
+            serving_absent = [alias for _, alias in lists.absent]
         except ValueError as e:
             serving_error = str(e)
         key_path = server.key_path if server is not None else DPC_HOME_DIR / GATEWAY_KEY_NAME
@@ -5850,6 +5851,7 @@ class CoreService:
             "serving_local": serving_local,
             "serving_vendor": serving_vendor,
             "serving_error": serving_error,
+            "serving_absent": serving_absent,
             "compute_enabled": bool(getattr(self.firewall, "compute_enabled", False)),
         }
 

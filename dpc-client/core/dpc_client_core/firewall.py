@@ -246,6 +246,10 @@ class ServingLists:
     local: Tuple[str, ...]
     vendor: Tuple[str, ...]
     quotas: Dict[str, float]  # alias -> amount per day, per caller, in the alias's billing currency
+    # Aliases the lists name that the loaded registry does not carry, as
+    # (list key, alias): left out of `local`/`vendor`, so `owner_of` answers
+    # None for them, the not-served answer of each door (ADR-041 D5, 2026-11-11).
+    absent: Tuple[Tuple[str, str], ...] = ()
 
     def owner_of(self, alias: str) -> Optional[str]:
         """`"local"`, `"vendor"`, or None for an alias in neither list."""
@@ -772,10 +776,15 @@ class ContextFirewall:
         that is somebody else's model — `remote_peer`, `dpc_agent` — in either
         list (ADR-041 D7 part 1: what is shared is not shared onward), a
         paying type under `serving_local`, a card type under `serving_vendor`,
-        a type the tables do not know, and an alias whose type this mapping
-        does not carry at all.
+        a type the tables do not know, and an alias whose type is None.
 
-        That last refusal is the one an earlier reading of this docstring got
+        Amended 2026-11-11 (Mike's call): an alias absent from a mapping that
+        carries other aliases is dropped with a WARNING and reported in
+        `ServingLists.absent`; the rest are served and a call naming it gets
+        each door's not-served answer. An EMPTY mapping still refuses, for the
+        reason below.
+
+        The refusal is the one an earlier reading of this docstring got
         wrong: an unloaded alias used to keep its place silently, and the
         place is what `owner_of` answers from. So an empty registry — the
         state at early start, before the providers are read — made every
@@ -786,19 +795,32 @@ class ContextFirewall:
         unknown class is a refusal of that alias and not a pass; both callers
         already turn the refusal into a shut door.
         """
+        absent: List[Tuple[str, str]] = []
         for key, aliases, allowed, other_key in (
             (SERVING_LOCAL_KEY, self.compute_serving_local, LOCAL_PROVIDER_TYPES, SERVING_VENDOR_KEY),
             (SERVING_VENDOR_KEY, self.compute_serving_vendor, VENDOR_PROVIDER_TYPES, SERVING_LOCAL_KEY),
         ):
             for alias in aliases:
+                if alias not in provider_types and provider_types:
+                    # A registry that carries other aliases and not this one:
+                    # the alias was removed, so it is dropped and named, and
+                    # the rest keep serving (ADR-041 D5, 2026-11-11).
+                    logger.warning(
+                        "compute.%s names '%s', whose provider is not in providers.json (it is "
+                        "absent from the loaded registry): it is dropped from the serving lists "
+                        "and a call naming it is not served; remove it from privacy_rules.json",
+                        key, alias,
+                    )
+                    absent.append((key, alias))
+                    continue
                 provider_type = provider_types.get(alias)
                 if provider_type is None:
                     raise ValueError(
                         f"compute.{key} names '{alias}', whose provider is not loaded, so what "
                         "bounds it — the card or a daily ceiling in money — cannot be "
                         "established; it is refused rather than served on a guess (ADR-041 D5). "
-                        "Either the alias is absent from providers.json, or the registry is not "
-                        "up yet at this moment"
+                        "The registry carries no provider at all at this moment (not up yet), "
+                        "or the alias has no type"
                     )
                 refusal = onward_sharing_refusal(key, alias, provider_type)
                 if refusal:
@@ -814,10 +836,12 @@ class ContextFirewall:
                     f"compute.{key} names '{alias}', whose provider type {provider_type!r} is classified as "
                     "neither local nor vendor; it is refused rather than guessed at"
                 )
+        gone = {alias for _, alias in absent}
         return ServingLists(
-            local=tuple(self.compute_serving_local),
-            vendor=tuple(self.compute_serving_vendor),
-            quotas=dict(self.compute_vendor_quotas),
+            local=tuple(a for a in self.compute_serving_local if a not in gone),
+            vendor=tuple(a for a in self.compute_serving_vendor if a not in gone),
+            quotas={a: q for a, q in self.compute_vendor_quotas.items() if a not in gone},
+            absent=tuple(absent),
         )
 
     def log_compute_sharing_state(self, known_aliases: Optional[Iterable[str]] = None):

@@ -1554,6 +1554,27 @@ account grouping, the window-start rule, the `insufficient_quota` wire word
 for every state that clears itself — only closes gaps a review found in its
 first landing.)*
 
+*(Amendment, 2026-11-11 — an alias whose provider is absent is dropped, not a
+refusal of every list. Mike's call, 2026-11-11, option B of
+A-STALE-ALIAS-IN-A-SERVING-LIST-NOW-CLOSES-THE-WHOLE-GATEWAY-AT-START-INSTEAD-OF-ANSWERING-503-ON-ITSELF.
+This replaces what D5 and the 2026-09-14 amendment said of such an alias: a
+provider removed from providers.json used to make `classify_serving_lists`
+raise, which shut every call on both lists, at the IDE door and over P2P, and
+the Inference Sharing tab said so. Now `classify_serving_lists` drops an alias
+the loaded registry does not carry, logs one WARNING naming it and its list, and
+reports it in `ServingLists.absent`; the other aliases keep their class and are
+served. A call naming the dropped alias gets each door's existing not-served
+answer: 404 `model_not_found` at the gateway (the text adds that the provider
+is absent), `model_not_found` over P2P. The tab shows a warning line naming each
+dropped alias (`serving_absent` in `get_gateway_state`) beside the verdict
+instead of the all-refused banner. What stays refused, as in 2026-09-14: a
+registry that carries no provider at all (the state at early start), so an
+empty or not-yet-loaded registry never turns every alias "absent" and serves
+nothing or, through a misfiled vendor alias, serves it as local; an alias
+present with no type; a wrong class; and somebody else's model (D7).
+Residual: a registry that is loaded but partial for a moment would drop an
+alias for that call and restore it on the next.)*
+
 ### D6 — `aiohttp.web`, declared explicitly
 
 **Re-decided.** The first writing offered two options — hand-written asyncio

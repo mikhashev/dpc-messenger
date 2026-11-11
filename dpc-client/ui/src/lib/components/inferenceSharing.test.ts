@@ -26,6 +26,7 @@ import {
   quotaWindowPercent,
   QUOTA_WARN_PERCENT,
   gatewayVerdict,
+  absentAliasesWarning,
   groupGatewayMenu,
   isFree,
   maskedHeader,
@@ -506,6 +507,15 @@ describe('the verdict at the top of the tab reads the two doors apart', () => {
     expect(verdict.text).toContain('every call on them is refused');
     expect(verdict.text).toContain("names 'ghost'");
     expect(verdict.text).not.toContain('listening');
+  });
+
+  it('names each alias dropped from the serving lists, and says nothing when none is', () => {
+    expect(absentAliasesWarning(door())).toBeNull();
+    expect(absentAliasesWarning(door({ serving_absent: [] }))).toBeNull();
+    const text = absentAliasesWarning(door({ serving_absent: ['ghost', 'gone'] })) ?? '';
+    expect(text).toContain("'ghost', 'gone'");
+    expect(text).toContain('The other aliases are served');
+    expect(gatewayVerdict(door({ serving_absent: ['ghost'] }), true).tone).toBe('shared');
   });
 
   it('separates configured from listening in both directions', () => {

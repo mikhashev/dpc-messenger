@@ -579,6 +579,8 @@ class P2PCoordinator:
         - `("local", None)` or `(None, None)` — not a vendor alias (a local
           one, or one on neither list, which the gate has already refused):
           admit, and the card's queue bounds it;
+        - `(None, (error text, model_not_found, None))` — an alias the lists name
+          whose provider is absent from the registry (dropped, 2026-11-11);
         - `(owner, (error text, refusal code, retry_after_sec))` — refuse:
           `owner` is `"vendor"` for `unrated` and `insufficient_quota`, and
           None only for `misconfigured`, where the serving lists could not be
@@ -597,6 +599,7 @@ class P2PCoordinator:
         from dpc_protocol.protocol import (
             REFUSAL_INSUFFICIENT_QUOTA,
             REFUSAL_MISCONFIGURED,
+            REFUSAL_MODEL_NOT_FOUND,
             REFUSAL_UNRATED,
         )
         from .dpc_agent.pricing import vendor_ceiling_currency
@@ -612,6 +615,14 @@ class P2PCoordinator:
                 None,
             )
         owner = lists.owner_of(serving_alias) if isinstance(lists, ServingLists) else None
+        if isinstance(lists, ServingLists) and any(a == serving_alias for _, a in lists.absent):
+            # Listed, but its provider left providers.json: dropped from the lists
+            # at classification, so it is not on the menu (ADR-041 D5, 2026-11-11).
+            return None, (
+                f"This node does not serve '{serving_alias}': its provider is no longer configured",
+                REFUSAL_MODEL_NOT_FOUND,
+                None,
+            )
         if owner != "vendor":
             return owner, None
         model = (self._provider_config(serving_alias) or {}).get("model")

@@ -482,6 +482,23 @@ async def test_an_alias_listed_but_not_loaded_keeps_the_door_shut_and_names_itse
 
 
 @pytest.mark.asyncio
+async def test_a_dropped_alias_answers_model_not_found_and_the_others_still_serve(tmp_path):
+    """Amended 2026-11-11: an alias whose provider left a loaded registry is
+    dropped from the lists; the door opens and answers 404 for it only."""
+    service = _service(tmp_path, {"enabled": True, "serving_local": [LOCAL, "gone"]})
+    async with _running(tmp_path, service) as (server, _ledger):
+        status, text = await _request(server, "POST", "/v1/chat/completions",
+                                      key=_key(tmp_path), body=_chat("gone"))
+        assert status == 404
+        error = json.loads(text)["error"]
+        assert error["code"] == "model_not_found" and "gone" in error["message"]
+        assert "absent from providers.json" in error["message"]
+        status, _ = await _request(server, "POST", "/v1/chat/completions",
+                                   key=_key(tmp_path), body=_chat(LOCAL))
+        assert status == 200
+
+
+@pytest.mark.asyncio
 async def test_a_request_that_would_wait_past_the_inference_timeout_is_503_the_card_is_busy(tmp_path):
     """A local alias is bounded by the card: the peer door's lock is the queue,
     and a wait longer than remote_inference_timeout is refused rather than held."""
@@ -564,9 +581,10 @@ async def test_a_serving_list_refused_after_the_port_opened_is_503_and_leaves_a_
         key = _key(tmp_path)
         assert (await _request(server, "GET", "/v1/models", key=key))[0] == 200
 
-        # The registry loses an alias the serving list still names, which is
-        # what `classify_serving_lists` refuses — after the port is open.
-        service.llm_manager.providers.pop(LOCAL)
+        # The registry empties (a reload that read no providers), which is what
+        # `classify_serving_lists` still refuses — after the port is open. One
+        # alias leaving a loaded registry is dropped instead (2026-11-11).
+        service.llm_manager.providers.clear()
         with caplog.at_level(logging.ERROR, logger="dpc_client_core.gateway"):
             status, text = await _request(server, "GET", "/v1/models", key=key)
 

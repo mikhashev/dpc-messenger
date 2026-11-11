@@ -908,7 +908,19 @@ export interface GatewayState {
   serving_vendor?: string[] | null;
   /** Why `classify_serving_lists` refused the lists, or null. */
   serving_error?: string | null;
+  /** Aliases the lists name whose provider is no longer in providers.json:
+   *  dropped from the lists, the others still served. */
+  serving_absent?: string[] | null;
   compute_enabled?: boolean;
+}
+
+/** One warning line naming each alias the serving lists name and the
+ *  registry no longer carries, or null. Beside the verdict, not instead of it. */
+export function absentAliasesWarning(state: GatewayState | null | undefined): string | null {
+  const absent = (state?.serving_absent ?? []).filter((a) => typeof a === 'string' && a.length > 0);
+  if (absent.length === 0) return null;
+  const names = absent.map((a) => `'${a}'`).join(', ');
+  return `Dropped from the serving lists: ${names} — no such provider in providers.json, so a call naming it is not served. The other aliases are served. Remove it from the lists or restore the provider.`;
 }
 
 export type VerdictTone = 'shared' | 'partial' | 'off' | 'error';

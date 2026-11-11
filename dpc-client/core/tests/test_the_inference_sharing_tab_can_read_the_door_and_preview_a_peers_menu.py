@@ -163,12 +163,28 @@ async def test_a_serving_list_that_cannot_be_classified_is_named_not_hidden(tmp_
     refusal travels as words rather than as an empty list."""
     holder = {}
     firewall = _rules(tmp_path, compute={"enabled": True, "serving_local": ["gone"]})
-    service = _service(tmp_path, firewall, gateway=_gateway(tmp_path, holder))
+    service = _service(tmp_path, firewall, providers={}, gateway=_gateway(tmp_path, holder))
 
     state = await service.get_gateway_state()
 
     assert state["serving_local"] == [] and state["serving_vendor"] == []
     assert "gone" in state["serving_error"]
+    assert state["serving_absent"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_alias_whose_provider_left_a_loaded_registry_is_named_as_absent_not_refused(tmp_path):
+    """Amended 2026-11-11 (Mike's call): the tab gets the dropped alias beside
+    the aliases still served, and no `serving_error`."""
+    holder = {}
+    firewall = _rules(tmp_path, compute={"enabled": True, "serving_local": [LOCAL, "gone"]})
+    service = _service(tmp_path, firewall, gateway=_gateway(tmp_path, holder))
+
+    state = await service.get_gateway_state()
+
+    assert state["serving_error"] is None
+    assert state["serving_local"] == [LOCAL]
+    assert state["serving_absent"] == ["gone"]
 
 
 @pytest.mark.asyncio

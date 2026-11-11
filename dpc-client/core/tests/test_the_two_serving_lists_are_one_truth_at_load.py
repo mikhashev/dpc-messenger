@@ -132,20 +132,37 @@ def test_the_lists_are_classified_by_provider_type(tmp_path):
     assert lists.owner_of("paid_default") is None
 
 
-def test_an_alias_whose_provider_is_not_loaded_is_refused_rather_than_kept(tmp_path):
-    """It used to keep its place, and the place is what `owner_of` answers
-    from - so a vendor alias misfiled under `serving_local` read as local and
-    was served with no ceiling (Ark's review, 2026-09-14). The class decides
-    whether money bounds the alias; an unestablished class is a shut door."""
+def test_an_alias_absent_from_a_loaded_registry_is_dropped_with_a_warning_and_the_rest_serve(tmp_path, caplog):
+    """Amended 2026-11-11 (Mike's call): one stale alias no longer shuts every
+    call. It is dropped and named; owner_of answers None for it, which each
+    door turns into its not-served answer."""
     fw = _firewall(tmp_path, {"serving_local": [LOCAL, "not_loaded"], "serving_vendor": [VENDOR],
                               "vendor_quotas": {VENDOR: 1.5}})
 
-    with pytest.raises(ValueError) as refused:
-        fw.classify_serving_lists({LOCAL: "ollama", VENDOR: "deepseek"})
+    with caplog.at_level(logging.WARNING, logger="dpc_client_core.firewall"):
+        lists = fw.classify_serving_lists({LOCAL: "ollama", VENDOR: "deepseek"})
 
-    reason = str(refused.value)
-    assert "not_loaded" in reason and "serving_local" in reason
-    assert "not loaded" in reason, "the refusal says why the class is unknown"
+    assert lists.local == (LOCAL,) and lists.vendor == (VENDOR,)
+    assert lists.quotas == {VENDOR: 1.5}
+    assert lists.absent == (("serving_local", "not_loaded"),)
+    assert lists.owner_of("not_loaded") is None
+    assert lists.owner_of(LOCAL) == "local" and lists.owner_of(VENDOR) == "vendor"
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("not_loaded" in m and "serving_local" in m and "dropped" in m for m in warned)
+
+
+def test_a_dropped_vendor_alias_loses_its_ceiling_too(tmp_path):
+    fw = _firewall(tmp_path, {"serving_local": [LOCAL], "serving_vendor": [VENDOR],
+                              "vendor_quotas": {VENDOR: 1.5}})
+    lists = fw.classify_serving_lists({LOCAL: "ollama"})
+    assert lists.vendor == () and lists.quotas == {} and lists.absent == (("serving_vendor", VENDOR),)
+
+
+def test_an_alias_present_with_no_type_is_still_refused(tmp_path):
+    fw = _firewall(tmp_path, {"serving_local": [LOCAL, "typeless"]})
+    with pytest.raises(ValueError) as refused:
+        fw.classify_serving_lists({LOCAL: "ollama", "typeless": None})
+    assert "typeless" in str(refused.value) and "not loaded" in str(refused.value)
 
 
 def test_an_empty_registry_refuses_the_lists_instead_of_calling_every_alias_local(tmp_path):

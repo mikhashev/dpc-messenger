@@ -30,6 +30,7 @@
     formatQuotaLine,
     formatQuotaLineTitle,
     gatewayVerdict,
+    absentAliasesWarning,
     groupGatewayMenu,
     guestWindowSummaryLine,
     isFree,
@@ -374,6 +375,7 @@
 
   // The firewall in memory is what serves a call; the saved file's flag is
   // what the tab can say before the door has answered.
+  $: absentWarning = absentAliasesWarning(gateway);
   $: doorVerdict = gatewayVerdict(gateway, gateway ? !!gateway.compute_enabled : !!displayCompute?.enabled);
 
   // The client-lines selector: which id the blocks below are rendered for,
@@ -500,6 +502,7 @@
   <!-- The two doors in one sentence: the P2P one these rules govern, and the
        IDE one on this machine, which config.ini governs and a restart reads. -->
   <div class="verdict verdict-{doorVerdict.tone}" role="status">{doorVerdict.text}</div>
+  {#if absentWarning}<div class="verdict verdict-error" role="status">{absentWarning}</div>{/if}
   {#if gatewayError}
     <div class="refusal" role="alert">The IDE door could not be read: {gatewayError}</div>
   {/if}

@@ -1032,10 +1032,12 @@ class Gateway:
         owner = lists.owner_of(alias)
         if owner is None:
             # Never the default provider: an alias outside the lists is not served (D5).
+            dropped = " (it is listed, but its provider is absent from providers.json)" if any(
+                a == alias for _, a in lists.absent) else ""
             raise GatewayError(
                 404,
                 f"model '{alias}' is not served: it is in neither compute.serving_local nor "
-                "compute.serving_vendor in privacy_rules.json",
+                f"compute.serving_vendor in privacy_rules.json{dropped}",
                 "model_not_found",
             )
         providers = getattr(self._core.llm_manager, "providers", None) or {}
