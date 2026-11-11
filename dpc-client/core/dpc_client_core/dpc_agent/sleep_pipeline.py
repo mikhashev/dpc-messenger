@@ -11,8 +11,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional
 
@@ -126,6 +128,60 @@ Rules:
 - If a relation involves a Decision (ADR, protocol rule), add "needs_review": true
 - If no meaningful relations found, return empty list
 """
+
+
+MONTH_SUMMARY_PROMPT = """\
+You have the per-session analysis results of {n} sessions from {month}{part_note}. \
+Condense them into one month summary that a later synthesis reads in place of \
+these sessions. Respond with ONLY a JSON object, no markdown fences.
+
+{{
+  "decisions": [{{"decision": "...", "date": "YYYY-MM-DD", "rationale": "..."}}],
+  "topics": ["topic 1", "topic 2"],
+  "unresolved": [{{"topic": "...", "date": "YYYY-MM-DD", "context": "..."}}],
+  "lessons": ["lesson learned"],
+  "notable_events": ["anything surprising or important"],
+  "productivity": "high|medium|low",
+  "summary": "what happened in this stretch, in order"
+}}
+
+Guidelines:
+- Work only from the sessions below; do not add what they do not say.
+- Keep the date of every decision and open item; without it the item cannot be placed later.
+- When a later session reverses or closes an earlier item, say so and keep the later state.
+- Stay under about {target_tokens} tokens: drop the trivial, keep decisions, reversals and open items.
+- Language: match the language of the sessions.
+
+--- PER-SESSION FINDINGS (oldest first) ---
+{findings}
+"""
+
+# Derived from SYNTHESIS_PROMPT so the two cannot drift; a test pins every replacement.
+SYNTHESIS_FROM_MONTH_SUMMARIES_PROMPT = (
+    SYNTHESIS_PROMPT
+    .replace(
+        "per-session analysis results from {n} recent sessions",
+        "month summaries covering {n} sessions, each condensed from per-session results",
+    )
+    .replace(
+        "--- PER-SESSION FINDINGS (newest first) ---",
+        "--- MONTH SUMMARIES (oldest first; a lone Session block is a session whose "
+        "month could not be summarised) ---",
+    )
+    .replace("Do NOT pick from --- PER-SESSION FINDINGS ---", "Do NOT pick from --- MONTH SUMMARIES ---")
+    .replace(
+        "- Be factual. If sessions were unproductive, say so.",
+        "- Be factual. If sessions were unproductive, say so.\n"
+        "- A month summary was condensed by an earlier pass; the dates inside it are session dates.",
+    )
+)
+
+# A map call reads at most this share of the prompt limit (the engine's window less the
+# answer reserve; on the estimate path, the synthesis budget). A larger month is split.
+MONTH_SUMMARY_CEILING_SHARE = 0.5
+MONTH_SUMMARY_TARGET_TOKENS = 2500  # what a summary is asked to stay under
+MONTH_SUMMARY_FILE_PREFIX = "month_summary_"
+UNDATED_MONTH = "undated"
 
 
 SYNTHESIS_BUDGET_FACTOR = 0.85
@@ -358,6 +414,292 @@ async def _fit_prompt_on_the_engine(
             tokens, limit, drop,
         )
         kept = kept[:len(kept) - drop]
+
+
+def _token_counter(engine, llm_manager, target_model: Optional[str]):
+    """One async `count(text, as_prompt=False)`: the engine's count, else the estimate."""
+    async def count(text: str, as_prompt: bool = False) -> int:
+        if engine is not None:
+            return await engine.engine_token_count(text, as_prompt=as_prompt)
+        if target_model:
+            return llm_manager.count_tokens(text, target_model)
+        return len(text) // 4
+    return count
+
+
+def _month_of(date: str) -> str:
+    """Calendar month `YYYY-MM` of a raw session date, or UNDATED_MONTH."""
+    month = (date or "")[:7]
+    return month if re.fullmatch(r"\d{4}-\d{2}", month) else UNDATED_MONTH
+
+
+def _months_with_an_errored_session(digests: List[Dict[str, Any]], findings: List[Dict[str, Any]]) -> set:
+    """Months holding a session whose analysis errored. Error findings carry no date,
+    so the month comes from the digest of the same archive."""
+    months_of_archive: Dict[str, List[str]] = {}
+    for d in digests:
+        months_of_archive.setdefault(d.get("archive_file", ""), []).append(_month_of(d.get("date", "")))
+    errored: set = set()
+    for f in findings:
+        if "error" in f:
+            errored.update(months_of_archive.get(f.get("archive_file", ""), []))
+    return errored
+
+
+def _month_summary_key(findings: List[Dict[str, Any]]) -> str:
+    """sha256 over the prompt template and exactly the findings a summary is built from."""
+    body = json.dumps(findings, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256((MONTH_SUMMARY_PROMPT + "\n" + body).encode("utf-8")).hexdigest()
+
+
+def _read_month_summary(path: Path, key: str) -> Optional[Dict[str, Any]]:
+    try:
+        entry = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(entry, dict) and entry.get("findings_hash") == key and isinstance(entry.get("summary"), dict):
+        return entry
+    return None
+
+
+def _write_month_summary(path: Path, entry: Dict[str, Any]) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+async def _split_month(findings_asc: List[Dict[str, Any]], count, ceiling: int) -> List[List[Dict[str, Any]]]:
+    """Consecutive parts of one month, each within `ceiling` tokens; a lone finding
+    above it is a part of its own."""
+    parts: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    used = 0
+    for f in findings_asc:
+        tokens = await count(_render_finding_block(len(current) + 1, f))
+        if current and used + tokens > ceiling:
+            parts.append(current)
+            current, used = [], 0
+        current.append(f)
+        used += tokens
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _month_summary_prompt(month: str, part: int, parts: int, findings: List[Dict[str, Any]]) -> str:
+    part_note = f" (part {part} of {parts})" if parts > 1 else ""
+    return MONTH_SUMMARY_PROMPT.format(
+        n=len(findings), month=month, part_note=part_note,
+        target_tokens=MONTH_SUMMARY_TARGET_TOKENS,
+        findings="\n\n".join(_render_finding_block(i + 1, f) for i, f in enumerate(findings)),
+    )
+
+
+def _render_month_summary_block(entry: Dict[str, Any]) -> str:
+    """The header is built from raw session dates and counts, never from the model."""
+    where = f"part {entry['part']} of {entry['parts']}, " if entry["parts"] > 1 else ""
+    head = (f"Month {entry['month']} ({where}{entry['sessions']} sessions, "
+            f"{entry['first_date'][:10]} to {entry['last_date'][:10]}):")
+    return f"{head}\n{json.dumps(entry['summary'], ensure_ascii=False, indent=2)}"
+
+
+async def _summarize_part(
+    llm_manager, provider_alias: Optional[str], prompt: str, context_window: int, dump_dir: Path,
+) -> Dict[str, Any]:
+    response = await llm_manager.query(
+        prompt, provider_alias=provider_alias, timeout=SYNTHESIS_TIMEOUT_SECONDS,
+        **_synthesis_request_limits(context_window),
+    )
+    if not response or not response.strip():
+        raise ValueError("LLM returned empty response (extended thinking may have consumed all output tokens)")
+    try:
+        parsed = _parse_llm_answer(response)
+    except json.JSONDecodeError as err:
+        _capture_unparsable(response, err, label="month-summary",
+                            usage=_last_usage_of(llm_manager, provider_alias), dump_dir=dump_dir)
+        raise
+    # Month and counts are set by code from raw sessions; the model's own are dropped.
+    return {k: v for k, v in parsed.data.items() if k not in ("month", "sessions", "period")}
+
+
+async def _synthesis_over_month_summaries(
+    findings_sorted_desc: List[Dict[str, Any]],
+    *,
+    errored_months: set,
+    results_dir: Path,
+    scope: str,
+    count,
+    engine,
+    llm_manager,
+    provider_alias: Optional[str],
+    context_window: int,
+    template_of,
+    progress_callback=None,
+) -> Dict[str, Any]:
+    """Map: one summary per month part from raw findings; reduce: the prompt over them.
+
+    `template_of(findings_text, n)` formats the synthesis prompt. A part whose call
+    fails falls back to as many of its raw findings as fit, newest first. Returns the
+    prompt, its token figures, what it includes by raw dates and an `info` record.
+    """
+    total = len(findings_sorted_desc)
+    findings_asc = sorted(findings_sorted_desc, key=lambda f: f.get("digest_date", ""))
+    overhead = await count(template_of("", total))
+    if engine is not None:
+        prompt_limit = _engine_prompt_limit(context_window)
+        budget = prompt_limit - overhead
+    else:
+        prompt_limit = _compute_synthesis_budget(context_window, 0)
+        budget = _compute_synthesis_budget(context_window, overhead)
+    map_overhead = await count(_month_summary_prompt("0000-00", 1, 1, []))
+    ceiling = max(1, int(MONTH_SUMMARY_CEILING_SHARE * (prompt_limit - map_overhead)))
+
+    plan = []  # (month, part, parts, findings)
+    for month, group in groupby(findings_asc, key=lambda f: _month_of(f.get("digest_date", ""))):
+        parts = await _split_month(list(group), count, ceiling)
+        plan.extend((month, p, len(parts), fs) for p, fs in enumerate(parts, 1))
+
+    months: Dict[str, Dict[str, Any]] = {}
+    failures: List[Dict[str, Any]] = []
+    entries: List[Dict[str, Any]] = []  # one per part, in plan order; "entry" None = failed
+    used_files = set()
+    for index, (month, part, parts, fs) in enumerate(plan):
+        if progress_callback:
+            await progress_callback(index, len(plan), "synthesizing", month)
+        record = months.setdefault(month, {
+            "month": month, "findings": 0, "parts": 0, "built": 0, "cached": 0, "failed": 0,
+            "cache": "not frozen: a session of this month errored" if month in errored_months else "frozen",
+        })
+        record["findings"] += len(fs)
+        record["parts"] += 1
+        key = _month_summary_key(fs)
+        path = results_dir / f"{MONTH_SUMMARY_FILE_PREFIX}{scope}_{month}_{key[:16]}.json"
+        entry = None if month in errored_months else _read_month_summary(path, key)
+        built_now = entry is None
+        if entry is not None:
+            record["cached"] += 1
+        else:
+            try:
+                summary = await _summarize_part(
+                    llm_manager, provider_alias, _month_summary_prompt(month, part, parts, fs),
+                    context_window, results_dir)
+                entry = {
+                    "month": month, "sessions": len(fs), "findings_hash": key, "summary": summary,
+                    "first_date": fs[0].get("digest_date", ""), "last_date": fs[-1].get("digest_date", ""),
+                    "built_at": datetime.now(timezone.utc).isoformat(),
+                }
+                record["built"] += 1
+            except Exception as e:
+                err_desc = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                log.warning("Sleep: month summary %s part %d/%d failed: %s", month, part, parts, err_desc)
+                record["failed"] += 1
+                failures.append({"month": month, "part": part, "error": err_desc})
+        if entry is not None:
+            if month not in errored_months:
+                used_files.add(path.name)
+                if built_now:
+                    try:
+                        _write_month_summary(path, entry)
+                    except OSError as e:
+                        log.warning("Sleep: month summary %s not cached: %s", path.name, e)
+            entry = {**entry, "part": part, "parts": parts}
+        entries.append({"month": month, "findings": fs, "entry": entry})
+
+    # Summaries no longer matching their findings go; only this scope's files are touched.
+    for stale in results_dir.glob(f"{MONTH_SUMMARY_FILE_PREFIX}{scope}_*.json"):
+        if stale.name not in used_files:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+    # Items in date order; a summary stands for its part, a raw finding for itself.
+    items: List[Dict[str, Any]] = []
+    for plan_index, e in enumerate(entries):
+        if e["entry"] is not None:
+            text = _render_month_summary_block(e["entry"])
+            items.append({"kind": "summary", "month": e["month"], "order": (plan_index, 0), "text": text,
+                          "count": len(e["findings"]), "first_date": e["findings"][0].get("digest_date", ""),
+                          "tokens": await count(text)})
+    summaries = list(items)
+    kept_summaries: List[Dict[str, Any]] = []
+    used = 0
+    for item in reversed(summaries):  # newest first; the oldest are what a short budget loses
+        if kept_summaries and used + item["tokens"] > budget:
+            break
+        kept_summaries.append(item)
+        used += item["tokens"]
+    left_out = len(summaries) - len(kept_summaries)
+
+    fallback: List[Dict[str, Any]] = []
+    room = True
+    for plan_index in range(len(entries) - 1, -1, -1):
+        e = entries[plan_index]
+        if e["entry"] is not None or not room:
+            continue
+        for j in range(len(e["findings"]) - 1, -1, -1):  # newest finding first
+            f = e["findings"][j]
+            tokens = await count(_render_finding_block(1, f))
+            if used + tokens > budget:
+                room = False
+                break
+            fallback.append({"kind": "finding", "month": e["month"], "order": (plan_index, j + 1),
+                             "finding": f, "count": 1, "first_date": f.get("digest_date", ""),
+                             "tokens": tokens})
+            used += tokens
+    for item in fallback:
+        months[item["month"]]["fallback_findings"] = months[item["month"]].get("fallback_findings", 0) + 1
+
+    items_desc = sorted(kept_summaries + fallback, key=lambda it: it["order"], reverse=True)
+
+    def build_prompt(kept_desc: List[Dict[str, Any]]) -> str:
+        blocks, seq = [], 0
+        for it in sorted(kept_desc, key=lambda x: x["order"]):
+            if it["kind"] == "finding":
+                seq += 1
+                blocks.append(_render_finding_block(seq, it["finding"]))
+            else:
+                blocks.append(it["text"])
+        return template_of("\n\n".join(blocks), total)
+
+    prompt_tokens = None
+    if engine is not None:
+        prompt, items_kept, prompt_tokens = await _fit_prompt_on_the_engine(
+            items_desc, build_prompt, engine, context_window)
+        tokens_used = prompt_tokens
+    else:
+        items_kept = items_desc
+        prompt = build_prompt(items_kept)
+        tokens_used = sum(it["tokens"] for it in items_kept)
+
+    in_prompt: Dict[str, int] = {}
+    for it in items_kept:
+        in_prompt[it["month"]] = in_prompt.get(it["month"], 0) + it["count"]
+    for month, record in months.items():
+        record["findings_in_prompt"] = in_prompt.get(month, 0)
+
+    ordered_kept = sorted(items_kept, key=lambda it: it["order"])
+    info = {
+        "mode": "month_summaries",
+        "ceiling_tokens": ceiling,
+        "parts": len(plan),
+        "built": sum(m["built"] for m in months.values()),
+        "cached": sum(m["cached"] for m in months.values()),
+        "failed": len(failures),
+        "summaries_left_out": left_out + (len(items_desc) - len(items_kept)),
+        "months": list(months.values()),
+        "failures": failures,
+    }
+    return {
+        "prompt": prompt,
+        "tokens_used": tokens_used,
+        "prompt_tokens_on_engine": prompt_tokens,
+        "findings_tokens": sum(it["tokens"] for it in items_kept),
+        "included_findings": sum(it["count"] for it in items_kept),
+        "oldest_included_date": ordered_kept[0]["first_date"][:10] if ordered_kept else "",
+        "budget_available": prompt_limit if engine is not None else budget,
+        "info": info,
+    }
 
 
 def _read_sleep_state(conversation_dir: Path) -> Dict[str, Any]:
@@ -1279,29 +1621,63 @@ async def run_sleep(
             )
 
         prompt_tokens_on_engine = None
-        if engine is not None:
-            synthesis_prompt, selected_findings, prompt_tokens_on_engine = (
+        month_summaries = None
+        over_budget = len(selected_findings) < len(findings_sorted_desc)
+        if engine is not None and not over_budget:
+            synthesis_prompt, fitted, prompt_tokens_on_engine = (
                 await _fit_prompt_on_the_engine(
                     selected_findings, _synthesis_prompt_of, engine, context_window,
                 )
             )
-            # The trim drops the oldest, so what is kept is a prefix of the counted.
-            findings_tokens = sum(finding_counts[:len(selected_findings)])
-            tokens_used = prompt_tokens_on_engine
+            over_budget = len(fitted) < len(selected_findings)
+            selected_findings = fitted
 
-        if engine is not None:
-            budget_available = _engine_prompt_limit(context_window)
+        if over_budget:
+            # The raw findings do not fit one prompt: month summaries stand in for them.
+            def _from_month_summaries(findings_text: str, n: int) -> str:
+                return SYNTHESIS_FROM_MONTH_SUMMARIES_PROMPT.format(
+                    n=n, period=period, most_recent=most_recent_text,
+                    findings=findings_text, entity_section=entity_section,
+                )
+
+            month_summaries = await _synthesis_over_month_summaries(
+                findings_sorted_desc,
+                errored_months=_months_with_an_errored_session(digests, per_session_findings),
+                results_dir=results_dir,
+                scope=re.sub(r"[^A-Za-z0-9_.-]", "_", f"group-{group_id}") if group_id else "all",
+                count=_token_counter(engine, llm_manager, target_model),
+                engine=engine, llm_manager=llm_manager, provider_alias=provider_alias,
+                context_window=context_window, template_of=_from_month_summaries,
+                progress_callback=progress_callback,
+            )
+            synthesis_prompt = month_summaries["prompt"]
+            tokens_used = month_summaries["tokens_used"]
+            prompt_tokens_on_engine = month_summaries["prompt_tokens_on_engine"]
+            findings_tokens = month_summaries["findings_tokens"]
+            budget_available = month_summaries["budget_available"]
+            included_findings = month_summaries["included_findings"]
+            oldest_included_date = month_summaries["oldest_included_date"]
         else:
-            budget_available = _compute_synthesis_budget(context_window, template_overhead_tokens)
+            if engine is not None:
+                # The trim drops the oldest, so what is kept is a prefix of the counted.
+                findings_tokens = sum(finding_counts[:len(selected_findings)])
+                tokens_used = prompt_tokens_on_engine
+                budget_available = _engine_prompt_limit(context_window)
+            else:
+                budget_available = _compute_synthesis_budget(context_window, template_overhead_tokens)
+            included_findings = len(selected_findings)
+            oldest_included_date = (
+                selected_findings[-1].get("digest_date", "")[:10] if selected_findings else ""
+            )
         synthesis_budget_info = {
             "total_findings": len(findings_sorted_desc),
-            "included_findings": len(selected_findings),
-            "oldest_included_date": (
-                selected_findings[-1].get("digest_date", "")[:10] if selected_findings else ""
-            ),
+            "included_findings": included_findings,
+            "oldest_included_date": oldest_included_date,
             "budget_tokens_used": tokens_used,
             "budget_tokens_available": budget_available,
         }
+        if month_summaries is not None:
+            synthesis_budget_info["month_summaries"] = month_summaries["info"]
         if prompt_tokens_on_engine is not None:
             # On an engine the budget is the one limit, and "used" is the whole prompt
             # counted against it; the findings' own share is kept beside.
@@ -1309,14 +1685,17 @@ async def run_sleep(
             synthesis_budget_info["findings_tokens_on_engine"] = findings_tokens
 
         log.info(
-            "Sleep synthesis budget: %d/%d findings, %d/%d tokens (context_window=%d, model=%s%s)",
-            len(selected_findings), len(findings_sorted_desc),
+            "Sleep synthesis budget: %d/%d findings, %d/%d tokens (context_window=%d, model=%s%s%s)",
+            included_findings, len(findings_sorted_desc),
             tokens_used, budget_available, context_window, target_model or "unknown",
             "" if prompt_tokens_on_engine is None
             else f", counted on the engine, findings={findings_tokens}",
+            "" if month_summaries is None else (
+                f", month summaries: {month_summaries['info']['built']} built, "
+                f"{month_summaries['info']['cached']} cached, {month_summaries['info']['failed']} failed"),
         )
 
-        if engine is None:
+        if engine is None and month_summaries is None:
             synthesis_prompt = _synthesis_prompt_of(selected_findings)
 
         response = await llm_manager.query(
@@ -1402,6 +1781,13 @@ async def run_sleep(
                 log.warning("Sleep pipeline: LLM relation extraction failed — the "
                             "irreplaceable edge class gained nothing this cycle: %s", e,
                             exc_info=True)
+
+        if month_summaries is not None:
+            # Period, count and last date come from raw sessions, not from summaries or the model.
+            morning_brief["period"] = period
+            morning_brief["sessions_analyzed"] = len(findings_sorted_desc)
+            if most_recent_finding and isinstance(morning_brief.get("last_session"), dict):
+                morning_brief["last_session"]["date"] = most_recent_finding.get("digest_date", "")[:10]
 
         morning_brief["generated_at"] = datetime.now(timezone.utc).isoformat()
         morning_brief["consumed"] = False

@@ -54,12 +54,13 @@ def _isolated(tmp_path, monkeypatch):
     _ACTIVE_SUPERVISORS.clear()
 
 
-def _conversation(tmp_path: Path, sessions: int = 1) -> Path:
+def _conversation(tmp_path: Path, sessions: int = 1, monthly: bool = False) -> Path:
     conv = tmp_path / "conversations" / AGENT
     (conv / "archive").mkdir(parents=True)
     rows = []
     for n in range(1, sessions + 1):
-        rows.append({"archive_file": f"a{n}.json", "date": f"2026-10-{n:02d}T10:00:00", "message_count": 2})
+        day = f"2026-{7 + n:02d}-01" if monthly else f"2026-10-{n:02d}"
+        rows.append({"archive_file": f"a{n}.json", "date": f"{day}T10:00:00", "message_count": 2})
         (conv / "archive" / f"a{n}.json").write_text(json.dumps({"messages": [
             {"role": "user", "content": f"plan the trip {n}"},
             {"role": "assistant", "content": "done"},
@@ -354,15 +355,17 @@ async def test_sleep_on_a_local_engine_sizes_the_prompt_by_the_engine_and_not_by
 
 @pytest.mark.asyncio
 async def test_the_brief_records_the_whole_prompt_after_the_trim_against_the_one_limit(tmp_path):
-    """Three findings are 36 050 engine tokens on a 40 000 window (limit 36 000): the
-    oldest goes, and what the brief says is the post-trim prompt, not the pre-trim sum."""
+    """Three sessions in three months are 36 050 engine tokens on a 40 000 window (limit
+    36 000), raw and as month summaries alike: the oldest month goes, and what the brief
+    says is the post-trim prompt, not the pre-trim sum."""
     def whole(text):
-        return 12_000 * len(re.findall(r"^Session \d+ \(", text, re.M)) + 50
+        return 12_000 * len(re.findall(r"^(?:Session \d+|Month \d{4}-\d{2}) \(", text, re.M)) + 50
 
     engine = _Engine(window=40_000, whole=whole)
     manager = _Manager(engine)
 
-    result = await run_sleep(_conversation(tmp_path, sessions=3), manager, provider_alias="engine")
+    result = await run_sleep(
+        _conversation(tmp_path, sessions=3, monthly=True), manager, provider_alias="engine")
 
     assert result["status"] == "completed", result
     info = result["morning_brief"]["synthesis_budget"]
@@ -371,6 +374,7 @@ async def test_the_brief_records_the_whole_prompt_after_the_trim_against_the_one
     assert info["prompt_tokens_on_engine"] == 24_050
     assert info["budget_tokens_used"] == 24_050
     assert 0 < info["findings_tokens_on_engine"] < info["budget_tokens_used"]
+    assert info["month_summaries"]["summaries_left_out"] == 1
 
 
 @pytest.mark.asyncio

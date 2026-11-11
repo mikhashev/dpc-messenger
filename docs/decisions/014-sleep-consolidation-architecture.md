@@ -152,3 +152,66 @@ changes once belongs in front of the history.
 
 Mike's call, 2026-11-10; consume point corrected 2026-11-11 after review; point 3 changed:
 Mike's call, 2026-11-11 (option A).
+
+## Amendment, 2026-11-11 — findings that do not fit one synthesis prompt are summarised by month
+
+The original text stands, except that the **Synthesis pass (1 call)** reads every per-session
+finding only when they fit. Per the reviewers' measurements on 2026-11-11 (not re-measured here),
+a 1:1 agent had 469 findings of about 896 tokens each (about 420K) against a local-engine budget of
+about 244 736 tokens, so about 42% of its sessions would have left the brief with the old trim;
+a group brief had 165 findings of about 236K, 16 of them dropped. Findings per month are uneven
+(one agent: 72 in April, 80 in May, 4 in June, 6 in July), so a fixed batch size would not do.
+The oldest-first trim of `_fit_prompt_on_the_engine` stays only as the last resort inside the
+reduce (point 5).
+
+1. **When they fit, nothing changes.** If all findings are selected within the budget and, on a
+   local engine, the whole prompt counted by the engine leaves the answer reserve free, the
+   synthesis is one call over the raw findings, as before. The map-reduce starts only when they
+   do not (`run_sleep`, `over_budget`).
+2. **Map: one month summary per calendar month, from raw findings only.** Findings are grouped by
+   the month of the raw session date (`digest_date`); a finding with no date goes to a group
+   `undated`, which sorts first. Each group is condensed by one model call from that month's raw
+   findings, never from other summaries, so nothing is compressed twice. A month whose findings
+   exceed the **ceiling** is split into consecutive parts, each summarised by its own call. The
+   ceiling is `MONTH_SUMMARY_CEILING_SHARE` (0.5) of the prompt limit less the map template: the
+   limit is the one the synthesis already has (`_engine_prompt_limit`: window less the answer
+   reserve, on an engine; `_compute_synthesis_budget` with no template, on the estimate path).
+   Half, so one call's prefill stays well inside `SYNTHESIS_TIMEOUT_SECONDS` and a part never
+   fills the window. The map calls carry the synthesis's own answer room and effort
+   (`_synthesis_request_limits`). Tokens are counted by the engine where there is one.
+3. **Cache.** A month summary is written beside the per-session findings:
+   `sleep_results/month_summary_<scope>_<YYYY-MM>_<hash16>.json`, `scope` being `all` or
+   `group-<group_id>` so the agent's own sleep and a group sleep, which see different sets of
+   sessions in the same directory, never prune each other's files. The key is a sha256 over the
+   map prompt template and exactly the successful findings of the part, so a finding added,
+   re-analysed or removed, or a changed template, makes a new key and the old file is deleted at
+   the end of the run (files of the same scope only). **A month with a session whose analysis
+   errored is not frozen:** it is summarised each night from its successful findings and nothing
+   is written, so tomorrow's retry of the errored session is not locked out by an old summary.
+   A failed call writes nothing.
+4. **Reduce: the synthesis reads the month summaries in date order.** The prompt is
+   `SYNTHESIS_PROMPT` with its input renamed (`SYNTHESIS_FROM_MONTH_SUMMARIES_PROMPT`, derived by
+   replacement, a test pins every replacement). The newest finding is still put in verbatim in
+   the MOST RECENT SESSION block.
+5. **Dates and counts are set by code.** `period`, `sessions_analyzed`, `last_session.date`, the
+   oldest included date and every count come from raw session dates and raw findings. A summary's
+   header (`Month 2026-09 (2 sessions, 2026-09-02 to 2026-09-20)`) is written by code; the
+   model's own `month`, `sessions` and `period` keys in a summary are dropped, and the brief's
+   `period`, `sessions_analyzed` and `last_session.date` overwrite whatever the synthesis wrote.
+   If the summaries together still exceed the prompt limit, the oldest summaries leave first
+   (`summaries_left_out`).
+6. **A failed month-summary call does not drop the month.** The part falls back to as many of its
+   raw findings as fit in what the summaries leave, newest first. Nothing is cached for it. The
+   brief says so: `synthesis_budget` keeps `total_findings`, `included_findings`,
+   `oldest_included_date`, `budget_tokens_used` and `budget_tokens_available` (now counting the
+   findings behind the summaries as included) and gains `month_summaries`: `ceiling_tokens`,
+   `parts`, `built`, `cached`, `failed`, `summaries_left_out`, one record per month (`findings`,
+   `parts`, `built`, `cached`, `failed`, `cache` frozen or not, `fallback_findings`,
+   `findings_in_prompt`) and `failures` (month, part, error).
+7. **Cost.** The first night over budget makes one call per month part; later nights make one per
+   changed month, plus one per month with an errored session. Each call has the synthesis timeout,
+   and the pipeline's `SLEEP_TIMEOUT_MINUTES` window is one lock for all of them, as it already is
+   for the per-session calls: a first night with many months can approach it.
+
+Previous briefs are still not input to the next one. Mike's call, 2026-11-11, on the reviewers'
+consensus (the Zcode and Ark conditions are points 3 and 5, and the split in point 2).
