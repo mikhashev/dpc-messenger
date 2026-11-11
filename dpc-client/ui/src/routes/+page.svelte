@@ -1595,7 +1595,10 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="confirm-overlay" role="dialog" aria-modal="true" aria-label="New session?">
     <div class="confirm-dialog">
-      <p>Start new session? Current history will be archived.</p>
+      <!-- local_ai keeps no history on disk, so it has nothing to archive. -->
+      <p>{pendingNewSessionChatId === 'local_ai'
+        ? 'Start new session? Current history will be cleared.'
+        : 'Start new session? Current history will be archived.'}</p>
       <div class="confirm-actions">
         <button class="btn-confirm-yes" onclick={confirmNewSession}>
           Yes, new session
