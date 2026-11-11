@@ -5732,7 +5732,9 @@ class CoreService:
             logger.info("Shell command approved via %s: %s — %r", resolved_via, request_id, entry["command"])
             entry["note"] = f"Approved by {owner} {place}."
         else:
-            entry["result"] = f"Command rejected by {owner} {place}."
+            cmd = entry.get("command")
+            entry["result"] = f"Command rejected by {owner} {place}. " + (
+                f"Not run: `{cmd}`" if cmd else "Not run.")
         event = entry.get("event")
         if event:
             event.set()

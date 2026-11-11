@@ -86,7 +86,7 @@ def test_a_refusal_from_the_service_reaches_the_agent_with_the_owner_name(tmp_pa
         asyncio.run_coroutine_threadsafe(
             service.shell_reject_command(request_id), loop).result(5)
         t.join(5)
-        assert out["r"] == "Command rejected by Mike on the desktop."
+        assert out["r"] == "Command rejected by Mike on the desktop. Not run: `rm -rf x`"
     finally:
         loop.call_soon_threadsafe(loop.stop)
         runner.join(timeout=5)
@@ -98,4 +98,4 @@ def test_a_refusal_with_no_display_name_says_user(tmp_path):
     shell._pending_approvals["r1"] = entry
     service = _core_service(types.SimpleNamespace(get_display_name=lambda: ""))
     asyncio.run(service.shell_reject_command("r1"))
-    assert entry["result"] == "Command rejected by User on the desktop."
+    assert entry["result"] == "Command rejected by User on the desktop. Not run."

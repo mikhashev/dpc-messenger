@@ -1412,14 +1412,18 @@ def timeout_result_text(fn_name: str, timeout_sec: int) -> str:
     )
 
 
-# What a refusal of `run_shell`'s approval gate starts with when it is not the warning mark:
-# the texts are read by tests and by the person's eyes, so they stay and the loop learns them.
+# What a refusal by `run_shell`'s gate (an approval answer, a guardrail rule or a cwd check)
+# starts with; the command did not run. The texts are read by tests and by the person's
+# eyes, so they stay and the loop learns them.
 # With the mark, a refusal counts as an error (ADR-046, amendment 2026-11-11).
-UNMARKED_APPROVAL_REFUSALS = (
+SHELL_GATE_REFUSALS = (
     "🚫 Approval required and nobody could be asked",
     "⏳ Command approval timed out",
     "Command rejected by",
     "Command manually rejected by",
+    "⛔ Command blocked by safety guardrails",
+    "⛔ cwd '",
+    "Error: cwd '",
 )
 
 
@@ -1428,7 +1432,7 @@ def is_a_refusal_result(fn_name: str, result: Any) -> bool:
     the gate's refusals."""
     text = str(result)
     return text.startswith("⚠️") or (
-        fn_name == "run_shell" and text.startswith(UNMARKED_APPROVAL_REFUSALS))
+        fn_name == "run_shell" and text.startswith(SHELL_GATE_REFUSALS))
 
 
 def _classify_tool_error(result: str) -> str:

@@ -174,7 +174,7 @@ async def test_a_desktop_rejection_says_desktop_to_the_ui_and_to_the_telegram_me
     assert payload["outcome"] == "❌ Rejected on the desktop."
     assert bridge._bot.edited == ["❌ Rejected on the desktop."]
     assert entry["resolved_via"] == "desktop"
-    assert entry["result"] == "Command rejected by Mike on the desktop."
+    assert entry["result"] == "Command rejected by Mike on the desktop. Not run: `echo hi`"
 
 
 # --- Telegram decides ---------------------------------------------------------
@@ -207,7 +207,7 @@ async def test_a_telegram_rejection_says_telegram_to_the_ui():
     assert (payload["resolution"], payload["resolved_via"]) == ("rejected", "telegram")
     assert payload["outcome"] == "❌ Rejected from Telegram."
     assert query.texts == ["❌ Rejected."]
-    assert entry["result"] == "Command rejected by Mike from Telegram."
+    assert entry["result"] == "Command rejected by Mike from Telegram. Not run: `echo hi`"
 
 
 # --- a payload cannot name the surface ---------------------------------------
@@ -299,11 +299,11 @@ def test_the_agent_is_told_who_approved_and_from_where(tmp_path, monkeypatch):
 def test_the_agent_is_told_who_rejected_and_from_where(tmp_path, monkeypatch):
     service, bridge = _world()
     result = _run_tool(tmp_path, service, lambda rid: service.shell_reject_command(rid), monkeypatch)
-    assert result == "Command rejected by Mike on the desktop."
+    assert result == "Command rejected by Mike on the desktop. Not run: `echo hi`"
 
     service, bridge = _world()
     result = _run_tool(tmp_path, service, lambda rid: _press(bridge, "reject", rid), monkeypatch)
-    assert result == "Command rejected by Mike from Telegram."
+    assert result == "Command rejected by Mike from Telegram. Not run: `echo hi`"
 
 
 def test_a_timeout_says_timeout_in_the_payload(tmp_path, monkeypatch):

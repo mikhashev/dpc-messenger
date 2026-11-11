@@ -2553,7 +2553,7 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
                 ))
             except Exception as e:
                 log.warning("Failed to announce shell_approval_closed: %s", e)
-        return entry.get("result") or "Command manually rejected by User"
+        return entry.get("result") or f"Command manually rejected by User. Not run: `{command}`"
 
     log.info("Shell approval granted: %s — executing %r", request_id, command)
     output = _execute_shell_command(
@@ -2758,7 +2758,11 @@ def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "")
         tier, reason = violation
         if tier == "tier2":
             log.warning("run_shell BLOCKED (tier2): %r — %s", command, reason)
-            return f"⛔ Command blocked by safety guardrails: {reason}"
+            return (
+                f"⛔ Command blocked by safety guardrails: {reason}. "
+                f"This is a fixed rule, not an approval, so asking again will not change it. "
+                f"Not run: `{command}`"
+            )
         elif tier == "tier1":
             log.warning("run_shell TIER1 (approval needed): %r — %s", command, reason)
             return _request_approval(ctx, command, reason, cwd, timeout)
@@ -2767,12 +2771,15 @@ def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "")
     if cwd:
         expanded = os.path.expanduser(cwd)
         if not os.path.isdir(expanded):
-            return f"Error: cwd '{cwd}' is not a valid directory."
+            return f"Error: cwd '{cwd}' is not a valid directory. Not run: `{command}`"
         try:
             ctx.validate_extended_path(expanded)
         except PermissionError:
             log.warning("run_shell cwd BLOCKED: %r outside sandbox", cwd)
-            return f"⛔ cwd '{cwd}' is outside allowed sandbox paths."
+            return (
+                f"⛔ cwd '{cwd}' is outside allowed sandbox paths: a command may run only in the "
+                f"agent sandbox or in a path this agent's profile grants. Not run: `{command}`"
+            )
         working_dir = expanded
     else:
         working_dir = str(ctx.agent_root)
