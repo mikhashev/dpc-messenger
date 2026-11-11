@@ -1595,9 +1595,9 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="confirm-overlay" role="dialog" aria-modal="true" aria-label="New session?">
     <div class="confirm-dialog">
-      <!-- local_ai keeps no history on disk, so it has nothing to archive. -->
-      <p>{pendingNewSessionChatId === 'local_ai'
-        ? 'Start new session? Current history will be cleared.'
+      <!-- local_ai and 1:1 peer chats keep no history on disk: nothing to archive. -->
+      <p>{pendingNewSessionChatId === 'local_ai' || pendingNewSessionChatId?.startsWith('dpc-node-')
+        ? 'Start new session? Current history will be cleared and not saved.'
         : 'Start new session? Current history will be archived.'}</p>
       <div class="confirm-actions">
         <button class="btn-confirm-yes" onclick={confirmNewSession}>
