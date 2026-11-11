@@ -78,8 +78,11 @@ session: "DPC Project group chat, 2026-10-25 — card THE-BACKEND-KEEPS-NO-LIST-
 > like the shell's; an approval already carrying a person's answer is not overwritten; a
 > child that was born and stopped at once in the window between the spawn check and
 > `register` is reported as that ("the turn was killed; the command had started and was
-> stopped at once"), not as "was not started"; and every refusal result starts with the
-> warning mark, so the ledger and the interface count it an error.
+> stopped at once"), not as "was not started"; and every refusal result counts as an error
+> in the loop (`is_error`): the Kill's refusals and `schedule_task`'s start with the warning
+> mark, and the three of `run_shell`'s approval gate that do not (nobody could be asked, the
+> approval timed out, a person said no) are listed in `loop.UNMARKED_APPROVAL_REFUSALS`, which
+> `run_shell` results are also read against, so their texts stay as they are.
 >
 > **Axis `knowledge, network`.** `knowledge` because most spawns are an agent's tool
 > calls and the board card carries that axis; `network` because the two local engines of

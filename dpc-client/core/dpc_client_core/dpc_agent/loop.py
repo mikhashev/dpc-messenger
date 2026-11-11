@@ -1412,6 +1412,25 @@ def timeout_result_text(fn_name: str, timeout_sec: int) -> str:
     )
 
 
+# What a refusal of `run_shell`'s approval gate starts with when it is not the warning mark:
+# the texts are read by tests and by the person's eyes, so they stay and the loop learns them.
+# With the mark, a refusal counts as an error (ADR-046, amendment 2026-11-11).
+UNMARKED_APPROVAL_REFUSALS = (
+    "🚫 Approval required and nobody could be asked",
+    "⏳ Command approval timed out",
+    "Command rejected by",
+    "Command manually rejected by",
+)
+
+
+def is_a_refusal_result(fn_name: str, result: Any) -> bool:
+    """True for a result that starts with the warning mark, or, for `run_shell`, is one of
+    the gate's refusals."""
+    text = str(result)
+    return text.startswith("⚠️") or (
+        fn_name == "run_shell" and text.startswith(UNMARKED_APPROVAL_REFUSALS))
+
+
 def _classify_tool_error(result: str) -> str:
     """Classify tool error category from result string prefix."""
     r = str(result)
@@ -1501,7 +1520,7 @@ def _execute_single_tool(
     duration_ms = round((time.monotonic() - t0) * 1000)
 
     # Detect error category from result
-    is_error = is_error or str(result).startswith("⚠️")
+    is_error = is_error or is_a_refusal_result(fn_name, result)
     error_category = _classify_tool_error(result) if is_error else None
 
     # Log tool execution
