@@ -123,6 +123,11 @@ export interface AgentInfo {
     updated_at?: string;
     compute_host?: string;
     reasoning_effort?: string;
+    // Role names (main, sleep, snapshot, compaction) whose alias is absent from this
+    // node's providers; [] for an agent that runs on a peer.
+    missing_aliases?: string[];
+    // {role: alias} for every model role of an agent that runs its models here.
+    alias_roles?: Record<string, string>;
     // Telegram integration fields (v0.22.0+)
     telegram_enabled?: boolean;
     telegram_bot_token?: string;

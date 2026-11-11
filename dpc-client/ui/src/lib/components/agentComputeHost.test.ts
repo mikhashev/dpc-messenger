@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { agentHostDisplay, heldModelLabel } from "./agentComputeHost";
+import {
+  agentHostDisplay,
+  heldModelLabel,
+  missingModelBadge,
+  agentsNamingAlias,
+  deleteProviderPrompt,
+  type AgentAliasRow,
+} from "./agentComputeHost";
 
 const HOST = "dpc-node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -66,5 +73,51 @@ describe("heldModelLabel", () => {
     for (const v of [undefined, "", "local"]) {
       expect(heldModelLabel("a", v, [])).toBe("a (not available now)");
     }
+  });
+});
+
+describe("missingModelBadge", () => {
+  it("is null while the main model is held, even if another role is not", () => {
+    expect(missingModelBadge({ missing_aliases: [] })).toBeNull();
+    expect(missingModelBadge({})).toBeNull();
+    expect(missingModelBadge({ missing_aliases: ["sleep"] })).toBeNull();
+  });
+
+  it("says 'not available now' and the tooltip names the alias and every missing role in order", () => {
+    const badge = missingModelBadge({
+      provider_alias: "qwen-gone",
+      alias_roles: { main: "qwen-gone", sleep: "qwen-gone" },
+      missing_aliases: ["snapshot", "main", "sleep"],
+    });
+    expect(badge?.text).toBe("⚠ not available now");
+    expect(badge?.title).toContain("qwen-gone (not available now)");
+    expect(badge?.title).toContain("Roles without a model: main, sleep, snapshot");
+  });
+});
+
+describe("deleteProviderPrompt", () => {
+  const agents: AgentAliasRow[] = [
+    { name: "Kotler", alias_roles: { main: "X", sleep: "X", snapshot: "X", compaction: "Y" } },
+    { name: "Muse", alias_roles: { main: "X" } },
+    { name: "Johnny", alias_roles: { main: "Y" } },
+    { name: "OnPeer", alias_roles: {} },
+  ];
+
+  it("asks the plain question when no agent names the alias", () => {
+    expect(deleteProviderPrompt("Z", agents)).toBe("Delete provider 'Z'?");
+    expect(deleteProviderPrompt("Z", undefined)).toBe("Delete provider 'Z'?");
+  });
+
+  it("names each agent by display name with the roles that use the alias", () => {
+    expect(deleteProviderPrompt("X", agents)).toBe(
+      "Delete provider 'X'? Used by: Kotler (main, sleep, snapshot); Muse (main)"
+    );
+  });
+
+  it("lists only the roles that name this alias", () => {
+    expect(agentsNamingAlias(agents, "Y")).toEqual([
+      { name: "Kotler", roles: ["compaction"] },
+      { name: "Johnny", roles: ["main"] },
+    ]);
   });
 });

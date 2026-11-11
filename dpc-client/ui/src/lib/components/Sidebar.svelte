@@ -16,7 +16,7 @@
   import { buildAgentModelConfigPayload } from '$lib/agentModelConfig';
   import { accountLevel, formatQuotaLine, providerTypeLabel } from './inferenceSharing';
   import { agentTurns } from '$lib/services/agents';
-  import { agentHostDisplay, heldModelLabel, type HostPeer } from './agentComputeHost';
+  import { agentHostDisplay, heldModelLabel, missingModelBadge, type HostPeer } from './agentComputeHost';
   import { BURST_QUIET_DEFAULT_SECONDS, BURST_QUIET_MAX_SECONDS, burstQuietFromAgent, burstQuietToSend } from '$lib/utils/burstQuiet';
   import { ownerUserIdFromAgent, ownerUserIdToSend } from '$lib/utils/telegramOwner';
   import { agentStatusLine, buttonSummary, chatNamer } from '$lib/utils/agentMap';
@@ -381,6 +381,9 @@
     provider_alias: string;
     reasoning_effort?: string;
     compute_host?: string;
+    // Role names whose alias is absent from this node's providers; [] for an agent on a peer.
+    missing_aliases?: string[];
+    alias_roles?: Record<string, string>;
     profile_name: string;
     instruction_set_name?: string;
     created_at: string;
@@ -1006,6 +1009,17 @@
                     onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
                     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
                   >{agent.provider_alias}</span>
+                  {#if missingModelBadge(agent)}
+                    {@const gone = missingModelBadge(agent)}
+                    <span
+                      role="button"
+                      tabindex="0"
+                      class="agent-model-missing"
+                      title={gone?.title}
+                      onclick={(e) => { e.stopPropagation(); handleModelConfig(agent.agent_id); }}
+                      onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleModelConfig(agent.agent_id); } }}
+                    >{gone?.text}</span>
+                  {/if}
                   {#if hostOffline(agent.compute_host)}
                     <span
                       role="button"
@@ -2715,6 +2729,24 @@
     cursor: pointer;
     white-space: nowrap;
     flex: 0 0 auto;
+  }
+
+  /* The main model is not among this node's providers: the offline badge's colours,
+     but it gives way to the name instead of pushing the row wider. */
+  .agent-model-missing {
+    font-size: 0.65rem;
+    color: #f9e2af;
+    background: rgba(249, 226, 175, 0.12);
+    border: 1px solid rgba(249, 226, 175, 0.4);
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .agent-effort {

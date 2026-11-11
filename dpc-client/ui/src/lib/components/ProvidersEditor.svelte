@@ -3,7 +3,9 @@
 
 <script lang="ts">
   import { createEventDispatcher, onDestroy } from 'svelte';
-  import { nodeStatus, sendCommand, peerProviders, providerAccounts, getProviderBalances, modelDownloadCompleted } from '$lib/coreService';
+  import { nodeStatus, sendCommand, peerProviders, providerAccounts, getProviderBalances, modelDownloadCompleted, agentsList } from '$lib/coreService';
+  import { get } from 'svelte/store';
+  import { deleteProviderPrompt } from './agentComputeHost';
   import { voiceMemoryNote } from '$lib/utils/voiceMemoryExtra';
   import {
     blockedModelLine, formatQuotaLine, formatQuotaLineTitle, quotaHasWarning,
@@ -1389,7 +1391,15 @@
   async function deleteProvider(index: number) {
     if (!editedConfig) return;
     const provider = editedConfig.providers[index];
-    const confirmed = await confirmAsync(`Delete provider '${provider.alias}'?`, { kind: 'warning' });
+    // Name the agents that use the alias: the list as it is now, the store's copy when it cannot be had.
+    let agents: any[] = get(agentsList) as any[];
+    try {
+      const fresh = await sendCommand('list_agents', {});
+      if (fresh?.status === 'success' && Array.isArray(fresh.agents)) agents = fresh.agents;
+    } catch (e) {
+      // The store's copy stands.
+    }
+    const confirmed = await confirmAsync(deleteProviderPrompt(provider.alias, agents), { kind: 'warning' });
     if (confirmed) {
       editedConfig.providers.splice(index, 1);
       // If deleted provider was default, reset default

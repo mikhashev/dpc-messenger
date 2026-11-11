@@ -241,8 +241,24 @@ class AgentService:
             registry = AgentRegistry()
             agents = registry.list_agents()
 
+            # Which model roles of which agent name an alias this node does not
+            # hold: the check the providers save reports as warnings, per agent.
+            # `alias_roles` is what each agent names, held or not, for the
+            # screen that is about to delete a provider.
+            missing: Dict[str, Any] = {}
+            named: Dict[str, Any] = {}
+            llm_manager = getattr(self, "llm_manager", None)
+            if llm_manager is not None:
+                from . import provider_alias_refs
+                home = llm_manager.config_path.parent
+                missing = provider_alias_refs.unresolved_agent_roles(
+                    list(llm_manager.providers), home)
+                named = provider_alias_refs.agent_alias_roles(home)
+
             for agent in agents:
                 agent_id = agent.get("agent_id", "")
+                agent["missing_aliases"] = missing.get(agent_id, [])
+                agent["alias_roles"] = named.get(agent_id, {})
                 # The turn and the waiting chats as they are now; every later
                 # change arrives as `agent_turn_updated`.
                 agent.update(agent_turn_fields(agent_id) if agent_id

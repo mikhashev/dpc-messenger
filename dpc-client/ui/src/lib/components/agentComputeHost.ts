@@ -43,6 +43,9 @@ export function agentHostDisplay(
   };
 }
 
+/** What the configuration dialog and the agents list say of a model this node does not hold. */
+export const NOT_AVAILABLE_NOW = "not available now";
+
 /**
  * The text of a dropdown option for a model the agent has configured but the
  * lists do not carry now: the alias, where it lives, and why it is not offered.
@@ -55,6 +58,72 @@ export function heldModelLabel(
   peers: HostPeer[] | undefined | null
 ): string {
   const d = agentHostDisplay(computeHost, peers);
-  if (d.host === "local") return `${alias} (not available now)`;
+  if (d.host === "local") return `${alias} (${NOT_AVAILABLE_NOW})`;
   return `${alias} @ ${d.shortName} (${d.connected ? "not offered by it now" : "offline"})`;
+}
+
+// --- A deleted provider, as the agents list shows it ---------------------------------
+// `list_agents` rows carry `missing_aliases` (role names whose alias is absent from
+// this node's providers; empty for an agent that runs on a peer) and `alias_roles`
+// ({role: alias} for every agent that runs its models here).
+
+export type AgentAliasRow = {
+  name?: string;
+  provider_alias?: string;
+  missing_aliases?: string[];
+  alias_roles?: Record<string, string>;
+};
+
+const ROLE_ORDER = ["main", "sleep", "snapshot", "compaction"];
+
+function byRole(a: string, b: string): number {
+  const ia = ROLE_ORDER.indexOf(a);
+  const ib = ROLE_ORDER.indexOf(b);
+  return (ia < 0 ? ROLE_ORDER.length : ia) - (ib < 0 ? ROLE_ORDER.length : ib);
+}
+
+/**
+ * The warning badge of an agent whose main model is not held here, or null.
+ * Only the main role gets a badge; the title names every missing role.
+ */
+export function missingModelBadge(
+  agent: AgentAliasRow
+): { text: string; title: string } | null {
+  const missing = agent.missing_aliases ?? [];
+  if (!missing.includes("main")) return null;
+  const alias = agent.alias_roles?.main || agent.provider_alias || "";
+  const roles = [...missing].sort(byRole).join(", ");
+  return {
+    text: `⚠ ${NOT_AVAILABLE_NOW}`,
+    title:
+      `${alias ? heldModelLabel(alias, undefined, []) : `main model (${NOT_AVAILABLE_NOW})`}. ` +
+      `Roles without a model: ${roles}. Click to choose another model.`
+  };
+}
+
+/** Agents that name `alias`, each with the roles that do, as the delete confirmation prints them. */
+export function agentsNamingAlias(
+  agents: AgentAliasRow[] | undefined | null,
+  alias: string
+): { name: string; roles: string[] }[] {
+  const found: { name: string; roles: string[] }[] = [];
+  for (const agent of agents || []) {
+    const roles = Object.entries(agent.alias_roles || {})
+      .filter(([, a]) => a === alias)
+      .map(([role]) => role)
+      .sort(byRole);
+    if (roles.length) found.push({ name: agent.name || "(unnamed agent)", roles });
+  }
+  return found;
+}
+
+/** "Delete provider 'X'? Used by: Kotler (main, sleep, snapshot); Muse (main)" */
+export function deleteProviderPrompt(
+  alias: string,
+  agents: AgentAliasRow[] | undefined | null
+): string {
+  const users = agentsNamingAlias(agents, alias);
+  const base = `Delete provider '${alias}'?`;
+  if (!users.length) return base;
+  return `${base} Used by: ${users.map((u) => `${u.name} (${u.roles.join(", ")})`).join("; ")}`;
 }

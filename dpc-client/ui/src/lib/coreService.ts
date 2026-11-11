@@ -585,6 +585,10 @@ export async function connectToCoreService() {
                     console.log("Providers configuration updated, reloading provider list");
                     sendCommand("get_providers_list");     // Reload full provider list
                     sendCommand("get_default_providers");  // Reload defaults
+                    // Each agent row says which of its models this node no longer holds.
+                    listAgents().then((r: any) => {
+                        if (r?.status === 'success') agentsList.set(r.agents || []);
+                    }).catch(() => { /* the next agents event refreshes it */ });
                 }
                 // Handle default_providers_updated event (v0.13.0+: voice/text/vision default changed)
                 else if (message.event === "default_providers_updated") {

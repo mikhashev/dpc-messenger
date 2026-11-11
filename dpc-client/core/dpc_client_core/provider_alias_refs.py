@@ -18,6 +18,7 @@ same list, so a key that is not carried is a failing test rather than a silence.
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -420,15 +421,62 @@ def _peer_resolved_places(home: Path) -> set:
     return labels
 
 
+def _unresolved_places(known_aliases, home: Path) -> List[Tuple[str, str]]:
+    """(label, alias) of every reference naming an alias `known_aliases` lacks, minus the peer-resolved ones."""
+    known = set(known_aliases or ())
+    on_a_peer = _peer_resolved_places(home)
+    return [(where, value)
+            for place in PLACES if place.in_unresolved
+            for where, value in place.scan(home)
+            if value and value not in known and where not in on_a_peer]
+
+
 def unresolved_references(known_aliases, home: Path) -> List[str]:
     """References naming an alias that `known_aliases` does not contain — an agent cut off from its provider.
 
     A reference that a peer resolves (any model key of an agent pinned to a
     `compute_host`) is not cut off from anything and is left out.
     """
-    known = set(known_aliases or ())
-    on_a_peer = _peer_resolved_places(home)
     return [f"{where} → '{value}'"
-            for place in PLACES if place.in_unresolved
-            for where, value in place.scan(home)
-            if value and value not in known and where not in on_a_peer]
+            for where, value in _unresolved_places(known_aliases, home)]
+
+
+# What the agents list says about an agent's model keys, under the words the
+# configuration dialog prints for the four selects (Main, Sleep, Snapshot, Compaction).
+AGENT_ROLE_NAMES = {
+    "provider_alias": "main",
+    "sleep_provider_alias": "sleep",
+    "snapshot_summarize_provider": "snapshot",
+    "compaction_provider": "compaction",
+}
+
+_AGENT_LABEL = re.compile(r"^agents/(?P<agent>[^/]+)/config\.json:(?P<key>\w+)$")
+
+
+def unresolved_agent_roles(known_aliases, home: Path) -> Dict[str, List[str]]:
+    """agent_id -> role names whose alias `known_aliases` lacks; the same check as `unresolved_references`.
+
+    An agent pinned to a `compute_host` has none: its aliases are the peer's.
+    """
+    found: Dict[str, List[str]] = {}
+    for where, _value in _unresolved_places(known_aliases, home):
+        match = _AGENT_LABEL.match(where)
+        if match and match["key"] in AGENT_ROLE_NAMES:
+            found.setdefault(match["agent"], []).append(AGENT_ROLE_NAMES[match["key"]])
+    return found
+
+
+def agent_alias_roles(home: Path) -> Dict[str, Dict[str, str]]:
+    """agent_id -> {role name: alias} for every agent that runs its models here.
+
+    The roles an agent names, whether or not they resolve, so a screen can say
+    which agents a provider is about to leave. A pinned agent is left out: the
+    alias it names is a row of the peer's providers.json.
+    """
+    on_a_peer = _peer_resolved_places(home)
+    found: Dict[str, Dict[str, str]] = {}
+    for where, value in _scan_agent_configs(home):
+        match = _AGENT_LABEL.match(where)
+        if match and match["key"] in AGENT_ROLE_NAMES and where not in on_a_peer:
+            found.setdefault(match["agent"], {})[AGENT_ROLE_NAMES[match["key"]]] = value
+    return found
