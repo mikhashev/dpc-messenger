@@ -165,6 +165,18 @@ def test_the_engines_window_is_read_once_after_its_first_answer_and_not_before(t
     assert strips[-1] == (ENGINE_WINDOW, context_reserve_of(ENGINE_WINDOW))
 
 
+def test_the_answer_reserve_applies_from_the_first_round_whose_window_came_from_the_engine(tmp_path, monkeypatch):
+    """Round one has no engine window by design (the pre-flight covers it, so no reserve);
+    round two is the first on the engine's window and already carries the reserve."""
+    engine = _Engine()
+    llm = _Llm(tool_rounds=3, engine=engine)
+    _, guard_reads, _, _ = _run(tmp_path, monkeypatch, llm, _Tools([100] * 3))
+
+    assert guard_reads[0][1:] == (204_800, 0)
+    assert guard_reads[1][1:] == (ENGINE_WINDOW, context_reserve_of(ENGINE_WINDOW))
+    assert {reserve for _, _, reserve in guard_reads[1:]} == {context_reserve_of(ENGINE_WINDOW)}
+
+
 def test_the_agents_own_context_window_caps_the_engines_when_lower(tmp_path, monkeypatch):
     engine = _Engine()
     llm = _Llm(tool_rounds=2, engine=engine)
@@ -203,6 +215,16 @@ def test_a_window_the_engine_cannot_give_leaves_the_alias_numbers_and_is_said_on
     assert {window for _, window, _ in guard_reads} == {204_800}
     said = [r for r in caplog.records if "could not be asked for its window" in r.getMessage()]
     assert len(said) == 1
+
+
+def test_a_window_read_that_failed_is_not_asked_again_this_turn(tmp_path, monkeypatch):
+    engine = _Engine(window_fails=True)
+    llm = _Llm(tool_rounds=4, engine=engine)
+    _, guard_reads, _, _ = _run(tmp_path, monkeypatch, llm, _Tools([100] * 4))
+
+    assert engine.window_reads == 1, "a sick engine pays one failed read, not one per round"
+    assert {window for _, window, _ in guard_reads} == {204_800}
+    assert {reserve for _, _, reserve in guard_reads} == {0}
 
 
 # --- (b) the count ------------------------------------------------------------------------------------------------
@@ -468,3 +490,37 @@ def test_the_loop_tells_the_guard_whether_its_cut_changed_the_prompt(tmp_path, m
 
     assert text.startswith("[CONTEXT_LIMIT]")
     assert "there was nothing left to cut" in text or "nothing left for the plain cut" in text
+
+
+def _preflight_agent(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_module, "build_llm_messages",
+                        lambda **kw: ([], {"estimated_tokens_before": 10}))
+    agent = agent_module.DpcAgent.__new__(agent_module.DpcAgent)
+    agent.agent_root = tmp_path
+    agent.memory = agent.skill_store = agent._firewall = agent._embedding_provider = None
+    agent._get_allowed_tools = lambda **kw: set()
+    agent._runtime_billing_model = lambda: None
+    agent._provider_facts = lambda: {}
+    agent._last_usage = {}
+    agent._last_trace = {}
+    return agent
+
+
+@pytest.mark.parametrize("window", [32_768, ENGINE_WINDOW])
+def test_the_pre_turn_check_refuses_at_the_guards_reserve(tmp_path, monkeypatch, window):
+    """One rule for both: a prompt that leaves one token under `context_reserve_of` is refused."""
+    agent = _preflight_agent(tmp_path, monkeypatch)
+    estimated = window - context_reserve_of(window) + 1
+    text = asyncio.run(agent.process("hi", "conv", session_state={
+        "tokens_limit": window, "tokens_after_last_response": estimated}))
+    assert text.startswith("⚠️ Context window full")
+
+
+def test_the_pre_turn_check_takes_its_reserve_from_context_reserve_of(tmp_path, monkeypatch):
+    """Changing the one function moves the pre-turn check: 26_000 of 32_768 passes on the real
+    rule (reserve 6553) and is refused when the rule says 10_000."""
+    agent = _preflight_agent(tmp_path, monkeypatch)
+    monkeypatch.setattr(agent_module, "context_reserve_of", lambda window: 10_000)
+    text = asyncio.run(agent.process("hi", "conv", session_state={
+        "tokens_limit": 32_768, "tokens_after_last_response": 26_000}))
+    assert text.startswith("⚠️ Context window full")

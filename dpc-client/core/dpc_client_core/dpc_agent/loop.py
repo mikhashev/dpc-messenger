@@ -2483,11 +2483,13 @@ async def run_llm_loop(
     # engine once it has answered a request of this loop (the child is up, so asking starts
     # nothing), never before; until then, and for any provider that does not count on its
     # engine, the alias numbers stand. The count of what a round appended is asked of the
-    # engine too, once per round; the first failure is said once and the rest of the turn
-    # falls back to the estimate, so a sick engine costs one timeout and not one per round.
+    # engine too, once per round. The first failure of either is said once and the rest of
+    # the turn goes on without it (the alias window, the estimate), so a sick engine costs one
+    # timeout per kind and not one per round.
     engine_answered = None      # the provider whose engine last answered this loop
     engine_window_of = None     # the provider `engine_window` was read from
     engine_window = 0
+    engine_window_failed = False
     engine_count_failed = False
     engine_trouble_said = False
 
@@ -2563,11 +2565,13 @@ async def run_llm_loop(
 
             # A local engine's window, read after its first answer; the alias numbers otherwise.
             engine = local_engine_of(llm)
-            if engine is not None and engine is engine_answered and engine is not engine_window_of:
+            if (engine is not None and engine is engine_answered and engine is not engine_window_of
+                    and not engine_window_failed):
                 try:
                     engine_window = int(await engine.engine_context_window())
                     engine_window_of = engine
                 except Exception as e:
+                    engine_window_failed = True
                     _engine_trouble("for its window", e)
             on_the_engine = engine is not None and engine is engine_window_of and engine_window > 0
             if on_the_engine:
