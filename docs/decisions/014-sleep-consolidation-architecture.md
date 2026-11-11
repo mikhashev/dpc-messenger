@@ -120,12 +120,22 @@ changes once belongs in front of the history.
    `sent_annotations` is the tail exactly as sent, the brief included, so a later turn replays the
    first message byte-for-byte ([ADR-040](040-local-inference-second-path-as-a-dpc-owned-llama-server.md)
    F2) and the model has the brief for the rest of the session. It is in that message once and is
-   never appended to a later one. The cost is the brief's size, about 2-3K tokens of the window for
-   the session, and no cold prefill after the first turn. On a later turn with L5 closed
+   never appended to a later one. The cost is the brief's size, about 0.2-0.5K tokens of the window
+   for the session (measured 2026-11-11 on the seven briefs in `~/.dpc/conversations/agent_*/`:
+   the section as `_pending_morning_brief` renders it is 657-1611 characters, 160-400 tokens at
+   chars/4 and 200-465 with Cyrillic counted at the x1.38 engine ratio measured here; the section
+   is capped at five decisions and five unresolved items, so it cannot grow far past that), and no
+   cold prefill after the first turn. The system block's note (`TURN_CONTEXT_NOTE`) tells the model
+   where the brief is and that a turn with L5 closed replays it without. On a later turn with L5 closed
    ([ADR-048](048-memory-layer-audience.md): the brief is L5 memory) the replayed tail goes without
    the brief, cut by its heading (`strip_closed_layers`), at the cost of one cold prefill. A tail
    that carries the brief is recorded once the request has been answered, so a turn that never got
-   an answer leaves no replayable brief for the next offer to double.
+   an answer leaves no replayable brief for the next offer to double. This departs from
+   [ADR-045](045-agent-context-is-a-projection-of-a-kept-transcript.md) decision 7, which keeps agent
+   memory out of the replayed turn tail because every turn would add a copy: the brief is one-shot
+   (point 5), so it adds one copy, once. The first version of this amendment cited decision 7 as its
+   ground for not replaying; option A reverses that, and the reference is kept here for that reason.
+   The turn tail is a 1:1 path only; in a group the brief lives only as the chat message (point 6).
 4. **The L5 gate moves with it.** With L5 closed for the turn (ADR-048) the tail carries no brief
    and the brief is not marked consumed; the first turn that has L5 open gets it.
 5. **One-shot means one placement.** The brief is marked consumed when the request that carries it
@@ -134,7 +144,10 @@ changes once belongs in front of the history.
    when a chat post has carried it into the history (the 1:1 agent's start-up check and the
    sleep-completion post of a 1:1 agent). It is never offered a second time by either route.
 6. **The group path is unchanged.** A group sleep posts the brief to the group chat at sleep time and
-   marks `morning_brief_group_<group>.json` consumed at once; it never enters a prompt block. The
+   marks `morning_brief_group_<group>.json` consumed at once (`service.py`, `_run_group_sleep`); it
+   never enters a prompt block or a turn tail, because `_pending_morning_brief` reads only the 1:1
+   `conversations/<agent>/morning_brief.json`. In a group the brief exists only as that chat
+   message, a history message like any other. The
    Telegram bridge only formats the brief.
 
 Mike's call, 2026-11-10; consume point corrected 2026-11-11 after review; point 3 changed:

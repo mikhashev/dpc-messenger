@@ -1287,8 +1287,9 @@ TURN_CONTEXT_NOTE = (
     "when that message was sent. The morning brief after a sleep cycle normally arrives as "
     "a chat message; only if that post did not happen does it ride at the end of the block "
     "of the first message after the sleep, and stay in that message for the rest of the "
-    "session. In earlier messages the block describes that moment, not now; the block on "
-    "the latest message is current."
+    "session (a turn with layer L5 closed replays it without the brief). In earlier "
+    "messages the block describes that moment, not now; the block on the latest message "
+    "is current."
 )
 
 
