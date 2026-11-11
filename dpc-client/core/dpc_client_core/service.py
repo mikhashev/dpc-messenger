@@ -651,6 +651,7 @@ class CoreService:
                 local_api=self.local_api,
                 firewall=self.firewall,
                 peer_metadata=self.peer_metadata,
+                own_addresses_getter=lambda: getattr(getattr(self, "p2p_manager", None), "own_addresses", None),
             )
         except Exception as e:
             logger.error("AgentService init failed, continuing without agent management: %s", e)

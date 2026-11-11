@@ -301,7 +301,11 @@ const VENDOR_NAMES: Record<string, string> = {
  */
 export function vendorLine(row: MenuRow | null | undefined): string | null {
   if (!row || row.provider_kind !== 'vendor') return null;
-  const type = typeof row.type === 'string' ? row.type.trim() : '';
-  const vendor = VENDOR_NAMES[type] ?? (type || 'the vendor');
-  return `vendor model — your prompt goes to ${vendor}`;
+  return `vendor model — your prompt goes to ${vendorName(row.type)}`;
+}
+
+/** The vendor a provider type sends its calls to, in the words of `vendorLine`. */
+export function vendorName(type: unknown): string {
+  const t = typeof type === 'string' ? type.trim() : '';
+  return VENDOR_NAMES[t] ?? (t || 'the vendor');
 }

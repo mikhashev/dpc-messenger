@@ -17,6 +17,7 @@
   import { accountLevel, formatQuotaLine, providerTypeLabel } from './inferenceSharing';
   import { agentTurns } from '$lib/services/agents';
   import { agentHostDisplay, heldModelLabel, missingModelBadge, type HostPeer } from './agentComputeHost';
+  import { compactionOffLine, computeHostNote, modelRoute, optionWithRoute, routeForAlias } from './agentModelRoute';
   import { BURST_QUIET_DEFAULT_SECONDS, BURST_QUIET_MAX_SECONDS, burstQuietFromAgent, burstQuietToSend } from '$lib/utils/burstQuiet';
   import { ownerUserIdFromAgent, ownerUserIdToSend } from '$lib/utils/telegramOwner';
   import { agentStatusLine, buttonSummary, chatNamer } from '$lib/utils/agentMap';
@@ -59,7 +60,7 @@
   let modelConfigCompactionEnabled = $state<boolean>(false);
   let modelConfigCompactionProvider = $state('');
   let modelConfigCompactionThreshold = $state<number>(0.8);
-  let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string}[]>([]);
+  let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string, route?: string, provider_kind?: string, host_scope?: string}[]>([]);
   let modelConfigSaving = $state(false);
   let modelConfigError = $state('');
   let modelConfigReasoningEffort = $state('');
@@ -549,6 +550,20 @@
     modelConfigProvidersList.find(p => p.alias === modelConfigProviderAlias && p.is_remote)?.peer_id
       || (heldMain && modelConfigProviderAlias === heldMain.value ? modelConfigComputeHost : '')
   );
+
+  // Where each role's calls go, from the row the select shows: data leaves this machine for a vendor or a node.
+  function routeOf(alias: string) {
+    return routeForAlias(alias, modelConfigProvidersList, modelConfigComputeHost, hostPeers);
+  }
+  function optionText(p: (typeof modelConfigProvidersList)[number]): string {
+    return optionWithRoute(providerOptionLabel(p), modelRoute(p, modelConfigComputeHost, hostPeers));
+  }
+  let routeMain = $derived(routeOf(modelConfigProviderAlias));
+  let routeSleep = $derived(routeOf(modelConfigSleepProvider));
+  let routeSnapshot = $derived(routeOf(modelConfigSnapshotProvider));
+  let routeCompaction = $derived(routeOf(modelConfigCompactionProvider));
+  let compactionOffNote = $derived(compactionOffLine(routeCompaction));
+  let hostNote = $derived(computeHostNote(modelConfigComputeHost, hostPeers));
 
   let modelConfigAgentName = $derived(
     agents.find(a => a.agent_id === modelConfigAgentId)?.name || modelConfigAgentId
@@ -1234,15 +1249,19 @@
             Configure LLM providers for this agent. Each agent can use a different model for chat and sleep consolidation.
           </p>
         </div>
+        {#if hostNote}
+          <p class="dialog-route route-peer" role="note" title={modelConfigComputeHost}>{hostNote}</p>
+        {/if}
         <hr class="dialog-divider">
 
         <label for="main-llm" class="dialog-label">Agent Main LLM:</label>
         <select id="main-llm" class="dialog-input" bind:value={modelConfigProviderAlias}>
           {#if heldMain}<option value={heldMain.value}>{heldMain.label}</option>{/if}
           {#each modelConfigProvidersList as p}
-            <option value={p.alias}>{providerOptionLabel(p)}</option>
+            <option value={p.alias}>{optionText(p)}</option>
           {/each}
         </select>
+        {#if routeMain}<p class="dialog-route route-{routeMain.where}">{routeMain.line}</p>{/if}
         <p class="dialog-hint">Primary language model used for agent conversations.</p>
         {#if modelConfigHostOffline}
           <p class="dialog-warning" role="alert" title={modelConfigComputeHost}>
@@ -1274,9 +1293,10 @@
           <option value="">Default (global)</option>
           {#if heldSleep}<option value={heldSleep.value}>{heldSleep.label}</option>{/if}
           {#each modelConfigProvidersList as p}
-            <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
+            <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{optionText(p)}</option>
           {/each}
         </select>
+        {#if routeSleep}<p class="dialog-route route-{routeSleep.where}">{routeSleep.line}</p>{/if}
         <p class="dialog-hint">Model used for sleep consolidation analysis. "Default" uses the global provider. Remote (peer) models are selectable only when the Main LLM runs on that same peer.</p>
 
         <label for="snapshot-llm" class="dialog-label">Snapshot summarization LLM:</label>
@@ -1284,9 +1304,10 @@
           <option value="">Default (global)</option>
           {#if heldSnapshot}<option value={heldSnapshot.value}>{heldSnapshot.label}</option>{/if}
           {#each modelConfigProvidersList as p}
-            <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
+            <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{optionText(p)}</option>
           {/each}
         </select>
+        {#if routeSnapshot}<p class="dialog-route route-{routeSnapshot.where}">{routeSnapshot.line}</p>{/if}
         <p class="dialog-hint">Model used to extract task-relevant parts from oversized browser snapshots (accessibility-tree). Falls back to line-based truncation when not set or the call fails. Remote (peer) models are selectable only when the Main LLM runs on that same peer.</p>
 
         <label for="snapshot-threshold" class="dialog-label">Snapshot summarization threshold (chars):</label>
@@ -1316,9 +1337,10 @@
             <option value="">Default (global)</option>
             {#if heldCompaction}<option value={heldCompaction.value}>{heldCompaction.label}</option>{/if}
             {#each modelConfigProvidersList as p}
-              <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{providerOptionLabel(p)}</option>
+              <option value={p.alias} disabled={p.is_remote && p.peer_id !== mainConfigPeerId}>{optionText(p)}</option>
             {/each}
           </select>
+          {#if routeCompaction}<p class="dialog-route route-{routeCompaction.where}">{routeCompaction.line}</p>{/if}
           <p class="dialog-hint">Model used to summarize old tool results. A fast, reasoning-disabled model is recommended (reasoning adds latency without helping this task). On failure the agent degrades to deterministic truncation and notifies you.</p>
 
           <label for="compaction-threshold" class="dialog-label">Compaction threshold (fraction of the agent's Main LLM model context window):</label>
@@ -1332,6 +1354,8 @@
             bind:value={modelConfigCompactionThreshold}
           />
           <p class="dialog-hint">Fraction of the agent's main model context window (not the compaction model's). Start compacting once usage crosses it, and keep compacting each round until usage falls back below (fraction − 0.2), then stop (hysteresis). Default 0.8.</p>
+        {:else if compactionOffNote}
+          <p class="dialog-route route-{routeCompaction?.where}">{compactionOffNote}</p>
         {/if}
 
         <hr class="dialog-divider">
@@ -2875,6 +2899,21 @@
     line-height: 1.4;
     margin: 0 0 0.5rem 0;
   }
+
+  /* Where a chosen model's calls go. The sentence says it; the colour only echoes it. */
+  .dialog-route {
+    font-size: 0.8rem;
+    line-height: 1.4;
+    margin: -0.25rem 0 0.35rem 0;
+    padding: 0.2rem 0.5rem;
+    border-left: 3px solid #888;
+    color: #888;
+  }
+  .dialog-route.route-local { border-left-color: #2e8b57; color: #2e8b57; }
+  .dialog-route.route-lan { border-left-color: #4a7fb5; color: #4a7fb5; }
+  .dialog-route.route-vendor { border-left-color: #c77700; color: #b8860b; }
+  .dialog-route.route-peer { border-left-color: #c77700; color: #b8860b; }
+  .dialog-route.route-unknown { border-left-color: #888; color: #888; }
 
   .dialog-hint {
     color: #888;

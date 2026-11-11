@@ -32,11 +32,17 @@ _LOCAL_NETWORKS = tuple(
               "fc00::/7", "::1/128")
 )
 
+def in_local_networks(addr: Any) -> bool:
+    """True for an address in RFC 1918, IPv6 ULA or loopback; link-local is not."""
+    return any(addr in net for net in _LOCAL_NETWORKS)
+
+
 # `local_addresses` (DPTP 1.12 §3.1): a peer's own LAN "ip:port" list, a hint
 # where to dial. Kept in metadata, replaced per HELLO/HELLO_ACK, and never put
 # into `addresses` until a dial over it succeeds.
 LOCAL_ADDRESSES_KEY = "local_addresses"
 MAX_LOCAL_ADDRESSES = 4
+# Not _LOCAL_NETWORKS: the wire field `local_addresses` is IPv4 RFC 1918 only (DPTP §3.1).
 _RFC1918 = tuple(
     ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
@@ -164,7 +170,7 @@ def addresses_to_try(cached: Any, own_addresses: Any = None) -> List[Dict[str, A
             addr = ipaddress.ip_address(entry["ip"])
         except (KeyError, TypeError, ValueError):
             return 1
-        if any(addr in net for net in _LOCAL_NETWORKS):
+        if in_local_networks(addr):
             return 0
         if addr.is_link_local:
             return None if addr.version == 6 else 2

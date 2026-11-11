@@ -57,7 +57,9 @@ class AgentService:
         local_api,
         firewall,
         peer_metadata: Dict,
+        own_addresses_getter=None,
     ):
+        self._own_addresses_getter = own_addresses_getter
         self.llm_manager = llm_manager
         self.local_api = local_api
         self.firewall = firewall
@@ -920,6 +922,20 @@ class AgentService:
                     entry["is_remote"] = True
                     entry["peer_id"] = peer_id
                     providers_list.append(entry)
+            # Where each model's calls go: `route` and `provider_kind`, the
+            # words of the runtime budget, so the dialog can say where data goes.
+            from dpc_client_core.dpc_agent.provider_facts import provider_row_facts
+            try:
+                own = self._own_addresses_getter() if self._own_addresses_getter else None
+            except Exception:
+                own = None
+            for entry in providers_list:
+                try:
+                    entry.update(provider_row_facts(entry, self.llm_manager, self.peer_metadata, own))
+                except Exception as e:
+                    # Said as unknown on the screen, not left blank.
+                    logger.warning("provider_row_facts failed for %s: %s", entry.get("alias"), e)
+                    entry["provider_kind"] = "unknown"
             return {
                 "status": "ok",
                 "agent_id": agent_id,

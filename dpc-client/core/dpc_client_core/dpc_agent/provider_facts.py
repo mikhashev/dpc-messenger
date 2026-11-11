@@ -15,8 +15,11 @@ written at the call is the record.
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
+
+from dpc_client_core.peer_cache import in_local_networks
 
 # The same classes firewall.py uses for the serving lists.
 LOCAL_TYPES = frozenset({"ollama", "llamacpp_server", "strata", "local_whisper"})
@@ -24,6 +27,7 @@ VENDOR_TYPES = frozenset({
     "openai_compatible", "anthropic", "zai", "deepseek", "neuraldeep", "gemini", "github_models",
     "gigachat",
 })
+OPENAI_OWN_HOSTS = ("api.openai.com",)  # as providers/openai_provider.py
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
 REMOTE_PREFIX = "remote:"
 
@@ -121,6 +125,110 @@ def _resolve_local_alias(llm_manager: Any, provider_alias: Optional[str]) -> Opt
         if candidate and candidate in providers:
             return candidate
     return None
+
+
+# Names a person gives a machine on their own network. A name outside this
+# list, with a dot, is read as a public DNS name.
+_LAN_SUFFIXES = ("local", "lan", "home", "internal", "home.arpa", "localdomain", "intranet", "corp")
+
+
+def url_host_scope(url: Optional[str], own_addresses: Any = None) -> Optional[str]:
+    """Display-only: where the host in a provider's URL is, when that is not the vendor's.
+
+    'this_machine' for `localhost`, a loopback literal or an address this node owns
+    (`own_addresses.contains`; no registry means "not mine"), 'lan' for an IP literal
+    in a private network (peer_cache.in_local_networks: RFC 1918, ULA; link-local is
+    not), 'unknown' for a name that is one label or ends in a LAN suffix, or a host of
+    digits and dots that is no address (this node cannot tell what it is), None for
+    anything else. Never feeds `provider_kind` or `tokens_paid_by`.
+    """
+    if not url:
+        return None
+    text = url if "://" in url else "//" + url
+    try:
+        host = (urlparse(text).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    if not host:
+        return None
+    if host == "localhost" or host in _LOOPBACK_HOSTS:
+        return "this_machine"
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        if host.replace(".", "").isdigit():
+            return "unknown"
+        if "." not in host or host.endswith(tuple("." + s for s in _LAN_SUFFIXES)):
+            return "unknown"
+        return None
+    if addr.is_loopback:
+        return "this_machine"
+    try:
+        if own_addresses is not None and own_addresses.contains(str(addr)):
+            return "this_machine"
+    except Exception:
+        pass
+    return "lan" if in_local_networks(addr) else None
+
+
+def _unnamed_vendor_host(base_url: Optional[str]) -> Optional[str]:
+    """Display-only: the host of an `openai_compatible` URL that names no vendor, else None.
+
+    The type is generic and its URL is typed by the owner, so a public-looking host
+    other than OpenAI's own (or none, the SDK default) is not known to be a vendor.
+    """
+    if not base_url:
+        return None
+    text = base_url if "://" in base_url else "//" + base_url
+    try:
+        host = (urlparse(text).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    return host if host and host not in OPENAI_OWN_HOSTS else None
+
+
+def provider_row_facts(
+    row: Dict[str, Any],
+    llm_manager: Any,
+    peer_metadata: Optional[Dict[str, Any]] = None,
+    own_addresses: Any = None,
+) -> Dict[str, Any]:
+    """`route` and `provider_kind` of one row of the providers list the agent dialog shows.
+
+    `provider_kind` is exactly what `provider_kind(type, base_url)` returns. A local
+    row also carries `host_scope`, the value of `url_host_scope` verbatim, when it is
+    not None; display only, it never changes the kind. A row of `openai_compatible`
+    with no scope and a host that is not OpenAI's carries `base_url_host`, so the dialog can
+    say it does not know who answers there.
+
+    A peer's row (`is_remote`, `peer_id`) and a local `remote_peer` or `dpc_agent`
+    alias are a peer route; anything else is local and its kind is read from the
+    type and base_url, as `provider_facts_for` reads it.
+    """
+    alias = row.get("alias")
+    scope = None
+    unnamed_host = None
+    if row.get("is_remote") and row.get("peer_id"):
+        facts = _peer_facts(alias, row["peer_id"], peer_metadata)
+    else:
+        provider = (getattr(llm_manager, "providers", None) or {}).get(alias)
+        config = getattr(provider, "config", None) or {}
+        ptype = config.get("type") or row.get("type")
+        if ptype == "remote_peer" and config.get("peer_id"):
+            facts = _peer_facts(config.get("provider") or alias, config["peer_id"], peer_metadata)
+        elif ptype == "dpc_agent" and getattr(provider, "peer_id", None):
+            facts = _peer_facts(getattr(provider, "remote_provider", None), provider.peer_id, peer_metadata)
+        else:
+            facts = {"route": "local", "provider_kind": provider_kind(ptype, config.get("base_url"))}
+            scope = url_host_scope(config.get("base_url") or config.get("host"), own_addresses)
+            if scope is None and ptype == "openai_compatible":
+                unnamed_host = _unnamed_vendor_host(config.get("base_url"))
+    out = {"route": facts["route"], "provider_kind": facts["provider_kind"]}
+    if scope is not None:
+        out["host_scope"] = scope
+    elif unnamed_host is not None:
+        out["base_url_host"] = unnamed_host
+    return out
 
 
 def provider_facts_for(
