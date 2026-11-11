@@ -1845,6 +1845,13 @@ class LlamaServerSupervisor:
         # supervisor replaces a live one; `ensure_running` waits on it before
         # spending VRAM, so draining the old child cannot turn into two children.
         self._predecessor: Optional["asyncio.Task"] = None
+        # The other side of `_predecessor`: the supervisor a settings save put in this one's
+        # place under the same alias (`superseded_by`). A request that has not started here
+        # goes on there, in the place it holds in the card queue, instead of meeting the
+        # drain's refusal. `_passed_on_to` is set when one has, so that the provider that
+        # asked follows it (`where_calls_go`).
+        self._successor: Optional["LlamaServerSupervisor"] = None
+        self._passed_on_to: Optional["LlamaServerSupervisor"] = None
         self._in_flight = 0
         # The most slots held at once since the last telemetry read. Nothing
         # serialises traffic to the child, so this is what says whether the
@@ -2265,7 +2272,9 @@ class LlamaServerSupervisor:
 
     def _check_a_wait_can_end(self, request: _QueuedRequest) -> None:
         request.check_still_in_line()
-        if self._will_not_reopen():
+        # A supervisor a settings save replaced has a successor to hand its waiting request
+        # to; the request keeps its place, and `ensure_running` moves it when it is first.
+        if self._will_not_reopen() and self._successor is None:
             raise self._draining_error()
 
     async def _wait_in_the_card_queue(self) -> Optional[_QueuedRequest]:
@@ -2664,17 +2673,41 @@ class LlamaServerSupervisor:
     @on_the_owner_loop
     async def ensure_running(self) -> Dict[str, Any]:
         """The server is up and its /props are returned; starts it if needed, in its turn at
-        the card (ADR-044, amendment 2026-11-02, the card queue, rule 3)."""
-        request = await self._wait_in_the_card_queue()
-        try:
-            props = await self._start_if_needed(request)
-        except BaseException:
+        the card (ADR-044, amendment 2026-11-02, the card queue, rule 3).
+
+        A request that has not started when a settings save replaces this supervisor is not
+        refused: it goes on under the successor of the same alias (ADR-044, amendment
+        2026-11-11). Its place in the line is kept when it still holds one; one that had
+        passed the line (its child was starting) asks the successor afresh. A call already in
+        flight is not here: it holds a slot, and the drain waits for it."""
+        here: LlamaServerSupervisor = self
+        request: Optional[_QueuedRequest] = None
+        queued = False
+        while True:
+            try:
+                if not queued:
+                    request = await here._wait_in_the_card_queue()
+                    queued = True
+                props = await here._start_if_needed(request)
+            except EngineDrainingError:
+                successor = here._successor_in_the_end()
+                keeps_its_place = successor is not None and request is not None and request.in_line()
+                if request is not None and not keeps_its_place:
+                    request.leaves()
+                if successor is None:
+                    raise
+                here._passes_its_calls_to(successor, keeps_its_place)
+                here = successor
+                if not keeps_its_place:
+                    request, queued = None, False
+                continue
+            except BaseException:
+                if request is not None:
+                    request.leaves()
+                raise
             if request is not None:
-                request.leaves()
-            raise
-        if request is not None:
-            request.passes()
-        return props
+                request.passes()
+            return props
 
     async def _start_if_needed(self, request: Optional[_QueuedRequest]) -> Dict[str, Any]:
         """What `ensure_running` does in its turn; each engine has its own (the Strata override).
@@ -3542,6 +3575,51 @@ class LlamaServerSupervisor:
     def supersedes(self, drain_task: Optional["asyncio.Task"]) -> None:
         """Record the drain of the child this supervisor replaces."""
         self._predecessor = drain_task
+
+    def waiting_in_the_card_queue(self) -> int:
+        """How many requests stand in the card queue for this alias, whoever's supervisor they
+        asked: the queue is keyed by alias (rule 14)."""
+        return sum(len(place.requests) for place in _CARD_QUEUE if place.alias == self.alias)
+
+    def superseded_by(self, successor: "LlamaServerSupervisor") -> None:
+        """A settings save put `successor` in this supervisor's place under the same alias, and
+        the provider that did it calls this in the same stretch as `supersedes`. From here a
+        request that has not started on this supervisor goes on under the successor (see
+        `ensure_running`); a call in flight finishes here, and the drain stops the child after.
+        Said once, because without it a save that retires a supervisor with no child yet left
+        no line at all (2026-11-10, a turn refused with 'is draining')."""
+        self._successor = successor
+        waiting = self.waiting_in_the_card_queue()
+        logger.info(
+            "%s[%s]: replaced by a settings save while %s; %d request(s) waiting for the card "
+            "go on under the successor, in the place they hold",
+            self.ENGINE, self.alias,
+            "its child is up" if self.props is not None else "no child of it is up",
+            waiting,
+        )
+
+    def _successor_in_the_end(self) -> Optional["LlamaServerSupervisor"]:
+        """The last supervisor of the chain of settings saves, or None for one never replaced."""
+        successor = self._successor
+        while successor is not None and successor._successor is not None:
+            successor = successor._successor
+        return successor
+
+    def _passes_its_calls_to(self, successor: "LlamaServerSupervisor", keeps_its_place: bool) -> None:
+        self._passed_on_to = successor
+        logger.info(
+            "%s[%s]: a request that had not started here goes on under the supervisor that replaced "
+            "this one (%s)", self.ENGINE, self.alias,
+            "in its place in the card queue" if keeps_its_place else "asking afresh",
+        )
+
+    def where_calls_go(self) -> "LlamaServerSupervisor":
+        """This supervisor, or the one a request of it was passed on to: what a provider holding
+        this one points at after its `ensure_running` returned."""
+        sup = self
+        while sup._passed_on_to is not None:
+            sup = sup._passed_on_to
+        return sup
 
     async def _await_predecessor(self) -> None:
         """Do not start until the superseded child has actually let go.

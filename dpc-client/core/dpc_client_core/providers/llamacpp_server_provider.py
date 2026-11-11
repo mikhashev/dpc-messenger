@@ -171,10 +171,18 @@ class LlamaServerProvider(DeepSeekProvider):
         # flags are unchanged (a reload must not re-load a 30 GB model), and
         # retire it loudly when they are not. A child of another class is never
         # adopted: an alias whose type changed keeps its name and nothing else.
+        #
+        # A supervisor with no child yet is adopted on the same terms: a call may be
+        # waiting for the card in the line of ADR-044 (rule 14), and replacing it would
+        # drain the supervisor that call asked and refuse it (2026-11-10). The one with no
+        # child that is not adopted is a Strata launcher that stopped after an engine
+        # death: its latched failure stays the owner's to reset (point 3), and a save has
+        # always built a fresh supervisor for it, with nothing waiting on it (a latched
+        # failure is refused at once).
         previous = _ACTIVE_SUPERVISORS.get(alias)
         if (
             previous is not None
-            and previous.props is not None
+            and getattr(previous, "failure", None) is None
             and type(previous) is self.SUPERVISOR_CLASS
             and self._flag_signature(previous.config) == self._flag_signature(config)
         ):
@@ -189,11 +197,19 @@ class LlamaServerProvider(DeepSeekProvider):
             # change what the live child was started with; it only lets the
             # non-flag values move without paying for a model re-load.
             previous.config = previous.merge_config(config)
-            logger.info(
-                "llamacpp_server '%s': adopting the already-running llama-server "
-                "(flags unchanged by the config reload)",
-                alias,
-            )
+            if previous.props is not None:
+                logger.info(
+                    "llamacpp_server '%s': adopting the already-running llama-server "
+                    "(flags unchanged by the config reload)",
+                    alias,
+                )
+            else:
+                logger.info(
+                    "llamacpp_server '%s': adopting the supervisor that has no child yet "
+                    "(flags unchanged by the config reload); %d request(s) waiting for the "
+                    "card stay in line",
+                    alias, previous.waiting_in_the_card_queue(),
+                )
         else:
             if previous is not None and previous.props is not None:
                 logger.warning(
@@ -207,6 +223,18 @@ class LlamaServerProvider(DeepSeekProvider):
                 # finished its in-flight work and released the card — this card
                 # cannot hold two copies of the model.
                 self.supervisor.supersedes(self._retire(previous))
+                # A request that has not started on the predecessor goes on under
+                # the successor. Only for the same engine: a provider of another
+                # class would be pointed at a launcher whose dialect it does not speak.
+                if type(previous) is type(self.supervisor):
+                    previous.superseded_by(self.supervisor)
+                elif previous.waiting_in_the_card_queue():
+                    logger.warning(
+                        "llamacpp_server '%s': the alias changed engine (%s -> %s); the %d "
+                        "request(s) waiting for the card on the old one are refused",
+                        alias, previous.ENGINE, self.supervisor.ENGINE,
+                        previous.waiting_in_the_card_queue(),
+                    )
             elif _RETIRING:
                 # A rename crosses the key. The old alias is gone from the
                 # registry and the new one has never been in it, so the lookup
@@ -315,11 +343,26 @@ class LlamaServerProvider(DeepSeekProvider):
 
     # --- lifecycle -----------------------------------------------------------
 
+    async def _ensure_running(self) -> Dict[str, Any]:
+        """`ensure_running` of this provider's supervisor, and this provider follows the call if
+        a settings save passed it on: a request that had not started on the supervisor that was
+        replaced runs under the successor, so its port, its slot and its props are the
+        successor's from here (`where_calls_go`)."""
+        supervisor = self.supervisor
+        props = await supervisor.ensure_running()
+        # A test double standing in for a supervisor has no hand-over to follow.
+        follow = getattr(supervisor, "where_calls_go", None)
+        moved = follow() if follow is not None else supervisor
+        if moved is not supervisor:
+            self.supervisor = moved
+            self._openai = None
+        return props
+
     async def _ensure(self) -> AsyncOpenAI:
         """The server is up (started if this is the first call) and the client
         aimed at it. Each retry re-runs this, so a child that died mid-call is
         restarted by the attempt that follows its connection error."""
-        props = await self.supervisor.ensure_running()
+        props = await self._ensure_running()
         if self._openai is None or self._port != self.supervisor.port:
             self._port = self.supervisor.port
             # The server ignores the key but the SDK insists on one.
@@ -861,7 +904,7 @@ class LlamaServerProvider(DeepSeekProvider):
         `EngineCountError` that says what was asked. 60 s: a count is a tokenizer
         pass, not a generation."""
         try:
-            await self.supervisor.ensure_running()
+            await self._ensure_running()
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
                     f"http://127.0.0.1:{self.supervisor.port}{path}", json=body)
@@ -894,7 +937,7 @@ class LlamaServerProvider(DeepSeekProvider):
     async def engine_context_window(self) -> int:
         """The live child's own `n_ctx` (`_reported_window`), once it is up."""
         try:
-            await self.supervisor.ensure_running()
+            await self._ensure_running()
         except Exception as e:
             raise EngineCountError(
                 f"'{self.alias}': the engine could not be started to read its window "
