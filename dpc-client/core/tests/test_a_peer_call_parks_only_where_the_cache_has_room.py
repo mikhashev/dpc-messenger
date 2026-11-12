@@ -312,3 +312,42 @@ class TestTheField:
         from dpc_client_core.providers.strata_provider import _STRATA_FLAG_KEYS
 
         assert "guest_conversation_cache" not in _STRATA_FLAG_KEYS
+
+
+class TestTheEntryIsReservedWhenTheDecisionIsOn:
+    @pytest.mark.asyncio
+    async def test_a_call_decided_on_and_cancelled_with_no_usage_still_holds_the_entry(self, tmp_path):
+        sup = _sup(tmp_path, _cache(parked=0, slots=4))
+        sup.note_guest_call(PEER, 125000, False)
+        sup.note_guest_call(OTHER, 1000, False)
+        # The call goes out on, and is cancelled before its usage chunk: no note_guest_call.
+        assert await sup.guest_checkpoint(PEER) is True
+        assert sup._guest_entry_holder() == PEER
+        assert await sup.guest_checkpoint(OTHER) is False
+        # The first peer's own next call still decides normally.
+        assert await sup.guest_checkpoint(PEER) is True
+
+    @pytest.mark.asyncio
+    async def test_a_decision_that_is_off_reserves_nothing(self, tmp_path):
+        sup = _sup(tmp_path, _cache(parked=2, slots=2, held=5 * GIB))
+        sup.note_guest_call(PEER, 125000, False)
+        assert await sup.guest_checkpoint(PEER) is False
+        assert sup._guest_entry_holder() is None
+
+    @pytest.mark.asyncio
+    async def test_a_reservation_the_call_never_used_goes_with_an_eviction(self, tmp_path):
+        sup = _sup(tmp_path, _cache(parked=0, slots=4, evictions=7))
+        sup._cache_evictions_polled = 7
+        sup.note_guest_call(PEER, 125000, False)
+        sup.note_guest_call(OTHER, 1000, False)
+        assert await sup.guest_checkpoint(PEER) is True
+        sup._get = AsyncMock(return_value={"conversation_cache": _cache(parked=0, slots=4, evictions=8)})
+        assert await sup.guest_checkpoint(OTHER) is True
+
+    @pytest.mark.asyncio
+    async def test_a_reservation_the_call_never_used_goes_with_a_new_launch(self, tmp_path):
+        sup = _sup(tmp_path, _cache(parked=0, slots=4))
+        sup.note_guest_call(PEER, 125000, False)
+        assert await sup.guest_checkpoint(PEER) is True
+        sup.prime_restore_scan()
+        assert sup._guest_entry_holder() is None

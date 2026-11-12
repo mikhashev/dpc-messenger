@@ -2245,8 +2245,10 @@ class StrataSupervisor(LlamaServerSupervisor):
     def note_guest_call(self, peer_id: str, size: Optional[int], checkpoint_on: bool) -> None:
         """Record a finished call served to `peer_id`: its size (prompt plus reply
         tokens; None when the call reported none) for the next estimate, and the
-        guest entry. A call with checkpointing on leaves the peer's session to be
-        parked; one with it off took back the peer's entry if it matched and parked
+        guest entry. The entry is first reserved by `guest_checkpoint` when it
+        decides on; a call with checkpointing on that finishes renews it (its
+        park comes at the end of the call, after any eviction counted meanwhile);
+        one with it off took back the peer's entry if it matched and parked
         nothing after it, so the peer holds none."""
         if isinstance(size, int) and not isinstance(size, bool) and size > 0:
             sizes = (self._guest_sizes.pop(peer_id, []) + [size])[-2:]
@@ -2339,6 +2341,14 @@ class StrataSupervisor(LlamaServerSupervisor):
             reasons.insert(0, "another peer holds the one guest entry")
         if estimate is None:
             reasons.insert(0, "no earlier call of this peer to estimate its snapshot from")
+        if not reasons:
+            # Reserved now, not when the call finishes: a call cancelled before its
+            # usage chunk reaches no `note_guest_call`, and the engine may hold the
+            # peer's session all the same. A reservation the call never uses goes
+            # with the other release rules (this peer's next call out with
+            # checkpointing off, an eviction since, a new launch). Nothing awaits
+            # between the holder check above and this line.
+            self._guest_entry = {"peer": peer_id, "evictions": self._cache_evictions_polled}
         return say(not reasons, reasons, inputs, estimate)
 
     def _new_cache_evictions(self) -> int:
