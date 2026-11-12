@@ -22,6 +22,7 @@ One INFO line per decision prints the inputs and the answer (Johnny's (b)).
 
 import asyncio
 import logging
+import re
 from unittest.mock import AsyncMock
 
 import pytest
@@ -168,6 +169,7 @@ class TestTheDecision:
             assert await sup.guest_checkpoint(PEER) is False
         (line,) = _decisions(caplog)
         assert "did not answer" in line
+        assert re.search(r"; /metrics read took \d+ ms; ", line)
 
     @pytest.mark.asyncio
     async def test_metrics_slower_than_the_limit_turns_it_off(self, tmp_path, monkeypatch):
@@ -269,6 +271,7 @@ class TestTheLine:
             assert await sup.guest_checkpoint(PEER) is False
         (line,) = _decisions(caplog)
         assert f"peer {PEER} goes out with checkpointing off" in line
+        assert re.search(r"\(guest_conversation_cache\); /metrics read took \d+ ms; slots:", line)
         assert "slots: parked 1 - 0 own + 2" in line and "+ 1 kept free = 4 of 3" in line
         assert "MiB: 2048 held + 2503 estimate of budget 10240" in line
         assert "physical RAM: 40000 MiB free - 2503 estimate against the floor 1000" in line

@@ -1248,10 +1248,13 @@ Names kept from the code: `supersedes`, predecessor and successor are the superv
    - The full rule needs an engine key for an evict-first entry (`park=spare` in the ideas file, the mirror image of `pin`), and per-entry sizes in `/metrics`. Until a Strata release has them, this paragraph is the known cost.
 6. **The gateway is not a peer.** ADR-041's gateway calls are this node's own and keep checkpointing on.
 7. **What is said.** Two INFO lines, both naming no agent or conversation:
-   - one per call served to a peer: on or off, the parked count against `slots` with the peer's own entry and the slot kept free, MiB held and the estimate against the budget, free physical RAM and the estimate against the floor, the estimate with what it was made from, and the reasons when off; it names no node but the peer;
+   - one per call served to a peer: on or off, how long the `/metrics` read took in milliseconds (that await sits before every peer call on an engine that serves one request at a time; on a timeout or an error the elapsed time is printed too), the parked count against `slots` with the peer's own entry and the slot kept free, MiB held and the estimate against the budget, free physical RAM and the estimate against the floor, the estimate with what it was made from, and the reasons when off; it names no node but the peer;
    - one whenever the cache's `parked`, `slots`, `bytes` or `budget_mib` change, from the engine watcher's poll (`_note_cache_view`), so a day's occupancy can be read from the log before the rule is tuned (Johnny's condition: record before deciding).
 8. **Known cost.**
    - A peer's entry takes one slot and one snapshot of host RAM between its calls.
    - With `slots = 2` the rule never applies: our live conversation, the peer's snapshot and the slot kept free already need three. It is meant for a `conversation_cache_slots` of at least 3, which is the owner's setting (point 7), not a default. Until then the INFO lines say why it is off.
+9. **Reading the first day.**
+   - The acceptance criterion for the first day is read against `budget_mib` (the MiB budget), not against physical RAM: on this node the RAM floor (`conversation_cache_min_free_mib`) was 1000 MiB with about 9 GiB free, so the floor never binds and cannot explain a "no fire".
+   - The engine has a third mechanism besides park and evict, a partial borrow from a parked entry that "stays parked" (engine log lines "borrowed ... which stays parked"); it is known and not used by this rule.
 
 Names: `guest_conversation_cache` is new (GLOSSARY). Its "guest" is the peer a call is served to, not the guest ceiling of ADR-041 D5 (`vendor_request_quotas`, `guest_vendor_quota.py`).

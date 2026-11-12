@@ -2269,11 +2269,17 @@ class StrataSupervisor(LlamaServerSupervisor):
         `/metrics` answers within GUEST_METRICS_TIMEOUT_S, no other peer holds the
         guest entry, an earlier call of this peer gives an estimate, and
         `guest_cache_room` finds room. Anything else is off."""
+        read_ms: List[int] = []
+
         def say(on: bool, why: List[str], inputs: Optional[Dict[str, Any]] = None,
                 estimate: Optional[Dict[str, Any]] = None) -> bool:
             i = inputs or {}
             est = estimate["mib"] if estimate else None
             parts = []
+            if read_ms:
+                # The read sits before every peer call on an engine that serves one
+                # request at a time, so what it cost is part of the decision's record.
+                parts.append(f"/metrics read took {read_ms[0]} ms")
             if i:
                 parts.append(
                     f"slots: parked {_fmt(i.get('parked'))} - {i.get('own')} own + 2 (our live "
@@ -2304,10 +2310,13 @@ class StrataSupervisor(LlamaServerSupervisor):
 
         if not self.config.get("guest_conversation_cache", True):
             return say(False, ["guest_conversation_cache is off on this alias"])
+        started = time.monotonic()
         try:
             metrics = await asyncio.wait_for(self._get("/metrics"), GUEST_METRICS_TIMEOUT_S)
         except Exception as e:
+            read_ms.append(round((time.monotonic() - started) * 1000))
             return say(False, [f"the launcher's /metrics did not answer ({type(e).__name__})"])
+        read_ms.append(round((time.monotonic() - started) * 1000))
         if not isinstance(metrics, dict) or not isinstance(metrics.get("conversation_cache"), dict):
             return say(False, ["the launcher's /metrics has no conversation_cache"])
         self._note_cache_evictions(metrics)
