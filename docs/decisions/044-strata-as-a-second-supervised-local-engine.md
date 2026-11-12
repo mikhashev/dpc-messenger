@@ -1225,3 +1225,33 @@ Nothing below has been run live: acceptance is a live start with no budget, shor
 6. **Not covered.** A call whose child was mid-launch when a flag-changing save arrived is cancelled by the drain's stop and is not passed on. A deleted alias's supervisor with no child is dropped from the registry without a drain (`retire_absent`), and what waits on it is not looked at here.
 
 Names kept from the code: `supersedes`, predecessor and successor are the supervisor's own words; no new term entered the vocabulary beyond the three methods `superseded_by`, `where_calls_go` and `waiting_in_the_card_queue`.
+
+## Amendment, 2026-11-13 — a peer's call parks when the cache has room
+
+*(Voted 2026-11-12/13 by CC, Zcode and Johnny as variant C2 of `ideas/peer-cache-variant-c-2026-11-12.md`; Ark's vote is pending. This replaces the first sentence of point 9 ("Every call served to a peer is sent with checkpointing off") and the part of its known cost about parking. Everything else in point 9 stands. The owner keeps two things: the alias's `conversation_cache_slots`, and whether and when the request below goes to Strata's maintainer.)*
+
+1. **The rule.** A call served to a peer goes out with checkpointing on when, read right before the call, the conversation cache has room for it. Otherwise it goes out with checkpointing off (`strata_checkpoint: false`, the engine's `ckpt=0`) as before.
+   - Room means four things together, read from the launcher's `/metrics` `conversation_cache` and the host's free physical RAM (`ullAvailPhys` on Windows, `MemAvailable` elsewhere), both fresh at that moment:
+     - the parked count, less this peer's own entry, plus two (our live conversation and the peer's snapshot), plus one slot kept free for our next new conversation, is within `slots`;
+     - `bytes` plus the peer's estimated snapshot is within `budget_mib`;
+     - free physical RAM less that estimate stays at or above the engine's `conversation_cache_min_free_mib`;
+     - no other peer holds the one guest entry.
+   - The estimate is a fit of the engine's own parked sizes on this alias (a fixed part plus a part per token; the fit, its source and its date are `GUEST_SNAPSHOT_*` in `strata_supervisor.py`, since this record carries no figure that changes), applied to the peer's next call: its last call's prompt and reply plus the growth between its last two calls, or the last times 1.15 when only one is known. A peer with no earlier call has no estimate, and its call is off.
+   - A `/metrics` that does not answer within 3 s, or answers without `conversation_cache`, means off.
+   - The decision is taken in the provider's last await before the wire body is built (`StrataProvider._ensure`, `StrataSupervisor.guest_checkpoint`), so all four request paths carry it.
+2. **The switch.** The `strata` alias field `guest_conversation_cache`, true or false, on when absent. Off sends every call served to a peer with checkpointing off and reads no `/metrics` for it. It changes nothing the launcher is started with, so a save does not restart it.
+3. **One guest entry.** One peer at a time may hold an entry. It is recorded when a call that went out with checkpointing on finishes, and dropped when that peer's next call goes out off (that call takes the entry back if it matches and parks nothing after it), when the engine's eviction counter moves (the entry may be the one evicted), and at a new launch.
+4. **What the engine does with it.** With checkpointing on, the engine keeps the peer's session after its turn and parks it at the next switch, as it does ours. The peer's next call restores it (a restore of a few hundred milliseconds in place of a cold read of its whole prompt) and takes it out of the cache. A call sent with checkpointing off still takes back an entry it matches, and parks nothing after it, so a peer's entry lasts at most until that peer's next call.
+5. **What it does not promise.** Strata evicts the conversation parked longest ago (`evict_oldest`, by slots, by budget and by the RAM floor), and has no per-request way to say "evict this one first".
+   - A peer's snapshot is usually the newest entry, so if we start more new conversations after it than the slot kept free, the next eviction takes one of ours, not the peer's.
+   - The rule keeps the peer out of room we are using when its call goes out. It does not reserve the room afterwards.
+   - The full rule needs an engine key for an evict-first entry (`park=spare` in the ideas file, the mirror image of `pin`), and per-entry sizes in `/metrics`. Until a Strata release has them, this paragraph is the known cost.
+6. **The gateway is not a peer.** ADR-041's gateway calls are this node's own and keep checkpointing on.
+7. **What is said.** Two INFO lines, both naming no agent or conversation:
+   - one per call served to a peer: on or off, the parked count against `slots` with the peer's own entry and the slot kept free, MiB held and the estimate against the budget, free physical RAM and the estimate against the floor, the estimate with what it was made from, and the reasons when off; it names no node but the peer;
+   - one whenever the cache's `parked`, `slots`, `bytes` or `budget_mib` change, from the engine watcher's poll (`_note_cache_view`), so a day's occupancy can be read from the log before the rule is tuned (Johnny's condition: record before deciding).
+8. **Known cost.**
+   - A peer's entry takes one slot and one snapshot of host RAM between its calls.
+   - With `slots = 2` the rule never applies: our live conversation, the peer's snapshot and the slot kept free already need three. It is meant for a `conversation_cache_slots` of at least 3, which is the owner's setting (point 7), not a default. Until then the INFO lines say why it is off.
+
+Names: `guest_conversation_cache` is new (GLOSSARY). Its "guest" is the peer a call is served to, not the guest ceiling of ADR-041 D5 (`vendor_request_quotas`, `guest_vendor_quota.py`).

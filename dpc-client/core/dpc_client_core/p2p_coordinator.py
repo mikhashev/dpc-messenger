@@ -1140,8 +1140,8 @@ class P2PCoordinator:
                 # field was refused above, so no tool is dropped on this branch.
                 # Marked as a peer's call: a Strata launcher that is down is not
                 # started for it, its failure is not retried, and it goes out
-                # with checkpointing off, so it parks nothing in the owner's
-                # conversation cache (ADR-044 point 9). The owner does not queue
+                # with checkpointing off unless guest_conversation_cache is on
+                # and the cache has room (ADR-044 amendment 2026-11-13). The owner does not queue
                 # behind this lock; the engine serves one request at a time.
                 try:
                     with serving_a_peer(peer_id):

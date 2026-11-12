@@ -303,7 +303,8 @@ an alias outside them is `404`, and the gateway never falls back to `default_pro
   permission — but it transcribes and does not chat, so the gateway leaves it off
   `/v1/models` and answers a completion addressed to it `404` saying so. The same
   applies to a peer's `local_whisper` row: it is not listed as `remote:<peer>:<alias>`.
-  A `strata` alias serves a peer with checkpointing off, so it parks nothing and is served
+  A `strata` alias serves a peer with checkpointing off unless `guest_conversation_cache`
+  is on and the conversation cache has room (ADR-044 amendment of 2026-11-13), and is served
   beside this node's own parked conversations, queued behind an owner call that is
   running. A peer's request may start a stopped engine when the card is free, and while
   the engine loads the peer gets the refusal code `provider_loading` (ADR-044 point 9).

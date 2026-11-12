@@ -45,9 +45,11 @@ What differs, by ADR-044 point:
   fail harmlessly) and the card is not claimed free.
 - 9. A peer's call is marked (`serving_a_peer`) so the supervisor and the
   provider can tell it from the owner's: a peer's call never starts the
-  launcher itself, is never retried, and goes out with checkpointing off
+  launcher itself and is never retried. It goes out with checkpointing off
   (`strata_provider.PEER_CHECKPOINT_OFF`), so it parks no conversation of its
-  own (Mike's call, 2026-10-20). The peer policy in
+  own (Mike's call, 2026-10-20), unless the conversation cache has room for its
+  snapshot and one slot more (`guest_checkpoint`, the alias field
+  `guest_conversation_cache`; amendment of 2026-11-13). The peer policy in
   `strata_provider.peer_refusal` may begin a start in the background instead
   (`start_for_peer`), one at a time, and answers the peer "loading" meanwhile.
 """
@@ -57,6 +59,7 @@ import concurrent.futures
 import contextvars
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -133,6 +136,104 @@ def cache_admission(config: Dict[str, Any]) -> Dict[str, int]:
     }
 
 
+# ADR-044, amendment 2026-11-13 (variant C2): a call served to a peer goes out
+# with checkpointing on only when the conversation cache has room for its
+# snapshot and one slot stays free for our next new conversation.
+#
+# The snapshot size the room is checked for, fitted over 2303 `parked ...
+# snapshot_bytes=...` lines of the engine log of the alias that serves peers
+# (ideas/peer-cache-variant-c-2026-11-12.md, question 1): an upper envelope,
+# 750 MiB plus 13.8 MiB per 1000 tokens.
+GUEST_SNAPSHOT_BASE_MIB = 750.0
+GUEST_SNAPSHOT_MIB_PER_1K_TOKENS = 13.8
+# The growth a peer's next call is given over its last one when only one call
+# is known; with two, the difference between them (growth was additive).
+GUEST_GROWTH_FACTOR_ONE_CALL = 1.15
+# Slots left empty after our live conversation and the peer's snapshot (C2).
+GUEST_SLOTS_KEPT_FREE = 1
+# A `/metrics` read slower than this is a read that did not answer: off.
+GUEST_METRICS_TIMEOUT_S = 3.0
+# Peers whose last two call sizes are kept for the estimate; the oldest goes first.
+_GUEST_SIZES_KEPT = 32
+
+
+def guest_snapshot_estimate(sizes: List[int]) -> Optional[Dict[str, Any]]:
+    """The peer's next snapshot from the sizes (prompt plus reply tokens) of its
+    last calls, oldest first: `tokens`, `mib` and `basis` in words; None with no call.
+
+    Two calls: the last plus the growth between them (none when it shrank). One
+    call: the last times GUEST_GROWTH_FACTOR_ONE_CALL."""
+    if not sizes:
+        return None
+    last = sizes[-1]
+    if len(sizes) >= 2:
+        growth = max(0, last - sizes[-2])
+        tokens = last + growth
+        basis = f"last call {last} tokens + {growth} grown since the call before"
+    else:
+        tokens = math.ceil(last * GUEST_GROWTH_FACTOR_ONE_CALL)
+        basis = f"last call {last} tokens x{GUEST_GROWTH_FACTOR_ONE_CALL}, one call known"
+    # Rounded before the ceiling: 13.8 * 115 is 1587.0000000000002 in floats.
+    mib = math.ceil(round(GUEST_SNAPSHOT_BASE_MIB + GUEST_SNAPSHOT_MIB_PER_1K_TOKENS * tokens / 1000, 6))
+    return {"tokens": tokens, "mib": mib, "basis": basis}
+
+
+def guest_cache_room(
+    cache: Any,
+    *,
+    estimate_mib: Optional[int],
+    free_physical_mib: Optional[int],
+    floor_mib: int,
+    own_entry: bool,
+) -> tuple:
+    """Whether the conversation cache has room for a peer's snapshot (C2):
+    `(reasons, inputs)`, room when `reasons` is empty.
+
+    - slots: the parked count, less this peer's own entry, plus two (our live
+      conversation and the peer's snapshot), plus GUEST_SLOTS_KEPT_FREE, within `slots`;
+    - MiB: `bytes` plus the estimate within `budget_mib`;
+    - physical RAM: free less the estimate at least the engine's floor.
+    A value the launcher does not give is a reason, never a guess; with no
+    estimate the MiB and RAM checks are not made (the caller names why)."""
+    cache = cache if isinstance(cache, dict) else {}
+    parked, slots = _whole_number(cache.get("parked")), _whole_number(cache.get("slots"))
+    held, budget = _whole_number(cache.get("bytes")), _whole_number(cache.get("budget_mib"))
+    reasons: List[str] = []
+    if cache.get("enabled") is False:
+        reasons.append("the conversation cache is off on the engine")
+    own = 1 if own_entry else 0
+    inputs: Dict[str, Any] = {
+        "parked": parked, "slots": slots, "own": own, "kept_free": GUEST_SLOTS_KEPT_FREE,
+        "held_mib": None if held is None else held >> 20, "budget_mib": budget,
+        "free_physical_mib": free_physical_mib, "floor_mib": floor_mib, "estimate_mib": estimate_mib,
+    }
+    if parked is None or slots is None:
+        reasons.append("the launcher's /metrics gives no parked count or no slots")
+    else:
+        needed = max(parked - own, 0) + 2 + GUEST_SLOTS_KEPT_FREE
+        inputs["slots_needed"] = needed
+        if needed > slots:
+            reasons.append(f"slots: {needed} needed of {slots}")
+    if estimate_mib is not None:
+        if held is None or budget is None:
+            reasons.append("the launcher's /metrics gives no bytes or no budget_mib")
+        elif (held >> 20) + estimate_mib > budget:
+            reasons.append(f"MiB: {(held >> 20) + estimate_mib} needed of budget {budget}")
+        if free_physical_mib is None:
+            reasons.append("free physical RAM is unreadable")
+        elif free_physical_mib - estimate_mib < floor_mib:
+            reasons.append(
+                f"physical RAM: {free_physical_mib - estimate_mib} MiB left, under the floor {floor_mib}")
+    return reasons, inputs
+
+
+def guest_conversation_cache_error(value: Any) -> Optional[str]:
+    """Why `value` cannot be the alias's `guest_conversation_cache`, or None (absent is on)."""
+    if value is None or isinstance(value, bool):
+        return None
+    return f"guest_conversation_cache: expected true or false, not {value!r}"
+
+
 STRATA_DEFAULTS: Dict[str, Any] = {
     "strata_install_dir": None,
     "strata_base_config": None,
@@ -145,6 +246,10 @@ STRATA_DEFAULTS: Dict[str, Any] = {
     # The admission rules: Strata's own defaults, held here so that they are
     # written explicitly (CACHE_ADMISSION_FLAGS).
     **{key: default for key, (_flag, default, _hi) in CACHE_ADMISSION_FLAGS.items()},
+    # Whether a call served to a peer may go out with checkpointing on when the
+    # conversation cache has room for it (`guest_checkpoint`); False sends every
+    # such call with checkpointing off, as before the amendment of 2026-11-13.
+    "guest_conversation_cache": True,
     # The server's window (`--max-context`), not the agent's: that one is
     # `context_window`, a config field nothing derives; unset, the engine answers.
     "max_context": None,
@@ -474,6 +579,9 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
     slot_error = slot_save_path_error(config.get("slot_save_path"))
     if slot_error:
         errors.append(slot_error)
+    guest_error = guest_conversation_cache_error(config.get("guest_conversation_cache"))
+    if guest_error:
+        errors.append(guest_error)
     for error in (drafting_error(config.get("drafting")), vision_elastic_error(config.get("vision_elastic"))):
         if error:
             errors.append(error)
@@ -973,6 +1081,13 @@ class StrataSupervisor(LlamaServerSupervisor):
         # printed: the occupancy is logged when it changes, not on every poll.
         self.cache_view: Optional[Dict[str, Any]] = None
         self._cache_view_logged: Optional[tuple] = None
+        # The one entry a peer may hold in the conversation cache (C2): the peer's
+        # node id and the eviction count when its call went out with checkpointing
+        # on; None when no peer holds one. Any later eviction may have taken it,
+        # so a changed count drops it from here (`_guest_entry_holder`).
+        self._guest_entry: Optional[Dict[str, Any]] = None
+        # Per peer, the sizes (prompt plus reply tokens) of its last two calls.
+        self._guest_sizes: Dict[str, List[int]] = {}
         # A recorded engine death. While set, ensure_running refuses: DPC
         # never relaunches after it stopped the launcher on a death.
         self.failure: Optional[Dict[str, Any]] = None
@@ -2114,6 +2229,109 @@ class StrataSupervisor(LlamaServerSupervisor):
             "unread" if not reading else f"{reading['avail_phys_mib']} MiB",
         )
 
+    # --- a call served to a peer, and the room it may park in (C2) --------------
+
+    def _guest_entry_holder(self) -> Optional[str]:
+        """The peer that holds the one guest entry, or None; an eviction since dropped it."""
+        entry = self._guest_entry
+        if entry is None:
+            return None
+        then, now = entry.get("evictions"), self._cache_evictions_polled
+        if then is not None and now is not None and now != then:
+            self._guest_entry = None
+            return None
+        return entry["peer"]
+
+    def note_guest_call(self, peer_id: str, size: Optional[int], checkpoint_on: bool) -> None:
+        """Record a finished call served to `peer_id`: its size (prompt plus reply
+        tokens; None when the call reported none) for the next estimate, and the
+        guest entry. A call with checkpointing on leaves the peer's session to be
+        parked; one with it off took back the peer's entry if it matched and parked
+        nothing after it, so the peer holds none."""
+        if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+            sizes = (self._guest_sizes.pop(peer_id, []) + [size])[-2:]
+            self._guest_sizes[peer_id] = sizes
+            while len(self._guest_sizes) > _GUEST_SIZES_KEPT:
+                self._guest_sizes.pop(next(iter(self._guest_sizes)))
+        if checkpoint_on:
+            self._guest_entry = {"peer": peer_id, "evictions": self._cache_evictions_polled}
+        elif self._guest_entry is not None and self._guest_entry["peer"] == peer_id:
+            self._guest_entry = None
+
+    @_base.on_the_owner_loop
+    async def guest_checkpoint(self, peer_id: str) -> bool:
+        """Whether the call about to be served to `peer_id` goes out with
+        checkpointing on (ADR-044, amendment 2026-11-13). One INFO line says the
+        inputs and the answer; it names no agent or conversation, and no node
+        but this peer.
+
+        On only when the alias's `guest_conversation_cache` is on, the launcher's
+        `/metrics` answers within GUEST_METRICS_TIMEOUT_S, no other peer holds the
+        guest entry, an earlier call of this peer gives an estimate, and
+        `guest_cache_room` finds room. Anything else is off."""
+        def say(on: bool, why: List[str], inputs: Optional[Dict[str, Any]] = None,
+                estimate: Optional[Dict[str, Any]] = None) -> bool:
+            i = inputs or {}
+            est = estimate["mib"] if estimate else None
+            parts = []
+            if i:
+                parts.append(
+                    f"slots: parked {_fmt(i.get('parked'))} - {i.get('own')} own + 2 (our live "
+                    f"conversation, this snapshot) + {i.get('kept_free')} kept free = "
+                    f"{_fmt(i.get('slots_needed'))} of {_fmt(i.get('slots'))}"
+                )
+                parts.append(
+                    f"MiB: {_fmt(i.get('held_mib'))} held + {_fmt(est)} estimate of budget "
+                    f"{_fmt(i.get('budget_mib'))}"
+                )
+                parts.append(
+                    f"physical RAM: {_fmt(i.get('free_physical_mib'))} MiB free - {_fmt(est)} estimate "
+                    f"against the floor {_fmt(i.get('floor_mib'))}"
+                )
+                parts.append(
+                    "snapshot estimate: "
+                    + (f"{estimate['mib']} MiB for {estimate['tokens']} tokens ({estimate['basis']})"
+                       if estimate else "none")
+                )
+            logger.info(
+                "strata[%s]: a call served to peer %s goes out with checkpointing %s "
+                "(guest_conversation_cache)%s%s",
+                self.alias, peer_id, "on" if on else "off",
+                "".join(f"; {p}" for p in parts),
+                "" if on else "; off because " + "; ".join(why),
+            )
+            return on
+
+        if not self.config.get("guest_conversation_cache", True):
+            return say(False, ["guest_conversation_cache is off on this alias"])
+        try:
+            metrics = await asyncio.wait_for(self._get("/metrics"), GUEST_METRICS_TIMEOUT_S)
+        except Exception as e:
+            return say(False, [f"the launcher's /metrics did not answer ({type(e).__name__})"])
+        if not isinstance(metrics, dict) or not isinstance(metrics.get("conversation_cache"), dict):
+            return say(False, ["the launcher's /metrics has no conversation_cache"])
+        self._note_cache_evictions(metrics)
+        self._note_cache_view(metrics)
+        engine = metrics.get("engine") if isinstance(metrics.get("engine"), dict) else {}
+        floor = _whole_number(engine.get("conversation_cache_min_free_mib"))
+        if floor is None:
+            floor = cache_admission(self.config)["conversation_cache_min_free_mib"]
+        holder = self._guest_entry_holder()
+        estimate = guest_snapshot_estimate(self._guest_sizes.get(peer_id, []))
+        reading = read_free_commit_or_physical()
+        reasons, inputs = guest_cache_room(
+            metrics["conversation_cache"],
+            estimate_mib=estimate["mib"] if estimate else None,
+            free_physical_mib=reading.get("avail_phys_mib") if reading else None,
+            floor_mib=floor,
+            own_entry=holder == peer_id,
+        )
+        if holder is not None and holder != peer_id:
+            reasons.insert(0, "another peer holds the one guest entry")
+        if estimate is None:
+            reasons.insert(0, "no earlier call of this peer to estimate its snapshot from")
+        return say(not reasons, reasons, inputs, estimate)
+
     def _new_cache_evictions(self) -> int:
         """Evictions the engine counted since the last INFO record, as of the last poll.
 
@@ -2193,6 +2411,7 @@ class StrataSupervisor(LlamaServerSupervisor):
         # A new launch starts with an empty cache: its first reading is said whatever it is.
         self.cache_view = None
         self._cache_view_logged = None
+        self._guest_entry = None
         try:
             self._engine_scan_offset = self._engine_log_path.stat().st_size
         except OSError:

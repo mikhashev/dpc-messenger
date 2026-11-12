@@ -9,6 +9,7 @@ or, while none runs, from the start it would make.
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 from typing import Any, Dict, Optional
@@ -29,14 +30,23 @@ from .llamacpp_server_provider import _ACTIVE_SUPERVISORS, LlamaServerProvider, 
 
 logger = logging.getLogger(__name__)
 
-# ADR-044 point 9 (Mike's call, 2026-10-20): every call served to a peer goes
-# out with Strata's per-request checkpoint switch off. The launcher reads the
-# request body as its sampling dict and turns this key into the engine's
-# `ckpt=0` (serve/server.py:1705-1706, Strata v0.2.11); the engine
-# then takes no checkpoint for the request and neither continues nor parks its
-# session afterwards (src/program/generate.cpp:13882-13886, :17183), so a
-# peer's call leaves no snapshot in the conversation cache to compete with ours.
+# ADR-044 point 9 (Mike's call, 2026-10-20) as amended 2026-11-13: a call served
+# to a peer goes out with Strata's per-request checkpoint switch off unless the
+# supervisor finds room for its snapshot (`StrataSupervisor.guest_checkpoint`,
+# alias field `guest_conversation_cache`). The launcher reads the request body as
+# its sampling dict and turns this key into the engine's `ckpt=0`
+# (serve/server.py:1703-1706, Strata v0.2.11); the engine then takes no
+# checkpoint for the request and neither continues nor parks its session
+# afterwards (src/program/generate.cpp:15495-15498, :19120), so such a call
+# leaves no snapshot in the conversation cache to compete with ours.
 PEER_CHECKPOINT_OFF = {"strata_checkpoint": False}
+
+# (id of the provider, peer node id, on) of the decision `_ensure` took for the
+# call in this task; `_sampling_on_the_wire` and `_record_usage` read it. A
+# ContextVar for the reason the peer mark is one: the five request paths each
+# run `_ensure`, the wire body and the usage in one task.
+_GUEST_CHECKPOINT: contextvars.ContextVar = contextvars.ContextVar(
+    "dpc_strata_guest_checkpoint", default=None)
 
 # The keys that change what the launcher would be started with; a reload that
 # leaves them equal adopts the running launcher. An edit inside the base
@@ -186,15 +196,60 @@ class StrataProvider(LlamaServerProvider):
         sampling: Dict[str, Any],
     ) -> Dict[str, Any]:
         """The base's, and on a call served to a peer the checkpoint switch off
-        (PEER_CHECKPOINT_OFF). Here because every request path — plain,
-        stream, tools, vision — passes its final `extra_body` through this
-        method just before the call, the vision path's thinking-off body
-        included, which `_build_extra_body` does not see. An owner's call is
-        sent as before: its conversation is the one the cache is for."""
+        (PEER_CHECKPOINT_OFF) unless `_ensure` found room for it. Here because
+        every request path — plain, stream, tools, vision — passes its final
+        `extra_body` through this method just before the call, the vision path's
+        thinking-off body included, which `_build_extra_body` does not see. No
+        decision is off. An owner's call is sent as before: its conversation is
+        the one the cache is for."""
         sampling = super()._sampling_on_the_wire(extra_body, sampling)
-        if peer_being_served() is not None:
+        if peer_being_served() is not None and not self._guest_checkpoint_on():
             extra_body.update(PEER_CHECKPOINT_OFF)
         return sampling
+
+    async def _ensure(self):
+        """The base's, and for a call served to a peer the supervisor's answer to
+        whether it goes out with checkpointing on (`guest_checkpoint`), read
+        here because this is the last await before the wire body is built. A
+        supervisor that cannot answer, or fails to, means off."""
+        client = await super()._ensure()
+        peer = peer_being_served()
+        if peer is not None:
+            on = False
+            decide = getattr(self.supervisor, "guest_checkpoint", None)
+            if decide is not None:
+                try:
+                    on = bool(await decide(peer))
+                except Exception as e:
+                    logger.warning(
+                        "strata '%s': the guest checkpoint decision failed (%s: %s); "
+                        "the call goes out with checkpointing off", self.alias, type(e).__name__, e,
+                    )
+            _GUEST_CHECKPOINT.set((id(self), peer, on))
+        return client
+
+    def _guest_checkpoint_on(self) -> bool:
+        """Whether `_ensure` decided on for the call being served to this peer now."""
+        peer = peer_being_served()
+        decision = _GUEST_CHECKPOINT.get()
+        return (peer is not None and decision is not None
+                and decision[0] == id(self) and decision[1] == peer and decision[2])
+
+    def _record_usage(self, raw_usage: Any, **kwargs) -> Dict[str, Any]:
+        """The base's, and for a call served to a peer its size and how it went
+        out, for the next decision (`StrataSupervisor.note_guest_call`)."""
+        usage = super()._record_usage(raw_usage, **kwargs)
+        peer = peer_being_served()
+        note = getattr(self.supervisor, "note_guest_call", None) if peer is not None else None
+        if note is not None:
+            size = None
+            if usage:
+                size = int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+            try:
+                note(peer, size or None, self._guest_checkpoint_on())
+            except Exception:
+                logger.debug("strata '%s': the guest call could not be noted", self.alias, exc_info=True)
+        return usage
 
     def supports_vision(self) -> bool:
         """`/props` `modalities.vision` of a running launcher; otherwise what the
@@ -295,7 +350,11 @@ class StrataProvider(LlamaServerProvider):
 
         Served with checkpointing off (PEER_CHECKPOINT_OFF), a peer's call
         parks nothing, so it cannot evict a conversation of ours with a
-        snapshot of its own. What it can still do is the engine's ordinary
+        snapshot of its own. It goes out with checkpointing on only when the
+        cache has room for that snapshot and one slot more (amendment of
+        2026-11-13, `StrataSupervisor.guest_checkpoint`); if more new
+        conversations of ours follow than that one slot, Strata's oldest-first
+        eviction takes one of ours, not the peer's. What it can still do is the engine's ordinary
         switch: its arrival parks the conversation of ours that is live, as a
         switch between two of our own agents does, and with the cache full
         that park evicts the oldest entry. Strata serves one request at a time
