@@ -66,7 +66,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from . import llama_server_supervisor as _base
-from .commit_memory import describe_free_commit, read_free_commit
+from .commit_memory import describe_free_commit, read_free_commit, read_free_commit_or_physical
 from .llama_server_supervisor import LlamaServerError, LlamaServerSupervisor, _free_port
 from . import strata_fetcher
 from .strata_fetcher import STRATA_ENGINE_VERSION, STRATA_RELEASE_TAG, strata_pin
@@ -903,6 +903,15 @@ def cache_loss_kind(line: str) -> Optional[str]:
     return None
 
 
+def _whole_number(value: Any) -> Optional[int]:
+    """`value` when it is an int and not a bool; None otherwise."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _fmt(value: Any) -> str:
+    return "unknown" if value is None else str(value)
+
+
 def _positive(name: str, value: Any) -> int:
     try:
         return _base._positive_int(name, value)
@@ -959,6 +968,11 @@ class StrataSupervisor(LlamaServerSupervisor):
         # every eviction, the budget and slot ones too, which have no log line.
         self._cache_evictions_polled: Optional[int] = None
         self._cache_evictions_logged = 0
+        # The launcher's whole `/metrics` conversation_cache as last read, with `at`
+        # (monotonic), and the (parked, slots, bytes, budget_mib) the last INFO line
+        # printed: the occupancy is logged when it changes, not on every poll.
+        self.cache_view: Optional[Dict[str, Any]] = None
+        self._cache_view_logged: Optional[tuple] = None
         # A recorded engine death. While set, ensure_running refuses: DPC
         # never relaunches after it stopped the launcher on a death.
         self.failure: Optional[Dict[str, Any]] = None
@@ -1967,6 +1981,7 @@ class StrataSupervisor(LlamaServerSupervisor):
                 logger.debug("strata[%s]: /metrics read failed: %s", self.alias, e)
                 continue
             self._note_cache_evictions(metrics)
+            self._note_cache_view(metrics)
             state = ((metrics or {}).get("live") or {}).get("state")
             if state == "unloaded" and not self._unload_expected():
                 await self._fail_closed(
@@ -2065,6 +2080,40 @@ class StrataSupervisor(LlamaServerSupervisor):
         if isinstance(value, int) and not isinstance(value, bool):
             self._cache_evictions_polled = value
 
+    def _note_cache_view(self, metrics: Any) -> None:
+        """Keep the cache's occupancy from a /metrics body, and say it at INFO when
+        `parked`, `slots`, `bytes` or `budget_mib` differ from the last line said.
+
+        The launcher's numbers are its parse of the engine's own log lines
+        (serve/server.py `ConvCacheLog` and `conversation_cache_view`, Strata v0.2.11),
+        fresh as of the last cache event. One line per change, so a day's occupancy
+        can be read from the log without one line per poll."""
+        cache = metrics.get("conversation_cache") if isinstance(metrics, dict) else None
+        if not isinstance(cache, dict):
+            return
+        self.cache_view = {
+            **{k: cache.get(k) for k in (
+                "enabled", "parked", "slots", "bytes", "budget_mib",
+                "evictions", "parks", "restores", "last_event", "last_tokens",
+            )},
+            "at": time.monotonic(),
+        }
+        key = tuple(_whole_number(cache.get(k)) for k in ("parked", "slots", "bytes", "budget_mib"))
+        if key == self._cache_view_logged:
+            return
+        self._cache_view_logged = key
+        parked, slots, held, budget = key
+        reading = read_free_commit_or_physical()
+        logger.info(
+            "strata[%s]: conversation cache parked=%s of slots=%s, %s of budget_mib=%s "
+            "(evictions=%s, parks=%s, restores=%s, last %s %s tokens; free physical RAM %s)",
+            self.alias, _fmt(parked), _fmt(slots),
+            "unknown MiB" if held is None else f"{held >> 20} MiB", _fmt(budget),
+            _fmt(cache.get("evictions")), _fmt(cache.get("parks")), _fmt(cache.get("restores")),
+            cache.get("last_event") or "event", _fmt(cache.get("last_tokens")),
+            "unread" if not reading else f"{reading['avail_phys_mib']} MiB",
+        )
+
     def _new_cache_evictions(self) -> int:
         """Evictions the engine counted since the last INFO record, as of the last poll.
 
@@ -2141,6 +2190,9 @@ class StrataSupervisor(LlamaServerSupervisor):
         super().prime_restore_scan()
         self._cache_evictions_polled = None
         self._cache_evictions_logged = 0
+        # A new launch starts with an empty cache: its first reading is said whatever it is.
+        self.cache_view = None
+        self._cache_view_logged = None
         try:
             self._engine_scan_offset = self._engine_log_path.stat().st_size
         except OSError:
