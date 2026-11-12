@@ -160,7 +160,7 @@ def test_the_executor_passes_the_depth_through():
     import inspect
     from dpc_client_core.dpc_agent.agent import DpcAgent
 
-    src = inspect.getsource(DpcAgent._execute_task_guarded)
+    src = inspect.getsource(DpcAgent._run_task)
     assert 'task.task_type == "check_back"' in src, "the type is not handled at all"
     assert "check_back_depth=depth" in src, "depth never reaches process()"
 

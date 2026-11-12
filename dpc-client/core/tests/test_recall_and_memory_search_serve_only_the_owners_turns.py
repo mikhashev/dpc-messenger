@@ -464,7 +464,7 @@ def test_every_queued_run_hands_its_stored_source_back():
     """The executor's own process() calls: none may run without saying whose it is."""
     calls = [(fn, kws) for fn, name, kws in _calls_in(PACKAGE / "dpc_agent/agent.py",
                                                       names=("process",))
-             if fn in ("_execute_task_guarded", "_execute_review", "handler")]
+             if fn in ("_run_task", "_execute_review", "handler")]
     assert len(calls) >= 4
     assert all("message_source" in kws for _fn, kws in calls), calls
 

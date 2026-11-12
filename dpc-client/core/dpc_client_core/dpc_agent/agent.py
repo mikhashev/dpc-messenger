@@ -1496,7 +1496,51 @@ class DpcAgent:
         Returns:
             Task result string
         """
-        live = live or {}
+        self._last_trace = {}
+        result, post_text = await DpcAgent._run_task(self, task, live or {})
+        return await DpcAgent._publish_task_answer_to_group(self, task, result, post_text)
+
+    async def _publish_task_answer_to_group(
+        self, task: Task, result: str, post_text: Optional[str],
+    ) -> str:
+        """Post a task's answer into the group it was scheduled from, once.
+
+        process() returns the text and does not publish it; in a group nothing
+        else does. `post_text` is None for a run with nothing to say. Returns
+        the task outcome: `result`, prefixed with a note when the group refused
+        the post (a refusal is a returned dict, not an exception).
+        """
+        group_id = (getattr(task, "data", None) or {}).get("_reply_conversation_id") or ""
+        if not post_text or not isinstance(group_id, str) or not group_id.startswith("group-"):
+            return result
+        service = getattr(self, "_service", None)
+        if service is None:
+            log.warning("%s task %s finished for %s with no service to publish through",
+                        task.task_type, task.id, group_id)
+            return result
+        sender = getattr(self, "display_name", None) or self.agent_root.name
+        turn_end = (getattr(self, "_last_trace", None) or {}).get("turn_end")
+        try:
+            posted = await service.send_group_agent_message(
+                group_id=group_id,
+                agent_name=sender,
+                text=post_text,
+                **({"turn_end": turn_end} if turn_end else {}),
+            )
+        except Exception as e:
+            log.warning("Failed to publish %s result to %s: %s", task.task_type, group_id, e)
+            return result
+        if isinstance(posted, dict) and posted.get("status") == "error":
+            reason = posted.get("message") or "refused"
+            log.warning("%s task %s: post to %s as %r refused: %s",
+                        task.task_type, task.id, group_id, sender, reason)
+            return f"[not posted to {group_id}: {reason}]\n{result}"
+        return result
+
+    async def _run_task(
+        self, task: Task, live: Dict[str, Any],
+    ) -> "tuple[str, Optional[str]]":
+        """Run one task; returns (outcome, text to post into its group or None)."""
         # Check custom handlers first
         if task.task_type in self._task_handlers:
             handler = self._task_handlers[task.task_type]
@@ -1506,10 +1550,10 @@ class DpcAgent:
                 # Support both sync and async handlers
                 if asyncio.iscoroutine(result):
                     result = await result
-                return str(result)
+                return str(result), str(result)
             except Exception as e:
                 log.error(f"Task handler error for {task.task_type}: {e}")
-                return f"Handler error: {e}"
+                return f"Handler error: {e}", None
 
         # Built-in task types
         if task.task_type == "chat":
@@ -1543,7 +1587,7 @@ class DpcAgent:
                     except Exception as e:
                         log.warning("Failed to deliver task result to Telegram: %s", e)
 
-            return result
+            return result, result
         elif task.task_type == "check_back":
             # A deferred wake-up: unlike `reminder` this runs the model, so the
             # agent can actually look at what it came back for. The depth rides
@@ -1562,41 +1606,6 @@ class DpcAgent:
                 **live,
             )
 
-            # Waking up is only half of coming back: the answer has to land in
-            # the conversation that scheduled it. process() returns the text, it
-            # does not publish it, and in a group there is no other path — the
-            # first live run woke correctly, produced its line, and the agent's
-            # own send_user_message delivered it to Telegram instead, so the
-            # group saw nothing.
-            outcome = result
-            if reply_conversation_id.startswith("group-") and result:
-                service = getattr(self, "_service", None)
-                sender = getattr(self, "display_name", None) or self.agent_root.name
-                if service is not None:
-                    turn_end = (getattr(self, "_last_trace", None) or {}).get("turn_end")
-                    try:
-                        posted = await service.send_group_agent_message(
-                            group_id=reply_conversation_id,
-                            agent_name=sender,
-                            text=result,
-                            **({"turn_end": turn_end} if turn_end else {}),
-                        )
-                        # A refusal is a dict; the queue would otherwise record
-                        # "completed successfully" over a report nobody saw.
-                        if isinstance(posted, dict) and posted.get("status") == "error":
-                            reason = posted.get("message") or "refused"
-                            log.warning("check_back task %s: post to %s as %r refused: %s",
-                                        task.id, reply_conversation_id, sender, reason)
-                            outcome = f"[not posted to {reply_conversation_id}: {reason}]\n{result}"
-                    except Exception as e:
-                        log.warning("Failed to publish check_back result to %s: %s",
-                                    reply_conversation_id, e)
-                else:
-                    log.warning(
-                        "check_back finished for %s with no service to publish through",
-                        reply_conversation_id,
-                    )
-
             reply_telegram_chat_id = task.data.get("_reply_telegram_chat_id")
             if reply_telegram_chat_id:
                 send_fn = getattr(self, "_telegram_send_fn", None)
@@ -1605,12 +1614,12 @@ class DpcAgent:
                         await send_fn(reply_telegram_chat_id, result)
                     except Exception as e:
                         log.warning("Failed to deliver check_back result to Telegram: %s", e)
-            return outcome
+            return result, result
         elif task.task_type == "reminder":
             # Deliver reminder message directly — no LLM call to prevent scheduling loops
             message = task.data.get("message", task.data.get("text", ""))
             if not message:
-                return "Reminder task has no message"
+                return "Reminder task has no message", None
 
             reply_telegram_chat_id = task.data.get("_reply_telegram_chat_id")
             formatted = f"⏰ Reminder: {message}"
@@ -1632,12 +1641,17 @@ class DpcAgent:
                 log.warning("Failed to emit reminder event: %s", e)
 
             log.info("Reminder delivered for task %s: %s", task.id, message[:80])
-            return f"Reminder sent: {message}"
+            return f"Reminder sent: {message}", formatted
         elif task.task_type == "review":
             # Run code review
-            return await self._execute_review(task.data)
+            review = await self._execute_review(task.data)
+            has_target = bool(task.data.get("target", task.data.get("text", "")))
+            return review, (review if has_target else None)
         else:
-            return f"Unknown task type: {task.task_type}. Register a handler with register_task_handler('{task.task_type}', handler)"
+            return (
+                f"Unknown task type: {task.task_type}. Register a handler with "
+                f"register_task_handler('{task.task_type}', handler)"
+            ), None
 
     async def _execute_review(self, data: Dict[str, Any]) -> str:
         """Execute a code review task — LLM produces the review in its response."""
