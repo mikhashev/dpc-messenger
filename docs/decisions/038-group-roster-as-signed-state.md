@@ -251,7 +251,7 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 | `session_started_at` marker | Partial — honoured against the pre-sync roster, votes bound to the group, trim archived first; the roster itself is still unsigned | `e2962656` |
 | Live-history boundary (amendment 2026-09-23) | Done — awaiting observation on the live pair | `c8582d43` |
 | Unsigned changes refused, legibly | Pending | — |
-| `GROUP_SYNC` in the spec | Pending | — |
+| `GROUP_SYNC` in the spec | Done (2026-11-13) | `specs/dptp_v1.md` §3.18 describes every `GROUP_*` command as the code accepts it today, with each rule this ADR tightens marked **Not yet** |
 
 ## Open Questions
 

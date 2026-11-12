@@ -27,15 +27,15 @@ measured both from git and found the number had no source.
 
 | axis | decisions | board entries | awaiting observation |
 |---|---|---|---|
-| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 proposed · ADR-048 accepted · ADR-050 proposed | 236 | 80 |
-| **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 accepted · ADR-046 accepted · ADR-048 accepted | 224 | 45 |
+| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 proposed · ADR-048 accepted · ADR-050 proposed | 237 | 80 |
+| **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 accepted · ADR-046 accepted · ADR-048 accepted | 225 | 45 |
 | **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 accepted · ADR-046 accepted · ADR-047 proposed · ADR-050 proposed | 343 | 86 |
-| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 313 | 75 |
-| **reach** | ADR-035 accepted · ADR-043 proposed | 89 | 22 |
+| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 314 | 75 |
+| **reach** | ADR-035 accepted · ADR-043 proposed | 90 | 22 |
 
 **Observation debt: 289 under an axis + 19 in entries that carry none = 308.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
 
-Not yet placed: 130 of 1242 board entries carry no axis, and a guessed one would report coverage this does not have.
+Not yet placed: 130 of 1245 board entries carry no axis, and a guessed one would report coverage this does not have.
 
 Rendered from `docs/decisions/*.md` front matter and `backlog.md`. Nothing here is written by hand; correct it at the source and re-run `uv run python tools/backlog/build.py --roadmap`.
 
@@ -140,7 +140,7 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 - **Retrieval Upgrade (ADR-018)** — BGE-M3 embeddings, whole-document indexing, dense FAISS + BM25 RRF fusion (`reciprocal_rank_fusion` in `dpc_agent/hybrid_search.py`, called from `dpc_agent/retrieval/native.py`; ADR-021 removed the learned-sparse channel) (S76)
 - **PyTorch Unified ML (ADR-021)** — ONNX fully removed, PyTorch as single ML framework (S83)
 - **Multi-Agent Safety (ADR-022)** — Three-layer defense framework, 10 risks (C1-C10). ADR accepted (S87). Phase 1 and Layer 2 status: see `THE-ROADMAP-DESCRIBES-ENFORCEMENT-THE-CODE-DOES-NOT-HAVE` in the backlog — this row restated the Phase 1 claim, the board measured otherwise, and it points now instead of copying. Verified in code 2026-08-28: per-provider concurrency/RPM/RPD limits (`dpc_agent/budget.py`) and a dollar-denominated `BudgetLimitGuard` in the loop; and **signature verification at merge**, a code path since S108 that could be walked past by removing the signature until `f9b9b3dd`. Phase 2 remaining items need design
-- **Knowledge Graph (ADR-024)** — graph layer behind a `GraphBackend` ABC, typed nodes and edges (`NodeType`/`EdgeType` in `dpc_agent/knowledge_graph.py`). **Phase 1+2 implemented** (S96, Grafeo migration S123–S125): GraphBackend ABC with `SQLiteGraphBackend` (the code default, `[knowledge_graph] backend = sqlite`) and `GrafeoGraphBackend` (opt-in per node or per agent via `kg_backend`; extra `graph-grafeo`), structural edges, L7 RRF channel, GLiNER NER, bi-temporal metadata. Guided LLM relation extraction is built but its end-to-end verification is still open. Phase 3-4 deferred (federation, GRAVITON). §1.6 adds a retrieval backend abstraction so the graph backend and the vector/text/fusion channels are chosen independently per agent (`retrieval_vector` / `retrieval_text` in the agent's `config.json`, native by default, Grafeo opt-in). Tasks: `tasks/adr-024-knowledge-graph/`
+- **Knowledge Graph (ADR-024)** — graph layer behind a `GraphBackend` ABC, typed nodes and edges (`NodeType`/`EdgeType` in `dpc_agent/knowledge_graph.py`). **Phase 1+2 implemented** (S96, Grafeo migration S123–S125): GraphBackend ABC with `SQLiteGraphBackend` (the code default, `[knowledge_graph] backend = sqlite`) and `GrafeoGraphBackend` (opt-in per node via `[knowledge_graph] backend` in `config.ini`, or per agent via `kg_backend` in the agent's `config.json`; extra `graph-grafeo`), structural edges, L7 RRF channel, GLiNER NER, bi-temporal metadata. Guided LLM relation extraction is built but its end-to-end verification is still open. Phase 3-4 deferred (federation, GRAVITON). §1.6 adds a retrieval backend abstraction so the graph backend and the vector/text/fusion channels are chosen independently per agent (`retrieval_vector` / `retrieval_text` in the agent's `config.json`, native by default, Grafeo opt-in). Tasks: `tasks/adr-024-knowledge-graph/`
 - **Phase C Decomposition** — sections of service.py extracted into domain services and coordinators (S85-S86); the file's size since then is tracked on the board as `THE-FILE-WE-DECOMPOSED-GREW-BACK-PAST-ITS-RECORDED-CEILING`
 - **Rate Limiting + Security (ARCH-26)** — security/ folder, THREAT-MODEL.md (S58)
 - **Protocol 13** (v1.13) — Human-AI team coordination (Mike=approve, CC=execute, Ark=review)

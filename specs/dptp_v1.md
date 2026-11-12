@@ -1,6 +1,6 @@
-# DPTP Specification: D-PC Transfer Protocol v1.14
+# DPTP Specification: D-PC Transfer Protocol v1.15
 
-**Version:** 1.14
+**Version:** 1.15
 **Status:** Draft / PoC
 **Date:** November 2026
 **License:** CC0 1.0 Universal (Public Domain)
@@ -2423,6 +2423,739 @@ A `skill_received` WebSocket event is broadcast to the UI on successful save.
 
 ---
 
+### 3.18 Group Chat Messages (v0.19.0)
+
+A group is one conversation fanned out to N members under a `group_id`
+(docs/GROUP_CHAT.md). There is no group server and no shared copy. Every member keeps its
+own copy of the **group record** (metadata, above all the **roster**) and of the group's
+history, and the two converge by different commands: the record by `GROUP_CREATE` and
+`GROUP_SYNC`, the history by the `GROUP_HISTORY_*` exchange, and a live message travels as
+`GROUP_TEXT`.
+
+This section describes what the reference implementation sends and accepts **today**.
+ADR-038 (accepted) decides a stricter model: `created_by` pinned at first sight, authority
+per field, every roster change signed by the node entitled to it. None of those three
+parts is built. Each place where the code is looser than the ADR is marked **Not yet**,
+and nothing under a **Not yet** is current behaviour.
+
+**Conventions common to every command below**
+
+- **Paths and lines.** `Source:` lines give paths relative to
+  `dpc-client/core/dpc_client_core/` and the line numbers of the tree this revision was
+  written against; they exist so a later reader can re-check a rule, and they drift.
+- **Transport sender and author.** A handler is given the node id the session proved (the
+  *transport sender*). For every command here but `GROUP_TEXT` that is the only identity
+  the handler uses; a `sender_node_id` field in those payloads is never read. For
+  `GROUP_TEXT` the *author* may differ from the transport sender, because a receiver
+  relays (below), and is decided by the signature (§4.2).
+- **Fan-out.** A sender addresses the members of its own copy of the roster, except
+  itself, and only those currently connected. Nothing is queued for an absent member; it
+  catches up through the on-connect exchange below (`service.py:6000-6014`).
+- **Relaying.** Only `GROUP_TEXT` is forwarded by a receiver. `GROUP_CREATE`,
+  `GROUP_SYNC`, `GROUP_LEAVE`, `GROUP_DELETE`, `GROUP_DELETED_STATUS` and the
+  `GROUP_HISTORY_*` commands reach only the nodes the sender is directly connected to.
+- **Blocked nodes.** A frame from a node in `blocked_nodes` is dropped before routing
+  (`service.py:1976-1980`). `GROUP_CREATE` and `GROUP_SYNC` check the block again in
+  their handler; a roster that lists a blocked node is applied as the group's state, with
+  one INFO line, and the block still holds (`group_handler.py:782-787`).
+- **Failure is silent.** A handler that raises, for example on a record with no
+  `group_id` or `name`, is logged and the frame is dropped; no reply is sent
+  (`message_router.py:94-96`). The only refusal that is spoken is `GROUP_ACCESS_DENIED`.
+- **Not in this section.** Other frames carry group traffic and are specified where they
+  belong: `FILE_OFFER` with `group_id` (§3.11), `PROPOSE_NEW_SESSION`,
+  `VOTE_NEW_SESSION` and `NEW_SESSION_RESULT` for a group conversation (§3.15; the
+  receiver relays them to the roster), the knowledge-commit commands (§3.7), and
+  `REQUEST_CHAT_HISTORY` / `CHAT_HISTORY_RESPONSE` with a `group-` conversation id
+  (§3.16), which `REQUEST_CHAT_HISTORY` gates exactly as `GROUP_HISTORY_REQUEST` is gated
+  and refuses with `GROUP_ACCESS_DENIED` (`message_handlers/chat_history_handlers.py:83-92`).
+  `CERT_REQUEST`, sent when a `GROUP_TEXT` author's certificate is missing, has no section
+  yet.
+- **The library factories are not the wire.** `create_group_create_message` and
+  `create_group_text_message` (`dpc-protocol/dpc_protocol/protocol.py:585-651`) have no
+  caller, and build a reduced shape (no `agents`, no signature fields). The frames below
+  are the ones `service.py` builds.
+
+**On-connect exchange.** Each time the set of connected peers changes, a node runs this for
+**every** connected peer, not only the one that just arrived (`service.on_peer_list_change`,
+`service.py:1830-1967`):
+
+1. Deliver the removals owed (below): a `GROUP_SYNC` to each connected node that was
+   removed from a group while it was offline.
+2. For each group in which both this node and that peer are on the roster
+   (`group_manager.get_groups_for_peer`, `group_manager.py:483-495`), except the pairs that
+   peer has answered with `GROUP_ACCESS_DENIED` during this session: a `GROUP_SYNC`
+   followed at once by a `GROUP_HISTORY_STATUS`.
+3. If this node's deleted-groups registry is not empty: a `GROUP_DELETED_STATUS` to every
+   connected peer, whether or not that peer has anything to do with those groups.
+
+---
+
+#### The group record
+
+The payload of `GROUP_CREATE` and `GROUP_SYNC` is the whole record
+(`GroupMetadata.to_dict`, `managers/group_manager.py:34-80`), never a delta:
+
+| Field | Type | What a receiver does with it |
+|---|---|---|
+| `group_id` | string, required | Identity: `group-` and 12 hex characters when created here. A record without it raises and is dropped. |
+| `name` | string, required | Applied with the record. A record without it raises and is dropped. |
+| `topic` | string, default `""` | Applied with the record. |
+| `created_by` | string, default `""` | Applied as received. **Not yet:** ADR-038 part 1 pins it at first sight; today a higher-version record rewrites it. |
+| `created_at` | string, default `""` | Applied as received. |
+| `members` | array of node ids, default `[]` | Applied as received and not validated: not for duplicates, not for length (`MAX_MEMBERS` is 20 and is enforced only where a member is added locally, `group_manager.py:92`), not for containing the sender or the receiver. |
+| `agents` | object: node id to array of agent ids, default `{}` | Applied as received, every node's entry. An id starting `ext:` names an external agent. |
+| `agent_names` | object: node id to object (agent id to display name), default `{}` | Applied as received. |
+| `version` | integer, default 1 | Orders records; see below. |
+| `is_discord_bridge` | boolean, default `false` | Applied as received. Not in the content hash. |
+| `reasoning_effort` | string or null | **Sent and never applied.** A local setting of the sending node. The receiver keeps its own value, or none when it holds no copy (`group_manager.py:678-689`). |
+| `session_started_at` | string or null | The session marker: the moment the group last agreed to start over (ISO 8601 UTC). See *Session marker*. |
+| `session_reset_evidence` | object or null | `{proposal_id, conversation_id, participants, votes}`; `votes` maps a node id to that node's signed vote as in `VOTE_NEW_SESSION` (`vote`, `vote_hash`, `signature`, `signer_node_id`, `vote_preimage_version`, `timestamp`). |
+
+`version` is incremented by the node that makes a local change, and by nothing else except
+the tie-break below: adding a member, removing one, setting this node's agents, editing the
+topic, setting the marker, and also **setting `reasoning_effort`** (`group_manager.py:451,
+460, 471, 517, 541, 636`), although no receiver applies that field.
+
+**Accepting a record** (`GroupManager.apply_sync`, `group_manager.py:658-727`). One
+procedure serves `GROUP_CREATE` and `GROUP_SYNC`; the handlers differ only in the gates
+that run before it.
+
+1. Build the record from the payload with the defaults above.
+2. Replace the carried `reasoning_effort` with the receiver's own (null when it has no copy).
+3. If the receiver holds a session marker and the record carries none, or an earlier one,
+   copy the receiver's marker and evidence into the record: the **later** marker survives
+   whatever the versions say (`group_manager.py:643-656`). Markers are compared as strings.
+4. If the receiver holds a copy with a **higher** `version`: keep the copy, apply nothing.
+5. If the versions are **equal**: compare the content hashes (below). Equal hashes: apply
+   nothing. The record's hash greater than the copy's: apply the record with its `version`
+   raised by one, so the next sync carries the winner. Otherwise keep the copy. Hash
+   comparison is string comparison of the 16 hex characters.
+6. Otherwise (a higher `version`, or no copy at all): the record **replaces** the copy
+   whole, and is written to disk.
+
+**Content hash.** The first 16 hex characters of the SHA-256 of the UTF-8 bytes of
+`name`, `topic`, `json.dumps(sorted(members))`, `json.dumps(agents, sort_keys=True)` and
+`json.dumps(agent_names, sort_keys=True)` joined with `|`, where `json.dumps` is Python's
+with its default separators. `created_by`, `created_at`, `is_discord_bridge`,
+`reasoning_effort`, the session fields and `version` are not in it, so two records that
+differ only in those fields at one version are "equal" and the receiver keeps its own.
+
+**Session marker.** `GroupSyncHandler` reads the marker after the record is applied
+(`_honour_session_marker`, `message_handlers/group_handler.py:674-734`). The record, marker
+included, is stored by step 6 whether or not the marker is proven; what the proof gates is
+only the trimming of history, and it runs once, on the sync that first brings the marker.
+It does nothing unless **all** of these hold:
+
+1. The record was applied (a kept copy never trims).
+2. The record's marker differs from the one the receiver held before the sync and is later
+   than it.
+3. The receiver held a roster before the sync.
+4. `session_reset_evidence.conversation_id` equals the group id, and `quorum_is_proven`
+   (`signing.py:48-95`) holds over **the receiver's own roster from before the sync**: every
+   node on it has a vote in `votes` that approves (`true`, `"approve"` or `"yes"`), whose
+   `vote_preimage_version` is `dptp-vote-v1`, whose `signer_node_id` is that node, whose
+   recomputed `vote_hash` matches, and whose signature verifies against that node's cached
+   certificate. A vote whose certificate is not cached counts as not proven. The evidence's
+   own `participants` list and the record's `members` are not consulted: they arrive in the
+   same frame as the marker and would prove only that the sender agrees with itself.
+
+When they hold, the receiver archives (does not delete) every record dated before the
+marker, keeps the later ones, and moves its own live-history boundary to the marker
+(`ConversationMonitor.clear_before`, `conversation_monitor.py:2376`; a failed archive
+cancels the trim). When they do not, history is untouched and a WARNING says why.
+**Not yet:** the roster that supplies the quorum is itself unsigned (ADR-038, Pending).
+
+**Live-history boundary.** A node's statement that it keeps no live history older than a
+moment (ADR-038, amendment 2026-09-23). It is **not** a field of the group record, is
+never applied from a frame, and travels only inside `GROUP_HISTORY_STATUS`.
+
+---
+
+#### GROUP_CREATE
+
+Invites a node into a group, carrying the whole record.
+
+**Format:**
+```json
+{
+  "command": "GROUP_CREATE",
+  "payload": {
+    "group_id": "group-0123456789ab",
+    "name": "Project",
+    "topic": "",
+    "created_by": "dpc-node-alice-123",
+    "created_at": "2026-11-01T09:00:00.000000+00:00",
+    "members": ["dpc-node-alice-123", "dpc-node-bob-456"],
+    "agents": {},
+    "agent_names": {},
+    "version": 1,
+    "is_discord_bridge": false,
+    "reasoning_effort": null,
+    "session_started_at": null,
+    "session_reset_evidence": null
+  }
+}
+```
+
+**Sent:** by the creator to every connected invited member when the group is created, and
+by any node that adds a member, to that one member only and only if it is connected, at the
+record's new version, followed at once by a `GROUP_HISTORY_STATUS` for the group
+(`service.py:6752-6780`, `7562-7611`). Nothing is sent to a member who is not connected, and
+the on-connect exchange does not send `GROUP_CREATE`.
+
+**Receiver:**
+
+1. A blocked sender: ignored.
+2. The record is accepted by the procedure above. A group that was not held is created,
+   stored and listed in the UI at once (`group_invite_received`); the UI event announces
+   the group, it does not wait for an answer.
+3. When the record was kept instead, nothing is announced.
+4. In both cases the receiver then sends a `GROUP_HISTORY_STATUS` for the group to the
+   sender, provided that after step 2 this node and the sender are both on the roster.
+   That is what lets a re-added member that kept its history compare and merge it.
+
+**Reply:** none, apart from that `GROUP_HISTORY_STATUS`.
+
+**Not yet:** nothing checks the sender. A `GROUP_CREATE` from any connected, unblocked node
+is accepted or kept by the version rule alone, whether or not that node is on the
+receiver's roster for a group the receiver already holds, whether or not it is
+`created_by`, and whether or not the receiver is among the record's `members`; the
+membership gate `GROUP_SYNC` has does not apply. A group id in the receiver's
+deleted-groups registry is not refused either: the registry is sent in
+`GROUP_DELETED_STATUS` and is not read on receipt (`is_group_deleted` has no caller).
+ADR-038 parts 1 and 2 would pin `created_by` at the first `GROUP_CREATE` or `GROUP_SYNC` and
+check each field's author; neither exists.
+
+**Source:** `message_handlers/group_handler.py:104-156`; sender `service.py:6768-6771`,
+`7585-7593`.
+
+---
+
+#### GROUP_SYNC
+
+Carries a node's copy of the record to a node that should converge on it. The payload is the
+same object as `GROUP_CREATE` (see *The group record*).
+
+**Sent** (always `group.to_dict()` of the sender's copy):
+
+- On connect, as step 2 of the on-connect exchange (`service.py:1906-1923`).
+- To a connected node that was **removed while offline**, first thing on its connect
+  (`service._deliver_removals_owed`, `service.py:1807-1829`). The removal is recorded when
+  the member is removed while not connected (`~/.dpc/groups/removal_registry.json`,
+  `group_manager.py:386-403`); it is forgotten after the frame is sent, and without sending
+  when the group has been deleted or the node is back on the roster.
+- After a local change, to the connected members: this node's agents set
+  (`service.py:6819`), a member added (`7578`, then `GROUP_CREATE` to the new member), a
+  member removed (`7628` to the remaining members, and `7641` to the removed node itself
+  if it is connected, which is how it learns), the topic edited (`7682`).
+
+**Receiver** (`GroupSyncHandler.handle`, `group_handler.py:736-829`), in this order:
+
+1. A blocked sender: ignored.
+2. **Unknown group:** the receiver holds no copy of `group_id` (or the payload has none):
+   ignored, WARNING. A sync is not a way into a group; an invitation is `GROUP_CREATE`.
+3. **Membership gate:** the sender is not on the receiver's **own** roster for the group:
+   ignored, WARNING. No reply is sent, unlike the history commands.
+4. The record is accepted by the procedure in *The group record*, with the receiver's
+   roster and marker from before the sync kept for step 5.
+5. The session marker is honoured as described there.
+6. If the record was applied and the receiver's own node id is on the applied roster, the
+   standing `GROUP_ACCESS_DENIED` for that `(sender, group)` is cleared.
+7. If the record was applied, the UI is told (`group_updated`).
+8. If the receiver's history file for the group is missing or empty and it has no
+   live-history boundary, it sends the sender a `GROUP_HISTORY_STATUS` (only when both are on
+   the roster as it stands now). This runs whether or not the record was applied.
+
+A record that **removes the receiver** from `members` is applied like any other: the
+receiver keeps the group, its history and its files, now with a roster that leaves it out.
+Nothing is deleted by a sync. That node's next requests to a member that has removed it
+are refused with `GROUP_ACCESS_DENIED`.
+
+**Reply:** none.
+
+**Not yet** (ADR-038):
+
+- **Roster authority.** Any member's record with a higher `version` replaces the receiver's
+  whole record: `members`, `topic`, `name` and every node's `agents` and `agent_names`.
+  ADR-038 part 2 limits `members` and `topic` to the creator, makes `name` immutable and
+  lets a node change only its own agent entry; the code has none of it. Adding and removing
+  members is refused only by the interface of a node that is not the creator, never by a
+  receiver.
+- **`created_by` is wire-mutable.** It is applied from a higher-version record, and the
+  only authority checks that exist (`GROUP_DELETE`, `GROUP_DELETED_STATUS`) rest on it.
+  ADR-038 derives that a member can make itself creator everywhere with one record at
+  `version + 1`; that derivation has not been reproduced.
+- **Unsigned.** The record carries no signature and the sender is judged only by being on
+  the receiver's roster (ADR-038 part 3). A signed roster would also let a relay carry it;
+  today the handler forwards nothing, so a change reaches a node the sender is not
+  connected to only when a node that is connected to both sends its own copy on its next
+  connect.
+- **Refusals are silent to the sender.** ADR-038 Q1 asks that a refused change be reported
+  to the node that sent it; no frame does.
+- **Local setting on a synced counter.** Changing `reasoning_effort` raises `version`
+  (above) and so can make a node's older roster outrank a newer one it has not seen.
+
+**Source:** `message_handlers/group_handler.py:667-829`; `managers/group_manager.py:597-727`.
+
+---
+
+#### GROUP_LEAVE
+
+A member says it is leaving.
+
+**Format:**
+```json
+{
+  "command": "GROUP_LEAVE",
+  "payload": { "group_id": "group-0123456789ab" }
+}
+```
+
+**Sent:** by the leaving node to its connected members, before it deletes its own copy of
+the group and its folder (`service.py:7720-7743`).
+
+**Receiver:** removes the **transport sender** from its roster, raises its `version` by one,
+writes the record, and tells the UI (`group_member_left`). A group it does not hold: nothing
+(WARNING from the manager). A sender that is not on the roster: the roster is unchanged and
+`version` is not raised, but the UI event is still sent. The leaver's `agents` and
+`agent_names` entries stay in the record. Nothing checks that the sender is not the
+creator; the interface offers the creator Delete in place of Leave and nothing else
+enforces it.
+
+**Reply:** none. Not relayed: a member the leaver is not connected to learns from the next
+accepted `GROUP_SYNC`.
+
+**Source:** `message_handlers/group_handler.py:576-611`; `managers/group_manager.py:524-544`.
+
+---
+
+#### GROUP_DELETE
+
+The creator deletes the group.
+
+**Format:**
+```json
+{
+  "command": "GROUP_DELETE",
+  "payload": { "group_id": "group-0123456789ab" }
+}
+```
+
+**Sent:** by the node whose id is `created_by` in its own copy, to its connected members,
+before it deletes the group locally and writes it into its deleted-groups registry. A node
+that is not the creator refuses locally (`service.py:7745-7771`).
+
+**Receiver:**
+
+1. A group it holds, whose `created_by` is not the transport sender: ignored, WARNING.
+2. A group it holds, `created_by` the sender: the group's folder (metadata, history, files)
+   is removed, the group is written into the receiver's own deleted-groups registry with the
+   creator as `deleted_by`, its conversation monitor is dropped, and the UI is told
+   (`group_deleted`).
+3. A group it does **not** hold: nothing is removed, but the monitor entry is dropped if one
+   exists and the UI is told (`group_deleted`, with the group id in place of its name).
+
+**Reply:** none. Not relayed.
+
+**Not yet:** the creator check compares with a `created_by` that a `GROUP_SYNC` can rewrite
+(ADR-038 part 1). A member that is not directly connected to the creator receives this
+frame from nobody, and the `GROUP_DELETED_STATUS` another node later sends it is honoured
+only when that node is the creator.
+
+**Source:** `message_handlers/group_handler.py:614-664`; `managers/group_manager.py:546-576,
+729-747`.
+
+---
+
+#### GROUP_DELETED_STATUS
+
+A node's list of the groups it knows to be deleted, offered so that deletions made while a
+member was offline still arrive.
+
+**Format:**
+```json
+{
+  "command": "GROUP_DELETED_STATUS",
+  "payload": { "deleted_groups": ["group-0123456789ab", "group-ba9876543210"] }
+}
+```
+
+**Fields:**
+- `deleted_groups` (array of strings, required to have effect): group ids from the sender's
+  deleted-groups registry. The registry has no removal operation; it only grows.
+
+**Sent:** on the on-connect exchange (step 3), to every connected peer, when the registry is
+not empty (`service.py:1955-1969`). The list therefore reaches peers that never belonged to
+those groups.
+
+**Receiver:** an empty or missing list: nothing. For each id the receiver holds: if its
+`created_by` is the transport sender, the group is removed exactly as for `GROUP_DELETE`
+(step 2 there); otherwise it is left alone. An id the receiver does not hold is ignored.
+
+**Reply:** none.
+
+**Source:** `message_handlers/group_handler.py:1255-1316`; `managers/group_manager.py:296-354`.
+
+---
+
+#### GROUP_TEXT
+
+A message in a group: a human's, or an agent's.
+
+**Format (a human's post):**
+```json
+{
+  "command": "GROUP_TEXT",
+  "payload": {
+    "group_id": "group-0123456789ab",
+    "text": "Hello @Bob",
+    "sender_name": "Alice",
+    "sender_type": "human",
+    "sender_node_id": "dpc-node-alice-123",
+    "agent_owner": null,
+    "content_hash": "…",
+    "signature": "base64…",
+    "signer_node_id": "dpc-node-alice-123",
+    "preimage_version": "dptp-msg-v3",
+    "mentions": [{"node_id": "dpc-node-bob-456", "name": "Bob", "start": 6, "end": 10}],
+    "message_id": "c0ffee00-0000-4000-8000-000000000000",
+    "timestamp": "2026-11-12T10:00:00.000000+00:00",
+    "msg_index": 17
+  }
+}
+```
+
+**Fields:**
+- `group_id` (string, required): the group.
+- `text` (string, required): the message.
+- `message_id` (string): the author's id for the message; a human's is a UUID, an agent's
+  16 hex characters. A receiver that is given none derives one from a hash of group, author,
+  text and its own clock, which no other node derives alike.
+- `timestamp` (string): ISO 8601, the author's clock. Absent: the receiver's now.
+- `sender_node_id` (string): the claimed author. Read only to be checked against
+  `signer_node_id`.
+- `sender_name` (string): display name; for an agent, the agent's name.
+- `sender_type` (string): `"human"` or `"agent"`.
+- `agent_owner` (string or null): for an agent's post, the node that runs the agent; null
+  for a human's.
+- `content_hash`, `signature`, `signer_node_id`, `preimage_version` (strings): the author's
+  signature over the preimage of §4.1, with `conversation_id` the `group_id`. All four are
+  sent together or not at all.
+- `tool_calls_digest` (string, optional): the digest §4.1 covers in v2 and v3, present when
+  the post had tool calls. The calls themselves are not sent to a peer; a receiver still
+  stores `tool_calls` from a payload that carries them (a v1 sender).
+- `mention_depth` (integer, optional): §4.3; written by an agent's post only when 1 or
+  more.
+- `is_agent` (boolean, agent posts): `true`. Unsigned; §4.3 says when it is read.
+- `mentions` (array): who the text names, as the sender resolved them. The receiver passes
+  it to its UI and resolves mentions itself.
+- `msg_index` (integer): the sender's own position for the message. The receiver assigns
+  its own and ignores this one.
+
+**Receiver** (`GroupTextHandler.handle`, `group_handler.py:260-416`), in this order:
+
+1. **Author and verdict** (§4.2). Not all of `content_hash`, `signature`,
+   `signer_node_id` present, or a `preimage_version` the receiver cannot recompute:
+   `legacy`, and the author is the transport sender. `signer_node_id` differing from
+   `sender_node_id`, a recomputed hash differing from `content_hash`, or a signature that
+   fails or cannot be evaluated: `rejected`. No cached certificate for the signer:
+   `unverified`, author as claimed. Otherwise `verified`, author as claimed
+   (`_authenticate_author`, `group_handler.py:166-258`). `rejected`: the frame is dropped,
+   not stored, not relayed, not shown, and nothing is answered. `unverified` where the author
+   is not the transport sender: a `CERT_REQUEST` for the author goes to the transport sender.
+2. **Blocked author.** When the author or the `agent_owner` is in `blocked_nodes`, the
+   message is stored and shown, but not relayed and it wakes nobody.
+3. **Duplicate.** A `group_id:message_id` already seen in this session, or already in the
+   group's history on disk: dropped without a trace. The session set holds at most 1000
+   keys; past that, 500 of its keys are dropped, not necessarily the oldest.
+4. **Relay.** Unless the author is blocked, if the receiver holds the group, it forwards the
+   received payload **unchanged** as `GROUP_TEXT` to each member of its roster that is
+   connected, except itself and the author. The transport sender is not excluded;
+   a copy that returns is dropped by step 3.
+5. **Store.** The record is written to the group's history with the author, the signature
+   fields (not for `legacy`), and the `mention_depth` only where the signature covers it
+   (a `preimage_version` after v2). The sender's `msg_index` is replaced by the receiver's.
+   This happens before the UI event so the event can carry the number.
+6. **UI event** `group_text_received`, carrying the `verification` verdict.
+7. **Agent mentions** (§4.3), unless the author is blocked.
+
+**Reply:** none.
+
+**Not yet:** steps 1 to 7 never ask whether the group is known or whether the author is on
+the roster. A `GROUP_TEXT` for a `group_id` the receiver has never heard of is stored
+(for a `group-` id, creating a folder and a `history.json` under that id) and shown; one for a known group from a node that
+is not on its roster is stored, shown, and relayed to the whole roster. The signature says
+who wrote the message and nothing about whether the author belongs to the group: the roster
+it would be checked against is unsigned (ADR-037 P1, membership as signed state, which ADR-038
+answers and has not built).
+
+**Source:** `message_handlers/group_handler.py:159-416`; senders `service.py:6898-6980`
+(human), `7307-7464` (agent; `tool_calls` and `speed_summary` are removed from the copy
+sent to peers).
+
+---
+
+#### GROUP_HISTORY_STATUS
+
+Opens, answers and corrects a comparison of what two nodes hold of one group's history.
+
+**Format:**
+```json
+{
+  "command": "GROUP_HISTORY_STATUS",
+  "payload": {
+    "group_id": "group-0123456789ab",
+    "history_hash": "sha256:1a2b3c4d5e6f7a8b",
+    "message_count": 42,
+    "history_digest": {
+      "authors": {
+        "dpc-node-alice-123": {"count": 30, "digest": "sha256:1a2b3c4d5e6f7a8b"},
+        "dpc-node-bob-456": {"count": 12, "digest": "sha256:0f1e2d3c4b5a6978"}
+      },
+      "digest": "sha256:aabbccddeeff0011"
+    },
+    "live_history_boundary": null,
+    "digest_since": null,
+    "is_reply": true,
+    "is_correction": true
+  }
+}
+```
+
+**Fields** (built by one function, `history_status_for`, `conversation_monitor.py:280-308`):
+- `group_id` (string, required).
+- `history_hash` (string): `sha256:` and 16 hex characters of the sender's chain tip, or
+  `sha256:empty`. It depends on arrival order and on the reader, so two honest nodes seldom
+  agree on it; it is compared only when a digest is missing.
+- `message_count` (integer): the records in the sender's live history, whatever the window.
+  Informational.
+- `history_digest` (object): `authors`, a map from author node id to `{count, digest}`,
+  where `digest` is `sha256:` and 16 hex characters of the SHA-256 of that author's record
+  keys, sorted and joined with `|`; a record's key is its `content_hash`, or `id:<id>` when
+  it has none. `digest` is the same over the whole map; no receiver compares it. The digest
+  leaves out a record this node wrote about a peer's file, and every record dated before
+  the window `digest_since` names; a record with no readable timestamp stays in.
+- `live_history_boundary` (string or null): the sender's own boundary. Absent or null
+  means "I accept everything", and is never replaced by the moment a member joined.
+- `digest_since` (string or null): the window the digest covers, the later of the sender's
+  boundary and the peer's boundary when it knew it. A peer that predates the field sends
+  none and its digest covers its whole history.
+- `is_reply` (boolean, optional): `true` on every status sent in answer to one.
+- `is_correction` (boolean, optional): `true` on the one extra reply described below.
+
+**Sent:** unprompted by the initiating node on the on-connect exchange (step 2); by
+`add_group_member` to the node just added; by a node that has received `GROUP_CREATE`, or a
+`GROUP_SYNC` that left its history empty (both through `send_history_status`, which sends
+only while both nodes are on its roster, `group_handler.py:78-101`); and to every connected
+member by a node whose group history was just repaired from a split store
+(`knowledge_service.py:394`).
+
+**Receiver** (`GroupHistoryStatusHandler`, `group_handler.py:1091-1252`):
+
+1. **Gate.** The group is unknown or the sender is not on the roster: refused with
+   `GROUP_ACCESS_DENIED` before anything else is said (so a stranger is never told the
+   receiver's count or digest).
+2. **Window.** The sender's `live_history_boundary` is used only if it is a readable ISO 8601
+   moment not more than five minutes ahead of the receiver's clock; otherwise it is treated
+   as absent and a WARNING is written. The pair's window is the later of the receiver's own
+   boundary and that one. The receiver recomputes its own status over that window.
+3. **Reply.** A status that is not a reply is answered with the receiver's status over the
+   window, `is_reply: true`. A status that **is** a reply is answered only if the sender
+   named a `digest_since`, was not itself a correction, and the window differs from the
+   receiver's own boundary (this node opened the exchange and digested over its own boundary
+   alone, and the replier's boundary was the later one): one more status with `is_reply` and
+   `is_correction` both true. A correction is never answered.
+4. **Comparable?** A status with no `digest_since` key (an older peer) is compared over its
+   whole history. Otherwise it is compared only when its `digest_since` is the same moment
+   as the window; if not, nothing is compared and the exchange ends here, DEBUG logged.
+5. **Differences.** With a digest on both sides, the authors whose `{count, digest}` differ
+   (an author present on one side only differs) are collected. None: the histories agree
+   and the exchange ends. Some: a `GROUP_HISTORY_REQUEST` naming those authors, with
+   `since` the window when there is one. With a digest missing on either side, the
+   `history_hash` values are compared instead and a difference sends a request with no
+   `authors`.
+6. A request to the same peer for the same group over the same window that covers the same
+   authors and is still waiting for its answer suppresses a second one: two statuses cross
+   when both sides open the exchange.
+
+**Reply:** `GROUP_HISTORY_STATUS` (rule 3), then `GROUP_HISTORY_REQUEST` (rules 5 and 6),
+or `GROUP_ACCESS_DENIED` (rule 1).
+
+**Source:** `message_handlers/group_handler.py:1091-1252`;
+`conversation_monitor.py:183-308, 311-375`.
+
+---
+
+#### GROUP_HISTORY_REQUEST
+
+Asks a member for the records of a group that the asker lacks.
+
+**Format:**
+```json
+{
+  "command": "GROUP_HISTORY_REQUEST",
+  "payload": {
+    "group_id": "group-0123456789ab",
+    "request_id": "1f2e3d4c",
+    "authors": ["dpc-node-bob-456"],
+    "since": "2026-11-10T08:00:00+00:00"
+  }
+}
+```
+
+**Fields:**
+- `group_id` (string, required).
+- `request_id` (string, sent): 8 hex characters; echoed in the answer. The asker records
+  `(peer, group, request_id)` as outstanding when it sends.
+- `authors` (array of node ids, optional): limit the answer to records whose
+  `sender_node_id` is in it. Absent: every author. An **empty** array: nothing.
+- `content_hashes` (array of strings, optional): exact records by `content_hash`, which
+  wins over `authors`. Used by a voter on a knowledge commit that lacks records of the
+  proposal's extraction window, which sends it **instead of** `authors` and `since`
+  (`knowledge_service.py:912-918`). An empty array: nothing.
+- `since` (string, optional): the pair's window. Records dated earlier are not sent. Ignored
+  if not a string. Absent from a peer that predates it.
+
+**Receiver** (`group_handler.py:832-912`):
+
+1. **Gate.** The group is unknown or the sender is not on the roster: `GROUP_ACCESS_DENIED`
+   (the same words for both cases), and nothing else. The receiver's own membership is not
+   asked: a node that has been removed still answers the members that remain.
+2. The receiver loads the group's history (from disk if no monitor is loaded) and exports
+   it as described under `GROUP_HISTORY_RESPONSE`, filtered by `content_hashes`, else by
+   `authors`, then by `since`.
+
+**Reply:** `GROUP_HISTORY_RESPONSE`, always, even with an empty `history`.
+
+**Source:** `message_handlers/group_handler.py:832-912`;
+`conversation_monitor.py:2944-3050`.
+
+---
+
+#### GROUP_HISTORY_RESPONSE
+
+The records a `GROUP_HISTORY_REQUEST` asked for.
+
+**Format:**
+```json
+{
+  "command": "GROUP_HISTORY_RESPONSE",
+  "payload": {
+    "group_id": "group-0123456789ab",
+    "request_id": "1f2e3d4c",
+    "authors": ["dpc-node-bob-456"],
+    "history": [
+      {
+        "id": "c0ffee00-0000-4000-8000-000000000000",
+        "role": "peer",
+        "content": "Hello",
+        "timestamp": "2026-11-12T10:00:00.000000+00:00",
+        "sender_node_id": "dpc-node-bob-456",
+        "sender_name": "Bob",
+        "sender_type": "human",
+        "content_hash": "…",
+        "signature": "base64…",
+        "signer_node_id": "dpc-node-bob-456",
+        "preimage_version": "dptp-msg-v3"
+      }
+    ]
+  }
+}
+```
+
+**Fields:**
+- `group_id` (string, required).
+- `history` (array, required): records, oldest first as the sender holds them. Each has
+  `id`, `role` and `content`; `timestamp` only when the record has one (a missing value is
+  never replaced by "now", because the signature covers it); `attachments` when present;
+  `sender_node_id`, `sender_name`, `sender_type`, `agent_owner`, `isAgent`, `mention_depth`
+  when present; and, only when the record's `preimage_version` is one the sender can still
+  build, `content_hash`, `signature`, `signer_node_id`, `preimage_version`,
+  `tool_calls_digest`. Not sent: `tool_calls` (the digest stands for them), `msg_index` and
+  `chain_hash` (they describe one node's copy), and any record a node wrote about a peer's
+  file, which every receiver would refuse. `role` is the sender's view, differs by reader
+  and is not signed.
+- `request_id` (string): echoed from the request when it had one.
+- `authors` (array): echoed, when the request limited the answer to authors, so a short
+  answer can be told from a short history.
+- `content_hashes` (array): echoed, when the request carried it.
+
+**Receiver** (`group_handler.py:915-1088`), in this order:
+
+1. **Gate.** The group is unknown or the sender is not on the roster: discarded with a
+   WARNING, with no `GROUP_ACCESS_DENIED`, since that would answer a frame nobody asked
+   for.
+2. **Claim.** The answer must match a question this node asked: with a `request_id`, the
+   exact `(sender, group, request_id)`, which is consumed; without one (an older peer), any
+   outstanding question to that sender about that group, which is consumed. No match:
+   discarded as unsolicited. Outstanding questions are dropped when the peer disconnects.
+3. A deferred knowledge-commit vote waiting on records of this group is re-tried after every
+   answer that passes step 2, including an empty one.
+4. An empty `history` stops here.
+5. **Merge** (`merge_history`, `conversation_monitor.py:4072-4160`), record by record:
+   - A record with all three of `content_hash`, `signature`, `signer_node_id` and a known
+     `preimage_version` is checked: the hash is recomputed over the **receiver's own** name
+     for the group, never one read from the record; `signer_node_id` must equal
+     `sender_node_id`; the signature is verified. A mismatch or a bad signature: refused
+     (and listed in `last_merge_rejected`). No cached certificate: kept as `unverified`.
+   - A record without a signature, or signed over a preimage the receiver cannot
+     recompute: kept as `legacy`, or refused when the setting `reject_unsigned` is on.
+   - The record's `verification` field, if any, is overwritten. The receiver writes it.
+   - A record dated before the receiver's own live-history boundary goes to the receiver's
+     archive, not its live history.
+   - A record whose `id` the receiver already holds is not added; the first copy stands.
+   - A record that matches a note the receiver wrote about the same file replaces the note.
+   - Added records are re-chained for this node and the history is put back into time
+     order.
+6. The UI is told (`group_history_synced`).
+7. Each added record that names an agent is routed as a live mention would be (§4.3), once,
+   and only within one hour of the record's own timestamp.
+
+**Reply:** none.
+
+**Source:** `message_handlers/group_handler.py:915-1088`;
+`message_handlers/chat_history_handlers.py:8-54` (the registry);
+`conversation_monitor.py:3953-4010, 4072-4160`.
+
+---
+
+#### GROUP_ACCESS_DENIED
+
+The one spoken refusal: "I do not hold that group, or you are not in it."
+
+**Format:**
+```json
+{
+  "command": "GROUP_ACCESS_DENIED",
+  "payload": { "group_id": "group-0123456789ab", "reason": "not_a_member" }
+}
+```
+
+**Fields:**
+- `group_id` (string): the group the refused request named.
+- `reason` (string): always `"not_a_member"`, for an unknown group and for a sender outside
+  the roster alike. One answer for both is deliberate: two answers would let a stranger walk
+  group ids and learn which this node holds.
+
+**Sent** by a node that receives a `GROUP_HISTORY_REQUEST`, a `GROUP_HISTORY_STATUS`, or a
+`REQUEST_CHAT_HISTORY` for a `group-` conversation from a node that fails the roster gate,
+once per refused frame (`message_handlers/group_access.py:34-62`). A removed member is not
+told it was removed; this refusal is how it finds out. `GROUP_SYNC` and `GROUP_TEXT` are
+not answered with it.
+
+**Receiver** (`group_handler.py:1319-1356`): remembers `(sender, group_id)` for the rest of
+the session so the on-connect exchange stops asking that peer about that group, and tells the
+UI (`group_access_denied`). It erases nothing: a peer cannot delete a group from another
+node by saying no. The memory is cleared when the same peer later sends a `GROUP_SYNC` that
+applies and lists the receiver. A frame without `group_id` is only logged.
+
+**Reply:** none.
+
+**Source:** `message_handlers/group_access.py:1-62`;
+`message_handlers/group_handler.py:1319-1356`; `service.py:5992-5998`.
+
+---
+
 ## 4. Node Identity System
 
 ### Node ID Format
@@ -2870,6 +3603,18 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.15 (November 2026)
+- **§3.18 Group Chat Messages** — new section for the ten `GROUP_*` commands the code sends
+  and handles and the spec never named: `GROUP_CREATE`, `GROUP_SYNC`, `GROUP_LEAVE`,
+  `GROUP_DELETE`, `GROUP_DELETED_STATUS`, `GROUP_TEXT`, `GROUP_HISTORY_STATUS`,
+  `GROUP_HISTORY_REQUEST`, `GROUP_HISTORY_RESPONSE`, `GROUP_ACCESS_DENIED`. For each: who
+  sends it and when, the payload, the receiver's acceptance rules as the code has them
+  (the membership gate and the unknown-group drop on `GROUP_SYNC`, version precedence and
+  the content-hash tie-break, the fields that stay local, the session marker and the
+  live-history boundary, removal delivered on connect, the history exchange's gates and
+  verdicts) and, wherever the code is looser than ADR-038, a **Not yet** note. **Documentation
+  only:** it describes what v1.14 nodes already do and changes no frame.
 
 ### v1.14 (November 2026)
 - **§3.4 REMOTE_INFERENCE_REQUEST** — optional `max_tokens`: the longest answer the guest
