@@ -1,7 +1,7 @@
 """Hybrid search with Reciprocal Rank Fusion (ADR-010 + ADR-018).
 
-Merges FAISS dense and BGE-M3 sparse results using RRF.
-BM25 fallback when BGE-M3 sparse not available.
+Merges FAISS dense and BM25 results (plus the L7 graph channel) using RRF.
+ADR-021 removed the learned-sparse (BGE-M3 sparse) channel; the second channel is BM25.
 Priority weights by source layer: L6 > L1 > L5 > L2-docs.
 """
 
@@ -53,7 +53,7 @@ def _accumulate(results, default_layer, scores, meta_map, layer_weights, k):
 
 def reciprocal_rank_fusion(
     faiss_results: List[Tuple[dict, float]],
-    sparse_or_bm25_results: List[Tuple[dict, float]],
+    bm25_results: List[Tuple[dict, float]],
     graph_results: Optional[List[Tuple[dict, float]]] = None,
     k: int = DEFAULT_RRF_K,
     layer_weights: Dict[str, float] = LAYER_WEIGHTS,
@@ -69,7 +69,7 @@ def reciprocal_rank_fusion(
     meta_map: Dict[str, dict] = {}
 
     _accumulate(faiss_results, "L5", scores, meta_map, layer_weights, k)
-    _accumulate(sparse_or_bm25_results, "L5", scores, meta_map, layer_weights, k)
+    _accumulate(bm25_results, "L5", scores, meta_map, layer_weights, k)
     _accumulate(graph_results or [], "L7", scores, meta_map, layer_weights, k)
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
