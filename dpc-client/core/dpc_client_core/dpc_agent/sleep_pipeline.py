@@ -816,22 +816,19 @@ def _collect_group_archive_digests(group_dir: Path, agent_id: str) -> List[Dict[
     if not archive_dir.exists():
         return digests
     metadata_path = group_dir / "metadata.json"
-    if metadata_path.exists():
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            agents_map = metadata.get("agents", {})
-            if agents_map and not any(agent_id in ids for ids in agents_map.values()):
-                return digests
-        except (json.JSONDecodeError, OSError):
-            pass
-    if metadata_path.exists():
-        try:
-            _meta = json.loads(metadata_path.read_text(encoding="utf-8"))
-            group_id = _meta.get("group_id", group_dir.name)
-        except (json.JSONDecodeError, OSError):
-            group_id = group_dir.name
-    else:
-        group_id = group_dir.name
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        agents_map = metadata["agents"]
+        if not agents_map:
+            raise ValueError("empty agents map")
+        is_member = any(agent_id in ids for ids in agents_map.values())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        log.warning("Sleep pipeline: %s skipped for %s: no readable membership in %s (%s: %s)",
+                    group_dir.name, agent_id, metadata_path, type(e).__name__, e)
+        return digests
+    if not is_member:
+        return digests
+    group_id = metadata.get("group_id", group_dir.name)
     for archive_path in sorted(archive_dir.rglob("*_session.json")):
         try:
             data = json.loads(archive_path.read_text(encoding="utf-8"))

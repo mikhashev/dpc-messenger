@@ -225,18 +225,32 @@ def test_group_archive_digest_skips_when_agent_not_member(tmp_path: Path):
     assert _collect_group_archive_digests(group, "agent_001") == []
 
 
-def test_group_archive_digest_no_metadata_falls_back_to_dir_name(tmp_path: Path):
-    """When metadata.json missing, group_id falls back to directory name and
-    membership check is skipped (all agents see the archive)."""
-    group = tmp_path / "group-no-meta"
+def _write_bare_archive(group: Path) -> None:
     (group / "archive").mkdir(parents=True)
     (group / "archive" / "2026-05-10T00-00-00_reset_session.json").write_text(
         json.dumps({"messages": [{"timestamp": "2026-05-10T00:00:00+00:00", "content": "x"}]}),
         encoding="utf-8",
     )
-    digests = _collect_group_archive_digests(group, "any-agent")
-    assert len(digests) == 1
-    assert digests[0]["group_id"] == "group-no-meta"
+
+
+def test_group_archive_with_no_metadata_is_not_read_for_the_agent(tmp_path: Path, caplog):
+    """Membership is unknown without metadata.json: fail closed, and say which folder."""
+    group = tmp_path / "group-no-meta"
+    _write_bare_archive(group)
+    with caplog.at_level("WARNING"):
+        assert _collect_group_archive_digests(group, "any-agent") == []
+    assert any("group-no-meta" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]", "{}", '{"agents": {}}', '{"agents": null}',
+                                     '{"agents": {"node": 5}}'])
+def test_group_archive_with_unusable_membership_is_not_read_for_the_agent(tmp_path: Path, content, caplog):
+    group = tmp_path / "group-bad-meta"
+    _write_bare_archive(group)
+    (group / "metadata.json").write_text(content, encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert _collect_group_archive_digests(group, "agent_001") == []
+    assert any("group-bad-meta" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
 
 
 def test_synthesis_prompt_has_most_recent_placeholder():
