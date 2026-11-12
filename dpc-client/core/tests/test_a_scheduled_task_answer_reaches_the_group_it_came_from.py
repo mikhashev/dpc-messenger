@@ -162,3 +162,23 @@ async def test_a_failed_handler_and_an_unknown_type_post_no_error_line():
     await DpcAgent._execute_task(agent, _task("review", GROUP))
 
     assert service.posts == []
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_origin_group_is_said_in_the_outcome_and_the_log(caplog):
+    """send_group_agent_message returns None for a group that no longer exists;
+    that is not a post, so the queue must not record a report nobody saw."""
+    class _GoneService:
+        async def send_group_agent_message(self, group_id, agent_name, text, **kw):
+            return None
+
+    agent = _agent(_GoneService())
+
+    with caplog.at_level("WARNING"):
+        outcome = await DpcAgent._execute_task(
+            agent, _task("chat", GROUP, text="say hello"))
+
+    assert outcome.startswith(f"[not posted to {GROUP}:"), outcome
+    assert outcome.endswith("the answer")
+    assert any(r.levelname == "WARNING" and "refused" in r.getMessage() and GROUP in r.getMessage()
+               for r in caplog.records), [r.getMessage() for r in caplog.records]

@@ -1508,7 +1508,8 @@ class DpcAgent:
         process() returns the text and does not publish it; in a group nothing
         else does. `post_text` is None for a run with nothing to say. Returns
         the task outcome: `result`, prefixed with a note when the group refused
-        the post (a refusal is a returned dict, not an exception).
+        the post (a refusal is a returned dict, not an exception) or no longer
+        exists (the service returns None).
         """
         group_id = (getattr(task, "data", None) or {}).get("_reply_conversation_id") or ""
         if not post_text or not isinstance(group_id, str) or not group_id.startswith("group-"):
@@ -1530,8 +1531,13 @@ class DpcAgent:
         except Exception as e:
             log.warning("Failed to publish %s result to %s: %s", task.task_type, group_id, e)
             return result
+        reason = None
         if isinstance(posted, dict) and posted.get("status") == "error":
             reason = posted.get("message") or "refused"
+        elif posted is None:
+            # The group is gone: the service returns None, not a refusal dict.
+            reason = "the group was not found"
+        if reason is not None:
             log.warning("%s task %s: post to %s as %r refused: %s",
                         task.task_type, task.id, group_id, sender, reason)
             return f"[not posted to {group_id}: {reason}]\n{result}"
