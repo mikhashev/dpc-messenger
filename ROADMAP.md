@@ -27,15 +27,15 @@ measured both from git and found the number had no source.
 
 | axis | decisions | board entries | awaiting observation |
 |---|---|---|---|
-| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 proposed · ADR-048 accepted · ADR-050 proposed | 237 | 80 |
+| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 proposed · ADR-048 accepted · ADR-050 proposed | 244 | 81 |
 | **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 accepted · ADR-046 accepted · ADR-048 accepted | 225 | 45 |
 | **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 accepted · ADR-046 accepted · ADR-047 proposed · ADR-050 proposed | 343 | 86 |
-| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 314 | 75 |
-| **reach** | ADR-035 accepted · ADR-043 proposed | 90 | 22 |
+| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 318 | 75 |
+| **reach** | ADR-035 accepted · ADR-043 proposed | 90 | 23 |
 
-**Observation debt: 289 under an axis + 19 in entries that carry none = 308.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
+**Observation debt: 291 under an axis + 19 in entries that carry none = 310.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
 
-Not yet placed: 130 of 1245 board entries carry no axis, and a guessed one would report coverage this does not have.
+Not yet placed: 130 of 1254 board entries carry no axis, and a guessed one would report coverage this does not have.
 
 Rendered from `docs/decisions/*.md` front matter and `backlog.md`. Nothing here is written by hand; correct it at the source and re-run `uv run python tools/backlog/build.py --roadmap`.
 
@@ -118,7 +118,7 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 | Feature | Status | Description |
 |---------|--------|-------------|
 | **Hooks/Middleware** | **DONE** (S47) | HookRegistry + Event Bus in loop.py |
-| **Selection Layer (ADR-013)** | **PARTLY REMOVED** (built S58-S59) | Data collection (`_log_knowledge_access`) and decay (`_apply_decay`) in `dpc_agent/active_recall.py` survive. Dedup and rejection feedback went with `consciousness.py` and the decision proposals pipeline and are not in the code |
+| **Selection Layer (ADR-013)** | **PARTLY REMOVED** (built S58-S59) | Data collection (`_log_knowledge_access`) and decay (`_apply_decay`) in `dpc_agent/active_recall.py` survive. What went with `consciousness.py` and the decision proposals pipeline is this layer's own dedup of knowledge candidates and its rejection loop for proposals. Dedup elsewhere stays (search results by file key in `dpc_agent/hybrid_search.py`, messages by id in `conversation_monitor.py`), and a rejected knowledge commit is still reported (`_on_commit_rejected` in `knowledge_service.py`) |
 | **Sleep Consolidation (ADR-014)** | **VERIFIED** (S66) | Per-session archive analysis, morning brief pipeline, Telegram notifications |
 | **Active Recall** | **DONE** (ADR-010) | FAISS+BM25 hybrid search, budget-aware context injection |
 | **Extended Paths Indexing** | **DONE** (S59-S60) | Per-path opt-in, bulk embedding, excluded dirs, UI checkboxes |

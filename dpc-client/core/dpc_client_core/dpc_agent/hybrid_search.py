@@ -58,7 +58,7 @@ def reciprocal_rank_fusion(
     k: int = DEFAULT_RRF_K,
     layer_weights: Dict[str, float] = LAYER_WEIGHTS,
 ) -> List[SearchResult]:
-    """Merge FAISS dense, sparse/BM25, and graph results using RRF with layer priority weights.
+    """Merge FAISS dense, BM25, and graph results using RRF with layer priority weights.
 
     Dedup is by _file_key, i.e. by index key: one entry per document however many
     channels returned it. Cross-layer duplicates of the same file are prevented at
