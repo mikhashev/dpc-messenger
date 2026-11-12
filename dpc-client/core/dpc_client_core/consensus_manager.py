@@ -320,24 +320,41 @@ class ConsensusManager:
     async def receive_vote(
         self,
         vote: CommitVote
-    ) -> None:
+    ) -> bool:
         """Receive vote from peer
 
         Args:
             vote: CommitVote object from peer
+
+        Returns:
+            True when the vote entered the tally and changed it; False when it
+            was dropped (unknown proposal, session not voting, voter outside
+            the roster) or repeated an identical verdict already held.
         """
         proposal_id = vote.proposal_id
 
         if proposal_id not in self.sessions:
             logger.warning("Received vote for unknown proposal %s", proposal_id)
-            return
+            return False
 
         session = self.sessions[proposal_id]
 
         if session.status not in ("voting",):
             logger.debug("receive_vote: session %s is in status '%s', ignoring late vote from %s",
                          proposal_id, session.status, vote.voter_node_id)
-            return
+            return False
+
+        roster = set(session.proposal.participants or ())
+        previous = session.votes.get(vote.voter_node_id)
+        counted = True
+        if roster and vote.voter_node_id not in roster:
+            counted = False
+            logger.info("Not counting vote by %s on %s: not a participant",
+                        str(vote.voter_node_id)[:20], str(proposal_id)[:8])
+        elif previous is not None and previous.vote == vote.vote:
+            counted = False
+            logger.debug("Not counting vote by %s on %s: duplicate %s",
+                         str(vote.voter_node_id)[:20], str(proposal_id)[:8], vote.vote)
 
         # Record vote
         session.votes[vote.voter_node_id] = vote
@@ -350,6 +367,18 @@ class ConsensusManager:
         # Trigger callback
         if self.on_vote_received:
             await self.on_vote_received(vote)
+
+        return counted
+
+    def vote_tally(self, proposal_id: str) -> tuple:
+        """(votes from participants, participants) for a session, for log lines."""
+        session = self.sessions.get(proposal_id)
+        if session is None:
+            return (0, 0)
+        roster = set(session.proposal.participants or ())
+        if not roster:
+            return (len(session.votes), len(session.votes))
+        return (sum(1 for n in session.votes if n in roster), len(roster))
 
     async def _finalize_vote(self, session: VotingSession) -> None:
         """Finalize voting and determine outcome
@@ -1064,9 +1093,15 @@ class ConsensusManager:
             )
 
             # Process vote (receive_vote internally triggers on_vote_received callback)
-            await self.receive_vote(vote)
+            counted = await self.receive_vote(vote)
 
-            logger.info("Received vote from %s: %s", sender_node_id, vote.vote)
+            if counted:
+                k, n = self.vote_tally(vote.proposal_id)
+                logger.info(
+                    "Counted %s vote by %s via %s on %s (%d/%d)",
+                    vote.vote, vote.voter_node_id, sender_node_id,
+                    vote.proposal_id, k, n,
+                )
 
         except Exception as e:
             logger.error("Error handling vote message from %s: %s", sender_node_id, e, exc_info=True)
