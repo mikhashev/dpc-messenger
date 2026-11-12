@@ -48,6 +48,13 @@ CORE = Path(__file__).resolve().parents[1]
 PROCESS_LOG = "dpc_client_core.dpc_agent.tools.process"
 VERIFIED = "the command and its descendants were killed"
 SLEEP_S = 40  # a sleeper ends by itself, whatever happens here
+# The shape scripts use only the standard library, so they skip the venv's launcher, which makes
+# every start two processes. A script that imports dpc_client_core keeps sys.executable.
+PY = getattr(sys, "_base_executable", sys.executable)
+# Timeouts for a test that needs its root gone, or its leaf up, before the clock fires.
+# One Python start took 0.2 to 2.3 s on a Windows box where `cmd /c exit` took 0.06 s.
+ROOT_EXITS_WITHIN_S = 10
+LEAF_STARTED_WITHIN_S = 15
 
 
 def _alive(pid: int) -> bool:
@@ -128,10 +135,10 @@ def _sleeper(seconds: float = SLEEP_S) -> str:
     return f"import time\ntime.sleep({seconds})"
 
 
-def _run(script: str, **kwargs) -> SupervisedRun:
+def _run(script: str, *, interpreter: str = PY, **kwargs) -> SupervisedRun:
     kwargs.setdefault("launcher", "test(root decides)")
     kwargs.setdefault("timeout", TIMEOUT_S)
-    return run_supervised([sys.executable, script], **kwargs)
+    return run_supervised([interpreter, script], **kwargs)
 
 
 def _middle(shape: Shape, program: str) -> str:
@@ -141,7 +148,17 @@ def _middle(shape: Shape, program: str) -> str:
 
 
 def _shell(script: str) -> str:
-    return f'"{sys.executable}" "{script}"'
+    return f'"{PY}" "{script}"'
+
+
+def _entry_whose_root_exited():
+    """The one open command, once its root has exited and the call still waits on its pipes."""
+    registry = process_registry.get_registry()
+    assert _wait_for(lambda: registry.open_entries("tool"), 20), "the command never registered"
+    (entry,) = registry.open_entries("tool")
+    handle = registry.handle_of(entry.pid)
+    assert _wait_for(lambda: handle.poll() is not None, 20), "the root never exited"
+    return entry
 
 
 # ------------------------------------------------- the real hole: the root lives, a link broke
@@ -162,9 +179,9 @@ def test_the_middle_of_a_chain_exits_and_the_ceiling_kills_the_leaf(shape, monke
 def test_the_middle_of_a_chain_exits_and_the_timeout_kills_the_leaf(shape, monkeypatch):
     monkeypatch.setattr(shell_tool, "_MEMORY_CEILING_MB", 0)
 
-    result = shell_tool._execute_shell_command(_shell(_middle(shape, _sleeper())), None, 5)
+    result = shell_tool._execute_shell_command(_shell(_middle(shape, _sleeper())), None, LEAF_STARTED_WITHIN_S)
 
-    assert "timed out after 5s" in result and VERIFIED in result, result
+    assert f"timed out after {LEAF_STARTED_WITHIN_S}s" in result and VERIFIED in result, result
     assert _gone(shape.pid()), "the sentence said killed and the leaf is alive"
 
 
@@ -191,7 +208,7 @@ def test_one_of_those_children_alone_stays_under_the_same_ceiling(shape):
     leaf = shape.leaf(allocator(most_mb=100, lives_s=30))
     middle = shape.starts(leaf)
 
-    run = _run(shape.starts(middle, then_sleep=SLEEP_S), timeout=6, ceiling_mb=200)
+    run = _run(shape.starts(middle, then_sleep=SLEEP_S), timeout=LEAF_STARTED_WITHIN_S, ceiling_mb=200)
 
     assert run.exceeded_mb is None, run
     assert run.timed_out and _gone(shape.pid())
@@ -235,18 +252,19 @@ def test_a_server_started_the_way_an_agent_starts_one_stays(name, shape, monkeyp
     monkeypatch.setattr(shell_tool, "_MEMORY_CEILING_MB", 2048)
     form, holds_the_pipes = _FORMS[name]
     leaf = shape.leaf(_sleeper())
-    timeout = 6
+    timeout = ROOT_EXITS_WITHIN_S
 
     started = time.monotonic()
-    result = shell_tool._execute_shell_command(form.format(py=sys.executable, leaf=leaf), None, timeout)
+    result = shell_tool._execute_shell_command(form.format(py=PY, leaf=leaf), None, timeout)
     took = time.monotonic() - started
 
     pid = shape.pid()
     time.sleep(0.5)
     assert _alive(pid), f"{name} did not survive the call: {result!r}"
     assert "were killed" not in result and "timed out" not in result, result
-    assert took < timeout + 3, f"{took:.1f} s: no drain after a timeout that kills nothing"
     if holds_the_pipes:
+        # Less than the drain after a kill (5 s): a timeout that kills nothing drains nothing.
+        assert timeout <= took < timeout + 3, f"{took:.1f} s: it waits out the timeout and then no drain"
         assert "ended (exit code 0)" in result and "Nothing was killed" in result, result
     else:
         assert took < timeout - 1, f"{took:.1f} s: this form gives up the pipes, so nothing waits"
@@ -262,7 +280,7 @@ def test_what_it_had_printed_comes_back_with_the_sentence(shape):
         subprocess.Popen([sys.executable, {leaf!r}])
     """)
 
-    result = shell_tool._execute_shell_command(_shell(top), None, 5)
+    result = shell_tool._execute_shell_command(_shell(top), None, ROOT_EXITS_WITHIN_S)
 
     assert "before it left" in result and "Nothing was killed" in result, result
     assert _alive(shape.pid())
@@ -277,7 +295,7 @@ def test_the_run_says_left_running_and_the_entry_says_exited(shape):
         sys.exit(3)
     """)
 
-    run = _run(top, timeout=4, ceiling_mb=2048)
+    run = _run(top, timeout=ROOT_EXITS_WITHIN_S, ceiling_mb=2048)
 
     assert run.left_running and not run.timed_out and run.returncode == 3, run
     assert run.killed == "" and run.exit_reason == "exited", run
@@ -288,7 +306,8 @@ def test_the_run_says_left_running_and_the_entry_says_exited(shape):
 def test_a_probe_with_a_child_holding_its_pipes_answers_and_does_not_raise(shape):
     leaf = shape.leaf(_sleeper())
 
-    done = process_mod.run_probe([sys.executable, shape.starts(leaf)], launcher="device_probe", timeout=3)
+    done = process_mod.run_probe([PY, shape.starts(leaf)], launcher="device_probe",
+                                 timeout=ROOT_EXITS_WITHIN_S)
 
     assert done.returncode == 0
     assert _alive(shape.pid())
@@ -299,7 +318,7 @@ def test_a_runaway_the_command_left_is_not_watched_the_accepted_cost(shape, capl
     """Past the ceiling, root gone, pipes held: no kill, no sentence of one."""
     leaf = shape.leaf(allocator(most_mb=300, lives_s=25))
 
-    run = _run(shape.starts(leaf), timeout=6, ceiling_mb=200)
+    run = _run(shape.starts(leaf), timeout=ROOT_EXITS_WITHIN_S, ceiling_mb=200)
 
     pid = shape.pid()
     assert run.left_running and run.exceeded_mb is None and run.killed == "", run
@@ -319,12 +338,12 @@ def test_a_stop_after_the_root_exited_kills_nothing(shape):
 
     def _in_thread():
         with spawn_origin(origin):
-            runs.append(_run(top, launcher="run_shell", timeout=6, ceiling_mb=0))
+            runs.append(_run(top, launcher="run_shell", timeout=ROOT_EXITS_WITHIN_S, ceiling_mb=0))
 
     thread = threading.Thread(target=_in_thread, daemon=True)
     thread.start()
     pid = shape.pid()
-    time.sleep(1.5)  # the root has exited; the call is still waiting on the pipes
+    _entry_whose_root_exited()
 
     process_registry.get_registry().stop_commands()
 
@@ -355,11 +374,7 @@ class _Waiting:
         self.thread = threading.Thread(target=_in_thread, daemon=True)
         self.thread.start()
         self.leaf = shape.pid()
-        registry = process_registry.get_registry()
-        assert _wait_for(lambda: registry.open_entries("tool"), 20), "the command never registered"
-        (self.entry,) = registry.open_entries("tool")
-        handle = registry.handle_of(self.entry.pid)
-        assert _wait_for(lambda: handle.poll() is not None, 20), "the root never exited"
+        self.entry = _entry_whose_root_exited()
         self.started = time.monotonic()
 
     def kill(self):
@@ -579,7 +594,7 @@ def test_a_command_that_left_nothing_is_not_recorded_as_stopped():
 def test_the_ceiling_and_the_timeout_still_kill_nothing_once_the_root_has_exited(shape):
     """The guard for everything automatic stays: same process, same state, the automatic door."""
     top = shape.starts(shape.leaf(_sleeper()))
-    waiting = _Waiting(shape, lambda: _run(top, launcher="run_shell", timeout=4, ceiling_mb=0))
+    waiting = _Waiting(shape, lambda: _run(top, launcher="run_shell", timeout=ROOT_EXITS_WITHIN_S, ceiling_mb=0))
     handle = process_registry.get_registry().handle_of(waiting.entry.pid)
 
     said = process_mod._kill_process_tree(handle)
@@ -594,7 +609,7 @@ def test_kill_my_process_keeps_its_refusal_in_the_window(shape, tmp_path):
     (tmp_path / TURN.agent_id).mkdir()
     ctx = ToolContext(agent_root=tmp_path / TURN.agent_id)
     top = shape.starts(shape.leaf(_sleeper()))
-    waiting = _Waiting(shape, lambda: _run(top, launcher="run_shell", timeout=4, ceiling_mb=0))
+    waiting = _Waiting(shape, lambda: _run(top, launcher="run_shell", timeout=ROOT_EXITS_WITHIN_S, ceiling_mb=0))
 
     text = skills._kill_my_process(ctx, waiting.entry.pid)
 
@@ -634,7 +649,7 @@ def test_with_no_job_the_same_shape_also_returns_and_kills_nothing(shape, monkey
     monkeypatch.setattr(process_mod, "_new_command_job", lambda: None)
     leaf = shape.leaf(_sleeper())
 
-    run = _run(shape.starts(leaf), timeout=4, ceiling_mb=0)
+    run = _run(shape.starts(leaf), timeout=ROOT_EXITS_WITHIN_S, ceiling_mb=0)
 
     assert run.left_running and not run.timed_out, run
     assert _alive(shape.pid())
@@ -719,7 +734,7 @@ def test_a_job_the_commands_child_makes_for_itself_nests_and_its_members_are_kil
         time.sleep({SLEEP_S})
     """)
 
-    run = _run(top, timeout=8, ceiling_mb=0)
+    run = _run(top, interpreter=sys.executable, timeout=LEAF_STARTED_WITHIN_S, ceiling_mb=0)
 
     assert "contained True" in run.stdout, (run.stdout, run.stderr)
     assert run.killed == VERIFIED, run.killed
@@ -831,7 +846,8 @@ def test_a_job_that_fails_falls_back_to_the_walk_with_a_log_line(step, patch, mo
     with caplog.at_level(logging.WARNING, logger=PROCESS_LOG):
         run = run_supervised([sys.executable, "-c", "print('still ran')"], launcher="test(no job)",
                              timeout=30, ceiling_mb=200)
-        walked = _run(shape.starts(shape.leaf(_sleeper()), then_sleep=SLEEP_S), timeout=4, ceiling_mb=0)
+        walked = _run(shape.starts(shape.leaf(_sleeper()), then_sleep=SLEEP_S), timeout=LEAF_STARTED_WITHIN_S,
+                      ceiling_mb=0)
 
     assert run.ok and run.stdout.strip() == "still ran", run
     lines = [r.getMessage() for r in caplog.records]
@@ -978,14 +994,17 @@ def test_commands_that_left_something_leave_no_job_handle_and_no_thread_of_ours(
     leaves = [shape.leaf(_sleeper(20)) for _ in range(10)]
     before_threads = {t.name for t in threading.enumerate()}
     before = psutil.Process().num_handles()
-    for leaf in leaves:
+    for i, leaf in enumerate(leaves):
         assert _run(shape.starts(leaf, quiet=True), ceiling_mb=2048).ok
+        pid = shape.pid(i)
+        time.sleep(0.3)
+        # Each right after its own command: ten commands can outlast a 20 s sleeper.
+        assert _alive(pid), f"the end of command {i} killed what it left"
     gc.collect()
     time.sleep(0.5)
 
     assert psutil.Process().num_handles() - before < 8, "the job handles of ten ended commands"
     assert {t.name for t in threading.enumerate()} <= before_threads, "a thread stayed behind the commands"
-    assert all(_alive(shape.pid(i)) for i in range(10))
 
 
 @windows_only
@@ -993,9 +1012,9 @@ def test_the_readers_of_a_left_pipe_leave_when_the_holder_ends(shape):
     """Bounded by what holds the pipe: two blocked daemon threads until it ends."""
     leaf = shape.leaf(_sleeper())
 
-    run = _run(shape.starts(leaf), timeout=2, ceiling_mb=0)
+    run = _run(shape.starts(leaf), timeout=ROOT_EXITS_WITHIN_S, ceiling_mb=0)
 
-    assert run.left_running
+    assert run.left_running, run
     readers = [t for t in threading.enumerate() if t.name.startswith("dpc-output-")]
     assert readers, "the readers had already left: this proves nothing"
     psutil.Process(shape.pid()).kill()
