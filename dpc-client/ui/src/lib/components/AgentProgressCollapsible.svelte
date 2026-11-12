@@ -8,6 +8,7 @@
     import { getToolLabel, getToolArgPreview } from '$lib/utils/toolDisplay';
     import { liveToolArgPreview } from '$lib/utils/liveToolArg';
     import { occupancyFromSpeed, occupancyLabel, occupancyTitle } from '$lib/utils/contextOccupancy';
+    import { cacheFromSpeed, cacheLabel, cacheTitle } from '$lib/utils/cacheHitRate';
     import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
     import { sendCommand } from '$lib/coreService';
     import {
@@ -131,6 +132,12 @@
     let ctxTitle = $derived(
         ctx ? occupancyTitle(ctx, { round: speed?.round, median: !!speed?.median }) : '',
     );
+    // The cache half: this round's rate live, the turn's token-weighted rate once
+    // finished (the summary carries the sums). cacheHitRate.ts says why.
+    let cache = $derived(cacheFromSpeed(speed));
+    let cacheHint = $derived(
+        cache ? cacheTitle(cache, { rounds: speed?.median ? speed?.rounds : null }) : '',
+    );
 
     // One-line result preview shown in the collapsed tool row; the expanded
     // block below carries the arguments and the output.
@@ -192,6 +199,9 @@
                             class:blocked={ctx.blocked}
                             title={ctxTitle}
                         >{occupancyLabel(ctx)}</span>
+                    {/if}
+                    {#if cache}
+                        <span class="speed-part cache" title={cacheHint}>{cacheLabel(cache)}</span>
                     {/if}
                     {#if speed.model || speed.alias}
                         <span class="speed-model">{speed.model || speed.alias}</span>

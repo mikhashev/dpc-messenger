@@ -81,7 +81,26 @@ export type Message = {
     duration_ms: number;
     round: number;
   }>;
+  speed_summary?: SpeedSummary; // The finished turn's strip (history `speed_summary`, beside tool_calls)
 };
+
+/** The finished agent turn's strip, made by the backend (loop.py speed_summary_of)
+ *  and stored on the message: medians of the rounds' speeds, the last round's
+ *  occupancy, the cache counts summed over the rounds that stated both. */
+export interface SpeedSummary {
+  rounds?: number;
+  prefill_tok_s?: number | null;
+  decode_tok_s?: number | null;
+  total_tok_s?: number | null;
+  context_used?: number | null;
+  context_window?: number | null;
+  context_reserve?: number | null;
+  cached_tokens?: number | null;
+  prompt_tokens?: number | null;
+  round?: number | null;
+  model?: string;
+  median?: boolean;
+}
 
 // --- Provider System ---
 
@@ -310,6 +329,10 @@ export interface AgentProgressEvent {
         context_used?: number;
         context_window?: number;
         context_reserve?: number;
+        // The prompt cache of the same round (loop.py: round_progress_payload):
+        // what the provider reused of `prompt_tokens`. Absent when the provider
+        // stated no split; a stated 0 is 0. The header shows cached / prompt.
+        cached_tokens?: number;
     } | null;
 }
 

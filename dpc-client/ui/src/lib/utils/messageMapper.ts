@@ -7,7 +7,7 @@
  */
 
 import { normalizeAttachments } from './telegramLiveMessage';
-import type { TurnEnd } from '$lib/types';
+import type { SpeedSummary, TurnEnd } from '$lib/types';
 
 export interface MappedMessage {
     id: string;
@@ -24,6 +24,7 @@ export interface MappedMessage {
     isAgent?: boolean;
     agentOwner?: string | null;
     turnEnd?: TurnEnd;
+    speed_summary?: SpeedSummary;
 }
 
 export interface SenderIdentityOptions {
@@ -37,6 +38,7 @@ interface LocalCachedFields {
     thinking?: string;
     streamingRaw?: string;
     tool_calls?: any[];
+    speed_summary?: SpeedSummary;
 }
 
 interface MapOptions {
@@ -182,5 +184,16 @@ export function mapBackendMessage(msg: any, opts: MapOptions = {}): MappedMessag
             : (msg.sender_type === 'agent' || !!msg.agent_owner || msg.is_agent || msg.role === 'assistant' || false),
         agentOwner: msg.agent_owner || null,
         turnEnd: turnEndOf(msg.turn_end),
+        speed_summary: speedSummaryOf(msg.speed_summary) ?? opts.local?.speed_summary,
     };
+}
+
+/** A record's finished-turn strip (history `speed_summary`, written by the
+ *  backend beside `tool_calls`) when it is an object, else undefined — an old
+ *  record has none and renders no strip. Shared by the live response and the
+ *  reload. */
+export function speedSummaryOf(value: unknown): SpeedSummary | undefined {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? (value as SpeedSummary)
+        : undefined;
 }

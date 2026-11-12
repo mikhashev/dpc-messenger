@@ -384,7 +384,7 @@
           <AgentProgressCollapsible
             toolCalls={msg.tool_calls}
             agentName={msg.senderName || ''}
-            speed={(msg as any).speed_summary || null}
+            speed={msg.speed_summary || null}
           />
         {/if}
 

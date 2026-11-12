@@ -441,7 +441,7 @@
                 index,
                 totalCount: result.messages.length,
                 identity: { agentSelfId: activeChatId, agentSelfName: agentName, selfNodeId: $nodeStatus?.node_id || '' },
-                local: local ? { thinking: local.thinking, streamingRaw: local.streamingRaw, tool_calls: local.tool_calls } : undefined,
+                local: local ? { thinking: local.thinking, streamingRaw: local.streamingRaw, tool_calls: local.tool_calls, speed_summary: local.speed_summary } : undefined,
                 previousTimestamp,
               });
               previousTimestamp = mapped.timestamp;

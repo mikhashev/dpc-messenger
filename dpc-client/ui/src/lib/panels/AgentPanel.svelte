@@ -49,9 +49,6 @@
     agentProgressRound = $bindable<number>(0),
     agentProgressName = $bindable<string>(''),
     agentProgressSpeed = $bindable<Record<string, unknown> | null>(null),
-    // UI-side per-turn speed samples; aggregated into the finished message on
-    // clear. Not persisted to history — a live-session view.
-    liveSpeedSamples = [],
     agentProgressAgentId = $bindable<string>(''),
     agentStreamingText = $bindable<string>(''),
   }: {
@@ -68,7 +65,6 @@
     agentProgressRound?: number;
     agentProgressName?: string;
     agentProgressSpeed?: Record<string, unknown> | null;
-    liveSpeedSamples?: Array<Record<string, any>>;
     agentProgressAgentId?: string;
     agentStreamingText?: string;
   } = $props();
@@ -259,11 +255,8 @@
         speedOwnerAgentId = upd.ownerAgentId;
         speedOwnerSpeed = upd.speed;
         agentProgressSpeed = upd.speed;
-        if (upd.resetSamples) liveSpeedSamples.length = 0;
-        // Per-round samples for the medians shown beside the finished round
-        // count. Median, not mean: one cold first round would drag a mean down
-        // and misreport the model's speed.
-        if (upd.appendSample) liveSpeedSamples.push(upd.appendSample);
+        // The finished header's medians are not made here: the backend stores
+        // them with the message (`speed_summary`, loop.py speed_summary_of).
         // The name belongs to the run, not to the room. It is update-only for
         // the same reason the speed is, and `agent_name` can arrive empty
         // (`_current_agent_display_name` defaults to ''), so without this a new
@@ -301,17 +294,12 @@
       // showing another room's agent name and `197,235 / 1,000,000`, two lines
       // under its own header saying `53,960 / 1,000,000`.
       //
-      // A run in progress that the user steps away from and back to loses the
-      // samples it had collected, and shows only what arrives after the return.
-      // That is the intended trade: a partial number about this agent beats a
-      // complete one about a different agent.
       const cleared = clearedStrip();
       agentProgressName = '';
       agentProgressAgentId = '';
       agentProgressSpeed = cleared.speed;
       speedOwnerAgentId = cleared.ownerAgentId;
       speedOwnerSpeed = cleared.speed;
-      liveSpeedSamples.length = 0;
       clearAgentStreaming();
       lastActiveChatId = activeChatId;
     }
@@ -333,65 +321,6 @@
       // event must not read as a continuation of this one.
       speedOwnerAgentId = null;
       speedOwnerSpeed = null;
-      // Aggregate the turn's per-round speeds onto the last agent message so
-      // the finished header (N rounds · M actions) carries medians. Client-side
-      // only — history on disk keeps its shape.
-      if (liveSpeedSamples.length > 0) {
-        const median = (key: string): number | null => {
-          const vals = liveSpeedSamples
-            .map((s) => Number(s[key]))
-            .filter((v) => Number.isFinite(v) && v > 0)
-            .sort((a, b) => a - b);
-          if (!vals.length) return null;
-          return vals[Math.floor(vals.length / 2)];
-        };
-        // Context occupancy is the one number here that must NOT be a median:
-        // it grows through the turn, so the last round is the peak the next
-        // turn starts from, and an average would understate exactly the case
-        // the user needs to see. The window and the reserve travel with it so
-        // the finished header colours by the same rule as the live one.
-        const last = liveSpeedSamples[liveSpeedSamples.length - 1] || {};
-        const lastNum = (key: string): number | null => {
-          const v = Number(last[key]);
-          return Number.isFinite(v) && v > 0 ? v : null;
-        };
-        const summary: Record<string, any> = {
-          rounds: liveSpeedSamples.length,
-          prefill_tok_s: median('prefill_tok_s'),
-          decode_tok_s: median('decode_tok_s'),
-          total_tok_s: median('total_tok_s'),
-          context_used: lastNum('context_used'),
-          context_window: lastNum('context_window'),
-          context_reserve: lastNum('context_reserve'),
-          round: Number(last.round) || null,
-          model: last.model || '',
-          median: true,
-        };
-        liveSpeedSamples.length = 0;
-        // The clear can land before the final agent message reaches the
-        // history, so attach on the next ticks too; and rebuild the Map and
-        // the array — mutating in place and setting the same reference does
-        // not notify subscribers.
-        const attach = () => {
-          const histories = get(chatHistories);
-          const hist = [...(histories.get(conversation_id) || [])];
-          for (let i = hist.length - 1; i >= 0; i--) {
-            const m: any = hist[i];
-            if (m && m.sender !== 'user' && (m.tool_calls?.length || m.senderName)) {
-              hist[i] = { ...m, speed_summary: summary };
-              const next = new Map(histories);
-              next.set(conversation_id, hist);
-              chatHistories.set(next);
-              return true;
-            }
-          }
-          return false;
-        };
-        if (!attach()) {
-          setTimeout(attach, 400);
-          setTimeout(attach, 1200);
-        }
-      }
       if (isActiveChatConv(conversation_id)) {
         // The second way the answer used to disappear, and the one the backlog entry
         // never named: completion fires at exactly the moment the user described —

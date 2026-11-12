@@ -7117,7 +7117,8 @@ class CoreService:
                 tool_calls = trace.get("accumulated_tool_calls")
                 await self.send_group_agent_message(group_id, agent_name, response, tool_calls=tool_calls,
                                                     mention_depth=mention_depth,
-                                                    turn_end=trace.get("turn_end"))
+                                                    turn_end=trace.get("turn_end"),
+                                                    speed_summary=trace.get("speed_summary"))
         except Exception as e:
             logger.error("Agent group response failed: %s", e, exc_info=True)
 
@@ -7308,6 +7309,7 @@ class CoreService:
         tool_calls: Optional[list] = None,
         mention_depth: int = 0,
         turn_end: Optional[str] = None,
+        speed_summary: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """Send a group message attributed to an agent.
 
@@ -7326,6 +7328,9 @@ class CoreService:
             mention_depth: How many cross-node agent mentions stand behind this
                 post (specs/dptp_v1.md §4.3) — 0 unless the run was woken by an
                 agent post from another node. Signed, and carried only when > 0.
+            speed_summary: The run's finished strip (`loop.speed_summary_of`):
+                stored with the record and sent to this node's UI, like
+                `tool_calls`; unsigned, and never sent to a peer.
 
         Returns:
             The generated message_id (16-char hex), or None if the group was not found.
@@ -7406,6 +7411,7 @@ class CoreService:
             # hash computed without them, and every peer refused the post.
             tool_calls=tool_calls or None,
             mention_depth=mention_depth or None,
+            speed_summary=speed_summary or None,
         ))
         monitor.save_history()
 
@@ -7436,6 +7442,8 @@ class CoreService:
             # Clipped to what the UI's tool row shows (tool_detail.py).
             "tool_calls": clip_tool_calls(tool_calls or []),
         }
+        if speed_summary:
+            payload["speed_summary"] = speed_summary
         if mention_depth:
             # Inside the v3 preimage; absent means 0.
             payload["mention_depth"] = mention_depth
@@ -7452,7 +7460,7 @@ class CoreService:
                 self._processed_message_ids.discard(k)
 
         # Relay to P2P peers so remote members see the agent response
-        for_peers = {k: v for k, v in payload.items() if k != "tool_calls"}
+        for_peers = {k: v for k, v in payload.items() if k not in ("tool_calls", "speed_summary")}
         await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": for_peers})
 
         # Update token count — use agent's tokens_after_last_response if available
@@ -9578,10 +9586,12 @@ class CoreService:
             # Read off the record, as the index is: the live bubble then says
             # what a reload will say.
             turn_end = None
+            speed_summary = None
             if monitor and monitor.message_history:
                 if monitor.message_history[-1].get("role") == "assistant":
                     assistant_msg_index = monitor.message_history[-1].get("msg_index", 0)
                     turn_end = monitor.message_history[-1].get("turn_end")
+                    speed_summary = monitor.message_history[-1].get("speed_summary")
                 if len(monitor.message_history) >= 2 and monitor.message_history[-2].get("role") == "user":
                     user_msg_index = monitor.message_history[-2].get("msg_index", 0)
 
@@ -9607,6 +9617,7 @@ class CoreService:
                     "assistant_msg_index": assistant_msg_index,
                     "context_breakdown": session_state.get("context_breakdown"),
                     **({"turn_end": turn_end} if turn_end else {}),
+                    **({"speed_summary": speed_summary} if speed_summary else {}),
                 }
             )
 

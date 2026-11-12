@@ -50,6 +50,7 @@ from ..managers.llama_server_supervisor import (
     current_card_hold,
     engine_refusal_in,
 )
+from ..node_ledger import prompt_cache_split
 from ..process_registry import SpawnOrigin, get_registry, spawn_origin
 from .run_gate import note_turn
 from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
@@ -212,8 +213,10 @@ def round_progress_payload(
     prompt_tokens: int,
     context_window: Optional[int],
     context_reserve: Optional[int],
+    cached_tokens: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    """One round's live strip: how fast it ran, and how full the window was.
+    """One round's live strip: how fast it ran, how full the window was, and how
+    much of the prompt the provider's cache already held.
 
     The speed half arrives from the provider (llama.cpp fills it, the API
     providers do not) and is passed through untouched. The occupancy half is
@@ -234,11 +237,25 @@ def round_progress_payload(
       blocks on is the reserve, carried next to the pair instead of folded into
       it: a full bar should be explained, not merely red.
 
+    The cache half is `cached_tokens` against this round's `prompt_tokens` —
+    the two numbers the header's «cache hit rate: N%» is made of, sent as counts so the
+    finished header can add them up across the turn instead of averaging
+    percentages. It is present only when the provider stated the reused count
+    (`node_ledger.prompt_cache_split`) and it fits inside the prompt: a real 0
+    travels as 0, and an unstated or impossible count is left out, because a
+    percentage the provider never reported would be made up.
+
     Nothing is invented. With no window known the occupancy half is absent — a
     missing field, not a zero — and a round with neither half returns None, so
     no empty strip is emitted.
     """
     payload: Dict[str, Any] = dict(speed) if speed else {}
+    if (
+        isinstance(cached_tokens, int) and not isinstance(cached_tokens, bool)
+        and 0 <= cached_tokens <= prompt_tokens and prompt_tokens > 0
+    ):
+        payload["cached_tokens"] = cached_tokens
+        payload["prompt_tokens"] = int(prompt_tokens)
     if context_window and context_window > 0 and prompt_tokens > 0:
         payload["context_used"] = int(prompt_tokens)
         payload["context_window"] = int(context_window)
@@ -248,6 +265,59 @@ def round_progress_payload(
         return None
     payload["round"] = round_idx
     return payload
+
+
+def _positive_number(value: Any) -> Optional[float]:
+    """A finite number above zero, else None — the test the header applies."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if value > 0 and value != float("inf") else None
+
+
+def _whole(value: Any) -> Optional[int]:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def speed_summary_of(rounds: List[Optional[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    """The finished turn's strip, stored as `speed_summary` beside the message's
+    `tool_calls`, from the strips `round_progress_payload` built for its rounds.
+
+    A round counts once (by `round`, its last strip winning). Speeds: upper
+    median over the rounds. Occupancy: the last round's, the peak the next turn
+    starts from. Cache: `cached_tokens` and `prompt_tokens` summed over the rounds
+    that stated both, so the header shows a token-weighted rate. None when no
+    round left a strip.
+    """
+    by_round: Dict[Any, Dict[str, Any]] = {}
+    for i, payload in enumerate(rounds):
+        if payload:
+            by_round[_whole(payload.get("round")) or f"strip-{i}"] = payload
+    if not by_round:
+        return None
+    strips = list(by_round.values())
+
+    def median(key: str) -> Optional[float]:
+        vals = sorted(v for v in (_positive_number(s.get(key)) for s in strips) if v is not None)
+        return vals[len(vals) // 2] if vals else None
+
+    cache = [(c, p) for c, p in ((_whole(s.get("cached_tokens")), _whole(s.get("prompt_tokens")))
+                                 for s in strips)
+             if c is not None and p is not None and 0 <= c <= p and p > 0]
+    last = strips[-1]
+    return {
+        "rounds": len(strips),
+        "prefill_tok_s": median("prefill_tok_s"),
+        "decode_tok_s": median("decode_tok_s"),
+        "total_tok_s": median("total_tok_s"),
+        "context_used": _positive_number(last.get("context_used")),
+        "context_window": _positive_number(last.get("context_window")),
+        "context_reserve": _positive_number(last.get("context_reserve")),
+        "cached_tokens": sum(c for c, _ in cache) if cache else None,
+        "prompt_tokens": sum(p for _, p in cache) if cache else None,
+        "round": _whole(last.get("round")) or None,
+        "model": last.get("model") or "",
+        "median": True,
+    }
 
 # Tool execution runs on daemon threads of our own rather than on a
 # ThreadPoolExecutor, for the reason browser.py's _PinnedThread already
@@ -2261,6 +2331,7 @@ async def run_llm_loop(
     }
     _accumulated_tool_calls: list[dict] = []
     llm_trace["accumulated_tool_calls"] = _accumulated_tool_calls
+    _round_strips: List[Dict[str, Any]] = []  # each round's strip, for llm_trace["speed_summary"]
     accumulated_usage: Dict[str, Any] = {
         "prompt_tokens": 0,        # cumulative across all rounds (for cost/billing)
         "first_prompt_tokens": 0,  # round-1 only — baseline context before tool results inflate it
@@ -2724,7 +2795,13 @@ async def run_llm_loop(
                     prompt_tokens=round_prompt_tokens,
                     context_window=_strip_window,
                     context_reserve=_strip_reserve,
+                    cached_tokens=prompt_cache_split(usage)["cached_tokens"],
                 )
+                # Kept current after every round, so whichever branch ends the
+                # turn (a Stop and a Kill too) returns the rounds that ran.
+                if _round_speed:
+                    _round_strips.append(_round_speed)
+                    llm_trace["speed_summary"] = speed_summary_of(_round_strips)
             except CallKilled:
                 log.warning("Agent killed by user mid-call in round %d", round_idx)
                 llm_trace["stopped_by_user"] = True

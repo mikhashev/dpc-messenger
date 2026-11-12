@@ -1507,6 +1507,7 @@ class DpcAgentManager:
             tool_calls=tool_calls or None,
             turn_end=turn_end,
             message_source=message_source,
+            speed_summary=trace.get("speed_summary"),
         )
         monitor.save_history()
 
