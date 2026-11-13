@@ -40,14 +40,8 @@ class SendTextHandler(MessageHandler):
             self.logger.debug("Duplicate message detected from %s, skipping", sender_node_id)
             return None
 
-        # Add to processed set
+        # Add to processed ids (bounds itself, oldest out first)
         self.service._processed_message_ids.add(message_id)
-
-        # Clean up old IDs
-        if len(self.service._processed_message_ids) > self.service._max_processed_ids:
-            to_remove = list(self.service._processed_message_ids)[:self.service._max_processed_ids // 2]
-            for mid in to_remove:
-                self.service._processed_message_ids.discard(mid)
 
         # Broadcast to UI with sender name
         sender_name = self.service.peer_metadata.get(sender_node_id, {}).get("name") or sender_node_id

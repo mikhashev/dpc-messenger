@@ -37,6 +37,7 @@ from .dpc_agent.pricing import vendor_ceiling_currency
 from . import node_ledger
 from .hub_client import HubClient
 from .p2p_manager import P2PManager, peer_proof
+from .processed_message_ids import ProcessedMessageIds
 from .own_addresses import lan_addresses
 from .llm_manager import LLMManager, PROVIDER_MAP, entry_point_for
 from . import provider_alias_refs
@@ -670,12 +671,12 @@ class CoreService:
         self.p2p_manager.set_on_message_received(self.on_p2p_message_received)
         self.p2p_manager.set_on_peer_disconnected(self._handle_peer_disconnected)
         self.p2p_manager.set_groups_for_peer(self.group_manager.get_groups_for_peer)
-        self._processed_message_ids = set()  # Track processed messages
+        self._max_processed_ids = 1000  # Cap on the processed-ids window
+        self._processed_message_ids = ProcessedMessageIds(self._max_processed_ids)  # Track processed messages
         # Certificates we have asked a neighbour for and not yet received.
         # Without it a busy group turns one missing certificate into a
         # request per message.
         self.pending_certificate_requests = set()
-        self._max_processed_ids = 1000  # Limit set size
         self._history_requested_peers = set()  # Track peers we've requested history from (prevents infinite loops)
         # (peer, group) pairs a peer has refused us this session. Our roster is
         # what makes us ask, and removal never reaches the node being removed,
@@ -7453,11 +7454,7 @@ class CoreService:
 
         # Pre-register message ID so GroupTextHandler ignores it if a peer relays it back
         dedup_key = f"{group_id}:{message_id}"
-        self._processed_message_ids.add(dedup_key)
-        if len(self._processed_message_ids) > self._max_processed_ids:
-            to_remove = list(self._processed_message_ids)[:len(self._processed_message_ids) // 2]
-            for k in to_remove:
-                self._processed_message_ids.discard(k)
+        self._processed_message_ids.add(dedup_key)  # bounds itself, oldest out first
 
         # Relay to P2P peers so remote members see the agent response
         for_peers = {k: v for k, v in payload.items() if k not in ("tool_calls", "speed_summary")}

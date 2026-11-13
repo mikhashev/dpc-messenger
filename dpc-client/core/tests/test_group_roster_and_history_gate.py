@@ -16,7 +16,7 @@ most powerful operation of the three checked nothing.
 import pytest
 
 from dpc_client_core.managers.group_manager import GroupManager
-from dpc_client_core.message_handlers.group_handler import GroupSyncHandler
+from dpc_client_core.message_handlers.group_handler import GroupDeleteHandler, GroupSyncHandler
 from dpc_client_core.message_handlers.chat_history_handlers import (
     ChatHistoryResponseHandler,
     HistoryRequestRegistry,
@@ -534,3 +534,43 @@ async def test_the_request_we_send_carries_an_id_and_is_recorded(served):
     request_id = asked[0]["payload"]["request_id"]
     assert request_id
     assert service.history_requests.claim(MEMBER, group.group_id, request_id)
+
+
+# --- GROUP_DELETE: no phantom announcement ------------------------------
+
+@pytest.mark.asyncio
+async def test_a_delete_for_an_unheld_group_announces_nothing(group_manager):
+    """A stranger naming a group id this node never held raises no UI event."""
+    manager, _ = group_manager
+    service = _Service(manager)
+    handler = GroupDeleteHandler(service)
+
+    await handler.handle(OUTSIDER, {"group_id": "group-never-held"})
+
+    assert [name for name, _ in service.local_api.events if name == "group_deleted"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_creators_delete_still_removes_and_announces(group_manager):
+    manager, group = group_manager
+    service = _Service(manager)
+    handler = GroupDeleteHandler(service)
+
+    await handler.handle(SELF, {"group_id": group.group_id})
+
+    assert manager.get_group(group.group_id) is None
+    assert [(n, p["group_id"], p["group_name"]) for n, p in service.local_api.events] == [
+        ("group_deleted", group.group_id, "work"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_delete_from_a_non_creator_for_a_held_group_is_still_ignored(group_manager):
+    manager, group = group_manager
+    service = _Service(manager)
+    handler = GroupDeleteHandler(service)
+
+    await handler.handle(OUTSIDER, {"group_id": group.group_id})
+
+    assert manager.get_group(group.group_id) is not None
+    assert service.local_api.events == []

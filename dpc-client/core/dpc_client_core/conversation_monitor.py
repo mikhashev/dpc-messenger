@@ -2389,8 +2389,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if not boundary:
             return 0
 
-        kept = [m for m in self.message_history if (m.get("timestamp") or "") >= boundary]
-        cut = [m for m in self.message_history if (m.get("timestamp") or "") < boundary]
+        # Moments, not strings: a record with no readable timestamp stays live and
+        # `Z` / `+00:00` spellings order by time, as on every other boundary path.
+        kept = [m for m in self.message_history if not is_before_boundary(m, boundary)]
+        cut = [m for m in self.message_history if is_before_boundary(m, boundary)]
         dropped = len(cut)
         if not dropped:
             self._advance_live_history_boundary(boundary)

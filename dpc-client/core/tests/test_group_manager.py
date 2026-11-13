@@ -57,7 +57,7 @@ class TestGroupReasoningEffort:
         v0 = group.version
         updated = manager.set_group_reasoning_effort(gid, "max")
         assert updated.reasoning_effort == "max"
-        assert updated.version == v0 + 1
+        assert updated.version == v0
         cleared = manager.set_group_reasoning_effort(gid, None)
         assert cleared.reasoning_effort is None
 
@@ -71,6 +71,20 @@ class TestGroupReasoningEffort:
 
     def test_set_effort_nonexistent_group(self, manager):
         assert manager.set_group_reasoning_effort("group-nope", "max") is None
+
+    def test_local_effort_changes_do_not_outrank_a_peer_roster_change(self, manager):
+        group = manager.create_group("Roster", "", ["dpc-node-alice-123"])
+        gid = group.group_id
+        v0 = group.version
+        manager.set_group_reasoning_effort(gid, "low")
+        manager.set_group_reasoning_effort(gid, "high")
+        remote = manager.get_group(gid).to_dict()
+        remote["version"] = v0 + 1
+        remote["members"] = [m for m in remote["members"] if m != "dpc-node-alice-123"]
+        applied = manager.apply_sync(remote)
+        assert applied is not None
+        assert "dpc-node-alice-123" not in manager.get_group(gid).members
+        assert manager.get_group(gid).reasoning_effort == "high"
 
     def test_apply_sync_preserves_local_effort(self, manager):
         group = manager.create_group("Sync", "", [])

@@ -313,13 +313,7 @@ class GroupTextHandler(MessageHandler):
             self.service._processed_message_ids.add(dedup_key)
             return None
 
-        self.service._processed_message_ids.add(dedup_key)
-
-        # Clean up old IDs
-        if len(self.service._processed_message_ids) > self.service._max_processed_ids:
-            to_remove = list(self.service._processed_message_ids)[:self.service._max_processed_ids // 2]
-            for mid in to_remove:
-                self.service._processed_message_ids.discard(mid)
+        self.service._processed_message_ids.add(dedup_key)  # bounds itself, oldest out first
 
         # Relay to group members the sender may not be directly connected to.
         # In a star topology (B↔A↔C, but B↛C), A must relay B's message to C.
@@ -637,7 +631,15 @@ class GroupDeleteHandler(MessageHandler):
 
         # Verify sender is the creator
         group = self.service.group_manager.get_group(group_id)
-        if group and group.created_by != sender_node_id:
+        if group is None:
+            # Not held here: there is nothing to remove and no deletion to
+            # announce, so a stranger cannot raise `group_deleted` for an id.
+            self.logger.debug(
+                "Ignoring GROUP_DELETE from %s for group %s this node does not hold",
+                sender_node_id[:20], group_id
+            )
+            return None
+        if group.created_by != sender_node_id:
             self.logger.warning(
                 "Ignoring GROUP_DELETE from non-creator %s (creator: %s)",
                 sender_node_id, group.created_by
@@ -645,7 +647,7 @@ class GroupDeleteHandler(MessageHandler):
             return None
 
         # Capture group name before deletion for UI notification
-        group_name = group.name if group else group_id
+        group_name = group.name
 
         # Remove local group data
         self.service.group_manager.handle_group_deleted(group_id)

@@ -134,6 +134,25 @@ def test_only_what_predates_the_boundary_is_dropped():
     assert [m["timestamp"] for m in monitor.message_history] == [BOUNDARY, LATER]
 
 
+def test_a_record_with_no_readable_timestamp_stays_and_mixed_formats_order_by_time():
+    """The trim reads moments the way every other boundary path does: a record
+    that cannot be placed stays live (ADR-037, amendment 2026-09-23), and `Z` and
+    `+00:00` spellings of the same clock order by time, not by the character
+    after the seconds."""
+    boundary = "2026-08-07T02:17:45Z"
+    just_after = "2026-08-07T02:17:45.5+00:00"
+    monitor = _monitor([EARLIER, "", just_after, LATER])
+    monitor.message_history.append({"id": "no-stamp", "content": "x"})
+    monitor.message_history.append({"id": "bad-stamp", "timestamp": "not a moment", "content": "x"})
+
+    dropped = monitor.clear_before(boundary)
+
+    assert dropped == 1
+    assert [m["id"] for m in monitor.message_history] == [
+        "m1", "m2", "m3", "no-stamp", "bad-stamp",
+    ]
+
+
 def test_a_node_that_was_present_drops_nothing():
     monitor = _monitor([LATER])
 

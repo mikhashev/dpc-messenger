@@ -468,7 +468,9 @@ class GroupManager:
             return None
         _note_effort(group_id, group.reasoning_effort, effort, "set by command")
         group.reasoning_effort = effort
-        group.version += 1
+        # No version bump: the effort is a local knob, apply_sync discards the
+        # value a peer carries, so a bump would only let an older roster outrank
+        # a newer one at the next sync.
         self._save_group(group_id)
         return group
 
