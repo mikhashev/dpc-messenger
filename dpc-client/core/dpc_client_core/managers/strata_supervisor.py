@@ -153,6 +153,12 @@ GUEST_GROWTH_FACTOR_ONE_CALL = 1.15
 GUEST_SLOTS_KEPT_FREE = 1
 # A `/metrics` read slower than this is a read that did not answer: off.
 GUEST_METRICS_TIMEOUT_S = 3.0
+# A guest entry its holder has not renewed for this long is free: the engine has no
+# time limit on a parked conversation, so without one a peer that went silent keeps
+# every other peer off until an eviction. 15 minutes is a pause longer than a
+# conversation's turn gap (the idle window of a caller is 2 minutes), after which the
+# snapshot's saved prefill is unlikely to be asked for again.
+GUEST_ENTRY_IDLE_S = 900.0
 # Peers whose last two call sizes are kept for the estimate; the oldest goes first.
 _GUEST_SIZES_KEPT = 32
 
@@ -2232,7 +2238,8 @@ class StrataSupervisor(LlamaServerSupervisor):
     # --- a call served to a peer, and the room it may park in (C2) --------------
 
     def _guest_entry_holder(self) -> Optional[str]:
-        """The peer that holds the one guest entry, or None; an eviction since dropped it."""
+        """The peer that holds the one guest entry, or None; an eviction since, or
+        GUEST_ENTRY_IDLE_S without a call by the holder, dropped it."""
         entry = self._guest_entry
         if entry is None:
             return None
@@ -2240,7 +2247,21 @@ class StrataSupervisor(LlamaServerSupervisor):
         if then is not None and now is not None and now != then:
             self._guest_entry = None
             return None
+        idle = time.monotonic() - entry["at"]
+        if idle > GUEST_ENTRY_IDLE_S:
+            self._guest_entry = None
+            logger.info(
+                "strata[%s]: the guest entry of peer %s is dropped: no call of its own for "
+                "%d s (limit GUEST_ENTRY_IDLE_S %d s)",
+                self.alias, entry["peer"], round(idle), round(GUEST_ENTRY_IDLE_S),
+            )
+            return None
         return entry["peer"]
+
+    def _reserve_guest_entry(self, peer_id: str) -> None:
+        """Make `peer_id` the holder of the one guest entry, as of now."""
+        self._guest_entry = {"peer": peer_id, "evictions": self._cache_evictions_polled,
+                             "at": time.monotonic()}
 
     def note_guest_call(self, peer_id: str, size: Optional[int], checkpoint_on: bool) -> None:
         """Record a finished call served to `peer_id`: its size (prompt plus reply
@@ -2256,7 +2277,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             while len(self._guest_sizes) > _GUEST_SIZES_KEPT:
                 self._guest_sizes.pop(next(iter(self._guest_sizes)))
         if checkpoint_on:
-            self._guest_entry = {"peer": peer_id, "evictions": self._cache_evictions_polled}
+            self._reserve_guest_entry(peer_id)
         elif self._guest_entry is not None and self._guest_entry["peer"] == peer_id:
             self._guest_entry = None
 
@@ -2346,9 +2367,10 @@ class StrataSupervisor(LlamaServerSupervisor):
             # usage chunk reaches no `note_guest_call`, and the engine may hold the
             # peer's session all the same. A reservation the call never uses goes
             # with the other release rules (this peer's next call out with
-            # checkpointing off, an eviction since, a new launch). Nothing awaits
-            # between the holder check above and this line.
-            self._guest_entry = {"peer": peer_id, "evictions": self._cache_evictions_polled}
+            # checkpointing off, an eviction since, GUEST_ENTRY_IDLE_S without a call
+            # of its own, a new launch). Nothing awaits between the holder check above
+            # and this line.
+            self._reserve_guest_entry(peer_id)
         return say(not reasons, reasons, inputs, estimate)
 
     def _new_cache_evictions(self) -> int:

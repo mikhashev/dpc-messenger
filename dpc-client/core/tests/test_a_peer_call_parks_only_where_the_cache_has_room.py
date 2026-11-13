@@ -23,6 +23,7 @@ One INFO line per decision prints the inputs and the answer (Johnny's (b)).
 import asyncio
 import logging
 import re
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -351,3 +352,47 @@ class TestTheEntryIsReservedWhenTheDecisionIsOn:
         assert await sup.guest_checkpoint(PEER) is True
         sup.prime_restore_scan()
         assert sup._guest_entry_holder() is None
+
+
+class TestTheEntryGoesWhenItsHolderIsSilent:
+    """GUEST_ENTRY_IDLE_S: the engine has no time limit on a parked conversation, so
+    a holder that goes silent would keep every other peer off until an eviction."""
+
+    @pytest.mark.asyncio
+    async def test_a_holder_silent_past_the_limit_lets_another_peer_in(self, tmp_path, caplog):
+        sup = _sup(tmp_path, _cache(parked=0, slots=4))
+        sup.note_guest_call(PEER, 125000, True)
+        sup.note_guest_call(OTHER, 1000, False)
+        sup._guest_entry["at"] -= strata_mod.GUEST_ENTRY_IDLE_S + 1
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert await sup.guest_checkpoint(OTHER) is True
+        assert sup._guest_entry_holder() == OTHER
+        dropped = [r.getMessage() for r in caplog.records if "guest entry" in r.getMessage()]
+        assert len(dropped) == 1
+        assert f"of peer {PEER} is dropped" in dropped[0] and "no call of its own" in dropped[0]
+
+    @pytest.mark.asyncio
+    async def test_a_holder_active_within_the_window_still_holds(self, tmp_path):
+        sup = _sup(tmp_path, _cache(parked=0, slots=4))
+        sup.note_guest_call(PEER, 125000, True)
+        sup.note_guest_call(OTHER, 1000, False)
+        sup._guest_entry["at"] -= strata_mod.GUEST_ENTRY_IDLE_S - 5
+        assert await sup.guest_checkpoint(OTHER) is False
+        assert sup._guest_entry_holder() == PEER
+
+    @pytest.mark.asyncio
+    async def test_a_call_by_the_holder_renews_the_clock(self, tmp_path):
+        sup = _sup(tmp_path, _cache(parked=0, slots=4))
+        sup.note_guest_call(PEER, 125000, True)
+        sup.note_guest_call(OTHER, 1000, False)
+        sup._guest_entry["at"] -= strata_mod.GUEST_ENTRY_IDLE_S - 5
+        sup.note_guest_call(PEER, 126000, True)
+        sup._guest_entry["at"] -= 10  # past the limit counted from the first call, not the renewal
+        assert await sup.guest_checkpoint(OTHER) is False
+
+    @pytest.mark.asyncio
+    async def test_the_clock_starts_at_the_reservation_not_the_finish(self, tmp_path):
+        sup = _sup(tmp_path, _cache(parked=0, slots=4))
+        sup.note_guest_call(PEER, 125000, False)
+        assert await sup.guest_checkpoint(PEER) is True
+        assert time.monotonic() - sup._guest_entry["at"] < 5
