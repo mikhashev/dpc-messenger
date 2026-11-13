@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
 
 from dpc_client_core import conversation_paths
+from dpc_client_core.conversation_monitor import BOUNDARY_CLOCK_SKEW, parse_moment
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,26 @@ def _note_effort(group_id: str, old: Optional[str], new: Optional[str], source: 
         "Group %s reasoning_effort %s -> %s (%s)",
         group_id, old or "none", new or "none", source,
     )
+
+
+def _marker_refusal(marker: Any) -> Optional[str]:
+    """Why a session marker cannot be taken, or None when it can.
+
+    The same rule a peer's live-history boundary meets: a moment, and not
+    further ahead of our clock than BOUNDARY_CLOCK_SKEW. A marker past that
+    would sort after every genuine reset and refuse them all.
+    """
+    moment = parse_moment(marker)
+    if moment is None:
+        return "it is not a readable moment"
+    if moment > datetime.now(timezone.utc) + BOUNDARY_CLOCK_SKEW:
+        return "it lies in the future"
+    return None
+
+
+def _marker_counts(marker: Any) -> bool:
+    """A stored marker that may outrank another: readable and not in the future."""
+    return bool(marker) and _marker_refusal(marker) is None
 
 
 @dataclass
@@ -588,6 +609,16 @@ class GroupManager:
         if not group:
             return False
 
+        # The creator cannot leave: it would take the roster's only owner with
+        # it, and no ownership transfer exists (Mike's call, 2026-10-23). It
+        # deletes the group instead.
+        if group.created_by == self.node_id:
+            logger.warning(
+                "Refusing to leave group %s: this node is its creator; delete it instead",
+                group_id,
+            )
+            return False
+
         if self.node_id in group.members:
             group.members.remove(self.node_id)
 
@@ -630,7 +661,18 @@ class GroupManager:
         group = self._groups.get(group_id)
         if not group:
             return None
-        if group.session_started_at and group.session_started_at >= started_at:
+        reason = _marker_refusal(started_at)
+        if reason:
+            logger.warning(
+                "Refusing session marker %r for %s set by this node: %s",
+                started_at, group_id, reason,
+            )
+            return None
+        # Moments, not strings. A stored marker that is unreadable or lies in
+        # the future blocks nothing: it is what a poisoned sync left behind.
+        if _marker_counts(group.session_started_at) and (
+            parse_moment(group.session_started_at) >= parse_moment(started_at)
+        ):
             return None
 
         group.session_started_at = started_at
@@ -642,30 +684,101 @@ class GroupManager:
         )
         return group
 
-    def _marker_survives_sync(self, local: Optional[GroupMetadata], remote: GroupMetadata) -> None:
+    def _marker_survives_sync(
+        self, local: Optional[GroupMetadata], remote: GroupMetadata,
+        sender_node_id: Optional[str] = None,
+    ) -> None:
         """Keep whichever session boundary is later, whatever the version says.
 
         Version ordering answers "who wrote last", which is not the same
         question. A peer that has not heard about the reset syncs a record with
         no marker at all and, on a higher version, would erase ours — and with
         it the only thing telling a returning node what to clear.
+
+        A carried marker that is not a moment, or lies further ahead of our
+        clock than BOUNDARY_CLOCK_SKEW, is refused: the record keeps the
+        receiver's own marker (none when it has none), so the refusal never
+        resets what the receiver already holds.
         """
-        if not local or not local.session_started_at:
+        carried = remote.session_started_at
+        if carried:
+            reason = _marker_refusal(carried)
+            if reason:
+                logger.warning(
+                    "Refusing session marker %r for %s from %s: %s",
+                    carried, remote.group_id, sender_node_id or "an unnamed sender", reason,
+                )
+                remote.session_started_at = local.session_started_at if local else None
+                remote.session_reset_evidence = local.session_reset_evidence if local else None
+                return
+        if not local or not _marker_counts(local.session_started_at):
             return
-        if remote.session_started_at and remote.session_started_at >= local.session_started_at:
+        if carried and parse_moment(carried) >= parse_moment(local.session_started_at):
             return
         remote.session_started_at = local.session_started_at
         remote.session_reset_evidence = local.session_reset_evidence
 
-    def apply_sync(self, remote_group: Dict[str, Any]) -> Optional[GroupMetadata]:
+    def _creator_pin_holds(self, local: Optional[GroupMetadata], remote: GroupMetadata,
+                           sender_node_id: Optional[str]) -> bool:
+        """ADR-038 part 1: `created_by` is fixed at first sight, never from the wire.
+
+        An empty `created_by` on a copy we hold (a file written before the
+        field existed) is pinned like any other value: such a group has no
+        creator, so nobody may change its roster, and no record may name one.
+        Taking the first non-empty value instead would hand the roster to
+        whichever member claimed it first — the very rewrite the pin exists
+        to stop.
+        """
+        if local is None or remote.created_by == local.created_by:
+            return True
+        logger.warning(
+            "Refusing group record for %s from %s: it names creator %s, the creator pinned here is %s",
+            remote.group_id, sender_node_id or "an unnamed sender",
+            remote.created_by or "(none)", local.created_by or "(none)",
+        )
+        return False
+
+    def _roster_from_its_owner(self, local: Optional[GroupMetadata], remote: GroupMetadata,
+                               sender_node_id: Optional[str]) -> None:
+        """Keep our `members` unless the record comes from the creator.
+
+        The roster belongs to the creator (ADR-038). Without signatures the
+        only author a receiver can name is the node that sent the record, so a
+        roster that differs from ours is taken only from the creator itself;
+        from anybody else the record goes on with our `members`, and its other
+        fields still ride its version. Before the version rule, so a refused
+        roster cannot win the equal-version tie-break either.
+        """
+        if local is None or (sender_node_id and sender_node_id == local.created_by):
+            return
+        if sorted(remote.members) == sorted(local.members):
+            return
+        logger.warning(
+            "Not applying the roster change for %s from %s: only the creator %s changes members "
+            "(kept %d, offered %d)",
+            remote.group_id, sender_node_id or "an unnamed sender",
+            local.created_by or "(none)", len(local.members), len(remote.members),
+        )
+        remote.members = list(local.members)
+
+    def apply_sync(
+        self, remote_group: Dict[str, Any], sender_node_id: Optional[str] = None,
+    ) -> Optional[GroupMetadata]:
         """
         Apply a GROUP_SYNC from a remote peer. Highest version wins; equal
         versions with divergent content are resolved by content-hash tie-break
         (higher hash wins on both sides, the accepting side bumps the version
         so the next sync propagates the winner).
 
+        Before that: a record naming another creator than the pinned one is
+        refused whole, and `members` is taken only from the creator. At equal
+        versions a roster the creator sends wins outright, so its copy and a
+        member's cannot stay split by the hash.
+
         Args:
             remote_group: Group metadata dict from remote peer
+            sender_node_id: The transport sender: the only author an unsigned
+                record has. None is treated as not the creator.
 
         Returns:
             Updated GroupMetadata if applied, None if the local copy is kept
@@ -673,6 +786,9 @@ class GroupManager:
         remote = GroupMetadata.from_dict(remote_group)
 
         local = self._groups.get(remote.group_id)
+        if not self._creator_pin_holds(local, remote, sender_node_id):
+            return None
+        self._roster_from_its_owner(local, remote, sender_node_id)
         # Not an arrow. What a sync does here is discard the value it carried and
         # keep the local one, so a transition would name a state the room never
         # entered — the first version of this line did exactly that, and its own
@@ -689,7 +805,7 @@ class GroupManager:
                 "Group %s arrived by sync with no local copy — reasoning_effort starts empty",
                 remote.group_id,
             )
-        self._marker_survives_sync(local, remote)
+        self._marker_survives_sync(local, remote, sender_node_id)
         if local and local.version > remote.version:
             logger.debug(
                 "Ignoring GROUP_SYNC for %s: local v%d > remote v%d",
@@ -702,13 +818,19 @@ class GroupManager:
             remote_hash = self._content_hash(remote)
             if local_hash == remote_hash:
                 return None
-            if remote_hash > local_hash:
+            creators_roster = (
+                bool(sender_node_id) and sender_node_id == local.created_by
+                and sorted(remote.members) != sorted(local.members)
+            )
+            if creators_roster or remote_hash > local_hash:
                 remote.version += 1
                 self._groups[remote.group_id] = remote
                 self._save_group(remote.group_id)
                 logger.info(
-                    "Applied GROUP_SYNC tie-break for %s (v%d, remote hash wins, bumped to v%d)",
-                    remote.group_id, local.version, remote.version,
+                    "Applied GROUP_SYNC tie-break for %s (v%d, %s, bumped to v%d)",
+                    remote.group_id, local.version,
+                    "the creator's roster wins" if creators_roster else "remote hash wins",
+                    remote.version,
                 )
                 return remote
             logger.debug(

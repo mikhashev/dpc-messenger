@@ -433,13 +433,16 @@ def test_a_removed_node_stops_advertising_the_group(tmp_path):
     for ever.
     """
     manager = GroupManager(dpc_home=tmp_path, node_id=SELF)
-    group = manager.create_group("work", "topic", [MEMBER])
+    # MEMBER's group: only the creator's roster removes anybody (ADR-038).
+    invited = GroupManager(dpc_home=tmp_path / "member", node_id=MEMBER).create_group(
+        "work", "topic", [SELF])
+    group = manager.apply_sync(invited.to_dict(), MEMBER)
     assert group.group_id in [g.group_id for g in manager.get_groups_for_peer(MEMBER)]
 
     removed = group.to_dict()
     removed["version"] = group.version + 1
     removed["members"] = [MEMBER]          # the roster that leaves SELF out
-    manager.apply_sync(removed)
+    manager.apply_sync(removed, MEMBER)
 
     assert manager.get_groups_for_peer(MEMBER) == []
 

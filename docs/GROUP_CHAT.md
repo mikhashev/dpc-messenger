@@ -148,12 +148,13 @@ On connect, nodes reconcile group history so all members converge.
 ## Group Management
 
 - **Create** — name + topic + peer checklist via NewGroupDialog.
-- **Leave** — member leaves; remaining members notified.
+- **Leave** — member leaves; remaining members notified. The creator cannot leave (no ownership transfer exists, so it deletes the group instead; Mike's call, 2026-10-23).
+- **Roster** — the creator's (ADR-038 part 1): only the creator adds or removes members, a receiver applies `members` only from a `GROUP_SYNC` the creator itself sent, and `created_by` is pinned when the group is first seen. `specs/dptp_v1.md` §3.18 has the rules and their costs.
 - **Delete** — creator-only; broadcasts `GROUP_DELETE`; all members clean up, including the on-disk conversation directory (GROUP-DELETE-FOLDER-REMNANT fix). Peers that were offline learn of the deletion via `GROUP_DELETED_STATUS` on next connect.
 - **Sync** — `GROUP_SYNC` on connect (version + content-hash tie-break); history reconciliation (hash-based). Adding a member sends it `GROUP_CREATE` and then `GROUP_HISTORY_STATUS`, and the invited node answers `GROUP_CREATE` with its own status even when the version was already applied, so a re-added member that kept its history compares and merges instead of waiting for the next reconnect. No history is pushed.
 - **What removal (and leaving) leaves on disk, and what is shown.** `remove_member` drops the node from `members` and nothing else: its `agents` and `agent_names` entries stay in `metadata.json` and travel in `GROUP_SYNC`, so a peer that applies the sync keeps them too. They are kept on purpose (Mike's call, 2026-11-04): the only writer of a node's slot is that node's own Group Settings save (`set_node_agents`), so a prune would lose the node's registered `ext:` tags and agents for good on remove and re-add, and, since both maps feed `_content_hash`, would also have to ship with the version bump. The cost is moved to the readers: wherever another node's agents are **shown or offered**, `members` decides, not the key of the map. That is the participants block every woken agent gets (`_group_participants`, which prints an agent only while its node is in `members`) and the `@` completion in the UI (`mentionableMembers`). A copy whose own node is no longer in `members` (a removed node's copy) offers none of its own agents either. Readers of this node's **own** slot (`group.agents[own node]`: the mention gates, the post-name check, group sleep, the context-window sizing, the bridge's registered tags) are unchanged, and so is delivery, which walks `members`.
 - **Remove while offline** — the removal is recorded in `~/.dpc/groups/removal_registry.json`, and the node's next connect starts with a `GROUP_SYNC` carrying the roster that leaves it out, before any other group traffic.
-- **Block** — removes the node from every group whose roster holds it, through `remove_group_member`, so the remaining members and the node itself get the `GROUP_SYNC` (or the removal is recorded for an offline node), and writes it into `blocked_nodes` (Mike's call, 2026-10-31). Unblock puts it back in no group; that is done by hand. This node then refuses to add it (`add_group_member`, `create_group_chat`: "unblock it first"), ignores a `GROUP_CREATE` or `GROUP_SYNC` the blocked node sends, and applies a `GROUP_SYNC` from a third member whose roster lists it as that group's state, with one INFO line: the gates read the block list, never the roster.
+- **Block** — removes the node from every group this node created whose roster holds it, through `remove_group_member` (in a group created by another node the roster is not this node's to change: it stays listed there, and the block still holds), so the remaining members and the node itself get the `GROUP_SYNC` (or the removal is recorded for an offline node), and writes it into `blocked_nodes` (Mike's call, 2026-10-31). Unblock puts it back in no group; that is done by hand. This node then refuses to add it (`add_group_member`, `create_group_chat`: "unblock it first"), ignores a `GROUP_CREATE` or `GROUP_SYNC` the blocked node sends, and applies a `GROUP_SYNC` from a third member whose roster lists it as that group's state, with one INFO line: the gates read the block list, never the roster.
 - **A blocked author's records are kept.** A post, image, voice message or file whose author (`sender_node_id`, or `agent_owner` for an agent post) is blocked is stored as any other, with its signature and hash untouched, and is still served to other members in history sync so their chains stay whole. On this node it is not relayed onward, routes no mention, emits no `cc_group_mention` and wakes no agent, live or merged by history sync; the UI folds it on display.
 
 ## Backend Files
@@ -190,8 +191,8 @@ On connect, nodes reconcile group history so all members converge.
 | `send_group_file` | group_id, file_path | Send file |
 | `send_group_agent_message` | group_id, agent_name, text | Post a message as a local agent (used by the CC bridge) |
 | `update_group_topic` | group_id, topic | Update topic (creator-only; broadcasts `GROUP_SYNC`) |
-| `add_group_member` | group_id, node_id | Add member + push full history |
-| `remove_group_member` | group_id, node_id | Remove member; broadcast `GROUP_SYNC` |
+| `add_group_member` | group_id, node_id | Add member (creator-only); `GROUP_SYNC` to members, `GROUP_CREATE` and `GROUP_HISTORY_STATUS` to the new one |
+| `remove_group_member` | group_id, node_id | Remove member (creator-only, not the creator itself); broadcast `GROUP_SYNC` |
 | `block_peer` | node_id | Block: `blocked_nodes`, removal from every group, every rule naming it deleted, session and transfers ended. Answers `removed_from_groups`, `removed_rules`, `was_connected`; broadcasts `firewall_rules_updated` |
 | `unblock_peer` | node_id | Remove the id from `blocked_nodes` and nothing else; broadcasts `firewall_rules_updated` |
 | `set_group_agents` | group_id, agent_ids | Choose which of this node's agents take part |
@@ -199,7 +200,7 @@ On connect, nodes reconcile group history so all members converge.
 | `trigger_group_sleep` | group_id | Run sleep consolidation and post the morning briefs |
 | `activate_group_chat` | group_id | Called when the group is opened; posts any pending morning briefs |
 | `get_groups` | (none) | List all groups |
-| `leave_group` | group_id | Leave a group |
+| `leave_group` | group_id | Leave a group (refused for the creator) |
 | `delete_group` | group_id | Delete group (creator-only) |
 
 ## Limitations

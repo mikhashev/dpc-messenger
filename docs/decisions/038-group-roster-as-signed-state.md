@@ -245,8 +245,8 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 |------|--------|--------|
 | ADR drafted | Done | `a583d42e` |
 | Q1–Q4 answered, status accepted | Done | — |
-| `created_by` pinned | Pending | — |
-| Per-field authority in `apply_sync` | Pending | — |
+| `created_by` pinned | Done (2026-11-13), uncommitted — a record naming another creator is refused whole at any version, WARNING with both ids; an empty `created_by` held from an older file is pinned as "no creator" (no member may claim it), so that group's roster is frozen. Cost: no ownership transfer exists, so a lost creator freezes the roster (Q2) | — |
+| Per-field authority in `apply_sync` | Partial (2026-11-13), uncommitted — `members` only, judged by the **transport sender**: a roster that differs from ours is applied only from the creator, from anybody else the record goes on with our roster (other fields still ride the version, a refused roster cannot win the tie-break), and at equal versions the creator's roster wins. `topic`, `name`, `agents`, `agent_names` are still applied from any member. Locally `add_group_member` / `remove_group_member` refuse on a node that is not the creator, and the creator refuses `leave_group` and removing itself (Mike's call, 2026-10-23). Cost: without signatures a roster change reaches only the members directly connected to the creator; a member reached only through another member keeps the old roster until it connects to the creator | — |
 | Signed roster changes | Pending | — |
 | `session_started_at` marker | Partial — honoured against the pre-sync roster, votes bound to the group, trim archived first; the roster itself is still unsigned | `e2962656` |
 | Live-history boundary (amendment 2026-09-23) | Done — awaiting observation on the live pair | `c8582d43` |

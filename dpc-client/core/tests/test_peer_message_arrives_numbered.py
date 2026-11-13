@@ -60,9 +60,16 @@ class _Service:
         return self.monitor
 
 
+class _Group:
+    # Held, with no other member connected: no relay fan-out in this test.
+    members = [_P2P.node_id]
+
+
 class _GroupManager:
     def get_group(self, group_id):
-        return None  # no relay fan-out in this test
+        # A group this node does not hold is dropped before storage, so the
+        # fake holds the one these tests write to.
+        return _Group() if group_id == GROUP else None
 
 
 def _payload(message_id="m-1", text="hello"):

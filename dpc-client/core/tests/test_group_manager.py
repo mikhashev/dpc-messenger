@@ -21,6 +21,22 @@ def manager(tmp_dpc_home):
     return GroupManager(tmp_dpc_home, node_id="dpc-node-self-abc")
 
 
+ALICE = "dpc-node-alice-123"
+
+
+def _received_from_alice(manager, name, members=()):
+    """A group ALICE created and this node holds a copy of.
+
+    The roster is the creator's (ADR-038), so a test that changes `members`
+    by sync, or leaves, needs a group this node did not create.
+    """
+    record = GroupMetadata(
+        group_id=f"group-{name.lower()}0000", name=name, created_by=ALICE,
+        members=[ALICE, "dpc-node-self-abc", *members], version=1,
+    ).to_dict()
+    return manager.apply_sync(record, ALICE)
+
+
 class TestGroupMetadata:
     def test_to_dict_roundtrip(self):
         group = GroupMetadata(
@@ -73,17 +89,17 @@ class TestGroupReasoningEffort:
         assert manager.set_group_reasoning_effort("group-nope", "max") is None
 
     def test_local_effort_changes_do_not_outrank_a_peer_roster_change(self, manager):
-        group = manager.create_group("Roster", "", ["dpc-node-alice-123"])
+        group = _received_from_alice(manager, "Roster", ["dpc-node-bob-456"])
         gid = group.group_id
         v0 = group.version
         manager.set_group_reasoning_effort(gid, "low")
         manager.set_group_reasoning_effort(gid, "high")
         remote = manager.get_group(gid).to_dict()
         remote["version"] = v0 + 1
-        remote["members"] = [m for m in remote["members"] if m != "dpc-node-alice-123"]
-        applied = manager.apply_sync(remote)
+        remote["members"] = [m for m in remote["members"] if m != "dpc-node-bob-456"]
+        applied = manager.apply_sync(remote, ALICE)
         assert applied is not None
-        assert "dpc-node-alice-123" not in manager.get_group(gid).members
+        assert "dpc-node-bob-456" not in manager.get_group(gid).members
         assert manager.get_group(gid).reasoning_effort == "high"
 
     def test_apply_sync_preserves_local_effort(self, manager):
@@ -213,7 +229,7 @@ class TestGroupManagerDelete:
 
 class TestGroupManagerLeave:
     def test_leave_group(self, manager):
-        group = manager.create_group("Test", "", ["dpc-node-alice-123"])
+        group = _received_from_alice(manager, "Test")
         assert manager.leave_group(group.group_id) is True
         assert manager.get_group(group.group_id) is None
 
@@ -221,11 +237,19 @@ class TestGroupManagerLeave:
         assert manager.leave_group("group-nope") is False
 
     def test_leave_removes_file(self, manager):
-        group = manager.create_group("Test", "", [])
+        group = _received_from_alice(manager, "Test")
         conv_dir = manager._get_conversation_dir(group.group_id)
         assert (conv_dir / "metadata.json").exists()
         manager.leave_group(group.group_id)
         assert not conv_dir.exists()
+
+    def test_the_creator_cannot_leave(self, manager):
+        """Mike's call, 2026-10-23: transfer (which does not exist) or delete."""
+        group = manager.create_group("Mine", "", [ALICE])
+        conv_dir = manager._get_conversation_dir(group.group_id)
+        assert manager.leave_group(group.group_id) is False
+        assert manager.get_group(group.group_id) is not None
+        assert (conv_dir / "metadata.json").exists()
 
 
 class TestGroupManagerPersistence:
@@ -266,13 +290,13 @@ class TestGroupManagerPersistence:
 
 class TestGroupManagerSync:
     def test_apply_newer_version(self, manager):
-        group = manager.create_group("Old", "", [])
+        group = _received_from_alice(manager, "Old")
         remote = group.to_dict()
         remote["version"] = 5
         remote["name"] = "Updated"
         remote["members"].append("dpc-node-new-999")
 
-        result = manager.apply_sync(remote)
+        result = manager.apply_sync(remote, ALICE)
         assert result is not None
         assert result.name == "Updated"
         assert result.version == 5

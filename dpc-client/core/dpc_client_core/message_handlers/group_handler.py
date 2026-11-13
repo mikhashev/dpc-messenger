@@ -132,8 +132,18 @@ class GroupCreateHandler(MessageHandler):
             sender_node_id[:20], group_id, name
         )
 
+        # A deleted group stays deleted, whoever offers it back: the registry
+        # is what this node knows, and no sender outranks it.
+        if group_id and self.service.group_manager.is_group_deleted(group_id):
+            self.logger.warning(
+                "Refusing GROUP_CREATE from %s for group %s: it is in this node's "
+                "deleted-groups registry",
+                sender_node_id[:20], group_id,
+            )
+            return None
+
         # Apply via sync (creates local copy)
-        group = self.service.group_manager.apply_sync(payload)
+        group = self.service.group_manager.apply_sync(payload, sender_node_id)
         if group:
             # Notify UI of new group invite
             await self.service.local_api.broadcast_event("group_invite_received", {
@@ -158,6 +168,11 @@ class GroupCreateHandler(MessageHandler):
 
 class GroupTextHandler(MessageHandler):
     """Handles GROUP_TEXT messages (text messages in group chat)."""
+
+    # Running total of GROUP_TEXT frames dropped because this node holds no
+    # group with that id. On the class, not the instance: the history merge
+    # builds a second handler, and the process has one service.
+    dropped_not_held = 0
 
     @property
     def command_name(self) -> str:
@@ -271,6 +286,18 @@ class GroupTextHandler(MessageHandler):
         group_id = payload.get("group_id")
         text = payload.get("text")
         sender_name = payload.get("sender_name", sender_node_id)
+
+        # A group this node does not hold: dropped before anything else, so the
+        # id never names a folder, a 1:1 history or a wake. No member check
+        # here: a node that takes part through `agents` is not on `members`.
+        if not group_id or self.service.group_manager.get_group(group_id) is None:
+            type(self).dropped_not_held += 1
+            self.logger.warning(
+                "Dropped GROUP_TEXT from %s for group %s this node does not hold "
+                "(%d dropped so far)",
+                sender_node_id[:20], group_id, type(self).dropped_not_held,
+            )
+            return None
 
         # Who wrote this, as opposed to who handed it over. In a star the two
         # differ: a relayed message arrives on the relay's socket, and taking
@@ -694,9 +721,12 @@ class GroupSyncHandler(MessageHandler):
         if applied is None:
             return
         marker = getattr(applied, "session_started_at", None)
-        if not marker or marker == marker_before:
+        if not marker or same_moment(marker, marker_before):
             return
-        if marker_before and marker <= marker_before:
+        # Moments, not strings (apply_sync has already refused a marker that is
+        # unreadable or in the future).
+        before, after = parse_moment(marker_before), parse_moment(marker)
+        if after is None or (before is not None and after <= before):
             return
 
         if not members_before:
@@ -779,7 +809,7 @@ class GroupSyncHandler(MessageHandler):
         marker_before = local.session_started_at
         members_before = frozenset(local.members)
 
-        result = self.service.group_manager.apply_sync(payload)
+        result = self.service.group_manager.apply_sync(payload, sender_node_id)
         if result:
             listed = _is_blocked(self.service, *getattr(result, "members", ()))
             if listed:
