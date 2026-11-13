@@ -426,7 +426,7 @@ class ConsensusManager:
         total_votes = len(votes)
         # Participants, not votes cast: otherwise the group shrinks to whoever
         # answered and one voice becomes unanimity.
-        participant_count = len(proposal.participants) or total_votes
+        participant_count = len(proposal.participants)
         approval_rate = approve_count / participant_count if participant_count else 0
 
         # No votes cast (timeout with no user action) — expire, don't treat as request_changes
@@ -454,10 +454,16 @@ class ConsensusManager:
         if deadline_fired:
             session.status = "timeout"
             proposal.status = "timeout"
-            logger.info(
-                "Proposal %s reached its deadline with %d of %d participants answered — "
-                "not approved", proposal.proposal_id, total_votes, participant_count,
-            )
+            if participant_count:
+                logger.info(
+                    "Proposal %s reached its deadline with %d of %d participants answered — "
+                    "not approved", proposal.proposal_id, total_votes, participant_count,
+                )
+            else:
+                logger.info(
+                    "Proposal %s reached its deadline with %d vote(s), no roster — "
+                    "not approved", proposal.proposal_id, total_votes,
+                )
             if self.on_commit_rejected:
                 await self.on_commit_rejected(proposal, votes)
         elif approval_rate >= self.consensus_threshold:
