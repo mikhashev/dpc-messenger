@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** 2026-11-12 | **Current Version:** 0.30.0 | **Current Phase:** Phase 2 (Track 1 Agent Maturity mostly complete; Track 2 Team Collaboration in progress — the client targets Windows, Linux and macOS; star topology)
+> **Status:** Alpha | **Last Updated:** 2026-11-12 | **Current Version:** 0.30.0 | **Current Phase:** Phase 2 (Track 1 Agent Maturity mostly complete; Track 2 Team Collaboration: see its section and the board — the client targets Windows, Linux and macOS; star topology)
 
 ---
 
@@ -10,7 +10,7 @@ D-PC Messenger development:
 
 1. **Phase 1: Federated MVP - COMPLETE (v0.8.0)** - Proven P2P messaging with AI collaboration
 2. **Phase 1.5: Extended Features - COMPLETE (v0.9.0 - v0.18.0)** - File transfer, voice, agent, resilient infrastructure
-3. **Phase 2: Team Collaboration + Agent Maturity** - Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) in progress (multi-node P2P live)
+3. **Phase 2: Team Collaboration + Agent Maturity** - Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration): group chat over several nodes exists, see the Track 2 section and the board
 4. **Where This Leads** - Autonomous agents, network effects, local-first sovereignty
 
 ## Status by axis
@@ -27,7 +27,7 @@ measured both from git and found the number had no source.
 
 | axis | decisions | board entries | awaiting observation |
 |---|---|---|---|
-| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 proposed · ADR-048 accepted · ADR-050 proposed | 247 | 86 |
+| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 proposed · ADR-048 accepted · ADR-050 proposed | 248 | 86 |
 | **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 accepted · ADR-046 accepted · ADR-048 accepted | 225 | 45 |
 | **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 accepted · ADR-046 accepted · ADR-047 proposed · ADR-050 proposed | 343 | 86 |
 | **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 321 | 78 |
@@ -35,7 +35,7 @@ measured both from git and found the number had no source.
 
 **Observation debt: 297 under an axis + 19 in entries that carry none = 316.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
 
-Not yet placed: 130 of 1260 board entries carry no axis, and a guessed one would report coverage this does not have.
+Not yet placed: 130 of 1261 board entries carry no axis, and a guessed one would report coverage this does not have.
 
 Rendered from `docs/decisions/*.md` front matter and `backlog.md`. Nothing here is written by hand; correct it at the source and re-run `uv run python tools/backlog/build.py --roadmap`.
 
@@ -107,7 +107,7 @@ These features were developed organically as the product matured, significantly 
 
 ## Phase 2: Team Collaboration + Agent Maturity
 
-**Status:** Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration) in progress — the client targets Windows, Linux and macOS (CI in `.github/workflows/tests.yml` has Ubuntu jobs only, no Windows or macOS job), star topology
+**Status:** Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration): group chat over several nodes with signed authorship and a creator-owned roster (since 8945a14f) exists; the Track 2 section and the board carry the rest — the client targets Windows, Linux and macOS (CI in `.github/workflows/tests.yml` has Ubuntu jobs only, no Windows or macOS job), star topology
 **Timeline:** Q1-Q3 2026
 **Scope:** Small teams (2-20 members + AIs), embedded agent system
 
