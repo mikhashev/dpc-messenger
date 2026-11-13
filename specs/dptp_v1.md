@@ -2792,8 +2792,8 @@ the group and its folder (`service.py:7743-7771`).
 writes the record, and tells the UI (`group_member_left`). This is a member removing
 itself, not a roster change, so it does not need the creator. A group it does not hold:
 nothing (WARNING from the manager). A sender that is not on the roster, any connected node
-that names a group the receiver holds: the roster is unchanged and `version` is not raised,
-but `group_member_left` is still raised for it, naming that node as the one who left. The
+that names a group the receiver holds: the roster is unchanged, `version` is not raised and
+`group_member_left` is not raised: the UI is told only of a node that was removed. The
 leaver's `agents` and `agent_names` entries stay in the record. A `GROUP_LEAVE` from the
 group's creator is refused (WARNING, roster and `version` unchanged, no UI event): the
 creator cannot leave, and its own node refuses to as well (see *Local roster changes*

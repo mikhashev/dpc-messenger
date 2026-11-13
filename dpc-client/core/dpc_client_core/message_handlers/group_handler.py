@@ -13,6 +13,7 @@ from dpc_protocol.message_signing import (
 )
 from ..conversation_monitor import (
     Message as ConvMessage,
+    BOUNDARY_CLOCK_SKEW,
     LIVE_HISTORY_BOUNDARY_KEY,
     accepted_peer_boundary,
     authors_that_differ_between,
@@ -653,8 +654,12 @@ class GroupLeaveHandler(MessageHandler):
 
         # A member removing itself: the one roster change that needs no
         # creator. The manager refuses anything else, the creator leaving too.
+        held = self.service.group_manager.get_group(group_id)
+        was_member = held is not None and sender_node_id in held.members
         group = self.service.group_manager.remove_member(group_id, sender_node_id, sender_node_id)
-        if group:
+        # Only a sender that was on the roster has left: the manager returns
+        # the group unchanged for one that never was.
+        if group and was_member and sender_node_id not in group.members:
             await self.service.local_api.broadcast_event("group_member_left", {
                 "group_id": group_id,
                 "node_id": sender_node_id,
@@ -1115,7 +1120,11 @@ class GroupHistoryResponseHandler(MessageHandler):
                                  str(message_id)[:8], group_id, blocked)
                 continue
             moment = parse_moment(record.get("timestamp"))
-            # A timestamp ahead of our clock counts as age 0.
+            # A timestamp ahead of our clock by no more than the clock skew
+            # counts as age 0; further ahead it is no age at all, so a node
+            # with a fast clock cannot make an old mention fresh.
+            if moment is not None and moment > now + BOUNDARY_CLOCK_SKEW:
+                moment = None
             age = None if moment is None else max(now - moment, timedelta(0))
             if age is None or age > SYNCED_MENTION_MAX_AGE:
                 self.logger.info(

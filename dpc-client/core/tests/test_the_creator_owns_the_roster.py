@@ -375,3 +375,18 @@ async def test_group_leave_removes_its_sender_and_never_another_node(manager):
     await GroupLeaveHandler(service).handle(CREATOR, {"group_id": GID})
     assert _held(manager).members == [CREATOR, SELF], "the creator cannot leave"
     assert service.local_api.events == []
+
+
+@pytest.mark.asyncio
+async def test_group_leave_from_a_node_off_the_roster_tells_the_ui_nothing(manager):
+    from dpc_client_core.message_handlers.group_handler import GroupLeaveHandler
+
+    service = _Service(manager)
+    service.peer_metadata = {}
+    stranger = "dpc-node-" + "f" * 32
+
+    await GroupLeaveHandler(service).handle(stranger, {"group_id": GID})
+
+    assert service.local_api.events == []
+    assert _held(manager).members == [CREATOR, SELF, MEMBER]
+    assert _held(manager).version == 3

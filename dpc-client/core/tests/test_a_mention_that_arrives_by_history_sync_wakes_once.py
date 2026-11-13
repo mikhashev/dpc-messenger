@@ -204,14 +204,25 @@ async def test_a_mention_older_than_an_hour_wakes_nobody_and_says_so(keys, caplo
 
 
 @pytest.mark.asyncio
-async def test_a_timestamp_ahead_of_our_clock_counts_as_age_zero(keys):
+async def test_a_timestamp_ahead_of_our_clock_within_the_skew_counts_as_age_zero(keys):
+    peer = keys.peer[0]
+    service = _Service([peer])
+    record = _record(keys.peer, "@Ark have a look", age=-datetime.timedelta(minutes=1))
+
+    await _sync(service, peer, [record])
+
+    assert service.run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_timestamp_further_ahead_than_the_skew_wakes_nobody(keys):
     peer = keys.peer[0]
     service = _Service([peer])
     record = _record(keys.peer, "@Ark have a look", age=-datetime.timedelta(hours=3))
 
     await _sync(service, peer, [record])
 
-    assert service.run.await_count == 1
+    assert service.run.await_count == 0
 
 
 @pytest.mark.asyncio
