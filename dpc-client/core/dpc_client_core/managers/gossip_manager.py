@@ -420,7 +420,7 @@ class GossipManager:
 
     async def _get_peer_certificate(self, node_id: str):
         """
-        Retrieve peer's certificate from cache or DHT.
+        Retrieve peer's certificate from the peers store or the DHT.
 
         Returns X.509 certificate with public key.
 
@@ -431,24 +431,20 @@ class GossipManager:
             X.509 certificate or None if not found
 
         Note:
-            First checks peer cache, then active connection, finally queries DHT.
+            First reads ``~/.dpc/peers/<node_id>.crt``, where P2PManager keeps every
+            certificate it has proved, then queries the DHT. The store is read
+            through ``load_persisted_peer_certificate``, so a file whose key does not
+            hash to ``node_id`` is refused there.
         """
-        # Check peer cache first
-        if hasattr(self.p2p_manager, 'peer_cache') and self.p2p_manager.peer_cache:
-            peer = self.p2p_manager.peer_cache.get_peer(node_id)
-            if peer and hasattr(peer, 'certificate'):
-                logger.debug(f"Found certificate for {node_id[:20]} in peer cache")
-                return peer.certificate
+        from ..p2p_manager import load_persisted_peer_certificate
 
-        # Try to get from active connection
-        if hasattr(self.p2p_manager, 'peers') and node_id in self.p2p_manager.peers:
-            conn = self.p2p_manager.peers[node_id]
-            if hasattr(conn, 'peer_cert'):
-                logger.debug(f"Found certificate for {node_id[:20]} from active connection")
-                return conn.peer_cert
+        cert = load_persisted_peer_certificate(node_id)
+        if cert is not None:
+            logger.debug(f"Found certificate for {node_id[:20]} in the peers store")
+            return cert
 
         # Query DHT for certificate
-        logger.debug(f"Certificate not in cache, querying DHT for {node_id[:20]}")
+        logger.debug(f"Certificate not in the peers store, querying DHT for {node_id[:20]}")
         return await self._query_dht_for_certificate(node_id)
 
     async def _query_dht_for_certificate(self, node_id: str):

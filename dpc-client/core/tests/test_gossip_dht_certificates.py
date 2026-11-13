@@ -7,11 +7,16 @@ Validates that:
 - Certificate retrieval falls back to DHT when not in cache
 """
 
+import base64
+import json
+
 import pytest
 import asyncio
 from unittest.mock import Mock, AsyncMock, MagicMock, patch
 from pathlib import Path
 import tempfile
+
+from cryptography.hazmat.primitives import serialization
 
 from dpc_client_core.managers.gossip_manager import GossipManager
 from dpc_client_core.dht.routing import DHTNode
@@ -99,6 +104,17 @@ def temp_dpc_dir():
         cert_path.write_text(cert_pem)
 
         yield dpc_dir
+
+
+@pytest.fixture(autouse=True)
+def peers_dir(tmp_path, monkeypatch):
+    """An empty peers store; the gossip lookup reads it through p2p_manager.DPC_HOME_DIR."""
+    import dpc_client_core.p2p_manager as p2p_module
+
+    monkeypatch.setattr(p2p_module, "DPC_HOME_DIR", tmp_path)
+    store = tmp_path / "peers"
+    store.mkdir()
+    return store
 
 
 @pytest.fixture
@@ -237,44 +253,70 @@ class TestCertificateRetrievalFlow:
     """Test complete certificate retrieval flow with fallback."""
 
     @pytest.mark.asyncio
-    async def test_get_certificate_from_cache(self, gossip_manager, mock_p2p_manager):
-        """Test retrieving certificate from peer cache (no DHT query)."""
+    async def test_get_certificate_from_the_peers_store(self, gossip_manager, mock_p2p_manager, peers_dir):
+        """A certificate P2PManager has proved and stored is found without the DHT."""
+        from dpc_client_core.p2p_manager import P2PManager
 
-        # Mock peer cache with certificate
-        mock_cert = Mock()
-        mock_peer = Mock()
-        mock_peer.certificate = mock_cert
+        cert_pem, _cert, _key, node_id = generate_test_certificate()
+        stored = P2PManager._persist_peer_certificate(
+            Mock(), node_id, cert_pem, peers_dir=peers_dir
+        )
+        assert stored is True
+        assert (peers_dir / f"{node_id}.crt").is_file()
 
-        mock_cache = Mock()
-        mock_cache.get_peer = Mock(return_value=mock_peer)
-        mock_p2p_manager.peer_cache = mock_cache
+        cert = await gossip_manager._get_peer_certificate(node_id)
 
-        cert = await gossip_manager._get_peer_certificate("dpc-node-bob456")
-
-        # Should return cached certificate
-        assert cert == mock_cert
-
-        # Should NOT query DHT
+        assert cert is not None
+        assert cert.public_bytes(serialization.Encoding.PEM).decode("utf-8") == cert_pem
         assert not mock_p2p_manager.dht_manager.find_node.called
 
     @pytest.mark.asyncio
-    async def test_get_certificate_from_active_connection(self, gossip_manager, mock_p2p_manager):
-        """Test retrieving certificate from active connection (no DHT query)."""
+    async def test_a_stored_certificate_of_another_node_is_refused(
+        self, gossip_manager, mock_p2p_manager, mock_dht_manager, peers_dir
+    ):
+        """A file named for one node but holding another node's key is not used."""
+        cert_pem, _cert, _key, _other_id = generate_test_certificate()
+        victim_id = "dpc-node-" + "ab" * 16
+        (peers_dir / f"{victim_id}.crt").write_text(cert_pem, encoding="utf-8")
+        mock_dht_manager.rpc_handler.find_value.return_value = {}
 
-        # Mock active connection with certificate
-        mock_cert = Mock()
-        mock_conn = Mock()
-        mock_conn.peer_cert = mock_cert
+        cert = await gossip_manager._get_peer_certificate(victim_id)
 
-        mock_p2p_manager.peers = {"dpc-node-bob456": mock_conn}
+        assert cert is None
+        # it fell through to the DHT instead
+        mock_dht_manager.find_node.assert_called_once_with(victim_id)
 
-        cert = await gossip_manager._get_peer_certificate("dpc-node-bob456")
+    @pytest.mark.asyncio
+    async def test_an_unreadable_stored_certificate_falls_through_to_the_dht(
+        self, gossip_manager, mock_dht_manager, peers_dir
+    ):
+        node_id = "dpc-node-" + "cd" * 16
+        (peers_dir / f"{node_id}.crt").write_text("not a certificate", encoding="utf-8")
+        mock_dht_manager.rpc_handler.find_value.return_value = {}
 
-        # Should return connection's certificate
-        assert cert == mock_cert
+        assert await gossip_manager._get_peer_certificate(node_id) is None
+        mock_dht_manager.find_node.assert_called_once_with(node_id)
 
-        # Should NOT query DHT
-        assert not mock_p2p_manager.dht_manager.find_node.called
+    @pytest.mark.asyncio
+    async def test_payload_is_encrypted_with_dht_empty_and_certificate_on_disk(
+        self, gossip_manager, mock_dht_manager, peers_dir
+    ):
+        """Falsifier of the card: nothing from the DHT, the cert only in the peers store."""
+        from dpc_client_core.p2p_manager import P2PManager
+        from dpc_protocol.crypto import decrypt_with_private_key_hybrid
+
+        cert_pem, _cert, private_key, node_id = generate_test_certificate()
+        assert P2PManager._persist_peer_certificate(
+            Mock(), node_id, cert_pem, peers_dir=peers_dir
+        )
+        mock_dht_manager.find_node.return_value = []
+
+        encrypted = await gossip_manager._encrypt_payload({"text": "hello"}, node_id)
+
+        assert isinstance(encrypted, str) and encrypted
+        plain = decrypt_with_private_key_hybrid(base64.b64decode(encrypted), private_key)
+        assert json.loads(plain.decode("utf-8")) == {"text": "hello"}
+        assert not mock_dht_manager.rpc_handler.find_value.called
 
     @pytest.mark.asyncio
     async def test_get_certificate_falls_back_to_dht(self, gossip_manager, mock_dht_manager):

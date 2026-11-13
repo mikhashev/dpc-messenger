@@ -128,6 +128,39 @@ class PeerConnection:
                 logger.debug("Error during SSL shutdown for peer %s: %s", self.node_id, e)
 
 
+def load_persisted_peer_certificate(
+    peer_node_id: str,
+    peers_dir: Optional[Path] = None,
+) -> Optional[x509.Certificate]:
+    """The certificate `P2PManager._persist_peer_certificate` stored for a peer.
+
+    Same directory and file name as the writer (`<peers_dir>/<node_id>.crt`,
+    default `DPC_HOME_DIR / "peers"`). The writer re-derives the node id from the
+    key before it stores anything, and this re-checks it on the way out, because a
+    file in that directory can be put there by hand: a certificate whose key does
+    not hash to `peer_node_id` is refused. None when there is no file, it does not
+    parse, or it is not this peer's.
+    """
+    if peers_dir is None:
+        peers_dir = DPC_HOME_DIR / "peers"
+    cert_path = peers_dir / f"{peer_node_id}.crt"
+    try:
+        if not cert_path.is_file():
+            return None
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+        derived_id = generate_node_id(cert.public_key())
+    except Exception as e:  # noqa: BLE001 - unreadable file: same answer as no file
+        logger.warning("Could not read cached certificate for %s: %s", peer_node_id, e)
+        return None
+    if derived_id != peer_node_id:
+        logger.warning(
+            "Refusing cached certificate for %s: its public key hashes to %s",
+            peer_node_id, derived_id,
+        )
+        return None
+    return cert
+
+
 def _enable_tcp_keepalive(writer: asyncio.StreamWriter) -> None:
     """
     Enable TCP keepalive on the underlying socket of an asyncio StreamWriter.

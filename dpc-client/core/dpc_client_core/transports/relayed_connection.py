@@ -134,10 +134,19 @@ class RelayedPeerConnection:
 
     async def _get_peer_certificate(self, node_id: str):
         """
-        Get peer's X.509 certificate for E2E encryption via DHT lookup.
+        Get peer's X.509 certificate for E2E encryption.
 
-        Uses cert:<node_id> key — same mechanism as the gossip tier.
+        First the peers store (``~/.dpc/peers/<node_id>.crt``, where P2PManager
+        keeps every certificate it has proved), then a DHT lookup of the
+        cert:<node_id> key — same mechanism as the gossip tier. Raises
+        ConnectionError when neither has it.
         """
+        from ..p2p_manager import load_persisted_peer_certificate
+
+        stored = load_persisted_peer_certificate(node_id)
+        if stored is not None:
+            return stored
+
         if not self.dht_manager:
             raise ConnectionError(
                 f"No DHT manager — cannot look up certificate for {node_id[:20]}"
