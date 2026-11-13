@@ -371,13 +371,16 @@ class ConsensusManager:
         return counted
 
     def vote_tally(self, proposal_id: str) -> tuple:
-        """(votes from participants, participants) for a session, for log lines."""
+        """(votes from participants, participants) for a session, for log lines.
+
+        A proposal that named nobody has no roster: the pair is (votes, 0), and a
+        caller says "no roster" rather than a fraction of nothing."""
         session = self.sessions.get(proposal_id)
         if session is None:
             return (0, 0)
         roster = set(session.proposal.participants or ())
         if not roster:
-            return (len(session.votes), len(session.votes))
+            return (len(session.votes), 0)
         return (sum(1 for n in session.votes if n in roster), len(roster))
 
     async def _finalize_vote(self, session: VotingSession) -> None:
@@ -1098,9 +1101,10 @@ class ConsensusManager:
             if counted:
                 k, n = self.vote_tally(vote.proposal_id)
                 logger.info(
-                    "Counted %s vote by %s via %s on %s (%d/%d)",
+                    "Counted %s vote by %s via %s on %s (%s)",
                     vote.vote, vote.voter_node_id, sender_node_id,
-                    vote.proposal_id, k, n,
+                    vote.proposal_id,
+                    f"{k}/{n}" if n else f"{k} vote{'' if k == 1 else 's'}, no roster",
                 )
 
         except Exception as e:

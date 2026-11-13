@@ -45,6 +45,19 @@ def test_a_counted_vote_prints_one_line_with_voter_relay_and_tally(caplog):
     assert lines[0].startswith("Counted approve vote")
 
 
+def test_a_proposal_that_named_nobody_says_no_roster_instead_of_n_over_n(caplog):
+    m = _manager(participants=())
+    with caplog.at_level(logging.DEBUG):
+        _send(m, B)
+        _send(m, C)
+    lines = _counted(caplog)
+    assert len(lines) == 2
+    assert f"on {PID} (1 vote, no roster)" in lines[0]
+    assert f"on {PID} (2 votes, no roster)" in lines[1]
+    assert "/" not in lines[1].rsplit("(", 1)[1]
+    assert m.vote_tally(PID) == (2, 0)
+
+
 def test_a_repeated_identical_vote_prints_no_counted_line(caplog):
     m = _manager()
     _send(m, B)
