@@ -1327,9 +1327,9 @@
             type="checkbox"
             bind:checked={modelConfigCompactionEnabled}
           />
-          Enable tool-history compaction
+          Summarize old tool results with a model
         </label>
-        <p class="dialog-hint">Off by default: the agent uses the current round-based truncation. When on, old tool results are summarized by the model below as the context window fills — one point of failure, no silent model switch.</p>
+        <p class="dialog-hint">Off: as the context fills, old tool results are cut to short notes. On: a model summarizes them instead.</p>
 
         {#if modelConfigCompactionEnabled}
           <label for="compaction-llm" class="dialog-label">Compaction LLM:</label>

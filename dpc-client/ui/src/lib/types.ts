@@ -333,6 +333,14 @@ export interface AgentProgressEvent {
         // what the provider reused of `prompt_tokens`. Absent when the provider
         // stated no split; a stated 0 is 0. The header shows cached / prompt.
         cached_tokens?: number;
+        // The run's last context cut (loop.py: round_progress_payload); absent
+        // before the first. The header shows it after the context part.
+        last_context_cut?: {
+            round: number;
+            reason: 'rounds' | 'pressure' | 'summary';
+            freed_tokens: number;
+            kept_rounds: number;
+        };
     } | null;
 }
 

@@ -214,6 +214,7 @@ def round_progress_payload(
     context_window: Optional[int],
     context_reserve: Optional[int],
     cached_tokens: Optional[int] = None,
+    last_context_cut: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """One round's live strip: how fast it ran, how full the window was, and how
     much of the prompt the provider's cache already held.
@@ -248,6 +249,10 @@ def round_progress_payload(
     Nothing is invented. With no window known the occupancy half is absent — a
     missing field, not a zero — and a round with neither half returns None, so
     no empty strip is emitted.
+
+    `last_context_cut` is the run's last context cut (`CompactionState`), carried
+    as it is so the strip can say why the context number fell; absent before the
+    first cut, and it rides an existing strip rather than making one.
     """
     payload: Dict[str, Any] = dict(speed) if speed else {}
     if (
@@ -264,6 +269,8 @@ def round_progress_payload(
     if not payload:
         return None
     payload["round"] = round_idx
+    if last_context_cut:
+        payload["last_context_cut"] = dict(last_context_cut)
     return payload
 
 
@@ -2796,6 +2803,7 @@ async def run_llm_loop(
                     context_window=_strip_window,
                     context_reserve=_strip_reserve,
                     cached_tokens=prompt_cache_split(usage)["cached_tokens"],
+                    last_context_cut=_compaction_state.last_context_cut,
                 )
                 # Kept current after every round, so whichever branch ends the
                 # turn (a Stop and a Kill too) returns the rounds that ran.

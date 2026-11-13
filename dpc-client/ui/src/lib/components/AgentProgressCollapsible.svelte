@@ -9,6 +9,7 @@
     import { liveToolArgPreview } from '$lib/utils/liveToolArg';
     import { occupancyFromSpeed, occupancyLabel, occupancyTitle } from '$lib/utils/contextOccupancy';
     import { cacheFromSpeed, cacheLabel, cacheTitle } from '$lib/utils/cacheHitRate';
+    import { cutFromSpeed, cutLabel, cutTitle } from '$lib/utils/contextCut';
     import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
     import { sendCommand } from '$lib/coreService';
     import {
@@ -138,6 +139,9 @@
     let cacheHint = $derived(
         cache ? cacheTitle(cache, { rounds: speed?.median ? speed?.rounds : null }) : '',
     );
+    // The run's last context cut, so a falling context number has its reason
+    // beside it (contextCut.ts).
+    let cut = $derived(cutFromSpeed(speed));
 
     // One-line result preview shown in the collapsed tool row; the expanded
     // block below carries the arguments and the output.
@@ -199,6 +203,9 @@
                             class:blocked={ctx.blocked}
                             title={ctxTitle}
                         >{occupancyLabel(ctx)}</span>
+                    {/if}
+                    {#if cut}
+                        <span class="speed-part cut" title={cutTitle(cut)}>{cutLabel(cut)}</span>
                     {/if}
                     {#if cache}
                         <span class="speed-part cache" title={cacheHint}>{cacheLabel(cache)}</span>

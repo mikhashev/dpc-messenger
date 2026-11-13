@@ -1830,6 +1830,9 @@ class CompactionState:
         self.compacting = False   # True while usage sits above release
         self.fail_streak = 0
         self.skip_logged = False  # a "cut skipped" line was written since the last real cut
+        # The last cut this run made, for the UI's progress strip (None before the first):
+        # {"round", "reason": "rounds" | "pressure" | "summary", "freed_tokens", "kept_rounds"}.
+        self.last_context_cut: Optional[Dict[str, Any]] = None
 
 
 # A cut rewrites the prompt from its boundary on, and a local engine re-reads
@@ -1979,6 +1982,31 @@ def plan_cut(
     return None
 
 
+def _note_cut(
+    state: CompactionState,
+    before: List[Dict[str, Any]],
+    after: List[Dict[str, Any]],
+    *,
+    round_idx: int,
+    reason: str,
+    kept: int,
+) -> List[Dict[str, Any]]:
+    """Record a cut that happened on `state.last_context_cut` and return `after`.
+    Freed tokens are the chars/4 estimate of the list before minus after; a pass
+    that freed nothing (every old result short enough to keep) records nothing,
+    so the strip never says "−0.0K"."""
+    if after is not before:
+        freed = estimate_messages_tokens(before) - estimate_messages_tokens(after)
+        if freed > 0:
+            state.last_context_cut = {
+                "round": round_idx,
+                "reason": reason,
+                "freed_tokens": freed,
+                "kept_rounds": kept,
+            }
+    return after
+
+
 async def apply_compaction(
     messages: List[Dict[str, Any]],
     *,
@@ -2039,8 +2067,11 @@ async def apply_compaction(
         round_idx, ratio * 100, uncut_rounds(messages), keep_after, summariser,
         evicted_calls(messages, keep_after),
     )
+    # A deterministic cut's reason: the pressure line, else the compaction-off round bound.
+    det_reason = "pressure" if ratio >= UNDER_PRESSURE else "rounds"
     if not summariser:
-        return compact_tool_history(messages, keep_recent=keep_after)
+        return _note_cut(state, messages, compact_tool_history(messages, keep_recent=keep_after),
+                         round_idx=round_idx, reason=det_reason, kept=keep_after)
 
     # ADR-033 observability: one line each time compaction runs, so a live agent's
     # compaction behaviour is visible in the log (grep "ADR-033 compaction").
@@ -2057,11 +2088,14 @@ async def apply_compaction(
             )
             state.fail_streak = 0
             log.debug("ADR-033 compaction: done (round=%d, usage was %.1f%%)", round_idx, ratio * 100)
-            return out
+            return _note_cut(state, messages, out,
+                             round_idx=round_idx, reason="summary", kept=keep_after)
         except Exception as e:
             # Summaries already bought stay in the transcript (marked, so the
             # next batch skips them); the ladder below treats only the rest.
-            if isinstance(e, PartialCompaction):
+            before_the_cut = messages
+            summarised = isinstance(e, PartialCompaction)
+            if summarised:
                 messages = e.result
                 e = e.cause
             # Strategy fallback ladder (not a model switch): keep MORE verbatim as a
@@ -2090,7 +2124,10 @@ async def apply_compaction(
                 )
             else:
                 keep = {1: 12, 2: 18}.get(state.fail_streak, state.keep_recent)
-            return compact_tool_history(messages, keep_recent=keep)
+            return _note_cut(state, before_the_cut, compact_tool_history(messages, keep_recent=keep),
+                             round_idx=round_idx,
+                             reason="summary" if summarised else det_reason, kept=keep)
 
     # Circuit broken: stop calling the model; keep context bounded deterministically.
-    return compact_tool_history(messages, keep_recent=keep_after)
+    return _note_cut(state, messages, compact_tool_history(messages, keep_recent=keep_after),
+                     round_idx=round_idx, reason=det_reason, kept=keep_after)
