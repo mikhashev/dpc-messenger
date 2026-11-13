@@ -203,3 +203,25 @@ def test_format_mention_keeps_the_first_line_cut_at_200(bridge):
     line = bridge._format_mention(_frame(text="x" * 300 + "\nmore")["payload"], ts="12:00:00")
     assert line == "[MENTION] 12:00:00 Mike (@cc_mike) in group-0a52389f2bb6: " + "x" * 200
     assert bridge._format_mention(_frame(text="")["payload"], ts="12:00:00").endswith(": ")
+
+
+def test_listen_prints_the_groups_token_counter_under_each_mention(bridge, scripted, capsys):
+    # Mike, 2026-11-13: the counter in every mode, a mention included.
+    sessions, _, _ = scripted
+    usage = {"history_tokens": 16244, "tokens_after_last_response": 97103, "token_limit": 250000,
+             "context_agent": "Ark",
+             "context_agents": [{"name": "Ark", "tokens": 97103, "limit": 250000, "percent": 38.8}]}
+    sessions.append([OK, json.dumps(_frame(token_usage=usage)), _Closed("gone")])
+    assert bridge.listen_sync(GROUP, ["CC_mike"], once=True) == 0
+    lines = capsys.readouterr().out.splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith("[MENTION]"))
+    assert lines[at + 1] == bridge.format_token_usage(usage)
+    assert lines[at + 1].startswith("[TOKENS] dialog 16244 of 169141 available")
+
+
+def test_listen_says_unknown_when_a_mention_carries_no_counter(bridge, scripted, capsys):
+    sessions, _, _ = scripted
+    sessions.append([OK, json.dumps(_frame()), _Closed("gone")])
+    assert bridge.listen_sync(GROUP, ["CC_mike"], once=True) == 0
+    out = capsys.readouterr().out
+    assert "[TOKENS] unknown (the mention carried no token_usage)" in out

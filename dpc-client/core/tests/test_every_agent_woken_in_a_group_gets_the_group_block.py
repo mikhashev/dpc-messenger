@@ -210,8 +210,8 @@ def test_list_groups_can_carry_each_groups_block(bridge, monkeypatch):  # noqa: 
 
 
 def test_the_read_prints_the_block_before_the_history(bridge, monkeypatch, capsys):  # noqa: F811
-    monkeypatch.setattr(bridge, "fetch_chat_contexts",
-                        lambda ids: {BRIDGE_GROUP: {"chat_name": "1234"}})
+    monkeypatch.setattr(bridge, "_fetch_chat_replies",
+                        lambda ids: {BRIDGE_GROUP: {"chat_context": {"chat_name": "1234"}}})
     bridge.main(["--group", BRIDGE_GROUP, "--chat-context"])
     out = capsys.readouterr().out.splitlines()
     assert out[0] == '[CHAT_CONTEXT] {"chat_name": "1234"}'

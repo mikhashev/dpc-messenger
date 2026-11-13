@@ -115,6 +115,9 @@ class _Node:
     def _group_chat_context(self, group_id):
         return None
 
+    def _group_token_usage_for_bridge(self, group_id):
+        return None
+
     async def _broadcast_to_group(self, group_id, message):
         self.broadcast.append(message)
 

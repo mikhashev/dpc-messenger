@@ -593,22 +593,67 @@ def _chat_context_command(group_id: str) -> dict:
             "payload": {"group_id": group_id}}
 
 
+def _fetch_chat_replies(group_ids: list) -> dict:
+    """{group_id: the get_group_chat_context payload or None}, one backend round trip;
+    raises when the backend is not reached."""
+    commands = [_chat_context_command(gid) for gid in group_ids]
+    replies = asyncio.run(_backend_commands(commands))
+    out = {}
+    for gid, reply in zip(group_ids, replies):
+        inner = reply.get("payload") if isinstance(reply, dict) else None
+        out[gid] = inner if isinstance(inner, dict) else None
+    return out
+
+
 def fetch_chat_contexts(group_ids: list) -> dict:
     """{group_id: its chat_context block or None}; {} with a stderr line when the
     backend is not reached. The block is built by the backend only, never from
     metadata.json here, so the bridge shows what an embedded agent is given."""
-    commands = [_chat_context_command(gid) for gid in group_ids]
     try:
-        replies = asyncio.run(_backend_commands(commands))
+        replies = _fetch_chat_replies(group_ids)
     except Exception as e:
         print(f"[WARN] no chat_context: backend not reached ({str(e) or type(e).__name__})",
               file=sys.stderr)
         return {}
-    contexts = {}
-    for gid, reply in zip(group_ids, replies):
-        inner = reply.get("payload") if isinstance(reply, dict) else None
-        contexts[gid] = inner.get("chat_context") if isinstance(inner, dict) else None
-    return contexts
+    return {gid: (inner.get("chat_context") if inner else None) for gid, inner in replies.items()}
+
+
+def format_token_usage(usage, reason: str = "") -> str:
+    """The [TOKENS] line: the group counter the desktop UI shows, from the backend's
+    `token_usage`. Figures follow SessionControls.svelte: with an agent's measured prompt,
+    non-dialog = that prompt minus the dialogue estimate (floored at 0, a remainder and not
+    a measurement) and available = window - non-dialog."""
+    if not isinstance(usage, dict):
+        return f"[TOKENS] unknown ({reason or 'the backend sent no token_usage'})"
+    try:
+        history = int(usage.get("history_tokens") or 0)
+        after = int(usage.get("tokens_after_last_response") or 0)
+        limit = int(usage.get("token_limit") or 0)
+        agents = [a for a in (usage.get("context_agents") or []) if isinstance(a, dict)]
+    except (TypeError, ValueError):
+        return "[TOKENS] unknown (token_usage malformed)"
+    measured = after > 0
+    non_dialog = max(0, after - min(history, after)) if measured else 0
+    dialog = min(history, after) if measured else history
+    available = limit - non_dialog if measured else limit
+    if limit <= 0:
+        parts = [f"dialog {dialog} (window not known)"]
+    elif available <= 0:
+        parts = [f"dialog {dialog} of {available} available"]
+    else:
+        parts = [f"dialog {dialog} of {available} available ({round(dialog / available * 100)}%)"]
+    if measured and agents:
+        name = usage.get("context_agent") or agents[0].get("name") or "?"
+        if limit > 0:
+            parts.append(f"fullest agent {name} {after} / {limit} ({round(after / limit * 100)}%)")
+        else:
+            parts.append(f"fullest agent {name} {after} (window not known)")
+        parts.append("agents: " + ", ".join(
+            f"{a.get('name') or '?'} {round(a.get('percent') or 0)}%" for a in agents))
+        parts.append(f"non-dialog ≈{non_dialog}")
+    else:
+        parts.append("no agent has answered since the backend started")
+    return "[TOKENS] " + " · ".join(parts)
 
 
 def _format_chat_context(ctx) -> str:
@@ -723,6 +768,9 @@ async def listen_for_mentions(group_id: str, names: list, all_tags: bool = False
                           else _format_mention(payload), flush=True)
                     if not as_json and payload.get("chat_context"):
                         print(_format_chat_context(payload["chat_context"]), flush=True)
+                    if not as_json:
+                        print(format_token_usage(payload.get("token_usage"),
+                                                 "the mention carried no token_usage"), flush=True)
                     # --all-tags prints other tags' mentions too; only ours leave a hint.
                     tag = str(payload.get("agent_tag") or "")
                     if tag.lower() in names_lower:
@@ -861,10 +909,22 @@ def main(argv=None):
 
     messages = read_history(args.group, last_n=args.last)
     canonical = _canonical_group_id(args.group)
+    # One round trip carries both the block (--chat-context) and the counter.
+    reason, inner = "", None
+    try:
+        inner = _fetch_chat_replies([canonical]).get(canonical)
+        if inner is None:
+            reason = "the backend gave no reply"
+    except Exception as e:
+        detail = str(e) or type(e).__name__
+        reason = f"backend not reached: {detail}"
+        if args.chat_context:
+            print(f"[WARN] no chat_context: backend not reached ({detail})", file=sys.stderr)
     if args.chat_context:
-        line = _format_chat_context(fetch_chat_contexts([canonical]).get(canonical))
+        line = _format_chat_context(inner.get("chat_context") if inner else None)
         print(line or f"[CHAT_CONTEXT] none for {canonical}")
     print(f"[CC Group Bridge] {len(messages)} messages (last {args.last})\n")
+    print(format_token_usage((inner or {}).get("token_usage"), reason), flush=True)
 
     node_id = _get_node_id()
     names = _identity_names(args.group, args.as_name)

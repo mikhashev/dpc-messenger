@@ -150,6 +150,12 @@ not through a different tool. One allowlist entry covers both.
   blocks and prints one line per `cc_group_mention` event for this bridge's
   tag as the backend emits it, so a runner that can wait on a subprocess needs
   no one-minute tick; read the context and respond exactly as above.
+- **The `[TOKENS]` line.** Every group read and every `--listen` mention carries one
+  line with the group's token counter, the same one the desktop UI shows: the
+  dialogue's size, the embedded agent whose context is fullest and each agent's
+  share of its window. Read it before tagging an agent with a long task: an agent
+  near 100 % stops with `CONTEXT_LIMIT` instead of answering. Format and caveats:
+  [EXTERNAL_HARNESS_INTEGRATION_GUIDE.md](../../docs/agent/EXTERNAL_HARNESS_INTEGRATION_GUIDE.md).
 - **The depth the line shows travels by itself.** A history line or a
   `[MENTION]` line marked `[--mention-depth N]` counts the cross-node agent
   mentions behind the reply ([DPTP §4.3](../../specs/dptp_v1.md#43-agent-mentions-across-nodes)):

@@ -230,8 +230,20 @@ def _run_cli(bridge, monkeypatch, capsys, *argv):
     return capsys.readouterr().out
 
 
+def _without_tokens_line(out: str) -> str:
+    """The output with its one [TOKENS] line taken out. Every read prints it since
+    2026-11-13 (Mike: the counter in every mode); here no backend is running, so it
+    says why it is unknown, and the path in that reason is the fixture's."""
+    lines = out.split("\n")
+    tokens = [i for i, line in enumerate(lines) if line.startswith("[TOKENS] ")]
+    assert len(tokens) == 1, out
+    assert lines[tokens[0]].startswith("[TOKENS] unknown (backend not reached"), out
+    del lines[tokens[0]]
+    return "\n".join(lines)
+
+
 def test_mentions_output_names_the_registered_tag_and_keeps_the_parsed_line(bridge, monkeypatch, capsys):
-    out = _run_cli(bridge, monkeypatch, capsys, "--group", GROUP, "--mentions")
+    out = _without_tokens_line(_run_cli(bridge, monkeypatch, capsys, "--group", GROUP, "--mentions"))
     assert out == "[CC Group Bridge] 0 messages (last 10)\n\nNo mentions of @CC_mike found.\n"
 
     gdir = bridge._find_group_dir(GROUP)
@@ -240,7 +252,7 @@ def test_mentions_output_names_the_registered_tag_and_keeps_the_parsed_line(brid
         {"sender_name": "Mike", "content": "@CC_mike глянь", "timestamp": "2026-09-04T10:00:01"},
     ]}
     (gdir / "history.json").write_text(json.dumps(history), encoding="utf-8")
-    out = _run_cli(bridge, monkeypatch, capsys, "--group", GROUP, "--mentions")
+    out = _without_tokens_line(_run_cli(bridge, monkeypatch, capsys, "--group", GROUP, "--mentions"))
     assert out == ("[CC Group Bridge] 2 messages (last 10)\n\n"
                    "=== 1 mention(s) of @CC_mike ===\n"
                    "  [2] 10:00:01 Mike: @CC_mike глянь\n")

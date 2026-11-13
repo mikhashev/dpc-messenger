@@ -7052,6 +7052,7 @@ class CoreService:
                 "Register it in Group Settings to address one machine.",
                 self.get_cc_display_name().lower(), group_id)
         chat_context = self._group_chat_context(group_id) if woken else None
+        token_usage = self._group_token_usage_for_bridge(group_id) if woken else None
         for tag in sorted(woken):
             logger.info("Group @%s mention detected — broadcasting cc_group_mention in group %s",
                         tag, group_id)
@@ -7066,6 +7067,8 @@ class CoreService:
                 "mention_depth": mention_depth,
                 # The block an embedded agent woken here gets.
                 "chat_context": chat_context,
+                # The group counter the UI shows; the bridge prints it as [TOKENS].
+                "token_usage": token_usage,
             })
 
     async def _invoke_agent_in_group_serialized(
@@ -7236,7 +7239,30 @@ class CoreService:
         ctx = self._group_chat_context(group_id)
         if ctx is None:
             return {"status": "error", "message": f"Group {group_id} not found"}
-        return {"status": "success", "chat_context": ctx}
+        reply: Dict[str, Any] = {"status": "success", "chat_context": ctx}
+        # The counter the UI shows, beside the block and not inside it: `chat_context` is
+        # what embedded agents are given and keeps its keys.
+        usage = self._group_token_usage_for_bridge(group_id)
+        if usage is not None:
+            reply["token_usage"] = usage
+        return reply
+
+    def _group_token_usage_for_bridge(self, group_id: str) -> Optional[Dict[str, Any]]:
+        """The group counter an external agent's bridge prints as its [TOKENS] line, on a
+        read and on a mention alike (Mike, 2026-11-13: the counter in every mode). None
+        when it cannot be built: never worth failing the command or the wake."""
+        try:
+            monitor = (self.conversation_monitors.get(group_id)
+                       or self._get_or_create_conversation_monitor(group_id))
+            history_tokens = sum(len(m.get("content", "") or "")
+                                 for m in monitor.get_message_history()) // 4
+            usage = self._group_token_usage(
+                group_id, history_tokens, monitor.get_token_usage().get("token_limit", 0))
+            usage.pop("conversation_id", None)
+            return usage
+        except Exception as e:
+            logger.warning("No token_usage for the bridge in %s: %s", group_id, e)
+            return None
 
     def update_group_agent_context(self, group_id: str, agent_id: str,
                                    prompt_tokens: int, token_limit: int,

@@ -238,6 +238,7 @@ class TestAnExternalTagIsNeverAnAgentFolder:
             get_cc_display_name=lambda: "CC",
             _invoke_agent_in_group_serialized=_invoke,
             _group_chat_context=lambda gid: None,
+            _group_token_usage_for_bridge=lambda gid: None,
         )
         return svc, invoked, broadcast
 

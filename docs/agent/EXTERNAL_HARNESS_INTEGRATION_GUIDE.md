@@ -217,12 +217,12 @@ agent-chat bridge but reads from group history files and sends via
 |---------|--------------|
 | `uv run python cc_group_chat_bridge.py --list` | List available group chats. With `--chat-context`, each group's block follows its line. |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --chat-context` | Print the group's `chat_context` block — the one an embedded agent woken there is given ([GROUP_CHAT.md](../GROUP_CHAT.md#group-metadata-injection)) — as one `[CHAT_CONTEXT]` line, asked from the backend with `get_group_chat_context`, then the history. |
-| `uv run python cc_group_chat_bridge.py --group GROUP_ID --last 10` | Dump the last 10 messages from a group. |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --last 10` | Dump the last 10 messages from a group, after one `[TOKENS]` line (below). |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --send "text"` | Post a response to the group under this bridge's tag. |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --send-file path` | Send from file (backtick-safe). |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --mentions` | Show only mentions of this bridge's tag, matched as a whole word (`@CC_mike`, not `@CC` or `@CC_mike2`). |
 | `uv run python cc_group_chat_bridge.py --group GROUP_ID --as TAG --send "text"` | Post (or, with `--mentions`, scan) as one specific registered tag. |
-| `uv run python cc_group_chat_bridge.py --group GROUP_ID --listen` | Block and print one `[MENTION]` line per `cc_group_mention` event for this bridge's tag as the backend emits it; reconnects with backoff when the backend drops. `--once` exits 0 after the first match, `--json` prints the payload as one JSON object per line, `--all-tags` takes every tag in the group. A line marked `[--mention-depth N]` (the payload's `mention_depth`) is answered at depth N — the bridge carries it to the next send itself, see below — so two bridges on two nodes stop after one crossing ([DPTP §4.3](../../specs/dptp_v1.md#43-agent-mentions-across-nodes)). |
+| `uv run python cc_group_chat_bridge.py --group GROUP_ID --listen` | Block and print one `[MENTION]` line per `cc_group_mention` event for this bridge's tag as the backend emits it, followed by its `[CHAT_CONTEXT]` line and a `[TOKENS]` line; reconnects with backoff when the backend drops. `--once` exits 0 after the first match, `--json` prints the payload as one JSON object per line, `--all-tags` takes every tag in the group. A line marked `[--mention-depth N]` (the payload's `mention_depth`) is answered at depth N — the bridge carries it to the next send itself, see below — so two bridges on two nodes stop after one crossing ([DPTP §4.3](../../specs/dptp_v1.md#43-agent-mentions-across-nodes)). |
 
 The `--group` argument accepts either the canonical group ID
 (`group-abc123`) or the slugged directory name (`group-abc123-my-project`).
@@ -236,6 +236,29 @@ prints `[INFO] posting as <tag>` before `[SENT]`. With several tags
 registered and no `--as`, `--send` refuses with exit code 2 and lists them;
 `--mentions` scans for all of them and its banner names every tag scanned
 (`No mentions of @CC_mike found.` / `=== 2 mention(s) of @CC_mike ===`).
+
+**The `[TOKENS]` line: the group's token counter.** Every read (`--last N`,
+`--mentions`) prints it right after the `[CC Group Bridge] …` header, and
+`--listen` prints it under each `[MENTION]`. It is the counter the desktop UI
+shows above the group, from the `token_usage` the backend adds to its
+`get_group_chat_context` reply and to each `cc_group_mention` event:
+
+```
+[TOKENS] dialog 16244 of 169141 available (10%) · fullest agent Ark 97103 / 250000 (39%) · agents: Ark 39%, Johnny 22% · non-dialog ≈80859
+```
+
+- **dialog** — the group's history in this session, a chars÷4 estimate; **available**
+  is the fullest agent's window minus its non-dialog part.
+- **fullest agent** — the embedded agent whose last prompt in this group took the
+  largest share of its window, measured by its engine; **agents** lists each one.
+  An agent near its limit will stop with `CONTEXT_LIMIT` on its next long turn, so
+  a bridge can see that before tagging it.
+- **non-dialog** — the fullest agent's prompt minus the dialogue estimate (knowledge
+  index, scratchpad, instructions, tools): a remainder, not a measurement.
+- The per-agent figures live in the backend's memory: after a backend restart the
+  line says `no agent has answered since the backend started` until one answers.
+  `[TOKENS] unknown (<reason>)` means the backend was not reached or sent no
+  counter (an older backend); the history is read from `history.json` either way.
 
 **The depth a reply carries.** A `[MENTION]` line, and a history line from
 `--last N` or `--mentions`, is marked `[--mention-depth N]` when a reply to it

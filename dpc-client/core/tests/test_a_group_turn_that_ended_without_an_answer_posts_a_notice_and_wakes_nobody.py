@@ -131,6 +131,9 @@ class _Service:
     def _group_chat_context(self, group_id):
         return None
 
+    def _group_token_usage_for_bridge(self, group_id):
+        return None
+
     def _worst_group_agent_context(self, group_id):
         return None
 
