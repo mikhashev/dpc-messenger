@@ -471,15 +471,26 @@ class ConsensusManager:
             session.status = "approved"
             proposal.status = "approved"
 
+            # A proposal that names nobody (reachable only at a threshold of 0)
+            # has no "of N" and nobody to be unanimous among. "majority" because
+            # KnowledgeCommit.consensus_type declares only unanimous / majority /
+            # disputed; the description is what says there was no roster.
+            if participant_count:
+                description = f"Approved by {approve_count}/{participant_count} participants"
+                consensus_type = "unanimous" if approve_count == participant_count else "majority"
+            else:
+                description = f"Approved by {approve_count} votes, no roster"
+                consensus_type = "majority"
+
             # Create finalized commit
             commit = KnowledgeCommit(
                 summary=proposal.summary,
-                description=f"Approved by {approve_count}/{participant_count} participants",
+                description=description,
                 topic=proposal.topic,
                 entries=proposal.entries,
                 conversation_id=proposal.conversation_id,
                 participants=proposal.participants,
-                consensus_type="unanimous" if approve_count == participant_count else "majority",
+                consensus_type=consensus_type,
                 approved_by=[nid for nid, v in votes.items() if v.vote == "approve"],
                 rejected_by=[nid for nid, v in votes.items() if v.vote == "reject"],
                 vote_comments={nid: v.comment for nid, v in votes.items() if v.comment},

@@ -261,3 +261,29 @@ def test_a_stranger_cannot_fill_a_participant_seat():
 
     session.votes[B] = object()
     assert _everyone_answered(session)
+
+
+@pytest.mark.parametrize("votes", [
+    {A: "approve", B: "approve"},
+    {A: "reject"},
+], ids=["two-approvals", "no-approval"])
+def test_a_commit_with_no_roster_says_so_rather_than_unanimous(votes):
+    """Johnny: unreachable at the default threshold, but at 0.0 a proposal that
+    names nobody is approved, and used to read "Approved by 0/0 participants",
+    unanimous. `majority` is a value KnowledgeCommit declares; the description
+    is what says there was no roster."""
+    m = _manager()
+    m.consensus_threshold = 0.0
+    proposal = _proposal(())
+    session = SimpleNamespace(proposal=proposal, status="voting", votes={
+        node: CommitVote(proposal_id=proposal.proposal_id, voter_node_id=node, vote=vote)
+        for node, vote in votes.items()
+    })
+
+    asyncio.run(m._finalize_vote(session))
+
+    approvals = sum(1 for v in votes.values() if v == "approve")
+    assert session.status == "approved"
+    (commit,) = m.commits
+    assert commit.description == f"Approved by {approvals} votes, no roster"
+    assert commit.consensus_type == "majority"
