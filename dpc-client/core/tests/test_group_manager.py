@@ -169,40 +169,40 @@ class TestGroupManagerCRUD:
 
     def test_add_member(self, manager):
         group = manager.create_group("Test", "", [])
-        updated = manager.add_member(group.group_id, "dpc-node-alice-123")
+        updated = manager.add_member(group.group_id, "dpc-node-alice-123", manager.node_id)
         assert "dpc-node-alice-123" in updated.members
         assert updated.version == 2
 
     def test_add_member_already_present(self, manager):
         group = manager.create_group("Test", "", ["dpc-node-alice-123"])
         original_version = group.version
-        updated = manager.add_member(group.group_id, "dpc-node-alice-123")
+        updated = manager.add_member(group.group_id, "dpc-node-alice-123", manager.node_id)
         assert updated.version == original_version  # No version bump
 
     def test_add_member_nonexistent_group(self, manager):
-        assert manager.add_member("group-nope", "dpc-node-alice-123") is None
+        assert manager.add_member("group-nope", "dpc-node-alice-123", manager.node_id) is None
 
     def test_add_member_max_enforced(self, manager):
         members = [f"dpc-node-peer-{i:03d}" for i in range(19)]
         group = manager.create_group("Full", "", members)
         assert len(group.members) == 20  # 19 + creator
         with pytest.raises(ValueError, match="cannot exceed"):
-            manager.add_member(group.group_id, "dpc-node-extra-999")
+            manager.add_member(group.group_id, "dpc-node-extra-999", manager.node_id)
 
     def test_remove_member(self, manager):
         group = manager.create_group("Test", "", ["dpc-node-alice-123"])
-        updated = manager.remove_member(group.group_id, "dpc-node-alice-123")
+        updated = manager.remove_member(group.group_id, "dpc-node-alice-123", manager.node_id)
         assert "dpc-node-alice-123" not in updated.members
         assert updated.version == 2
 
     def test_remove_member_not_present(self, manager):
         group = manager.create_group("Test", "", [])
         original_version = group.version
-        updated = manager.remove_member(group.group_id, "dpc-node-nobody-999")
+        updated = manager.remove_member(group.group_id, "dpc-node-nobody-999", manager.node_id)
         assert updated.version == original_version
 
     def test_remove_member_nonexistent_group(self, manager):
-        assert manager.remove_member("group-nope", "dpc-node-alice-123") is None
+        assert manager.remove_member("group-nope", "dpc-node-alice-123", manager.node_id) is None
 
 
 class TestGroupManagerDelete:
@@ -280,7 +280,7 @@ class TestGroupManagerPersistence:
     def test_version_persists_after_update(self, tmp_dpc_home):
         manager1 = GroupManager(tmp_dpc_home, "dpc-node-self-abc")
         group = manager1.create_group("Test", "", [])
-        manager1.add_member(group.group_id, "dpc-node-alice-123")
+        manager1.add_member(group.group_id, "dpc-node-alice-123", manager1.node_id)
 
         manager2 = GroupManager(tmp_dpc_home, "dpc-node-self-abc")
         manager2.load_from_disk()
@@ -304,7 +304,7 @@ class TestGroupManagerSync:
 
     def test_ignore_older_version(self, manager):
         group = manager.create_group("Current", "", [])
-        manager.add_member(group.group_id, "dpc-node-alice-123")  # bumps to v2
+        manager.add_member(group.group_id, "dpc-node-alice-123", manager.node_id)  # bumps to v2
 
         remote = group.to_dict()
         remote["version"] = 1  # older
@@ -324,7 +324,7 @@ class TestGroupManagerSync:
             "members": ["dpc-node-alice-123", "dpc-node-self-abc"],
             "version": 1,
         }
-        result = manager.apply_sync(remote)
+        result = manager.apply_sync(remote, ALICE)
         assert result is not None
         assert manager.get_group("group-remote-xyz") is not None
 

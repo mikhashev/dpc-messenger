@@ -2119,6 +2119,16 @@ Respond in JSON format:
         """Delete an entire conversation including history, settings, and files."""
         try:
             if conversation_id.startswith("group-"):
+                group = self.group_manager.get_group(conversation_id)
+                if group is None:
+                    return {"status": "error", "message": f"Group {conversation_id} not found"}
+                # Deleting a group's conversation is leaving it, and the creator
+                # cannot leave (Mike's call, 2026-10-23): say so, rather than
+                # "not found" for a group this node holds.
+                if group.created_by and group.created_by == self.group_manager.node_id:
+                    return {"status": "error",
+                            "message": "This node created the group, and the creator cannot "
+                                       "leave it; delete the group instead"}
                 success = self.group_manager.leave_group(conversation_id)
                 if not success:
                     return {"status": "error", "message": "Group not found or could not be deleted"}

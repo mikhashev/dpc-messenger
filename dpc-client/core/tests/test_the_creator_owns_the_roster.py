@@ -251,13 +251,127 @@ async def test_the_creator_cannot_leave_or_remove_itself_but_can_remove_others(t
 
 @pytest.mark.asyncio
 async def test_a_member_that_is_not_the_creator_can_still_leave(manager):
+    """Johnny: prove the act, not the status. The real fan-out runs, so the
+    GROUP_LEAVE that reaches each connected member is what is asserted."""
     service = _service(manager)
-
-    async def _no_fanout(group_id, message):
-        return None
-
-    service._broadcast_to_group = _no_fanout
     service.conversation_monitors = {}
+    service.p2p_manager.peers = {CREATOR: object(), MEMBER: object()}
 
     assert (await service.leave_group(GID))["status"] == "success"
+
+    leave = {"command": "GROUP_LEAVE", "payload": {"group_id": GID}}
+    assert service.p2p_manager.sent == [(CREATOR, leave), (MEMBER, leave)]
     assert _held(manager) is None
+
+
+# --- one owner of the rule (Johnny) ----------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_member_removing_itself_gets_the_managers_answer_and_leaves(manager):
+    """The service used to refuse what the manager allows. It now asks the
+    manager, and a member's own removal goes out as GROUP_LEAVE, the frame the
+    other members apply (a GROUP_SYNC dropping it would be applied by nobody)."""
+    service = _service(manager)
+    service.conversation_monitors = {}
+    service.p2p_manager.peers = {CREATOR: object(), MEMBER: object()}
+    assert GroupManager.roster_change_refusal(_held(manager), SELF, SELF, True) is None
+
+    result = await service.remove_group_member(GID, SELF)
+
+    assert result["status"] == "success"
+    leave = {"command": "GROUP_LEAVE", "payload": {"group_id": GID}}
+    assert service.p2p_manager.sent == [(CREATOR, leave), (MEMBER, leave)]
+    assert _held(manager) is None
+
+
+@pytest.mark.asyncio
+async def test_a_member_removing_another_is_refused_with_the_managers_reason(manager):
+    service = _service(manager)
+    reason = GroupManager.roster_change_refusal(_held(manager), SELF, MEMBER, True)
+
+    result = await service.remove_group_member(GID, MEMBER)
+
+    assert reason == f"only the creator {CREATOR} changes members"
+    assert result == {"status": "error", "message": f"Cannot remove {MEMBER}: {reason}"}
+    assert _held(manager).members == [CREATOR, SELF, MEMBER]
+    assert service.p2p_manager.sent == []
+
+
+@pytest.mark.parametrize("created_by", [CREATOR, SELF, ""], ids=["member", "creator", "no-creator"])
+@pytest.mark.parametrize("target,removing", [
+    (SELF, True), (MEMBER, True), ("dpc-node-newcomer", False),
+], ids=["remove-self", "remove-other", "add"])
+def test_the_service_refuses_exactly_when_the_manager_does(tmp_path, created_by, target, removing):
+    from dpc_client_core.service import roster_refusal
+
+    manager = GroupManager(dpc_home=tmp_path, node_id=SELF)
+    manager.apply_sync(_record(created_by=created_by), created_by or MEMBER)
+    group = _held(manager)
+
+    reason = GroupManager.roster_change_refusal(group, SELF, target, removing)
+    answer = roster_refusal(manager, SELF, GID, target, removing)
+
+    assert (answer is None) == (reason is None)
+    if reason:
+        assert answer["message"].endswith(reason)
+
+
+# --- the manager enforces it too (Ark) -------------------------------------
+
+def test_the_manager_refuses_an_add_or_remove_asked_by_a_member(manager, caplog):
+    """The service checks first for the UI's message; the module holds the rule."""
+    caplog.set_level(logging.WARNING, logger=MANAGER_LOGGER)
+
+    assert manager.add_member(GID, "dpc-node-newcomer", MEMBER) is None
+    assert manager.remove_member(GID, SELF, MEMBER) is None
+    assert manager.add_member(GID, "dpc-node-newcomer", SELF) is None, "nor this node"
+
+    assert _held(manager).members == [CREATOR, SELF, MEMBER]
+    assert _held(manager).version == 3
+    assert len(_refusals(caplog, "only the creator")) == 3
+
+
+def test_the_manager_takes_the_creators_add_and_remove(manager):
+    assert manager.add_member(GID, "dpc-node-newcomer", CREATOR) is not None
+    assert manager.remove_member(GID, MEMBER, CREATOR) is not None
+    assert _held(manager).members == [CREATOR, SELF, "dpc-node-newcomer"]
+    assert _held(manager).version == 5
+
+
+def test_a_member_removing_itself_needs_no_creator_but_the_creator_cannot(manager, caplog):
+    caplog.set_level(logging.WARNING, logger=MANAGER_LOGGER)
+
+    assert manager.remove_member(GID, CREATOR, CREATOR) is None
+    assert manager.remove_member(GID, MEMBER, MEMBER) is not None
+
+    assert _held(manager).members == [CREATOR, SELF]
+    (line,) = _refusals(caplog, "cannot remove itself")
+    assert CREATOR in line
+
+
+def test_a_group_with_no_creator_takes_no_add_or_remove_but_a_member_may_leave(tmp_path):
+    manager = GroupManager(dpc_home=tmp_path, node_id=SELF)
+    manager.apply_sync(_record(created_by=""), MEMBER)
+
+    assert manager.add_member(GID, "dpc-node-newcomer", SELF) is None
+    assert manager.remove_member(GID, CREATOR, SELF) is None
+    assert manager.remove_member(GID, MEMBER, MEMBER) is not None
+    assert _held(manager).members == [CREATOR, SELF]
+
+
+@pytest.mark.asyncio
+async def test_group_leave_removes_its_sender_and_never_another_node(manager):
+    """GROUP_LEAVE names no node: the transport sender is the one that leaves."""
+    from dpc_client_core.message_handlers.group_handler import GroupLeaveHandler
+
+    service = _Service(manager)
+    service.peer_metadata = {}
+
+    await GroupLeaveHandler(service).handle(MEMBER, {"group_id": GID, "node_id": CREATOR})
+    assert _held(manager).members == [CREATOR, SELF]
+    assert [name for name, _ in service.local_api.events] == ["group_member_left"]
+
+    service.local_api.events.clear()
+    await GroupLeaveHandler(service).handle(CREATOR, {"group_id": GID})
+    assert _held(manager).members == [CREATOR, SELF], "the creator cannot leave"
+    assert service.local_api.events == []

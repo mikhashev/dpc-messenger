@@ -200,6 +200,62 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 - **Neutral:** the transition has to be coordinated by whoever runs the nodes,
   not by the protocol. Every node must be updated before unsigned changes stop
   being accepted; with three nodes that is an hour, with ten it is planning.
+- **Negative, part 1 as built (2026-11-13):** a group held with an empty
+  `created_by` (a file written before the field existed) is frozen on that node.
+  Nobody changes its roster (a member may still leave), no creator can be set
+  on it, and a record naming any creator is refused whole: where the other
+  members hold the group with its creator, their `topic` and `agents` changes
+  stop arriving here too. Measured on one node only, the Windows node, on
+  2026-11-13 (about 01:00 local, and again later that day with the same
+  result), by reading every `~/.dpc/conversations/group-*/metadata.json` and
+  comparing `created_by` with `~/.dpc/node.id`: 16 groups, 15 created by this
+  node, 1 by another node, 0 with an empty `created_by`; `~/.dpc/groups/` holds
+  no legacy group file. Other nodes were not inventoried.
+- **Negative, part 1 as built:** roster delivery depends on topology.
+  `GROUP_SYNC` and `GROUP_CREATE` are not relayed and the roster is taken only
+  from the creator as transport sender, so a member reaches the creator's roster
+  only over a direct session with the creator. Signed roster changes (part 3)
+  are what would let any member carry it.
+- **Negative, part 1 as built:** a node removed from the roster keeps its local
+  copy of the group (record, history and files, now with a roster that leaves it
+  out), as a blocked node's records are kept by `block_peer`. Removal stops what
+  the other members serve it; it deletes nothing on its side.
+- **Negative, part 1 as built: the creator's copy is the single source of the
+  roster** (step 5 of the procedure in `specs/dptp_v1.md` §3.18 applies it even
+  over a newer copy). A rollback of that copy, the creator's node restored from
+  an old backup, rolls the roster back for everyone: members added since are
+  removed, members removed since come back, and the old roster arrives with the
+  freshest version in the room, because each member that takes it over its
+  newer copy raises its version by one. Nobody else can repair it, since no
+  member's roster is applied; only the creator adding or removing again does.
+  The rest of the record is not rolled back: the restored creator takes the
+  room's `topic` and `agents` with the next record above its own.
+- **Negative, part 1 as built:** rule C reads the local pin, so it protects
+  whatever creator this copy has pinned and is right only as far as the pin is
+  right. A copy made or last written before `8945a14f` took `created_by` from
+  whatever record arrived, and could carry a wrong pin; the first-sight check
+  (follow-up, uncommitted) is what makes a new copy's pin come from its creator.
+- **Negative, part 1 as built:** rule C never fires for a group held with an
+  empty `created_by`: no sender matches it, so that copy's roster is frozen both
+  ways, by no record (older or newer) and by no local add or remove, a member's
+  own leave excepted.
+- **Negative, part 1 as built:** at equal versions the whole-record tie-break
+  can still lose a concurrent `agents` change by another member, and measured,
+  it can be the member that made it. When two members meet at one version with
+  different rosters (one already holds the creator's, the other not yet), each
+  first puts its own roster into the offered record and then compares hashes,
+  so the two sides compare different records and both can take the other's.
+  In the three-node test 15 of 32 candidate agent ids lost N's own change for
+  the whole room; the room converged every time
+  (`test_a_creator_restored_from_an_old_copy_rolls_the_roster_back_for_the_room.py`).
+- **Neutral, measured 2026-11-13:** two-node convergence is tested
+  (`test_a_removed_nodes_old_roster_carried_by_a_member_does_not_outlive_the_creators.py`);
+  room convergence was measured on three nodes in the file above. The creator
+  restored at v10 with X, members M and N at v22 without X, meetings C–M, C–N,
+  M–N: all three end with the same roster (X back), the room's `topic` and
+  `agents`, versions 22, 23, 23; the creator is level after its next contact.
+  A concurrent `agents` change by N survives in that order of meetings and is
+  exposed to the loss above when M and N meet before the creator reaches N.
 
 ## Confirmation
 
@@ -245,8 +301,8 @@ asking anyone, and the creator retains a veto by being entitled to remove.
 |------|--------|--------|
 | ADR drafted | Done | `a583d42e` |
 | Q1–Q4 answered, status accepted | Done | — |
-| `created_by` pinned | Done (2026-11-13), uncommitted — a record naming another creator is refused whole at any version, WARNING with both ids; an empty `created_by` held from an older file is pinned as "no creator" (no member may claim it), so that group's roster is frozen. Cost: no ownership transfer exists, so a lost creator freezes the roster (Q2) | — |
-| Per-field authority in `apply_sync` | Partial (2026-11-13), uncommitted — `members` only, judged by the **transport sender**: a roster that differs from ours is applied only from the creator, from anybody else the record goes on with our roster (other fields still ride the version, a refused roster cannot win the tie-break), and at equal versions the creator's roster wins. `topic`, `name`, `agents`, `agent_names` are still applied from any member. Locally `add_group_member` / `remove_group_member` refuse on a node that is not the creator, and the creator refuses `leave_group` and removing itself (Mike's call, 2026-10-23). Cost: without signatures a roster change reaches only the members directly connected to the creator; a member reached only through another member keeps the old roster until it connects to the creator | — |
+| `created_by` pinned | Done (2026-11-13) — a record naming another creator is refused whole at any version, WARNING with both ids; an empty `created_by` held from an older file is pinned as "no creator" (no member may claim it), so that group's roster is frozen. First sight (follow-up, uncommitted): a record for a group not held is refused when it names a non-empty creator other than its transport sender; an empty one is not refused. Cost: no ownership transfer exists, so a lost creator freezes the roster (Q2) | `8945a14f` |
+| Per-field authority in `apply_sync` | Partial (2026-11-13) — `members` only, judged by the **transport sender**: a roster that differs from ours is applied only from the creator, from anybody else the record goes on with our roster (other fields still ride the version, a refused roster cannot win the tie-break), and at equal versions the creator's roster wins. `topic`, `name`, `agents`, `agent_names` are still applied from any member. Locally `add_group_member` / `remove_group_member` refuse on a node that is not the creator, and the creator refuses `leave_group` and removing itself (Mike's call, 2026-10-23). Cost: without signatures a roster change reaches only the members directly connected to the creator; a member reached only through another member keeps the old roster until it connects to the creator. Follow-up, uncommitted: the creator's roster is applied even from a record older than the receiver's copy (only `members`, version raised by one), so a removed node's own change carried by a third member cannot keep it listed; `GroupManager.add_member` / `remove_member` take the requesting node and enforce the rule themselves (a member removing itself excepted, the creator never), and the service's refusal only words the manager's answer (`roster_change_refusal`); costs of the older-record rule in Consequences | `8945a14f` |
 | Signed roster changes | Pending | — |
 | `session_started_at` marker | Partial — honoured against the pre-sync roster, votes bound to the group, trim archived first; the roster itself is still unsigned | `e2962656` |
 | Live-history boundary (amendment 2026-09-23) | Done — awaiting observation on the live pair | `c8582d43` |

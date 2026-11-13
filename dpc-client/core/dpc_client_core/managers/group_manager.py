@@ -517,16 +517,50 @@ class GroupManager:
             if node_id in g.members and self.node_id in g.members
         ]
 
-    def add_member(self, group_id: str, node_id: str) -> Optional[GroupMetadata]:
+    @staticmethod
+    def roster_change_refusal(group: GroupMetadata, requester_node_id: str, node_id: str,
+                              removing: bool) -> Optional[str]:
+        """Why `requester_node_id` may not add or remove `node_id`, or None when it may.
+
+        The roster is the creator's (ADR-038 part 1). One exception: a member
+        removing itself, which is what GROUP_LEAVE is, needs nobody's leave,
+        except the creator, which cannot leave (Mike's call, 2026-10-23). A group
+        with an empty `created_by` has no creator, so nobody else changes it.
+
+        The one owner of this rule: `service.roster_refusal` only words its
+        answer for the UI, so the screen and the module cannot disagree.
+        """
+        if removing and node_id == requester_node_id:
+            if node_id == group.created_by:
+                return "the creator cannot remove itself; it deletes the group instead"
+            return None
+        if not group.created_by:
+            return "the group has no creator, so nobody changes its roster"
+        if requester_node_id != group.created_by:
+            return f"only the creator {group.created_by} changes members"
+        return None
+
+    def add_member(self, group_id: str, node_id: str,
+                   requester_node_id: str) -> Optional[GroupMetadata]:
         """
         Add a member to a group.
 
+        Args:
+            requester_node_id: The node asking for the change; only the
+                creator may add (ADR-038 part 1).
+
         Returns:
-            Updated GroupMetadata, or None if group not found
+            Updated GroupMetadata, or None if the group is not found or the
+            requester may not change its roster
         """
         group = self._groups.get(group_id)
         if not group:
             logger.warning("Cannot add member: group %s not found", group_id)
+            return None
+        reason = self.roster_change_refusal(group, requester_node_id, node_id, removing=False)
+        if reason:
+            logger.warning("Refusing to add %s to group %s for %s: %s",
+                           node_id, group_id, requester_node_id, reason)
             return None
 
         if node_id in group.members:
@@ -544,16 +578,27 @@ class GroupManager:
         logger.info("Added %s to group %s (v%d)", node_id, group_id, group.version)
         return group
 
-    def remove_member(self, group_id: str, node_id: str) -> Optional[GroupMetadata]:
+    def remove_member(self, group_id: str, node_id: str,
+                      requester_node_id: str) -> Optional[GroupMetadata]:
         """
         Remove a member from a group.
 
+        Args:
+            requester_node_id: The node asking for the change: the creator, or
+                the member itself when it leaves (GROUP_LEAVE).
+
         Returns:
-            Updated GroupMetadata, or None if group not found
+            Updated GroupMetadata, or None if the group is not found or the
+            requester may not make this change
         """
         group = self._groups.get(group_id)
         if not group:
             logger.warning("Cannot remove member: group %s not found", group_id)
+            return None
+        reason = self.roster_change_refusal(group, requester_node_id, node_id, removing=True)
+        if reason:
+            logger.warning("Refusing to remove %s from group %s for %s: %s",
+                           node_id, group_id, requester_node_id, reason)
             return None
 
         if node_id not in group.members:
@@ -738,6 +783,27 @@ class GroupManager:
         )
         return False
 
+    def _first_sight_from_its_creator(self, local: Optional[GroupMetadata], remote: GroupMetadata,
+                                      sender_node_id: Optional[str]) -> bool:
+        """A group this node does not hold is taken only from the creator it names.
+
+        The record that creates our copy also fixes the pin, so it must not come
+        from a node naming somebody else as creator: an outsider could otherwise
+        enrol us in a group "Alice created", with a roster of its choosing, and
+        every later record from Alice would then be judged against it. An empty
+        `created_by` keeps its old meaning, a group with no creator, and is not
+        refused here (that copy's roster is frozen by the pin instead). A sender
+        that cannot be named is not the creator.
+        """
+        if local is not None or not remote.created_by or remote.created_by == sender_node_id:
+            return True
+        logger.warning(
+            "Refusing group record for %s from %s: this node does not hold the group, and the "
+            "record names creator %s, not its sender",
+            remote.group_id, sender_node_id or "an unnamed sender", remote.created_by,
+        )
+        return False
+
     def _roster_from_its_owner(self, local: Optional[GroupMetadata], remote: GroupMetadata,
                                sender_node_id: Optional[str]) -> None:
         """Keep our `members` unless the record comes from the creator.
@@ -770,8 +836,10 @@ class GroupManager:
         (higher hash wins on both sides, the accepting side bumps the version
         so the next sync propagates the winner).
 
-        Before that: a record naming another creator than the pinned one is
-        refused whole, and `members` is taken only from the creator. At equal
+        Before that: a record for a group not held here is refused when it
+        names a creator other than its sender, a record naming another creator
+        than the pinned one is refused whole, and `members` is taken only from
+        the creator. At equal
         versions a roster the creator sends wins outright, so its copy and a
         member's cannot stay split by the hash.
 
@@ -786,6 +854,8 @@ class GroupManager:
         remote = GroupMetadata.from_dict(remote_group)
 
         local = self._groups.get(remote.group_id)
+        if not self._first_sight_from_its_creator(local, remote, sender_node_id):
+            return None
         if not self._creator_pin_holds(local, remote, sender_node_id):
             return None
         self._roster_from_its_owner(local, remote, sender_node_id)
@@ -807,6 +877,24 @@ class GroupManager:
             )
         self._marker_survives_sync(local, remote, sender_node_id)
         if local and local.version > remote.version:
+            if (sender_node_id and sender_node_id == local.created_by
+                    and sorted(remote.members) != sorted(local.members)):
+                # The creator is the only node that changes `members`, so its
+                # copy holds the newest roster whatever its version says. A
+                # member's copy can outrun it on other fields — a removed node's
+                # own agents change, carried by a third member, did exactly that
+                # in Ark's three-hop case — and the version rule alone would then
+                # keep the removed node here. Only `members` is taken; the rest
+                # of our newer copy stays, and the bump carries the result on.
+                local.members = list(remote.members)
+                local.version += 1
+                self._save_group(local.group_id)
+                logger.info(
+                    "Applied the creator's roster for %s from an older record "
+                    "(remote v%d < local v%d, bumped to v%d)",
+                    local.group_id, remote.version, local.version - 1, local.version,
+                )
+                return local
             logger.debug(
                 "Ignoring GROUP_SYNC for %s: local v%d > remote v%d",
                 remote.group_id, local.version, remote.version,

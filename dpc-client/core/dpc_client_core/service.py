@@ -321,19 +321,24 @@ _hostname_lookup_lock = threading.Lock()
 _hostname_lookup_pending = False
 
 
-def roster_refusal(group_manager, node_id: str, group_id: str, action: str) -> Optional[Dict[str, Any]]:
-    """The error to return when `node_id` may not change `group_id`'s roster, else None.
+def roster_refusal(group_manager, requester_node_id: str, group_id: str, node_id: str,
+                   removing: bool) -> Optional[Dict[str, Any]]:
+    """The error to return when `requester_node_id` may not add or remove `node_id`, else None.
 
-    The roster is the creator's (ADR-038 part 1); a group with an empty
-    `created_by` has no creator, so nobody changes its roster.
+    Only a formatter: the decision is `GroupManager.roster_change_refusal`, the
+    rule the manager enforces itself (ADR-038 part 1), so what the UI is told
+    and what the module does cannot drift apart. Checked here first so the
+    refusal reaches the screen as a sentence rather than as "not found".
     """
     group = group_manager.get_group(group_id)
     if not group:
         return {"status": "error", "message": f"Group {group_id} not found"}
-    if group.created_by != node_id:
-        logger.warning("Refusing to %s in group %s: this node is not its creator", action, group_id)
-        return {"status": "error", "message": f"Only the group creator can {action}"}
-    return None
+    reason = group_manager.roster_change_refusal(group, requester_node_id, node_id, removing)
+    if reason is None:
+        return None
+    verb = "remove" if removing else "add"
+    logger.warning("Refusing to %s %s in group %s: %s", verb, node_id[:20], group_id, reason)
+    return {"status": "error", "message": f"Cannot {verb} {node_id}: {reason}"}
 
 
 def _bounded_hostname_lookup(hostname: str, deadline_s: float) -> list:
@@ -7580,13 +7585,14 @@ class CoreService:
         """
         # The roster is the creator's (ADR-038): refused here as well as on
         # every receiver, so a member's add does not look done on its own screen.
-        refusal = roster_refusal(self.group_manager, self.p2p_manager.node_id, group_id, "add members")
+        refusal = roster_refusal(self.group_manager, self.p2p_manager.node_id, group_id, node_id,
+                                 removing=False)
         if refusal:
             return refusal
         if is_blocked_by(getattr(self, "firewall", None), node_id):
             return self._unblock_first(node_id)
         try:
-            group = self.group_manager.add_member(group_id, node_id)
+            group = self.group_manager.add_member(group_id, node_id, self.p2p_manager.node_id)
             if not group:
                 return {"status": "error", "message": f"Group {group_id} not found"}
 
@@ -7634,14 +7640,18 @@ class CoreService:
             group_id: Target group ID
             node_id: Node ID to remove
         """
-        refusal = roster_refusal(self.group_manager, self.p2p_manager.node_id, group_id, "remove members")
+        refusal = roster_refusal(self.group_manager, self.p2p_manager.node_id, group_id, node_id,
+                                 removing=True)
         if refusal:
             return refusal
         if node_id == self.p2p_manager.node_id:
-            return {"status": "error",
-                    "message": "The creator cannot remove itself; delete the group instead"}
+            # Allowed by the rule only to a member that is not the creator, and
+            # that is leaving: done as a leave, because a GROUP_SYNC dropping a
+            # member is applied by nobody unless the creator sent it, while the
+            # GROUP_LEAVE that leave_group sends is.
+            return await self.leave_group(group_id)
         try:
-            group = self.group_manager.remove_member(group_id, node_id)
+            group = self.group_manager.remove_member(group_id, node_id, self.p2p_manager.node_id)
             if not group:
                 return {"status": "error", "message": f"Group {group_id} not found"}
 

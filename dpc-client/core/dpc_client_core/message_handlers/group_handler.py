@@ -173,6 +173,38 @@ class GroupTextHandler(MessageHandler):
     # group with that id. On the class, not the instance: the history merge
     # builds a second handler, and the process has one service.
     dropped_not_held = 0
+    # The drop comes before any signature check, so whoever is connected can
+    # cause it at will: it is logged at WARNING only on the first drop for a
+    # (sender, group) and then once every DROP_LOG_EVERY drops, DEBUG between.
+    # A sender that rotates ids is held by its own total instead once it has
+    # had DROP_LOG_DISTINCT_GROUPS_PER_SENDER groups announced. Both tables are
+    # bounded; the oldest entry goes first. The group id is the stranger's
+    # choice, so it is cut to 20 characters, like the sender, in the line and
+    # in the table key.
+    DROP_LOG_EVERY = 100
+    DROP_LOG_DISTINCT_GROUPS_PER_SENDER = 10
+    _DROP_TABLE_LIMIT = 4096
+    _dropped_by_pair: Dict[tuple, int] = {}
+    _dropped_by_sender: Dict[str, list] = {}  # sender -> [drops, groups announced]
+
+    @classmethod
+    def _note_drop_not_held(cls, sender_node_id: str, group_id) -> tuple:
+        """Count one drop; (log at WARNING?, drops for the pair, drops for the sender)."""
+        cls.dropped_not_held += 1
+        for table, key in ((cls._dropped_by_pair, (sender_node_id, group_id)),
+                           (cls._dropped_by_sender, sender_node_id)):
+            if key not in table and len(table) >= cls._DROP_TABLE_LIMIT:
+                del table[next(iter(table))]
+        pair = cls._dropped_by_pair[(sender_node_id, group_id)] = (
+            cls._dropped_by_pair.get((sender_node_id, group_id), 0) + 1)
+        sender = cls._dropped_by_sender.setdefault(sender_node_id, [0, 0])
+        sender[0] += 1
+        if pair == 1 and sender[1] < cls.DROP_LOG_DISTINCT_GROUPS_PER_SENDER:
+            sender[1] += 1
+            return True, pair, sender[0]
+        loud = pair % cls.DROP_LOG_EVERY == 0 or (
+            sender[1] >= cls.DROP_LOG_DISTINCT_GROUPS_PER_SENDER and sender[0] % cls.DROP_LOG_EVERY == 0)
+        return loud, pair, sender[0]
 
     @property
     def command_name(self) -> str:
@@ -291,11 +323,12 @@ class GroupTextHandler(MessageHandler):
         # id never names a folder, a 1:1 history or a wake. No member check
         # here: a node that takes part through `agents` is not on `members`.
         if not group_id or self.service.group_manager.get_group(group_id) is None:
-            type(self).dropped_not_held += 1
-            self.logger.warning(
+            shown_group = str(group_id)[:20]
+            loud, for_pair, for_sender = self._note_drop_not_held(sender_node_id, shown_group)
+            (self.logger.warning if loud else self.logger.debug)(
                 "Dropped GROUP_TEXT from %s for group %s this node does not hold "
-                "(%d dropped so far)",
-                sender_node_id[:20], group_id, type(self).dropped_not_held,
+                "(%d for this group from this sender, %d from this sender, %d dropped so far)",
+                sender_node_id[:20], shown_group, for_pair, for_sender, type(self).dropped_not_held,
             )
             return None
 
@@ -618,7 +651,9 @@ class GroupLeaveHandler(MessageHandler):
             sender_node_id[:20], group_id
         )
 
-        group = self.service.group_manager.remove_member(group_id, sender_node_id)
+        # A member removing itself: the one roster change that needs no
+        # creator. The manager refuses anything else, the creator leaving too.
+        group = self.service.group_manager.remove_member(group_id, sender_node_id, sender_node_id)
         if group:
             await self.service.local_api.broadcast_event("group_member_left", {
                 "group_id": group_id,

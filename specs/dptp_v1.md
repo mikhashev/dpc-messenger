@@ -2502,7 +2502,7 @@ The payload of `GROUP_CREATE` and `GROUP_SYNC` is the whole record
 | `group_id` | string, required | Identity: `group-` and 12 hex characters when created here. A record without it raises and is dropped. |
 | `name` | string, required | Applied with the record. A record without it raises and is dropped. |
 | `topic` | string, default `""` | Applied with the record. |
-| `created_by` | string, default `""` | **Pinned at first sight.** Taken from the record that creates the receiver's copy; afterwards a record naming any other value is refused whole (step 1 below). An empty value held from an older file is pinned too: that group has no creator. |
+| `created_by` | string, default `""` | **Pinned at first sight.** Taken from the record that creates the receiver's copy, which is accepted only from the creator it names (or naming none); afterwards a record naming any other value is refused whole (step 1 below). An empty value is pinned too: that group has no creator. |
 | `created_at` | string, default `""` | Applied as received. |
 | `members` | array of node ids, default `[]` | **The creator's.** Applied only from a record the creator itself sent (step 2 below); from anyone else the receiver keeps its own. When applied, not validated: not for duplicates, not for length (`MAX_MEMBERS` is 20 and is enforced only where a member is added locally, `group_manager.py:113`), not for containing the sender or the receiver. |
 | `agents` | object: node id to array of agent ids, default `{}` | Applied as received, every node's entry. An id starting `ext:` names an external agent. |
@@ -2528,8 +2528,12 @@ Build the record from the payload with the defaults above, then:
 
 1. **Creator pin.** If the receiver holds a copy and the record's `created_by` differs from
    the copy's, the record is refused whole, whatever its `version`, with a WARNING naming
-   the sender and both creators (`_creator_pin_holds`). No copy held: the record's value
-   becomes the pin.
+   the sender and both creators (`_creator_pin_holds`). No copy held: a record whose
+   `created_by` is not empty and is not the transport sender is refused, with a WARNING
+   naming the declared creator and the sender (`_first_sight_from_its_creator`; a sender
+   that cannot be named counts as not the creator); otherwise the record's value becomes
+   the pin. An empty `created_by` is not refused here: it keeps its meaning, a group with
+   no creator.
 2. **Roster.** If the receiver holds a copy, the sender is not the copy's `created_by`
    (a sender that cannot be named counts as not the creator), and the record's `members`
    differ from the copy's as a set: the record takes the copy's `members`, with a WARNING
@@ -2547,7 +2551,15 @@ Build the record from the payload with the defaults above, then:
    the versions say. Markers are compared as moments (`parse_moment`), so `Z` and `+00:00`
    spellings order by time; a stored marker that is unreadable or in the future (one stored
    before this rule) outranks nothing (`group_manager.py`, `_marker_survives_sync`).
-5. If the receiver holds a copy with a **higher** `version`: keep the copy, apply nothing.
+5. If the receiver holds a copy with a **higher** `version`: keep the copy, apply nothing,
+   with one exception. A record from the creator whose `members` differ from the copy's
+   has its `members` written onto the copy, and only those: the copy's other fields stay,
+   its `version` is raised by one so the next sync carries the result, and an INFO line
+   names both versions. The creator is the only node that changes `members`, so its copy
+   holds the newest roster whatever its `version` says, while a member's copy can be ahead
+   on other fields: a removed node's own `agents` change, carried to a third member, would
+   otherwise keep the removed node on that member's roster until the creator next sent at a
+   version the member had not passed.
 6. If the versions are **equal**: compare the content hashes (below). Equal hashes: apply
    nothing. A record from the creator whose `members` differ from the copy's, or a record
    whose hash is greater than the copy's: apply the record with its `version` raised by
@@ -2557,6 +2569,18 @@ Build the record from the payload with the defaults above, then:
    the hash alone could then keep the two apart until the creator changed something.
 7. Otherwise (a higher `version`, or no copy at all): the record, as steps 1 to 4 left it,
    **replaces** the copy and is written to disk.
+
+**What the roster rule costs** (ADR-038, Consequences). The creator's copy is the single
+source of `members`: if it is rolled back (restored from an old copy), step 5 and step 6
+carry the old roster to every member it meets, with the freshest `version` in the room, and
+no member can repair it; only the creator adding or removing again does. The other fields
+are not rolled back: the creator takes the room's with the next record above its own. Steps
+2, 5 and 6 judge the creator by the receiver's pin, so they are right only as far as the pin
+is. For a copy held with an empty `created_by` no sender is the creator, so its roster moves
+by no record. At equal versions two members holding different rosters each compare the
+offered record with their own roster put into it, so both can take the other's record and a
+concurrent `agents` change can be lost, by the node that made it too; the copies still
+converge.
 
 **Content hash.** The first 16 hex characters of the SHA-256 of the UTF-8 bytes of
 `name`, `topic`, `json.dumps(sorted(members))`, `json.dumps(agents, sort_keys=True)` and
@@ -2649,10 +2673,15 @@ the on-connect exchange does not send `GROUP_CREATE`.
 
 **Reply:** none, apart from that `GROUP_HISTORY_STATUS`.
 
-**Not yet:** for a group the receiver does not hold, nothing checks the sender: a
-`GROUP_CREATE` from any connected, unblocked node creates the group whether or not that node
-is the record's `created_by` and whether or not the receiver is among its `members`, and
-the value it names becomes the pin. For a group the receiver holds, the pin and the roster
+Only the creator sends `GROUP_CREATE` (the two senders above are its own create and add,
+and the frame is not relayed), so step 1 of the procedure refusing an invitation for an
+unheld group from anyone but the `created_by` it names costs no legitimate path. A node of
+an older version that let a non-creator add members could still send one; it is refused.
+
+**Not yet:** for a group the receiver does not hold, nothing checks that the receiver is
+among the record's `members`, and a record with an empty `created_by` is accepted from any
+connected, unblocked node (it creates a group with no creator, whose roster nobody can
+change). For a group the receiver holds, the pin and the roster
 rule of the procedure apply, but the membership gate `GROUP_SYNC` has does not: a node that
 is not on the roster can still move `topic`, `name`, `agents` and `agent_names` with a
 higher `version`. Invitation and joining are still one act
@@ -2707,11 +2736,18 @@ are refused with `GROUP_ACCESS_DENIED`.
 
 **Local roster changes** (`service.py`: `add_group_member`, `remove_group_member`,
 `leave_group`, `roster_refusal`). A node that is not the group's `created_by` refuses to
-add or remove a member, with an error to its UI and nothing sent; a group whose
+add or remove another member, with an error to its UI and nothing sent; a member asked to
+remove itself leaves instead (`leave_group`, so the frame is `GROUP_LEAVE`); a group whose
 `created_by` is empty has no creator, so nobody changes its roster. The creator refuses to
 leave (no ownership transfer exists, so it deletes the group instead; Mike's call,
 2026-10-23) and to remove itself; `GroupManager.leave_group` refuses the creator as well,
-which also covers deleting a group's conversation.
+which also covers deleting a group's conversation (`delete_conversation` answers the
+creator that it cannot leave and should delete the group instead). The same rule is held by the module, not
+only by the service: `GroupManager.add_member` and `remove_member` take the requesting node
+and refuse, with a WARNING, an add or remove asked by anyone but the creator, except a
+member removing itself (which is how `GROUP_LEAVE` is applied) and never the creator
+removing itself (`roster_change_refusal`). That method is the rule's one owner:
+`roster_refusal` only turns its answer into the UI's error.
 
 **Not yet** (ADR-038):
 
@@ -2758,9 +2794,11 @@ itself, not a roster change, so it does not need the creator. A group it does no
 nothing (WARNING from the manager). A sender that is not on the roster, any connected node
 that names a group the receiver holds: the roster is unchanged and `version` is not raised,
 but `group_member_left` is still raised for it, naming that node as the one who left. The
-leaver's `agents` and `agent_names` entries stay in the record. Nothing on the receiver
-checks that the sender is not the creator; the creator's own node refuses to leave (see
-*Local roster changes* under `GROUP_SYNC`). A member that hears of the leave only through
+leaver's `agents` and `agent_names` entries stay in the record. A `GROUP_LEAVE` from the
+group's creator is refused (WARNING, roster and `version` unchanged, no UI event): the
+creator cannot leave, and its own node refuses to as well (see *Local roster changes*
+under `GROUP_SYNC`). The frame names no node to remove; the payload's other fields are not
+read, so it cannot remove anyone but its sender. A member that hears of the leave only through
 another member's `GROUP_SYNC` keeps the leaver on its roster, because that roster change
 does not come from the creator; and when the creator itself never received the leave, its
 next `GROUP_SYNC` puts the leaver back on the rosters of the members that did, until the
@@ -2899,8 +2937,15 @@ A message in a group: a human's, or an agent's.
 **Receiver** (`GroupTextHandler.handle`, `group_handler.py:275-437`), in this order:
 
 1. **Held group.** No `group_id`, or a `group_id` the receiver holds no group for: dropped
-   before anything below runs, with one WARNING naming the transport sender and the group
-   id and carrying the running total of such drops (`GroupTextHandler.dropped_not_held`).
+   before anything below runs, and counted (`GroupTextHandler.dropped_not_held`, with
+   counts per transport sender and per sender and group). Since the drop precedes any
+   signature check, its log line is a WARNING only on the first drop for a (sender, group)
+   and then on every 100th (`DROP_LOG_EVERY`), carrying the counts; DEBUG otherwise. A
+   sender that has had ten groups announced (`DROP_LOG_DISTINCT_GROUPS_PER_SENDER`) gets no more
+   first-drop WARNINGs, only one per 100 of its drops. The count tables keep at most 4096
+   entries each, dropping the oldest. The group id, chosen by the sender, is cut to its
+   first 20 characters as the sender's id is, both in the line and as the count key, so
+   ids that share those characters count as one group.
    Nothing is verified, stored, relayed or shown, no folder is created, nobody is woken,
    and nothing is answered. The test is the receiver's own record of the group, not the
    id's spelling: no `group-` prefix is required (the prefix is how this implementation

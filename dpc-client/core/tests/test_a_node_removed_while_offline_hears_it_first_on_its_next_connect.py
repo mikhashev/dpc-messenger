@@ -141,7 +141,7 @@ def removed_offline(tmp_path, monkeypatch):
     group = a.service.group_manager.create_group("work", "topic", [B_ID, C_ID])
     b = _Node(net, B_ID, home_b, _manager(home_b, B_ID))
     net.on(b)
-    b.service.group_manager.apply_sync(group.to_dict())
+    b.service.group_manager.apply_sync(group.to_dict(), A_ID)
 
     net.nodes = {A_ID: a, B_ID: b}
     return net, a, b, group.group_id, home_a
@@ -193,7 +193,7 @@ async def test_a_member_added_back_before_it_connects_is_owed_nothing(removed_of
     net, a, b, gid, home_a = removed_offline
     net.on(a)
     await a.service.remove_group_member(gid, B_ID)
-    a.service.group_manager.add_member(gid, B_ID)
+    a.service.group_manager.add_member(gid, B_ID, A_ID)
 
     reloaded = _manager(home_a, A_ID)
     assert reloaded.removals_owed_to(B_ID) == []

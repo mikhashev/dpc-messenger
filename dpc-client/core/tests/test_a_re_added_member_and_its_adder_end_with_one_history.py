@@ -160,7 +160,7 @@ def pair(tmp_path, monkeypatch):
     manager_b = GroupManager(dpc_home=home_b / ".dpc", node_id=B_ID)
     b = _Node(net, B_ID, home_b, manager_b)
     net.on(b)
-    manager_b.apply_sync(group.to_dict())
+    manager_b.apply_sync(group.to_dict(), A_ID)
 
     net.nodes = {A_ID: a, B_ID: b}
     return net, a, b, group.group_id

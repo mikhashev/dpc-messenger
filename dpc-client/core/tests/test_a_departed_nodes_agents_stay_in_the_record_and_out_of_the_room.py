@@ -14,7 +14,7 @@ since 2026-10-31 (a departed key in both maps), not a hand-built namespace.
 
 import types
 
-from dpc_client_core.managers.group_manager import GroupManager
+from dpc_client_core.managers.group_manager import GroupManager, GroupMetadata
 from dpc_client_core.service import CoreService
 
 OWN = "dpc-node-" + "a" * 32
@@ -40,7 +40,7 @@ def _live_like_group(manager):
     manager.set_node_agents(gid, OWN, list(OWN_AGENTS), dict(OWN_NAMES))
     manager.set_node_agents(gid, GONE, list(GONE_AGENTS), dict(GONE_NAMES))
     manager.set_node_agents(gid, STAYS, list(STAYS_AGENTS), dict(STAYS_NAMES))
-    manager.remove_member(gid, GONE)
+    manager.remove_member(gid, GONE, OWN)
     return gid
 
 
@@ -90,7 +90,7 @@ def test_the_departed_nodes_entries_stay_in_the_record_and_in_group_sync(tmp_pat
 def test_after_remove_and_re_add_the_agents_and_their_ext_tags_are_back(tmp_path):
     manager = _manager(tmp_path)
     gid = _live_like_group(manager)
-    manager.add_member(gid, GONE)
+    manager.add_member(gid, GONE, OWN)
     # nobody re-registered anything: set_node_agents ran for GONE only once, before the removal
     group = manager.get_group(gid)
     assert group.agents[GONE] == GONE_AGENTS
@@ -113,9 +113,20 @@ def test_this_node_out_of_the_roster_shows_none_of_the_agents_of_the_room(tmp_pa
     """A removed node's own copy: the roster no longer lists it, so it is no more a
     participant than any other departed node. Its own slot is still on disk for a
     re-add, which is the whole point of not pruning."""
+    # The removal arrives as it does on the wire: a roster from the group's
+    # creator that leaves this node out. This node cannot remove itself from a
+    # group it created (ADR-038 part 1), so here the creator is STAYS.
     manager = _manager(tmp_path)
-    gid = _live_like_group(manager)
-    manager.remove_member(gid, OWN)
+    gid = "group-0123456789ab"
+    record = GroupMetadata(
+        group_id=gid, name="DPC Project", topic="work", created_by=STAYS,
+        members=[STAYS, OWN], version=4,
+        agents={OWN: list(OWN_AGENTS), GONE: list(GONE_AGENTS), STAYS: list(STAYS_AGENTS)},
+        agent_names={OWN: dict(OWN_NAMES), GONE: dict(GONE_NAMES), STAYS: dict(STAYS_NAMES)},
+    ).to_dict()
+    assert manager.apply_sync(record, STAYS) is not None
+    removed = dict(record, members=[STAYS], version=5)
+    assert manager.apply_sync(removed, STAYS) is not None
     group = manager.get_group(gid)
     assert group.agents[OWN] == OWN_AGENTS
     labels = _service()._group_participants(group)
