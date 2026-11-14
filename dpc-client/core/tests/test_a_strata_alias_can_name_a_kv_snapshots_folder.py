@@ -1,6 +1,6 @@
-"""A Strata alias can name the folder of Strata's session files (Mike's call, 2026-10-23).
+"""A Strata alias can name its KV snapshots folder (Mike's call, 2026-10-23; named so 2026-11-13).
 
-Strata saves and restores a conversation to a file through `/slots/0` when its
+Strata saves and restores a conversation's engine state to a file through `/slots/0` when its
 config carries the top-level key `slot_save_path`. It is not an engine flag:
 the first attempt, `--slot-save-path` in `extra_args`, made `strata.exe` exit
 with `unknown argument` (live, 2026-10-23 17:43). The typed alias field of the
@@ -70,7 +70,7 @@ class TestTheStartConfig:
         blocker = tmp_path / "a-file"
         blocker.write_text("x", encoding="utf-8")
         sup = _sup(_install(tmp_path), slot_save_path=str(blocker / "inside"))
-        with pytest.raises(LlamaServerError, match="cannot create the session files folder"):
+        with pytest.raises(LlamaServerError, match="cannot create the KV snapshots folder"):
             sup.write_start_config(5000)
 
     @pytest.mark.parametrize("bad", ["sessions", "./sessions", "~/sessions", "C:", "bad\npath", "bad\x00path", "  ", 5, True])

@@ -353,10 +353,10 @@ class TestStopAndReset:
 
         async def fake_stop(alias, timeout=None):
             seen.append(alias)
-            return alias == "flash"
+            return alias == "flash", None
 
         from dpc_client_core.providers import llamacpp_server_provider as lsp
-        monkeypatch.setattr(lsp, "stop_local_engine", fake_stop)
+        monkeypatch.setattr(lsp, "stop_local_engine_with_live_saved", fake_stop)
         assert (await CoreService.stop_local_engine(SimpleNamespace(), alias="flash"))["status"] == "success"
         out = await CoreService.stop_local_engine(SimpleNamespace(), alias="nobody")
         assert out["status"] == "error" and "nobody" in out["message"]
@@ -364,11 +364,23 @@ class TestStopAndReset:
         assert seen == ["flash", "nobody"]
 
     @pytest.mark.asyncio
+    async def test_stop_reports_the_drains_own_save_outcome(self, monkeypatch):
+        outcome = {"outcome": "saved", "bytes": 5, "ms": 7, "reason": None}
+
+        async def fake_stop(alias, timeout=None):
+            return True, outcome
+
+        from dpc_client_core.providers import llamacpp_server_provider as lsp
+        monkeypatch.setattr(lsp, "stop_local_engine_with_live_saved", fake_stop)
+        out = await CoreService.stop_local_engine(SimpleNamespace(), alias="flash")
+        assert out == {"status": "success", "alias": "flash", "live_saved": outcome}
+
+    @pytest.mark.asyncio
     async def test_stop_really_stops_a_registered_child(self, tmp_path):
         p = _provider(tmp_path, vram_release_timeout_s=0.01)
         p.supervisor._proc = _FakeProc()
         out = await CoreService.stop_local_engine(SimpleNamespace(), alias="flash")
-        assert out == {"status": "success", "alias": "flash"}
+        assert out == {"status": "success", "alias": "flash", "live_saved": None}
         assert p.supervisor._proc is None
 
     @pytest.mark.asyncio

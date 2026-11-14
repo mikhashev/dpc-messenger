@@ -19,6 +19,7 @@ from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSour
 
 from . import knowledge_routing
 from . import conversation_paths
+from .managers import kv_snapshots
 from .managers.llama_server_supervisor import BackgroundCallSkipped, a_background_call, card_queue_refusal_in
 from .p2p_manager import peer_proof
 
@@ -602,6 +603,11 @@ class ConversationMonitor:
                          has no way to make.
         """
         self.conversation_id = conversation_id
+        # A conversation is saved to a KV snapshot only if a monitor can clear it.
+        try:
+            kv_snapshots.note_clearable(conversation_id)
+        except Exception as e:  # noqa: BLE001 - a monitor never fails to exist on it
+            logger.warning("Monitor %s: not noted as clearable for KV snapshots: %s", conversation_id, e)
         self.display_name = display_name
         self.participants = participants
         self.llm_manager = llm_manager
@@ -2437,7 +2443,16 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         return value if parse_moment(value) is not None else None
 
     def _advance_live_history_boundary(self, moment: str) -> bool:
-        """Move the boundary forward to `moment`; never back. True when it moved."""
+        """Move the boundary forward to `moment`; never back. True when it moved.
+
+        Every path that clears this conversation comes through here, so the KV
+        snapshots of it are deleted first, whether or not the boundary moves
+        (ADR-044, KV snapshots amendment, point 7). A clear never fails on it."""
+        try:
+            kv_snapshots.forget_conversation(self.conversation_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Monitor %s: KV snapshots of the cleared conversation not forgotten: %s",
+                           self.conversation_id, e)
         new = parse_moment(moment)
         if new is None or not self.persist_history:
             return False

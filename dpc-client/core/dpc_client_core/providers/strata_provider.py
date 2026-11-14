@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 
 from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING
 
+from ..managers import kv_snapshots
 from ..managers import llama_server_supervisor as _base
 from ..managers.commit_memory import read_free_commit_or_physical
 from ..managers.llama_server_supervisor import effort_dictionary_of
@@ -119,9 +120,14 @@ class StrataProvider(LlamaServerProvider):
         """The alias's own keys, without the disk: a path checked here would drop
         the alias from the loaded set whenever a drive is not mounted. The save
         checks the paths too (`strata_config_errors(check_paths=True)`)."""
-        errors = strata_config_errors(config)
+        errors = strata_config_errors(config) + kv_snapshots.alias_field_errors(config)
         if errors:
             raise ValueError(f"strata provider '{alias}' " + "; ".join(errors))
+
+    @classmethod
+    def _supervisor_config(cls, alias: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Unchanged: Strata's folder is checked by `strata_config_errors` and its supervisor."""
+        return config
 
     @classmethod
     def _flag_signature(cls, config: Dict[str, Any]) -> tuple:
@@ -207,12 +213,13 @@ class StrataProvider(LlamaServerProvider):
             extra_body.update(PEER_CHECKPOINT_OFF)
         return sampling
 
-    async def _ensure(self):
-        """The base's, and for a call served to a peer the supervisor's answer to
+    async def _ensure(self, messages=None):
+        """The base's (the last-call record and the KV snapshot restore, for
+        `messages`), and for a call served to a peer the supervisor's answer to
         whether it goes out with checkpointing on (`guest_checkpoint`), read
         here because this is the last await before the wire body is built. A
         supervisor that cannot answer, or fails to, means off."""
-        client = await super()._ensure()
+        client = await super()._ensure(messages)
         peer = peer_being_served()
         if peer is not None:
             on = False
@@ -581,7 +588,11 @@ async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
     2026-11-02): from, to, their engines, `at`, and `parked_dropped`; None before one.
     `card_holders` is every holder, `card_queue` the line and `last_background_skip` each
     background call's last skip (the card queue, rule 10). These last two name the owner's
-    agents and chats or aliases; this status goes to the owner's own UI and to no peer."""
+    agents and chats or aliases; this status goes to the owner's own UI and to no peer.
+    `kv_snapshots` maps each active alias of either engine that has a KV snapshots folder
+    (configured or registered at launch) to `kv_snapshots.status_of`: folder, files, bytes,
+    cap_bytes, oldest_expiry, last_save, last_restore and off_reason (ADR-044, KV snapshots,
+    point 10)."""
     strata = [
         await strata_status(sup, metrics_timeout_s)
         for sup in list(_ACTIVE_SUPERVISORS.values())
@@ -596,10 +607,26 @@ async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
     except Exception as e:  # a status read must not fail the panel
         logger.warning("local engine pins unreadable: %s", e)
         pins = None
+    snapshots = await asyncio.to_thread(_kv_snapshots_status, list(_ACTIVE_SUPERVISORS.items()))
     return {"card_holder": card_holder(), "strata": strata, "free_commit": read_free_commit_or_physical(),
             "engine_backends": backends, "pins": pins, "last_swap": _base.last_swap(),
             "card_holders": _base.card_holders(), "card_queue": _base.card_queue(),
-            "last_background_skip": _base.last_background_skip()}
+            "last_background_skip": _base.last_background_skip(), "kv_snapshots": snapshots}
+
+
+def _kv_snapshots_status(supervisors) -> Dict[str, Any]:
+    """alias -> `kv_snapshots.status_of` for each alias with a folder; reads each index once."""
+    out: Dict[str, Any] = {}
+    for alias, sup in supervisors:
+        config = getattr(sup, "config", None)
+        configured = isinstance(config, dict) and bool(config.get("slot_save_path"))
+        if not configured and kv_snapshots.folder_of(alias) is None:
+            continue
+        try:
+            out[alias] = kv_snapshots.status_of(alias)
+        except Exception as e:  # a status read must not fail the panel
+            logger.warning("KV snapshots status of '%s' unreadable: %s", alias, e)
+    return out
 
 
 def strata_supervisor_of(alias: str) -> Optional[StrataSupervisor]:

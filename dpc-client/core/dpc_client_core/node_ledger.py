@@ -203,7 +203,7 @@ def usage_row(
 
     A value outside the vocabulary is refused here rather than written: a row
     saying `caller_kind=stranger` would be read by nothing. `gateway` is
-    accepted and emitted by nothing yet — it is reserved for the gateway child.
+    accepted, and emitted by `gateway.py` (its `CALLER_KIND`).
 
     The four rate columns are written when `tariff_in` is given and
     then all together: half a tariff would be a price to one reader and a

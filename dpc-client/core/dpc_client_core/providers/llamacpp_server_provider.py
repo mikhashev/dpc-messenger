@@ -24,8 +24,10 @@ dictionary comes from the model's jinja file.
 """
 
 import asyncio
+import contextvars
 import logging
 import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Optional, List, Tuple, Union
@@ -37,13 +39,26 @@ from .base import (AIProvider, EngineCountError, REASONING_OFF, declared_reasoni
                    image_blocks_in_turns, positive_ceiling, tool_use_of, with_tool_call_blocks)
 from .deepseek_provider import DeepSeekProvider
 
+from ..managers import kv_snapshots
 from ..managers import llama_server_supervisor as _llama_server_supervisor_module
 from ..managers.llama_server_supervisor import DEFAULTS as SUPERVISOR_DEFAULTS
 from ..managers.llama_server_supervisor import CardHeldError, LlamaServerSupervisor, PinNotInstalledError, card_holders
+from ..managers.llama_server_supervisor import current_card_hold, peer_being_served
 from ..managers.llama_server_supervisor import gguf_effort_dictionary, gguf_integer_keys
 from ..managers.llama_server_supervisor import on_the_owner_loop, stop_by_hand, take_card_queue_place
 
 logger = logging.getLogger(__name__)
+
+# The wire messages of the call being made, set by `_ensure_for` around `_ensure()`:
+# a test double that replaces `_ensure` takes no argument, so they ride beside it.
+_WIRE_MESSAGES: contextvars.ContextVar = contextvars.ContextVar("dpc_llama_wire_messages", default=None)
+# (id of the provider, sequence number) of the call `_ensure` noted in this task (ADR-044,
+# KV snapshots, point 2): `_mark_sent` makes it the record inside the call slot, and
+# `_record_usage` hands it the token counts. Per task, so two calls side by side never cross.
+_ENGINE_CALL_SEQ: contextvars.ContextVar = contextvars.ContextVar("dpc_llama_engine_call_seq", default=None)
+# Reason words of a restore's deletions that `kv_snapshots` has no constant for.
+_PREFIX_MISMATCH = "prefix_mismatch"
+_NO_ROOM_IN_AN_EMPTY_ENGINE = "no_room_in_an_empty_engine"
 
 # The template's own dictionary, measured 2026-08-19 on pin b10472 + qwen3.8:
 # thinking scales 6 492 / 14 989 / 33 966 chars across these three words (5.2×),
@@ -151,6 +166,24 @@ class LlamaServerProvider(DeepSeekProvider):
                 f"llamacpp_server provider '{alias}' needs a gguf_path pointing "
                 "at the model file to serve"
             )
+        # The KV snapshots alias fields (ADR-044, KV snapshots, point 6): new, so a bad value
+        # refuses. The folder is `_supervisor_config`'s: an alias saved before it was checked loads.
+        errors = kv_snapshots.alias_field_errors(config)
+        if errors:
+            raise ValueError(f"llamacpp_server provider '{alias}' " + "; ".join(errors))
+
+    @classmethod
+    def _supervisor_config(cls, alias: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        """The config the supervisor gets. A `slot_save_path` that is no KV snapshots folder
+        (relative, a root, a system folder) passed before the check existed: such an alias
+        still loads, with the folder left out, so saving is off and the child starts without
+        `--slot-save-path`. The providers save refuses the value (`provider_list_errors`)."""
+        problem = kv_snapshots.folder_error(config.get("slot_save_path"))
+        if not problem:
+            return config
+        logger.warning("llamacpp_server '%s': %s; KV snapshots are off for this alias until it is fixed",
+                       alias, problem)
+        return {**config, "slot_save_path": None}
 
     @classmethod
     def _flag_signature(cls, config: Dict[str, Any]) -> tuple:
@@ -166,6 +199,7 @@ class LlamaServerProvider(DeepSeekProvider):
         AIProvider.__init__(self, alias, config)
 
         self._check_config(alias, config)
+        config = self._supervisor_config(alias, config)
 
         # Adopt a live child left by a previous load of the same alias when its
         # flags are unchanged (a reload must not re-load a 30 GB model), and
@@ -358,10 +392,26 @@ class LlamaServerProvider(DeepSeekProvider):
             self._openai = None
         return props
 
-    async def _ensure(self) -> AsyncOpenAI:
+    async def _ensure_for(self, messages: Optional[List[Any]]) -> AsyncOpenAI:
+        """`_ensure` for a call that sends `messages`, its wire messages. They reach
+        `_ensure` through `_WIRE_MESSAGES`, so a test double of `_ensure` with no
+        argument keeps working; the call's record mark starts empty."""
+        _ENGINE_CALL_SEQ.set(None)
+        token = _WIRE_MESSAGES.set(messages)
+        try:
+            return await self._ensure()
+        finally:
+            _WIRE_MESSAGES.reset(token)
+
+    async def _ensure(self, messages: Optional[List[Any]] = None) -> AsyncOpenAI:
         """The server is up (started if this is the first call) and the client
         aimed at it. Each retry re-runs this, so a child that died mid-call is
-        restarted by the attempt that follows its connection error."""
+        restarted by the attempt that follows its connection error.
+
+        Also the one place the last engine call is recorded, for every call, and
+        where a KV snapshot is restored into an empty engine (ADR-044, KV
+        snapshots, points 2 and 5). `messages` are the call's wire messages;
+        None reads the ones `_ensure_for` set."""
         props = await self._ensure_running()
         if self._openai is None or self._port != self.supervisor.port:
             self._port = self.supervisor.port
@@ -369,7 +419,149 @@ class LlamaServerProvider(DeepSeekProvider):
             self._openai = AsyncOpenAI(
                 api_key="local", base_url=f"http://127.0.0.1:{self.supervisor.port}/v1"
             )
-        return self._openai
+        client = self._openai
+        if messages is None:
+            messages = _WIRE_MESSAGES.get()
+        await self._note_engine_call(messages)
+        return client
+
+    # --- KV snapshots: the last-call record and the restore ----------------------
+
+    def _caller_of_this_call(self) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+        """(caller kind, agent id, conversation id, peer id) of the call being made, read
+        from its own context. A peer's call holds no card; a gateway client's hold carries
+        its `caller`; an owner's hold on this alias is an agent's turn or the owner's chat.
+        No hold (a background call), a hold on another alias, a description's borrow or a
+        marked background call names no conversation."""
+        peer = peer_being_served()
+        if peer is not None:
+            return "peer", None, None, peer
+        hold = current_card_hold()
+        if hold is None:
+            return None, None, None, None
+        # A gateway hold sets `caller`, even an empty name: never an owner's chat. The caller's
+        # id is kept in `peer_id`, so a later rule can tell gateway clients apart.
+        caller = getattr(hold, "caller", None)
+        if caller is not None:
+            return "gateway", None, None, caller or None
+        base = _llama_server_supervisor_module
+        borrow = getattr(hold, "borrow", None)
+        if (
+            not getattr(hold, "live", False)
+            or getattr(hold, "alias", None) != self.alias
+            or (borrow is not None and getattr(borrow, "alias", None) == self.alias)
+            or base._CARD_BORROW.get()
+            or base._BACKGROUND_CALL.get() is not None
+        ):
+            return None, None, None, None
+        agent_id = getattr(hold, "agent_id", None)
+        conversation_id = getattr(hold, "conversation_id", None)
+        if agent_id:
+            return "agent", agent_id, conversation_id, None
+        return kv_snapshots.OWNER_CHAT_KIND, None, conversation_id, None
+
+    def _mark_sent(self) -> None:
+        """The call `_ensure` noted reaches the engine now: it becomes the alias's record.
+        Called inside the call slot, before the request goes out; a call refused or
+        cancelled before its slot never becomes the record."""
+        mark = _ENGINE_CALL_SEQ.get()
+        sent = getattr(kv_snapshots, "mark_sent", None)
+        if mark is None or mark[0] != id(self) or sent is None:
+            return
+        try:
+            sent(self.alias, mark[1])
+        except Exception:
+            logger.debug("'%s': the call could not be marked sent", self.alias, exc_info=True)
+
+    async def _note_engine_call(self, messages: Optional[List[Any]]) -> None:
+        """Record this call as the alias's last, then restore its conversation's KV
+        snapshot when the engine is empty and the call is the owner's. Neither runs while
+        the supervisor drains; neither ever fails the call."""
+        sup = self.supervisor
+        if getattr(sup, "_draining", False) is True:
+            return
+        kind, agent_id, conversation_id, peer = self._caller_of_this_call()
+        try:
+            seq = kv_snapshots.note_engine_call(
+                self.alias, caller_kind=kind, agent_id=agent_id, conversation_id=conversation_id,
+                peer_id=peer, prefix=kv_snapshots.prefix_digest(messages) if messages is not None else None,
+                at=time.time(),
+            )
+        except Exception:
+            logger.warning("'%s': the last engine call could not be recorded", self.alias, exc_info=True)
+            seq = None
+        if isinstance(seq, int) and not isinstance(seq, bool):
+            _ENGINE_CALL_SEQ.set((id(self), seq))
+        if getattr(sup, "_kv_engine_fresh", False) is not True:
+            return
+        # Any call fills the empty engine; cleared before the await, so one call restores.
+        sup._kv_engine_fresh = False
+        if not (kv_snapshots.is_owner_kind(kind) and conversation_id and messages is not None):
+            # Said once, so the policy is not read as a failed restore.
+            what = (f"{kind} call" if kind and not kv_snapshots.is_owner_kind(kind)
+                    else f"{kind or 'background'} call with no conversation")
+            article = "an" if what[0] in "aeiou" else "a"
+            logger.info("%s: the empty engine was filled by %s %s; no restore until the engine is empty again",
+                        self.alias, article, what)
+            return
+        if getattr(sup, "_in_flight", None) != 0:
+            return
+        try:
+            await self._restore_into_an_empty_engine(sup, agent_id, conversation_id, messages)
+        except Exception:
+            logger.warning("'%s': the KV snapshot restore failed; the call runs cold", self.alias, exc_info=True)
+
+    async def _restore_into_an_empty_engine(
+        self, sup: Any, agent_id: Optional[str], conversation_id: str, messages: List[Any],
+    ) -> None:
+        """Look the conversation up in the alias's folder, check its prefix, and restore it
+        through `sup._restore_kv_snapshot` inside a call slot, so a drain that begins waits
+        for it and one already begun refuses it. The supervisor classifies the answer, logs
+        it and drops a refused or missing file; a prefix mismatch, and llama-server's "no
+        room" in an empty engine, are deleted here."""
+        alias = self.alias
+        folder = kv_snapshots.folder_of(alias)
+        restore = getattr(sup, "_restore_kv_snapshot", None)
+        folder_off = getattr(sup, "_kv_folder_off_this_launch", None)
+        if (folder is None or restore is None or kv_snapshots.off_reason(alias) == kv_snapshots.FOLDER_MISSING
+                or (folder_off is not None and folder_off() is True)):
+            return
+        key = f"agent={agent_id or '-'} conv={conversation_id}"
+        entry = await asyncio.to_thread(
+            kv_snapshots.lookup, folder, alias=alias, agent_id=agent_id,
+            conversation_id=conversation_id, now=time.time(),
+        )
+        if entry is None:
+            return
+        name = entry.get("file")
+        if not kv_snapshots.matches(entry, messages):
+            await asyncio.to_thread(kv_snapshots.remove_entry, folder, name, reason=_PREFIX_MISMATCH)
+            logger.info("%s: KV snapshot %s (%s) not restored: the prefix moved since the save; "
+                        "deleted, the call runs cold", alias, name, key)
+            kv_snapshots.note_restore(alias, {"outcome": _PREFIX_MISMATCH, "bytes": entry.get("bytes"),
+                                              "ms": None, "reason": "prefix mismatch, deleted"})
+            return
+        # Asked again after the awaited lookup, with no await before the slot: a call that
+        # entered meanwhile has filled the engine, and a drain refuses the restore.
+        if getattr(sup, "_in_flight", None) != 0 or getattr(sup, "_draining", False) is True:
+            logger.info("%s: KV snapshot %s (%s) not restored: %s; kept", alias, name, key,
+                        "the engine began to stop" if getattr(sup, "_draining", False) is True
+                        else "another call reached the engine first")
+            return
+        try:
+            slot = sup.call_slot()
+        except Exception as e:  # draining: the refusal says so
+            logger.info("%s: KV snapshot %s (%s) not restored: %s", alias, name, key, e)
+            return
+        async with slot:
+            answer = await restore(entry)
+        outcome = answer.get("outcome") if isinstance(answer, dict) else None
+        if outcome == kv_snapshots.NO_ROOM and getattr(sup, "ENGINE", None) == LlamaServerSupervisor.ENGINE:
+            # llama-server answers "No available space in KV cache or invalid slot save file" for
+            # both; in an empty engine it is the file, and keeping it would fail every start.
+            await asyncio.to_thread(kv_snapshots.remove_entry, folder, name, reason=_NO_ROOM_IN_AN_EMPTY_ENGINE)
+            logger.info("%s: KV snapshot %s (%s) deleted: no room in an empty engine, read as a bad file",
+                        alias, name, key)
 
     async def close(self) -> None:
         """Stop the child, then hand the registry back.
@@ -772,6 +964,15 @@ class LlamaServerProvider(DeepSeekProvider):
         if max_tokens is not None:
             usage["max_tokens"] = max_tokens
         self._last_usage = usage
+        # The live conversation's size for a save at the next stop (ADR-044, KV snapshots,
+        # point 4), handed to the record this call's `_ensure` wrote.
+        mark = _ENGINE_CALL_SEQ.get()
+        if mark is not None and mark[0] == id(self):
+            try:
+                kv_snapshots.note_engine_tokens(
+                    self.alias, mark[1], usage["prompt_tokens"], usage["completion_tokens"])
+            except Exception:
+                logger.debug("'%s': the call's tokens could not be recorded", self.alias, exc_info=True)
         # The engine's own per-task timings give every path the phase
         # split, not just the streaming one: the agents' tools path has no
         # first-chunk boundary. The response carries them for the call that
@@ -998,9 +1199,10 @@ class LlamaServerProvider(DeepSeekProvider):
         `get_last_usage()` like every other provider."""
         self._last_thinking = None
         self._last_usage = None
+        messages = [{"role": "user", "content": prompt}]
 
         async def _call():
-            client = await self._ensure()
+            client = await self._ensure_for(messages)
             # Speed clock starts AFTER the server is ensured: a cold start
             # (~a minute) inside elapsed would read as a slow model.
             import time as _time
@@ -1016,11 +1218,12 @@ class LlamaServerProvider(DeepSeekProvider):
             params: Dict[str, Any] = {
                 "model": self._model_name(),
                 "max_tokens": kwargs.get("max_tokens", self.max_tokens),
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": messages,
                 "extra_body": extra_body,
                 **self._sampling_on_the_wire(extra_body, self._sampling_params(kwargs.get("temperature"))),
             }
             async with self.supervisor.call_slot():
+                self._mark_sent()  # synchronous: nothing between the slot and the send
                 resp = await client.chat.completions.create(**params)
             _choice = resp.choices[0]
             msg = _choice.message
@@ -1068,9 +1271,10 @@ class LlamaServerProvider(DeepSeekProvider):
         inherited along with the shape."""
         self._last_thinking = None
         self._last_usage = None
+        messages = [{"role": "user", "content": prompt}]
 
         async def _call():
-            client = await self._ensure()
+            client = await self._ensure_for(messages)
             extra_body = self._build_extra_body(
                 reasoning_effort, reasoning_budget_tokens,
                 effective_max_tokens=self.max_tokens,
@@ -1078,7 +1282,7 @@ class LlamaServerProvider(DeepSeekProvider):
             params: Dict[str, Any] = {
                 "model": self._model_name(),
                 "max_tokens": self.max_tokens,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": messages,
                 "extra_body": extra_body,
                 "stream": True,
                 "stream_options": {"include_usage": True},
@@ -1098,6 +1302,7 @@ class LlamaServerProvider(DeepSeekProvider):
             # so the reason arrives one chunk earlier than the accounting.
             finish_reason = None
             async with self.supervisor.call_slot():
+                self._mark_sent()  # synchronous: nothing between the slot and the send
                 # Speed clock starts inside the slot: the queue wait before it
                 # is contention, not model speed.
                 _t0 = _time.perf_counter()
@@ -1224,7 +1429,7 @@ class LlamaServerProvider(DeepSeekProvider):
         # when the alias asks for it, is the round's real notes.
 
         async def _call():
-            client = await self._ensure()
+            client = await self._ensure_for(openai_messages)
             import time as _time
             _t0 = _time.perf_counter()  # after ensure: cold start stays out of the number
             extra_body = self._build_extra_body(
@@ -1241,6 +1446,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 **self._sampling_on_the_wire(extra_body, self._sampling_params(reasoning_effort=reasoning_effort)),
             }
             async with self.supervisor.call_slot():
+                self._mark_sent()  # synchronous: nothing between the slot and the send
                 resp = await client.chat.completions.create(**params)
             _choice = resp.choices[0]
             msg = _choice.message
@@ -1288,7 +1494,7 @@ class LlamaServerProvider(DeepSeekProvider):
             return result
 
         async def _call_on_a_stream():
-            client = await self._ensure()
+            client = await self._ensure_for(openai_messages)
             import time as _time
             extra_body = self._build_extra_body(
                 reasoning_effort, reasoning_budget_tokens,
@@ -1316,6 +1522,7 @@ class LlamaServerProvider(DeepSeekProvider):
             handed_over = False
             try:
                 async with self.supervisor.call_slot():
+                    self._mark_sent()  # synchronous: nothing between the slot and the send
                     _t0 = _time.perf_counter()  # inside the slot, as on plain-stream
                     # Closed on every exit, a failed callback's too: nobody reads what the engine goes on making.
                     async with await client.chat.completions.create(**params) as stream:
@@ -1440,9 +1647,10 @@ class LlamaServerProvider(DeepSeekProvider):
                     "url": f"data:{mime};base64,{image_base64(img, self.alias)}"
                 },
             })
+        messages = [{"role": "user", "content": content}]
 
         async def _call():
-            client = await self._ensure()
+            client = await self._ensure_for(messages)
             import time as _time
             _t0 = _time.perf_counter()  # after ensure: cold start stays out of the number
             effort = kwargs.get("reasoning_effort")
@@ -1463,11 +1671,12 @@ class LlamaServerProvider(DeepSeekProvider):
             params: Dict[str, Any] = {
                 "model": self._model_name(),
                 "max_tokens": kwargs.get("max_tokens", self.max_tokens),
-                "messages": [{"role": "user", "content": content}],
+                "messages": messages,
                 "extra_body": extra_body,
                 **self._sampling_on_the_wire(extra_body, self._sampling_params(kwargs.get("temperature"))),
             }
             async with self.supervisor.call_slot():
+                self._mark_sent()  # synchronous: nothing between the slot and the send
                 resp = await client.chat.completions.create(**params)
             _choice = resp.choices[0]
             msg = _choice.message
@@ -1661,14 +1870,29 @@ async def stop_local_engine(alias: str, timeout: Optional[float] = None) -> bool
     agent before stopping. A place the alias has in the queue for the card goes first
     (ADR-044, the card queue, rule 12): a first place holds the start lock while it
     waits for the holder. False when the alias has no supervisor."""
+    stopped, _live_saved = await _stop_local_engine(alias, timeout)
+    return stopped
+
+
+@on_the_owner_loop
+async def stop_local_engine_with_live_saved(
+    alias: str, timeout: Optional[float] = None,
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """`stop_local_engine`, and what the stop's KV snapshot save did: (stopped, live_saved).
+    `live_saved` is `stop_by_hand`'s outcome (`drain`'s save step: outcome, bytes, ms,
+    reason), None when nothing live was saved or saving is off (ADR-044, KV snapshots, point 10)."""
+    return await _stop_local_engine(alias, timeout)
+
+
+async def _stop_local_engine(alias: str, timeout: Optional[float]) -> Tuple[bool, Optional[Dict[str, Any]]]:
     take_card_queue_place(alias)
     supervisor = _ACTIVE_SUPERVISORS.get(alias)
     retired = supervisor is None
     if retired:
         supervisor = (_RETIRING.get(alias) or (None, None))[0]
     if supervisor is None:
-        return False
+        return False, None
     # Whether it is still the configured one is asked after the drain (`_still_configured`).
-    await stop_by_hand(supervisor, timeout=timeout, reopen=not retired)
+    live_saved = await stop_by_hand(supervisor, timeout=timeout, reopen=not retired)
     logger.info("local engine '%s' (%s) stopped by hand", alias, supervisor.ENGINE)
-    return True
+    return True, live_saved if isinstance(live_saved, dict) else None

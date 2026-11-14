@@ -14,6 +14,10 @@
   import { confirmAsync } from '$lib/utils/dialog';
   import { enginePinLines, runsRetainedPin, type EnginePins } from '$lib/utils/enginePins';
   import {
+    isUncPath, kvSnapshotBlocks, ttlPlaceholder, KV_SNAPSHOT_DEFAULT_MAX_GIB, KV_SNAPSHOTS_DISK_HINT,
+    KV_SNAPSHOTS_FOLDER_LABEL, KV_SNAPSHOTS_HELP, KV_SNAPSHOTS_UNC_WARNING, type KvSnapshotsRow,
+  } from '$lib/utils/kvSnapshots';
+  import {
     backgroundSkipLines, cardQueueLines, otherCardHolderLines,
     type BackgroundSkipRow, type CardHolderRow, type CardQueueRow,
   } from '$lib/utils/cardQueue';
@@ -98,7 +102,9 @@
     kv_unified?: boolean;       // unset = true; only meaningful above one slot
     cache_ram_mib?: number;     // host RAM prompt cache, not VRAM
     vram_overhead_mib?: number; // what a loaded context costs beyond weights and KV
-    slot_save_path?: string;    // llamacpp_server: where slot state is persisted; strata: the folder of session files
+    slot_save_path?: string;    // both engines: the folder of KV snapshots (a conversation's engine state, kept at a stop)
+    kv_snapshot_ttl_s?: number; // both engines: seconds a KV snapshot is kept; unset = 86400 (24 h)
+    kv_snapshot_max_gib?: number; // both engines: GiB the snapshots may take; unset = 32
     jinja?: boolean;            // unset = true
     start_timeout_s?: number;   // unset = 300
     extra_args?: string[];      // raw flags appended last, one token per entry
@@ -250,6 +256,26 @@
     }
   }
 
+  /** The KV snapshots folder of a llama-server alias: a folder dialog, like Strata's. */
+  async function pickKvSnapshotsFolder(i: number) {
+    if (!editedConfig || !canBrowse) return;
+    const p = editedConfig.providers[i];
+    try {
+      const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+      const picked = await openDialog({
+        multiple: false,
+        directory: true,
+        defaultPath: p.slot_save_path || undefined,
+        title: STRATA_PICK.slot_save_path.title,
+      });
+      if (typeof picked !== 'string' || !picked) return;
+      p.slot_save_path = picked;
+      editedConfig = editedConfig;
+    } catch (err) {
+      console.error('[ProvidersEditor] KV snapshots folder dialog failed:', err);
+    }
+  }
+
   /** Fill a model path from a file dialog, starting where the current value points. */
   async function pickModelPath(i: number, field: 'gguf_path' | 'mmproj') {
     if (!editedConfig || !canBrowse) return;
@@ -296,7 +322,7 @@
     expert_profile: { title: 'Select the expert profile (--expert-profile)', ext: ['bin'] },
     mmproj: { title: 'Select the vision projector (mmproj)', ext: ['gguf'] },
     control_vector_file: { title: 'Select the control vector (.gguf)', ext: ['gguf'] },
-    slot_save_path: { title: 'Select the folder for Strata session files (slot_save_path)', directory: true },
+    slot_save_path: { title: 'Select the KV snapshots folder (slot_save_path)', directory: true },
   };
 
   // The model files, each overriding the base config's value (empty = keep it).
@@ -485,6 +511,7 @@
     swap_when_idle: boolean; swap_wait_s: number;
     card_holders: CardHolderRow[]; card_queue: CardQueueRow[];
     last_background_skip: Record<string, BackgroundSkipRow>;
+    kv_snapshots: Record<string, KvSnapshotsRow>;
   } | null = null;
   let engineStatusError = '';
   let engineStatusLoading = false;
@@ -502,6 +529,7 @@
           swap_when_idle: r.swap_when_idle ?? false, swap_wait_s: r.swap_wait_s ?? 300,
           card_holders: r.card_holders ?? [], card_queue: r.card_queue ?? [],
           last_background_skip: r.last_background_skip ?? {},
+          kv_snapshots: r.kv_snapshots ?? {},
         };
         engineStatusError = '';
       } else {
@@ -1890,6 +1918,31 @@
   </div>
 {/snippet}
 
+<!-- What both engines say under the KV snapshots folder, and the two alias fields beside it. -->
+{#snippet kvSnapshotExtras(i: number, folder: string | undefined, ttl: number | undefined, maxGib: number | undefined)}
+  <p class="help-text">
+    {KV_SNAPSHOTS_HELP}
+    <span class="kv-hint" title={KV_SNAPSHOTS_DISK_HINT}>Disk speed matters (hover).</span>
+    A change of folder restarts the engine.
+  </p>
+  {#if isUncPath(folder)}
+    <p class="help-text warn">{KV_SNAPSHOTS_UNC_WARNING}</p>
+  {/if}
+  <div class="form-group">
+    <label for="kv-ttl-{i}">KV snapshot lifetime, s (kv_snapshot_ttl_s)</label>
+    <input id="kv-ttl-{i}" type="number" min="1" step="1" value={ttl ?? ''}
+      on:change={(e) => setNum(i, 'kv_snapshot_ttl_s', e.currentTarget.value)}
+      placeholder={ttlPlaceholder()} />
+  </div>
+  <div class="form-group">
+    <label for="kv-max-gib-{i}">KV snapshots, most disk, GiB (kv_snapshot_max_gib)</label>
+    <input id="kv-max-gib-{i}" type="number" min="0.1" step="any" value={maxGib ?? ''}
+      on:change={(e) => setNum(i, 'kv_snapshot_max_gib', e.currentTarget.value, true)}
+      placeholder={String(KV_SNAPSHOT_DEFAULT_MAX_GIB)} />
+    <p class="help-text">Oldest are deleted first. Neither field restarts the engine; empty = the default.</p>
+  </div>
+{/snippet}
+
 <!-- The model files folder: shown in the Local engines block and in Add Provider. -->
 {#snippet modelFilesFolderRow()}
   <div class="form-group">
@@ -2182,6 +2235,11 @@
     {#if engineStatus?.free_commit}
       <p class="help-text">{freeCommitLine(engineStatus.free_commit)}</p>
     {/if}
+    {#each kvSnapshotBlocks(engineStatus?.kv_snapshots, Date.now() / 1000) as block (block.alias)}
+      {#each block.lines as line, n}
+        <p class="help-text" class:warn={line.warn}>{#if n === 0}<strong>{block.alias}</strong> — {/if}{line.text}</p>
+      {/each}
+    {/each}
   </div>
 {/snippet}
 
@@ -3087,19 +3145,22 @@
                         </div>
 
                         <div class="form-group">
-                          <label for="slot-save-{i}">Slot save path</label>
-                          <input
-                            id="slot-save-{i}"
-                            type="text"
-                            value={editedConfig.providers[i].slot_save_path ?? ''}
-                            on:input={(e) => setStr(i, 'slot_save_path', (e.target as HTMLInputElement).value)}
-                            placeholder="empty = slot state is not persisted"
-                          />
-                          <p class="help-text">
-                            Directory the child writes slot state into
-                            (<code>--slot-save-path</code>). Empty means state lives only for as
-                            long as the process does.
-                          </p>
+                          <label for="slot-save-{i}">{KV_SNAPSHOTS_FOLDER_LABEL}</label>
+                          <div class="path-row">
+                            <input
+                              id="slot-save-{i}"
+                              type="text"
+                              value={editedConfig.providers[i].slot_save_path ?? ''}
+                              on:change={(e) => setStr(i, 'slot_save_path', e.currentTarget.value.trim())}
+                              placeholder="off — empty"
+                            />
+                            {#if canBrowse}
+                              <button type="button" class="btn btn-browse" on:click={() => pickKvSnapshotsFolder(i)}
+                                title="Pick the KV snapshots folder">Browse…</button>
+                            {/if}
+                          </div>
+                          {@render kvSnapshotExtras(i, editedConfig.providers[i].slot_save_path,
+                            editedConfig.providers[i].kv_snapshot_ttl_s, editedConfig.providers[i].kv_snapshot_max_gib)}
                         </div>
 
                         <div class="form-group">
@@ -3489,7 +3550,7 @@
                       </div>
 
                       <div class="form-group">
-                        <label for="strata-slot-save-{i}">Session files folder (slot_save_path)</label>
+                        <label for="strata-slot-save-{i}">{KV_SNAPSHOTS_FOLDER_LABEL}</label>
                         <div class="path-row">
                           <input
                             id="strata-slot-save-{i}"
@@ -3500,17 +3561,11 @@
                           />
                           {#if canBrowse}
                             <button type="button" class="btn btn-browse" on:click={() => pickStrataPath(i, 'slot_save_path')}
-                              title="Pick the session files folder">Browse…</button>
+                              title="Pick the KV snapshots folder">Browse…</button>
                           {/if}
                         </div>
-                        <p class="help-text">
-                          Lets Strata save a conversation to a file here and restore it later, so it survives
-                          an eviction from the cache and an engine restart (<code>/slots/0</code> save and restore,
-                          slot 0 only). Size: about 18 KiB per token, so a 230k-token conversation is about 4 GiB.
-                          Strata never deletes these files, and a file stops being valid after a Strata version
-                          change. DPC creates the folder if it is missing; it does not call save or restore
-                          itself yet. Empty = off.
-                        </p>
+                        {@render kvSnapshotExtras(i, sp.slot_save_path,
+                          sp.kv_snapshot_ttl_s, sp.kv_snapshot_max_gib)}
                       </div>
 
                       <div class="form-group">
@@ -5240,6 +5295,11 @@
     margin: 0;
     font-size: 0.85rem;
     color: #999;
+  }
+
+  .kv-hint {
+    text-decoration: underline dotted;
+    cursor: help;
   }
 
   .help-text.warn {

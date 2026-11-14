@@ -853,6 +853,23 @@ class CoreService:
                 provider.set_service(self)
                 logger.info(f"Injected CoreService into RemotePeerProvider '{alias}'")
 
+        self._register_kv_snapshot_folders()
+
+    def _register_kv_snapshot_folders(self):
+        """Tell `kv_snapshots` each local engine alias's folder, at load and after a providers save.
+
+        Supervisors register at launch; a reset of a conversation whose alias has not
+        launched since the backend started must still find that alias's snapshots."""
+        from .managers import kv_snapshots
+        for alias, provider in self.llm_manager.providers.items():
+            try:
+                cfg = getattr(provider, "config", None) or {}
+                folder = cfg.get("slot_save_path")
+                if cfg.get("type") in ("llamacpp_server", "strata") and isinstance(folder, str) and folder:
+                    kv_snapshots.register_folder(alias, folder, cap_bytes=kv_snapshots.cap_bytes_of(cfg))
+            except Exception as e:  # noqa: BLE001 - a bad entry must not stop the load
+                logger.warning("KV snapshots folder of alias '%s' not registered: %s", alias, e)
+
     def _on_connection_status_changed(self, old_mode: OperationMode, new_mode: OperationMode):
         """Callback when connection status changes."""
         logger.info("Connection Status Change: %s -> %s", old_mode.value, new_mode.value)
@@ -3409,6 +3426,11 @@ class CoreService:
                     errors.append(f"{prefix}: temperature must be a number")
                 elif temp < 0 or temp > 2:
                     errors.append(f"{prefix}: temperature must be between 0 and 2 (got {temp})")
+
+        # KV snapshots folders and TTL/cap fields, both engines (ADR-044, KV snapshots
+        # amendment): absolute, not a system folder, one folder per alias.
+        from .managers import kv_snapshots
+        errors.extend(kv_snapshots.provider_list_errors(config_dict["providers"]))
 
         # Check default_provider exists
         default = config_dict.get("default_provider")
@@ -11132,6 +11154,9 @@ class CoreService:
         substituted). It is read from the settings here, since the provider module has
         no settings; the read creates nothing. `swap_when_idle`, `swap_wait_s` and
         `caller_idle_s` are the idle-swap settings as stored (ADR-044, amendments 2026-11-02).
+        `kv_snapshots` is the KV snapshots row of each local engine alias that has a folder
+        (`kv_snapshots.status_of`: files, bytes, cap_bytes, oldest_expiry, last_save,
+        last_restore, off_reason), built by the provider module's `local_engine_status`.
         """
         from dpc_client_core.providers.strata_provider import local_engine_status
         try:
@@ -11364,15 +11389,17 @@ class CoreService:
     async def stop_local_engine(self, alias: str = "") -> Dict[str, Any]:
         """Stop a local engine's child by hand to free the card (ADR-044 point 4).
 
-        Slow: the drain lets a running generation finish first."""
-        from dpc_client_core.providers.llamacpp_server_provider import stop_local_engine
+        Slow: the drain lets a running generation finish first. `live_saved` is what the
+        drain's own save outcome (`outcome`, `bytes`, `ms`, `reason`, the shape of
+        `last_swap.live_saved`), or null when nothing live was saved or saving is off."""
+        from dpc_client_core.providers.llamacpp_server_provider import stop_local_engine_with_live_saved
         if not alias:
             return {"status": "error", "message": "alias required"}
-        stopped = await stop_local_engine(alias)
+        stopped, live_saved = await stop_local_engine_with_live_saved(alias)
         logger.info("stop_local_engine: alias=%s stopped=%s", alias, stopped)
         if not stopped:
             return {"status": "error", "message": f"no local engine child for alias '{alias}'"}
-        return {"status": "success", "alias": alias}
+        return {"status": "success", "alias": alias, "live_saved": live_saved}
 
     async def strata_reset_failure(self, alias: str = "") -> Dict[str, Any]:
         """Clear a Strata alias's recorded engine death so its next call may start it."""

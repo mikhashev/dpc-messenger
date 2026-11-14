@@ -59,6 +59,7 @@ SENTINELS: Dict[str, Tuple[bool, str]] = {
     "ConversationMonitor.generate_commit_proposal": (True, "knowledge extraction by a model"),
     "strata_status": (False, "asks the Strata launcher for /metrics"),
     "stop_local_engine": (False, "drains a local engine's running generation"),
+    "stop_local_engine_with_live_saved": (False, "drains a local engine's running generation and saves its live conversation"),
     # (c) a peer's answer, or a connect
     "P2PManager.connect_directly": (False, "a TLS connect and HELLO"),
     "P2PManager.connect_via_node_id": (False, "a connect found through the DHT"),

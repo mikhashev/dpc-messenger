@@ -68,6 +68,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from . import kv_snapshots as _kv
 from . import llama_server_supervisor as _base
 from .commit_memory import describe_free_commit, read_free_commit, read_free_commit_or_physical
 from .llama_server_supervisor import LlamaServerError, LlamaServerSupervisor, _free_port
@@ -264,11 +265,12 @@ STRATA_DEFAULTS: Dict[str, Any] = {
     # the desktop and other programs). None keeps the base config's value.
     "resident_budget_gib": None,
     "vram_reserve_mib": None,
-    # Strata's own top-level config key `slot_save_path`: the folder its
-    # `/slots/0` save and restore write session files in. A key of the start
+    # Strata's own top-level config key `slot_save_path`: the KV snapshots folder its
+    # `/slots/0` save and restore write in. A key of the start
     # config, not an engine flag - the engine rejects `--slot-save-path`
     # (unknown argument, seen 2026-10-23) - so it never goes through `args`.
     # None / empty = off: no key is written and the base config's is kept.
+    # A folder whose parent is missing is written empty for that launch (off).
     "slot_save_path": None,
     # None keeps whatever the base config says; True / False decide.
     "vision": None,
@@ -1121,6 +1123,17 @@ class StrataSupervisor(LlamaServerSupervisor):
         # this alias, or None: set by StrataProvider, so the smoke's thinking
         # call runs the agents' effort without a second copy of its logic.
         self.smoke_effort: Optional[Callable[[], Optional[Dict[str, Any]]]] = None
+        # The drafter the running engine reports (/metrics engine.drafting), read after /health.
+        self._engine_drafting: Optional[str] = None
+        # A KV snapshot save was sent and the drain's stop has not run yet: an engine
+        # the save ended is that stop's, not a death to latch (`_watch_engine`).
+        self._kv_save_in_flight = False
+        # Whether the engine holds the model as last seen (start, /metrics, DPC's own /load),
+        # when DPC last saw it loaded with no call of its own behind the load (monotonic), and
+        # the last stop measured while the model was loaded.
+        self._kv_engine_loaded = False
+        self._kv_loaded_mono: Optional[float] = None
+        self._kv_loaded_stop_s: Optional[float] = None
 
     # --- paths ----------------------------------------------------------------
 
@@ -1317,8 +1330,8 @@ class StrataSupervisor(LlamaServerSupervisor):
             if refusal:
                 raise LlamaServerError(f"strata[{self.alias}]: {refusal}")
             args = _set_flag(args, flag, value)
-        # Session files: a top-level key, never an engine flag. Set, it replaces
-        # the base config's value; unset (or empty), the base's stays. The
+        # The KV snapshots folder: a top-level key, never an engine flag. Set, it
+        # replaces the base config's value; unset (or empty), the base's stays. The
         # folder is created by `write_start_config`, not here: this method is
         # pure and `start_reads_images` calls it without starting anything.
         slot_value = c.get("slot_save_path")
@@ -1326,7 +1339,10 @@ class StrataSupervisor(LlamaServerSupervisor):
         if refusal:
             raise LlamaServerError(f"strata[{self.alias}]: {refusal}")
         if slot_value:
-            cfg["slot_save_path"] = str(slot_value)
+            # Off this launch (a missing parent): written empty, which the pin reads as off
+            # (serve/server.py: `if a.slot_save_path or cfg.get("slot_save_path")`).
+            off = self._kv_prepared and self._kv_folder_off_this_launch()
+            cfg["slot_save_path"] = "" if off else str(slot_value)
         # The drafter and the picture reader: written only when the alias chooses; "auto"
         # (absent) leaves Strata's own pick, and a base config's own key stays as it is.
         for refusal in (drafting_error(c.get("drafting")), vision_elastic_error(c.get("vision_elastic"))):
@@ -1484,15 +1500,21 @@ class StrataSupervisor(LlamaServerSupervisor):
         """Write DPC's start config whole (temp file, then replace) and return its path."""
         cfg = self.build_start_config(port)
         slot_dir = cfg.get("slot_save_path") if self.config.get("slot_save_path") else None
-        if slot_dir:
-            # Strata refuses a session folder that does not exist (`slot_save_dir`).
+        if slot_dir and not self._kv_prepared:
+            # Outside a launch, which prepares the folder itself (`_prepare_kv_snapshots`).
+            # The launcher makes a missing folder, parents included (serve/server.py
+            # `slot_save_dir`), so a missing parent goes to it empty, or the folder would
+            # land on the system disk; a parent that refuses the folder is refused in words.
+            self._refuse_a_file_in_the_way(Path(slot_dir))
             try:
-                os.makedirs(slot_dir, exist_ok=True)
+                missing = _kv.prepare_folder(slot_dir)
             except OSError as e:
                 raise LlamaServerError(
-                    f"strata[{self.alias}]: cannot create the session files folder "
+                    f"strata[{self.alias}]: cannot create the KV snapshots folder "
                     f"slot_save_path {slot_dir}: {e}"
                 ) from None
+            if missing:
+                cfg["slot_save_path"] = ""
         if self.install_is_the_pin() and strata_fetcher.engine_folder(self.install_dir()) is None:
             raise LlamaServerError(
                 f"strata[{self.alias}]: DPC's own install of Strata {STRATA_RELEASE_TAG} at "
@@ -1843,20 +1865,35 @@ class StrataSupervisor(LlamaServerSupervisor):
             )
 
     async def _launch(self, binary: Path, cache_type: Optional[str] = None) -> Dict[str, Any]:
+        live = self._proc
+        if live is not None and live.returncode is None:
+            # The base's refusal, before the KV preparation resets the running launch's state.
+            raise LlamaServerError(
+                f"{self.ENGINE}[{self.alias}]: a child (pid {getattr(live, 'pid', None)}) "
+                f"is still running on :{self.port}; refusing to start a second over it"
+            )
         self._claim_card()
-        self.write_start_config(self.port)
-        self.vram_released = None
-        self.engine_version = None
+        self._kv_engine_loaded = False
+        self._kv_loaded_mono = None
         try:
-            self._vram_free_before = await asyncio.to_thread(_base._free_vram_mib)
-        except Exception:
-            self._vram_free_before = None
-        try:
-            props = await super()._launch(binary)
-        except LlamaServerError as e:
-            if getattr(e, "_build_fault", False):
-                raise self._with_arena_short_note(e) from e
-            raise
+            # Before the start config, which reads the outcome; the base's own call is skipped.
+            await asyncio.to_thread(self._prepare_kv_snapshots)
+            self.write_start_config(self.port)
+            self.vram_released = None
+            self.engine_version = None
+            self._engine_drafting = None
+            try:
+                self._vram_free_before = await asyncio.to_thread(_base._free_vram_mib)
+            except Exception:
+                self._vram_free_before = None
+            try:
+                props = await super()._launch(binary)
+            except LlamaServerError as e:
+                if getattr(e, "_build_fault", False):
+                    raise self._with_arena_short_note(e) from e
+                raise
+        finally:
+            self._kv_prepared = False  # the next launch prepares afresh
         proc = self._proc
         try:
             if await self._check_version() is None:
@@ -1881,6 +1918,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             # A no-op after `_fail_closed`, whose stop already cleared `_proc`.
             await self._stop_the_spawned(proc)
             raise
+        self._kv_engine_loaded = True  # the smoke's call loaded the model, lazy_load or not
         self._start_watch()
         return self.props or props
 
@@ -1897,6 +1935,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             engine = (metrics or {}).get("engine") or {}
             if isinstance(engine, dict) and engine.get("version"):
                 version = str(engine["version"])
+            self._note_engine_drafting(metrics)
         except Exception as e:
             logger.debug("strata[%s]: /metrics unreadable for the version: %s", self.alias, e)
         if version is None:
@@ -2086,6 +2125,8 @@ class StrataSupervisor(LlamaServerSupervisor):
     async def _watch_engine(self) -> None:
         """Poll the launcher's /metrics while it runs; fail closed on an engine death."""
         interval = float(self.config.get("engine_watch_interval_s") or 5.0)
+        last_state: Optional[str] = None
+        sent_seen = self._kv_last_sent()
         while True:
             await asyncio.sleep(interval)
             proc = self._proc
@@ -2104,7 +2145,30 @@ class StrataSupervisor(LlamaServerSupervisor):
             self._note_cache_evictions(metrics)
             self._note_cache_view(metrics)
             state = ((metrics or {}).get("live") or {}).get("state")
-            if state == "unloaded" and not self._unload_expected():
+            previous, last_state = last_state, state
+            sent, last_sent = self._kv_last_sent(), sent_seen
+            sent_seen = sent
+            # A call of DPC's own between two polls, or one in flight, may be what loads it.
+            quiet = self._in_flight == 0 and sent == last_sent
+            if state is not None and state != "unloaded":
+                self._note_engine_drafting(metrics)
+                if previous == "unloaded" and quiet:
+                    self._kv_loaded_mono = time.monotonic()  # loaded by nobody DPC served
+                self._kv_engine_loaded = True
+            if state == "unloaded" and self._kv_save_in_flight:
+                # A save the engine ended in (a 500 naming its restart): the drain stops it next.
+                logger.info("strata[%s]: the engine unloaded during a KV snapshot save; the stop "
+                            "follows", self.alias)
+                continue
+            if state == "unloaded" and self._unload_expected():
+                # Loaded before, unloaded now: the next owner call may restore into it. Only on
+                # the change, and only with no call in flight or sent since the last poll: the
+                # pin reports "unloaded" while a call's own load runs.
+                if previous not in (None, "unloaded") and quiet and not self._draining:
+                    self._kv_engine_fresh = True
+                self._kv_engine_loaded = False
+                continue
+            if state == "unloaded":
                 await self._fail_closed(
                     "the launcher reports the engine unloaded (/metrics live.state) and "
                     "no idle unload or lazy load is configured"
@@ -2523,6 +2587,156 @@ class StrataSupervisor(LlamaServerSupervisor):
             )
         return len(lost)
 
+    # --- KV snapshots (ADR-044, amendment 2026-11-13) ---------------------------
+
+    def _refuse_a_file_in_the_way(self, folder: Path) -> None:
+        """A parent that exists as a file is a folder that cannot be made, refused with the
+        OS error; `prepare_folder` alone would read it as a missing disk (off)."""
+        parent = folder.parent
+        if not parent.exists() or parent.is_dir():
+            return
+        try:
+            folder.mkdir()
+        except OSError as e:
+            raise LlamaServerError(
+                f"strata[{self.alias}]: cannot create the KV snapshots folder "
+                f"slot_save_path {folder}: {e}"
+            ) from None
+
+    def _prepare_kv_snapshots(self) -> None:
+        folder = self._kv_folder()
+        if folder is not None and not self._kv_prepared:
+            self._refuse_a_file_in_the_way(folder)
+        super()._prepare_kv_snapshots()
+
+    def _kv_expected_identity(self) -> Dict[str, Any]:
+        """Engine version, model and the configured drafter; a key left out is not compared.
+        Drafting auto has no drafter key: the engine's refusal at the restore deletes such a file."""
+        identity: Dict[str, Any] = {"engine_version": self._expected_engine_version()}
+        model = self._kv_model()
+        if model:
+            identity["model"] = model
+        if drafting_error(self.config.get("drafting")) is None:
+            drafter = drafting_choice(self.config.get("drafting"))
+            if drafter:
+                identity["drafter"] = drafter
+        return identity
+
+    def _kv_entry_identity(self) -> Dict[str, Any]:
+        """What a snapshot is saved with: with drafting auto, the drafter the engine reported, so
+        a later explicit choice of the same drafter keeps the file."""
+        identity = super()._kv_entry_identity()
+        if "drafter" not in identity and self._engine_drafting:
+            identity["drafter"] = self._engine_drafting
+        return identity
+
+    def _kv_model(self) -> Optional[str]:
+        """The model's first shard: the alias's `native_gguf`, else the base config's `--native`."""
+        if self.config.get("native_gguf"):
+            return str(self.config["native_gguf"])
+        try:
+            args = read_base_config(self.base_config_path())["args"]
+        except (LlamaServerError, ValueError, KeyError, TypeError):
+            return None
+        return _flag_value([str(a) for a in args], "--native")
+
+    def _expected_stop_s(self) -> float:
+        """The last stop of a loaded engine, which holds the VRAM release wait (inside
+        `_stop_child`); before one, the process's own 20 s plus that wait's bound. A stop of an
+        idle-unloaded engine is never the measure."""
+        if self._kv_loaded_stop_s is not None:
+            return self._kv_loaded_stop_s
+        return _base._STOP_CHILD_GRACE_S + float(self.config.get("vram_release_timeout_s") or 0)
+
+    async def _kv_slot_to_save(self) -> tuple:
+        """Slot 0, the only one Strata's session API saves, sized by the last call's prompt
+        plus reply (None: size unknown). Nothing is live when the pin's `GET /slots` answers
+        `[]` (the model unloaded) or slot 0's `n_prompt_tokens` is 0: serve/server.py v0.2.11,
+        the `/slots` handler, "the running request's prompt size, kept after it ends"."""
+        try:
+            slots = await self.slots()
+        except Exception as exc:
+            return None, None, f"the slots could not be read ({exc})"
+        if isinstance(slots, dict):
+            slots = slots.get("slots") or []
+        first = slots[0] if isinstance(slots, list) and slots else None
+        try:
+            held = int(first.get("n_prompt_tokens") or 0) if isinstance(first, dict) else 0
+        except (TypeError, ValueError):
+            held = 0
+        if held <= 0:
+            return None, None, None
+
+        def count(value: Any) -> Optional[int]:
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+        record = _kv.engine_call_of(self.alias) or {}
+        loaded_at, sent_at = self._kv_loaded_mono, record.get("sent_mono")
+        if loaded_at is not None and not (isinstance(sent_at, (int, float)) and sent_at >= loaded_at):
+            # The pin keeps `n_prompt_tokens` across an unload and a load: the slot is empty.
+            # One clock tick counts as after (Windows' monotonic clock ticks every ~16 ms).
+            return None, None, "the engine was reloaded after the last call"
+        prompt, reply = count(record.get("prompt_tokens")), count(record.get("reply_tokens"))
+        return 0, (prompt + (reply or 0) if prompt else None), None
+
+    async def _slot_action(self, slot: int, action: str, filename: str,
+                           timeout: float) -> tuple:
+        """`POST /slots/0?action=…` as the base sends it: JSON and no Origin, which the pin's
+        `_own_page` demands (415 / 403 otherwise). Strata has one slot."""
+        if action == "save":
+            self._kv_save_in_flight = True
+        return await super()._slot_action(0, action, filename, timeout)
+
+    async def _restore_kv_snapshot(self, entry: Dict[str, Any], *,
+                                   timeout: Optional[float] = None) -> Dict[str, Any]:
+        """After an idle unload the model is loaded first (`POST /load`): the pin's
+        `slot_action` answers 503 "the model is not loaded" and loads nothing itself."""
+        loaded = False
+        if not self._draining and await self._engine_unloaded():
+            loaded = await self._load_for_restore()
+        # Synchronous from here to the restore's request: a call that took a slot meanwhile
+        # (the restorer's own slot counts one) would be dropped by a restore beside it.
+        if self._in_flight > 1 and not self._draining:
+            reason = ("another call reached the engine during the load" if loaded
+                      else "another call reached the engine before the restore")
+            logger.info("%s[%s]: KV snapshot of conversation %s not restored: %s; kept",
+                        self.ENGINE, self.alias, entry.get("conversation_id"), reason)
+            return _base._kv_outcome(_base._KV_SKIPPED, reason)
+        return await super()._restore_kv_snapshot(entry, timeout=timeout)
+
+    async def _engine_unloaded(self) -> bool:
+        """`/metrics` `live.state` is "unloaded" (as `_watch_engine` reads it)."""
+        try:
+            metrics = await self._get("/metrics")
+            return metrics["live"]["state"] == "unloaded"
+        except Exception:
+            return False
+
+    async def _load_for_restore(self) -> bool:
+        """`POST /load`, bounded like a start; True when it loaded. A failure is logged and
+        the restore then answers 503, which keeps the file."""
+        wait = float(self.config.get("start_timeout_s") or STRATA_DEFAULTS["start_timeout_s"])
+        logger.info("strata[%s]: loading the model before restoring a KV snapshot (it was unloaded)",
+                    self.alias)
+        try:
+            await self._post("/load", {}, wait)
+        except Exception as exc:
+            logger.info("strata[%s]: POST /load failed (%s); the restore is tried as is", self.alias, exc)
+            return False
+        self._kv_engine_loaded = True
+        self._kv_loaded_mono = time.monotonic()
+        return True
+
+    def _kv_last_sent(self) -> Optional[int]:
+        """The ordering counter of the last call sent on this alias, or None."""
+        return (_kv.engine_call_of(self.alias) or {}).get("sent")
+
+    def _note_engine_drafting(self, metrics: Any) -> None:
+        """The drafter the engine reports (`/metrics` engine.drafting); it can change at a restart."""
+        engine = metrics.get("engine") if isinstance(metrics, dict) else None
+        if isinstance(engine, dict) and isinstance(engine.get("drafting"), str):
+            self._engine_drafting = engine["drafting"] or None
+
     def call_slot(self):
         if self._draining:
             raise self._draining_error()
@@ -2556,10 +2770,16 @@ class StrataSupervisor(LlamaServerSupervisor):
         task, self._watch_task = self._watch_task, None
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
+        self._kv_save_in_flight = False  # the watcher is gone: the save's stop is this one
         had_child = self._proc is not None and self._proc.returncode is None
+        loaded, self._kv_engine_loaded = self._kv_engine_loaded, False
+        began = time.monotonic()
         await super()._stop_child()
         if had_child or self._vram_free_before is not None:
             await self._verify_vram_released()
+        if had_child and loaded and self._proc is None:
+            # An unloaded engine stops in a second with the card already free: never the measure.
+            self._kv_loaded_stop_s = time.monotonic() - began
 
     async def _verify_vram_released(self) -> Optional[bool]:
         """Wait, bounded, for free VRAM to return to its pre-start level (ADR-044 point 2)."""
