@@ -1836,7 +1836,27 @@ export async function deleteGroup(groupId: string): Promise<any> {
     });
 }
 
-export async function loadGroups(): Promise<void> {
+// A burst of group events about groups not held asks once more, not once per event:
+// a call while a load is in flight joins it and marks one more round after it.
+let groupsLoad: Promise<void> | null = null;
+let groupsLoadAgain = false;
+
+export function loadGroups(): Promise<void> {
+    if (groupsLoad) {
+        groupsLoadAgain = true;
+        return groupsLoad;
+    }
+    groupsLoad = (async () => {
+        do {
+            groupsLoadAgain = false;
+            await loadGroupsOnce();
+        } while (groupsLoadAgain);
+        groupsLoad = null;
+    })();
+    return groupsLoad;
+}
+
+async function loadGroupsOnce(): Promise<void> {
     try {
         const result = await sendCommand('get_groups', {});
         if (result && result.status === "success" && result.groups) {

@@ -139,9 +139,10 @@
       { title: 'Decline invitation', kind: 'warning' }
     );
     if (!shouldDecline) return;
-    await leaveGroup(groupId);
-    // The invite put the group in the store, and leaving sends this node no event.
-    groupChats.update(map => {
+    const result = await leaveGroup(groupId);
+    // The invite put the group in the store, and leaving sends this node no event;
+    // a refused leave keeps the group this node still holds.
+    if (result?.status === 'success') groupChats.update(map => {
       const next = new Map(map);
       next.delete(groupId);
       return next;
