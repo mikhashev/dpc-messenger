@@ -128,6 +128,7 @@ import { accountRowsFromBalances, accountLevel, balanceErrorText, providerTypeLa
 import { blockedNodeIds, loadBlockedNodes } from './services/blockedPeers';
 import { blockedIdsFromRules } from './utils/blockedPeers';
 import { isBlockedAuthor } from './utils/blockedRuns';
+import { mergeGroupEvent } from './utils/groupEvents';
 import { showNotificationIfBackground } from './notificationService';
 import { fileSendTimeoutFor, getLocalFileSize } from './fileSendTimeout';
 import {
@@ -1106,42 +1107,27 @@ export async function connectToCoreService() {
                     groupInviteReceived.set(message.payload);
 
                     // Auto-add to groupChats store (can be refined with accept/decline later)
-                    groupChats.update(map => {
-                        const newMap = new Map(map);
-                        newMap.set(message.payload.group_id, message.payload);
-                        return newMap;
-                    });
+                    groupChats.update(map => mergeGroupEvent(map, message.payload));
                 }
                 else if (message.event === "group_updated") {
                     console.log("Group updated:", message.payload);
                     groupUpdated.set(message.payload);
 
-                    // Update groupChats store
-                    groupChats.update(map => {
-                        const newMap = new Map(map);
-                        newMap.set(message.payload.group_id, {
-                            ...newMap.get(message.payload.group_id),
-                            ...message.payload
-                        });
-                        return newMap;
-                    });
+                    // Update groupChats store; a partial event about a group not held
+                    // adds nothing, so the whole group is asked for instead.
+                    groupChats.update(map => mergeGroupEvent(map, message.payload));
+                    if (!get(groupChats).has(message.payload.group_id)) void loadGroups();
                 }
                 else if (message.event === "group_member_left") {
                     console.log("Group member left:", message.payload);
                     groupMemberLeft.set(message.payload);
 
                     // Update members in groupChats store
-                    groupChats.update(map => {
-                        const newMap = new Map(map);
-                        const group = newMap.get(message.payload.group_id);
-                        if (group) {
-                            newMap.set(message.payload.group_id, {
-                                ...group,
-                                members: message.payload.remaining_members
-                            });
-                        }
-                        return newMap;
-                    });
+                    groupChats.update(map => mergeGroupEvent(map, {
+                        group_id: message.payload.group_id,
+                        members: message.payload.remaining_members,
+                        version: message.payload.version,
+                    }));
                 }
                 else if (message.event === "group_deleted") {
                     console.log("Group deleted:", message.payload);

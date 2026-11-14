@@ -1490,19 +1490,9 @@
   on:deleteGroup={async (e) => { if (await handleDeleteGroup(e.detail.group_id)) showGroupSettingsDialog = false; }}
   on:toggleAutoTranscribe={() => { autoTranscribeEnabled = !autoTranscribeEnabled; voicePanelComp?.saveAutoTranscribeSetting(); }}
   on:updateAgents={async (e) => {
-    const result = await sendCommand('set_group_agents', { group_id: e.detail.group_id, agent_ids: e.detail.agent_ids });
-    if (result?.status === 'success') {
-      groupChats.update(map => {
-        const newMap = new Map(map);
-        const grp = newMap.get(e.detail.group_id);
-        if (grp) {
-          const agents = { ...(grp.agents || {}) };
-          agents[$nodeStatus?.node_id || ''] = e.detail.agent_ids;
-          newMap.set(e.detail.group_id, { ...grp, agents });
-        }
-        return newMap;
-      });
-    }
+    // The store learns the change from the group_updated event the command sends,
+    // with its agent names and version; a local copy here would carry neither.
+    await sendCommand('set_group_agents', { group_id: e.detail.group_id, agent_ids: e.detail.agent_ids });
   }}
 />
 

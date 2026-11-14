@@ -6,6 +6,7 @@
 
 <script lang="ts">
   import type { Writable } from 'svelte/store';
+  import type { GroupInviteReceivedEvent } from '$lib/types';
   import GroupInviteDialog from '$lib/components/GroupInviteDialog.svelte';
   import MentionAutocomplete from '$lib/components/MentionAutocomplete.svelte';
   import { confirmAsync } from '$lib/utils/dialog';
@@ -44,7 +45,7 @@
   // ---------------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------------
-  let pendingGroupInvite = $state<any>(null);
+  let pendingGroupInvite = $state<GroupInviteReceivedEvent | null>(null);
   let showGroupInviteDialog = $state(false);
 
   // Mention autocomplete (moved from ChatPanel, Step 8)
@@ -139,6 +140,12 @@
     );
     if (!shouldDecline) return;
     await leaveGroup(groupId);
+    // The invite put the group in the store, and leaving sends this node no event.
+    groupChats.update(map => {
+      const next = new Map(map);
+      next.delete(groupId);
+      return next;
+    });
     pendingGroupInvite = null;
     showGroupInviteDialog = false;
   }

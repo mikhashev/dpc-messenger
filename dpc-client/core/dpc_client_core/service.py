@@ -7764,7 +7764,7 @@ class CoreService:
             "payload": updated.to_dict()
         })
         await self.local_api.broadcast_event("group_updated", {
-            "group_id": group_id, "topic": topic,
+            "group_id": group_id, "topic": topic, "version": updated.version,
         })
         return {"status": "success", "topic": topic}
 
@@ -7794,7 +7794,7 @@ class CoreService:
         if not updated:
             return {"status": "error", "message": "Failed to set reasoning_effort"}
         await self.local_api.broadcast_event("group_updated", {
-            "group_id": group_id, "reasoning_effort": effort,
+            "group_id": group_id, "reasoning_effort": effort, "version": updated.version,
         })
         return {"status": "success", "reasoning_effort": effort}
 

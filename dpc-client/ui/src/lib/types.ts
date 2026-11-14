@@ -558,11 +558,27 @@ export interface GroupFileEvent {
     attachments?: MessageAttachment[];
 }
 
+/** `group_invite_received`: the whole group record after `apply_sync`, plus the creator's name. */
+export interface GroupInviteReceivedEvent extends GroupChat {
+    creator_name: string;
+    created_at?: string;
+    is_discord_bridge?: boolean;
+    session_started_at?: string | null;
+    session_reset_evidence?: unknown;
+}
+
+/** `group_updated`: the fields one local action or one accepted GROUP_SYNC changed, with the version after it. */
+export interface GroupUpdatedEvent extends Partial<GroupChat> {
+    group_id: string;
+    version: number;
+}
+
 export interface GroupMemberLeftEvent {
     group_id: string;
     node_id: string;
     member_name?: string;
     remaining_members: string[];
+    version: number;
 }
 
 export interface GroupDeletedEvent {

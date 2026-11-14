@@ -71,6 +71,8 @@ class _Service:
         self.knowledge_service = None
         self.history_requests = HistoryRequestRegistry()
         self.denials_cleared = []
+        # The group events name a node from it when the double has no `_peer_name`.
+        self.peer_metadata = {}
 
     def clear_group_access_denied(self, peer_id, group_id):
         self.denials_cleared.append((peer_id, group_id))

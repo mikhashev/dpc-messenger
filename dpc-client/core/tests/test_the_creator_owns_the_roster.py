@@ -370,6 +370,8 @@ async def test_group_leave_removes_its_sender_and_never_another_node(manager):
     await GroupLeaveHandler(service).handle(MEMBER, {"group_id": GID, "node_id": CREATOR})
     assert _held(manager).members == [CREATOR, SELF]
     assert [name for name, _ in service.local_api.events] == ["group_member_left"]
+    # Named as the invite and the settings panel name a node nobody has named.
+    assert service.local_api.events[0][1]["member_name"] == MEMBER[:16]
 
     service.local_api.events.clear()
     await GroupLeaveHandler(service).handle(CREATOR, {"group_id": GID})

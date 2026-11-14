@@ -63,7 +63,8 @@ async def test_off_is_announced_like_any_other_choice(tmp_path):
 
     await CoreService.set_group_reasoning_effort(node, gid, "off")
 
-    assert ("group_updated", {"group_id": gid, "reasoning_effort": "off"}) in node.local_api.events
+    version = node.group_manager.get_group(gid).version
+    assert ("group_updated", {"group_id": gid, "reasoning_effort": "off", "version": version}) in node.local_api.events
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,20 @@ def _is_blocked(service, *node_ids) -> Optional[str]:
     return None
 
 
+def _peer_display_name(service, node_id: str) -> str:
+    """A node's name as the settings panel shows it (`CoreService._peer_name`:
+    live metadata, then the peer cache, then a 16-character stub).
+
+    The fallback serves test doubles built without `_peer_name` (a running
+    service always has it), and some of their assertions rest on it, so it
+    keeps the same order without the cache: live metadata, then the stub.
+    """
+    peer_name = getattr(service, "_peer_name", None)
+    if callable(peer_name):
+        return peer_name(node_id)
+    return (service.peer_metadata.get(node_id) or {}).get("name") or node_id[:16]
+
+
 def signed_mention_depth(payload: Dict[str, Any], verification: str):
     """(is_agent_post, mention_depth) of a GROUP_TEXT from another node.
 
@@ -146,16 +160,15 @@ class GroupCreateHandler(MessageHandler):
         # Apply via sync (creates local copy)
         group = self.service.group_manager.apply_sync(payload, sender_node_id)
         if group:
-            # Notify UI of new group invite
+            # The whole record, as get_groups sends it: a members-only event left
+            # the @-list without the group's agents until a reload.
+            # The creator is the node in created_by (GLOSSARY "creator"); a group
+            # with none names its sender. _peer_name also reads the peer cache,
+            # as the settings panel does, so a restart does not show a bare id.
+            creator = group.created_by or sender_node_id
             await self.service.local_api.broadcast_event("group_invite_received", {
-                "group_id": group.group_id,
-                "name": group.name,
-                "topic": group.topic,
-                "created_by": group.created_by,
-                "creator_name": self.service.peer_metadata.get(
-                    sender_node_id, {}
-                ).get("name", sender_node_id),
-                "members": group.members,
+                **group.to_dict(),
+                "creator_name": _peer_display_name(self.service, creator),
             })
 
         # Also when apply_sync kept our copy: a re-add sends GROUP_SYNC first,
@@ -663,10 +676,9 @@ class GroupLeaveHandler(MessageHandler):
             await self.service.local_api.broadcast_event("group_member_left", {
                 "group_id": group_id,
                 "node_id": sender_node_id,
-                "member_name": self.service.peer_metadata.get(
-                    sender_node_id, {}
-                ).get("name", sender_node_id),
+                "member_name": _peer_display_name(self.service, sender_node_id),
                 "remaining_members": group.members,
+                "version": group.version,
             })
 
         return None
@@ -868,6 +880,7 @@ class GroupSyncHandler(MessageHandler):
                 "group_id": result.group_id,
                 "name": result.name,
                 "topic": result.topic,
+                "created_by": result.created_by,
                 "members": result.members,
                 "agents": result.agents,
                 "agent_names": result.agent_names,

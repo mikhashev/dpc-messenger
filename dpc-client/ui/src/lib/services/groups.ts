@@ -6,6 +6,8 @@ import type {
     GroupChat,
     GroupMessageEvent,
     GroupFileEvent,
+    GroupInviteReceivedEvent,
+    GroupUpdatedEvent,
     GroupMemberLeftEvent,
     GroupDeletedEvent,
     GroupHistorySyncedEvent,
@@ -18,8 +20,8 @@ export const groupChats = writable<Map<string, GroupChat>>(new Map());
 // Group events
 export const groupTextReceived = writable<GroupMessageEvent | null>(null);
 export const groupFileReceived = writable<GroupFileEvent | null>(null);
-export const groupInviteReceived = writable<GroupChat | null>(null);
-export const groupUpdated = writable<GroupChat | null>(null);
+export const groupInviteReceived = writable<GroupInviteReceivedEvent | null>(null);
+export const groupUpdated = writable<GroupUpdatedEvent | null>(null);
 export const groupMemberLeft = writable<GroupMemberLeftEvent | null>(null);
 export const groupDeleted = writable<GroupDeletedEvent | null>(null);
 export const groupHistorySynced = writable<GroupHistorySyncedEvent | null>(null);
