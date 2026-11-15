@@ -11,7 +11,7 @@
     import { cacheFromSpeed, cacheLabel, cacheTitle } from '$lib/utils/cacheHitRate';
     import { cutFromSpeed, cutLabel, cutTitle } from '$lib/utils/contextCut';
     import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
-    import { newestRound, roundJumpLabel, roundJumpTitle, findRoundHeader } from '$lib/utils/roundJump';
+    import { firstRound, roundJumpLabel, roundJumpTitle } from '$lib/utils/roundJump';
     import { sendCommand } from '$lib/coreService';
     import {
         pressAction, stopButtonLabel, stopButtonTitle, stopButtonDisabled, type StopState,
@@ -77,16 +77,15 @@
         collapsedRounds = next;
     }
 
-    // Back to the start of the newest round (roundJump.ts). The list's autoscroll
-    // needs no pause here: ChatMessageList follows streaming text only while its
-    // `atBottom` holds, and the scroll this starts clears it until the reader
-    // returns to the bottom.
+    // Back to the very start of the run, its first round (roundJump.ts). The
+    // list's autoscroll needs no pause here: ChatMessageList follows streaming
+    // text only while its `atBottom` holds, and the scroll this starts clears it
+    // until the reader returns to the bottom.
     let rootEl = $state<HTMLElement | null>(null);
-    let newest = $derived(newestRound(toolCalls));
-    function jumpToNewestRound(e: Event) {
+    let first = $derived(firstRound(toolCalls));
+    function jumpToRunStart(e: Event) {
         e.stopPropagation();
-        if (newest === null) return;
-        findRoundHeader(rootEl, newest)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        rootEl?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     }
 
     // Stop used to be fire-and-forget: the envelope said OK while the payload
@@ -322,12 +321,12 @@
                         {#if stopState === 'error'}
                             <span class="stop-note error">{stopNote}</span>
                         {/if}
-                        {#if newest !== null}
+                        {#if first !== null}
                             <button
                                 class="round-jump"
-                                title={roundJumpTitle(newest)}
-                                onclick={jumpToNewestRound}
-                            >{roundJumpLabel(newest)}</button>
+                                title={roundJumpTitle(first)}
+                                onclick={jumpToRunStart}
+                            >{roundJumpLabel(first)}</button>
                         {/if}
                     </div>
                 {/if}
