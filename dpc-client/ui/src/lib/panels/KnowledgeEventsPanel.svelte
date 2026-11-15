@@ -8,6 +8,7 @@
     knowledgeCommitResult,
     tokenWarning,
     extractionFailure,
+    extractionCancelled,
     extractionFallback,
     contextUpdated,
     peerContextUpdated,
@@ -24,6 +25,7 @@
     onUpdateTokenUsage,
     onShowTokenWarning,
     onShowExtractionFailure,
+    onExtractionCancelled,
     onShowExtractionFallback,
     onShowCommitResult,
     onCloseCommitDialog,
@@ -34,6 +36,7 @@
     onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; windowUnknown?: boolean; historyTokens?: number; tokensAfterLastResponse?: number; tokensAfterLastResponseAt?: string | null; contextAgent?: string; contextAgents?: Array<{name: string, tokens: number, limit: number, percent: number}> | null }) => void;
     onShowTokenWarning: (message: string) => void;
     onShowExtractionFailure: (message: string, conversationId: string | null) => void;
+    onExtractionCancelled: (conversationId: string | null) => void;
     onShowExtractionFallback: (message: string, conversationId: string | null) => void;
     onShowCommitResult: (message: string, type: 'info' | 'error' | 'warning', result: any) => void;
     onCloseCommitDialog: () => void;
@@ -109,6 +112,16 @@
         message || `Knowledge extraction failed for ${conversation_id}: ${reason}`,
         conversation_id ?? null
       );
+    }
+  });
+
+  // An extraction cancelled before the vote: the button goes back to Extract
+  // Knowledge, with no failure dialog and no vote dialog touched.
+  $effect(() => {
+    const cancelled = $extractionCancelled;
+    if (cancelled) {
+      extractionCancelled.set(null);
+      onExtractionCancelled(cancelled.conversation_id ?? null);
     }
   });
 

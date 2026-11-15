@@ -31,6 +31,7 @@
     sleepAgents = new Map(),
     onNewSession,
     onEndSession,
+    onCancelExtraction,
     onToggleSleep,
     onGroupSleep
   }: {
@@ -59,6 +60,8 @@
     sleepAgents?: Map<string, { agent_id: string; agent_name?: string; status: string; current: number; total: number; phase: string }>;
     onNewSession: (chatId: string) => void;
     onEndSession: (chatId: string) => void;
+    /** Pressed while extracting: cancel_knowledge_extraction, before the vote starts. */
+    onCancelExtraction?: (chatId: string) => void;
     onToggleSleep?: () => void;
     onGroupSleep?: () => void;
   } = $props();
@@ -116,6 +119,10 @@
       ? "Peer must be online to extract knowledge (requires voting)"
       : "Extract reusable knowledge from current conversation"
   );
+
+  // While extracting, the same button cancels; an offline peer blocks starting
+  // an extraction (it needs a vote), not stopping one.
+  let endSessionButtonDisabled = $derived(endSessionDisabled && !isExtracting);
 
   let staticTitle = $derived(
     hasComponentBreakdown(contextBreakdown)
@@ -193,12 +200,12 @@
   <button
     class="btn-end-session"
     class:extracting={isExtracting}
-    onclick={() => onEndSession(showForChatId)}
-    disabled={endSessionDisabled || isExtracting}
-    title={isExtracting ? "Extracting knowledge..." : endSessionTitle}
+    onclick={() => isExtracting ? onCancelExtraction?.(showForChatId) : onEndSession(showForChatId)}
+    disabled={endSessionButtonDisabled}
+    title={isExtracting ? "Stop the extraction before the vote starts" : endSessionTitle}
   >
     {#if isExtracting}
-      Extracting...
+      Cancel
     {:else}
       Extract Knowledge
     {/if}

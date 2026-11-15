@@ -773,10 +773,18 @@ class ConversationMonitor:
             if self.knowledge_score > self.knowledge_threshold:
                 # Check for consensus signals
                 if self._detect_consensus():
-                    # Generate commit proposal (auto-threshold path)
-                    proposal = await self._generate_commit_proposal(
-                        proposed_by="auto_monitor", initiated_by="auto_monitor"
-                    )
+                    # Held by the same flag as a press, so it neither runs beside
+                    # a press's extraction nor lets one start beside it.
+                    if self._extracting:
+                        return None
+                    self._extracting = True
+                    try:
+                        # Generate commit proposal (auto-threshold path)
+                        proposal = await self._generate_commit_proposal(
+                            proposed_by="auto_monitor", initiated_by="auto_monitor"
+                        )
+                    finally:
+                        self._extracting = False
 
                     # DON'T reset buffer yet - wait for all peers to approve (v0.15.1 fix)
                     # Buffer will be cleared by consensus_manager when proposal is approved

@@ -6102,6 +6102,12 @@ class CoreService:
         return await self.knowledge_service.end_conversation_session(
             conversation_id, initiated_by, extract_consent=extract_consent, remember=remember)
 
+    @slow_command
+    async def cancel_knowledge_extraction(self, conversation_id: str) -> Dict[str, Any]:
+        """Delegated to KnowledgeService. Slow: it waits (up to 5 s) for the
+        cancelled press to release its pin, which must not hold the read loop."""
+        return await self.knowledge_service.cancel_knowledge_extraction(conversation_id)
+
     def _history_page_refused(self, conversation_id: str, error: Exception) -> Dict[str, Any]:
         """The answer a pager stops on: never the newest page in its place."""
         logger.warning("History page for %s refused: %s", conversation_id, error)

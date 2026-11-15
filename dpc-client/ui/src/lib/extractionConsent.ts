@@ -93,6 +93,7 @@ export const MAX_CONSENT_QUESTIONS = 2;
 export type ExtractionOutcome =
   | { kind: 'running' }                    // the backend took the command; events follow
   | { kind: 'declined' }                   // the owner said no: nothing to show
+  | { kind: 'cancelled' }                  // stopped by cancel_knowledge_extraction before the vote: nothing to show
   | { kind: 'failed'; message: string };   // nothing was sent: say why
 
 type Sender = (command: string, payload: Record<string, unknown>) => Promise<unknown> | boolean;
@@ -102,8 +103,8 @@ export type ConsentDecision = { proceed: boolean; remember: boolean };
 
 /**
  * One press of Extract Knowledge: send, ask while the backend asks, resend with
- * the owner's yes. Every way out other than `running` and `declined` carries a
- * sentence for the failure dialog; a transport error is thrown to the caller.
+ * the owner's yes. Every way out other than `running`, `declined` and `cancelled`
+ * carries a sentence for the failure dialog; a transport error is thrown to the caller.
  */
 export async function requestExtraction(
   conversationId: string,
@@ -124,6 +125,8 @@ export async function requestExtraction(
   if (isConsentRequired(answer)) {
     return { kind: 'failed', message: 'The extraction model changed again while you were being asked, so nothing was sent. Press Extract Knowledge once more.' };
   }
+  // The owner pressed Cancel while the model was working: not a failure.
+  if (answer?.status === 'cancelled') return { kind: 'cancelled' };
   if (answer?.status === 'error') {
     return { kind: 'failed', message: answer.message || 'Knowledge extraction failed.' };
   }
@@ -176,4 +179,24 @@ export async function withCurrentRemembered<T extends RulesWithRemembered>(
     ? onDisk.filter((entry) => !!entry && typeof entry === 'object' && !gone.has(rememberedIdentity(entry)))
     : [];
   return { ...edited, knowledge_extraction: { ...(edited.knowledge_extraction ?? {}), send_without_asking: kept } };
+}
+
+/**
+ * What a press of Cancel tells the page (`cancel_knowledge_extraction`): `stop`
+ * clears the extracting state, `message` is shown when there is something to say.
+ * A cancel taken stops nothing here: the pressed command answers `cancelled` and
+ * the event follows. Nothing running means the state is stale; a vote already
+ * started is said, because there is no withdraw.
+ */
+export function cancelOutcome(answer: unknown): { stop: boolean; message: string | null } {
+  if (answer === false) {
+    return { stop: false, message: 'The connection to the backend is closed, so the extraction was not cancelled.' };
+  }
+  const a = (answer ?? {}) as { status?: string; reason?: string; message?: string };
+  if (a.status === 'success') return { stop: false, message: null };
+  if (a.status !== 'error') {
+    return { stop: false, message: 'The backend gave no clear answer to Cancel, so the extraction may still be running.' };
+  }
+  if (a.reason === 'extraction_not_running') return { stop: true, message: null };
+  return { stop: true, message: a.message || 'The extraction could not be cancelled.' };
 }

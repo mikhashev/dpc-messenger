@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import editor from './components/FirewallEditor.svelte?raw';
 import {
-  CONSENT_TARGET_FIELDS, consentedPayload, extractionConsentQuestion, isConsentRequired, rememberLabel, rememberedEntryLine, requestExtraction,
+  CONSENT_TARGET_FIELDS, cancelOutcome, consentedPayload, extractionConsentQuestion, isConsentRequired, rememberLabel, rememberedEntryLine, requestExtraction,
   withCurrentRemembered,
 } from './extractionConsent';
 
@@ -240,6 +240,54 @@ describe('requestExtraction', () => {
       .toEqual({ kind: 'failed', message: 'Wait for it.' });
     expect(await requestExtraction('c', sender({ status: 'error' }).send, yes, noPeer))
       .toEqual({ kind: 'failed', message: 'Knowledge extraction failed.' });
+  });
+});
+
+describe('a press cancelled before the vote', () => {
+  const yes = async () => ({ proceed: true, remember: false });
+  const answering = (answer: unknown) => () => Promise.resolve(answer);
+
+  it('is cancelled, not running and not a failure', async () => {
+    const outcome = await requestExtraction('c', answering({ status: 'cancelled', message: 'Knowledge extraction was cancelled before the vote; nothing was proposed.' }), yes, () => null);
+    expect(outcome).toEqual({ kind: 'cancelled' });
+  });
+
+  it('is cancelled after a yes too', async () => {
+    const answers: unknown[] = [
+      { status: 'consent_required', provider_alias: 'deepseek_flash', provider_type: 'deepseek', provider_kind: 'vendor', compute_host: null },
+      { status: 'cancelled' },
+    ];
+    expect(await requestExtraction('c', () => Promise.resolve(answers.shift()), yes, () => null)).toEqual({ kind: 'cancelled' });
+  });
+});
+
+describe('cancelOutcome (the answer to Cancel)', () => {
+  it('leaves the state to the pressed command when the cancel is taken', () => {
+    expect(cancelOutcome({ status: 'success', conversation_id: 'c' })).toEqual({ stop: false, message: null });
+  });
+
+  it('clears a stale state silently when nothing runs', () => {
+    expect(cancelOutcome({ status: 'error', reason: 'extraction_not_running', message: 'No knowledge extraction is running.' }))
+      .toEqual({ stop: true, message: null });
+  });
+
+  it('says a vote has already started, with the backend sentence', () => {
+    expect(cancelOutcome({ status: 'error', reason: 'vote_in_progress', message: 'The vote has already started.' }))
+      .toEqual({ stop: true, message: 'The vote has already started.' });
+  });
+
+  it('says so when the socket is closed and keeps the state', () => {
+    const outcome = cancelOutcome(false);
+    expect(outcome.stop).toBe(false);
+    expect(outcome.message).toContain('connection');
+  });
+
+  it('says so when the answer is not one it knows, and keeps the state', () => {
+    for (const answer of [true, null, {}]) {
+      const outcome = cancelOutcome(answer);
+      expect(outcome.stop).toBe(false);
+      expect(outcome.message).toContain('may still be running');
+    }
   });
 });
 

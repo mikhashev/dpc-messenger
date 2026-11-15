@@ -141,7 +141,7 @@ import { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, mo
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
 import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates, agentTurns, onAgentTurnUpdated, onAgentActivity, forgetAgentTurns } from './services/agents';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
-import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
+import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionCancelled, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
 
 // Re-export all service stores for backward compatibility.
@@ -157,7 +157,7 @@ export { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, mo
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated };
 export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates, agentTurns };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
-export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionFallback, tokenWarning, integrityWarnings, votingConversationId };
+export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionCancelled, extractionFallback, tokenWarning, integrityWarnings, votingConversationId };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
 
 // A group event whose author node (or the node owning the agent that wrote it) is blocked.
@@ -521,6 +521,11 @@ export async function connectToCoreService() {
                 else if (message.event === "knowledge_extraction_failed") {
                     console.error("Knowledge extraction failed:", message.payload);
                     extractionFailure.set(message.payload);
+                }
+                // The owner pressed Cancel while the model was working (knowledge_service.py
+                // cancel_knowledge_extraction); nothing was proposed.
+                else if (message.event === "knowledge_extraction_cancelled") {
+                    extractionCancelled.set(message.payload);
                 }
                 // A peer refused a knowledge-extraction inference request and
                 // extraction retried on the cold local alias instead — the

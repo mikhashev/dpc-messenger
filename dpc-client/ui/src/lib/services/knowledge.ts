@@ -40,6 +40,10 @@ export const knowledgeVoteStatus = writable<{
 // Knowledge extraction failure (Phase 4)
 export const extractionFailure = writable<ExtractionFailureEvent | null>(null);
 
+// An extraction stopped by cancel_knowledge_extraction before the vote: not a
+// failure, so it has its own store and closes no vote dialog.
+export const extractionCancelled = writable<{ conversation_id: string; message?: string } | null>(null);
+
 // A peer refused a knowledge-extraction inference request and extraction
 // retried on the cold local alias instead — the retry succeeded, so this is
 // not a failure, but the refusal must still reach the UI (sibling of

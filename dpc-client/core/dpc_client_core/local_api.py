@@ -187,6 +187,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "save_ai_chat",
     "import_ai_chats",
     "end_conversation_session",
+    "cancel_knowledge_extraction",
     "get_conversation_settings",
     "set_conversation_persist_history",
     # File transfer

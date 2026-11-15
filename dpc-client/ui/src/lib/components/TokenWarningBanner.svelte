@@ -7,11 +7,16 @@
     severity,
     percentage,
     onEndSession,
+    isExtracting = false,
+    onCancelExtraction,
     dismissible = true
   }: {
     severity: 'warning' | 'critical';
     percentage: number;
     onEndSession: () => void;
+    /** The same state and the same Cancel as the header's Extract Knowledge button. */
+    isExtracting?: boolean;
+    onCancelExtraction?: () => void;
     dismissible?: boolean;
   } = $props();
 
@@ -58,10 +63,11 @@
     <div class="banner-actions">
       <button
         class="btn-end-session-banner"
-        onclick={onEndSession}
-        aria-label="Extract knowledge from conversation"
+        onclick={() => isExtracting ? onCancelExtraction?.() : onEndSession()}
+        aria-label={isExtracting ? "Stop the extraction before the vote starts" : "Extract knowledge from conversation"}
+        title={isExtracting ? "Stop the extraction before the vote starts" : undefined}
       >
-        Extract Knowledge
+        {isExtracting ? 'Cancel' : 'Extract Knowledge'}
       </button>
       {#if dismissible}
         <button

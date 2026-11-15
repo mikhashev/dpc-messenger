@@ -111,6 +111,8 @@
     isSleeping = false,
     onOpenVote = null,
     onEndSession,
+    isExtracting = false,
+    onCancelExtraction,
   }: {
     activeChatId: string;
     chatHistories: Writable<Map<string, Message[]>>;
@@ -144,6 +146,9 @@
     onOpenVote?: (() => void) | null;
     /** The page's Extract Knowledge handler, shared with SessionControls. */
     onEndSession: (conversationId: string) => void | Promise<void>;
+    /** Whether the active chat is extracting (the page's extractingChats), and its Cancel. */
+    isExtracting?: boolean;
+    onCancelExtraction?: (conversationId: string) => void | Promise<void>;
   } = $props();
 
   // Where a recording can actually go. An AI or agent chat has no node to
@@ -1230,6 +1235,8 @@
         severity={tokenWarningLevel === 'critical' ? 'critical' : 'warning'}
         percentage={estimatedUsage.percentage}
         onEndSession={() => onEndSession(activeChatId)}
+        {isExtracting}
+        onCancelExtraction={() => onCancelExtraction?.(activeChatId)}
         dismissible={tokenWarningLevel !== 'critical'}
       />
     {/if}

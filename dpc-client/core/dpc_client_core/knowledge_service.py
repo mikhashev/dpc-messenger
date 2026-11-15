@@ -133,6 +133,9 @@ class KnowledgeService:
         # Live L6 reindex tasks — see _start_reindex.
         self._reindex_tasks: set = set()
 
+        # conversation_id -> the extraction a press is running — see _running_extractions.
+        self._extractions_running: Dict[str, Dict[str, Any]] = {}
+
         # Register all consensus callbacks on the manager we own
         self.consensus_manager.on_commit_applied = self._on_commit_applied
         self.consensus_manager.on_commit_signed = self._on_commit_signed
@@ -849,6 +852,72 @@ class KnowledgeService:
             self._pending_votes = store
         return store
 
+    def _running_extractions(self) -> Dict[str, Dict[str, Any]]:
+        """conversation_id -> the extraction a press is running there (its model call
+        as `task`; `settled`, set once the press has released the pin;
+        `cancel_requested`, set by the cancel command), tolerating a service built
+        without __init__. An entry lives from the model call's start
+        until it returns; the proposal is announced only after, so an entry here
+        means nothing has reached a vote yet."""
+        store = getattr(self, "_extractions_running", None)
+        if store is None:
+            store = {}
+            self._extractions_running = store
+        return store
+
+    def _voting_session_for(self, conversation_id: str):
+        """The consensus session still voting on a proposal of this conversation, if any."""
+        return next(
+            (
+                s for s in self.consensus_manager.sessions.values()
+                if s.proposal.conversation_id == conversation_id
+                and s.status == "voting"
+            ),
+            None,
+        )
+
+    async def cancel_knowledge_extraction(self, conversation_id: str) -> Dict[str, Any]:
+        """Stop the extraction a press is running, while the model is still working.
+
+        GLOSSARY cancel_knowledge_extraction. Only before the vote: once the
+        proposal is announced there is no withdraw, and this refuses with
+        `vote_in_progress` (a session is voting) or `extraction_not_running`
+        (nothing runs). The pressed `end_conversation_session` answers
+        `cancelled` and broadcasts `knowledge_extraction_cancelled`; this waits
+        until that press has released the pin, so a press sent after this
+        answer starts a new extraction. A refusal is not broadcast: nothing
+        changed, and `knowledge_extraction_failed` would close an open vote.
+        """
+        running = self._running_extractions().get(conversation_id)
+        if running is not None and not running["task"].done():
+            running["cancel_requested"] = True
+            running["task"].cancel()
+            logger.info("Cancelling knowledge extraction for %s", conversation_id)
+            try:
+                await asyncio.wait_for(running["settled"].wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Extraction for %s has not settled 5 s after its cancel",
+                               conversation_id)
+            return {
+                "status": "success",
+                "conversation_id": conversation_id,
+                "message": "Knowledge extraction cancelled.",
+            }
+        session = self._voting_session_for(conversation_id)
+        if session is not None:
+            return {
+                "status": "error",
+                "reason": "vote_in_progress",
+                "proposal_id": session.proposal.proposal_id,
+                "message": "The vote on this knowledge commit has already started; "
+                           "it cannot be cancelled, only voted on.",
+            }
+        return {
+            "status": "error",
+            "reason": "extraction_not_running",
+            "message": "No knowledge extraction is running for this conversation.",
+        }
+
     def _peers_to_ask(self, session) -> List[str]:
         """Connected participants of this proposal, ourselves excluded.
 
@@ -1430,14 +1499,7 @@ Respond in JSON format:
             # started in that window produces two proposals over overlapping
             # history, each anchored to a different position — not a stale
             # proposal but two commits arguing over the same conversation.
-            open_session = next(
-                (
-                    s for s in self.consensus_manager.sessions.values()
-                    if s.proposal.conversation_id == conversation_id
-                    and s.status == "voting"
-                ),
-                None,
-            )
+            open_session = self._voting_session_for(conversation_id)
             if open_session is not None:
                 logger.info(
                     "Refusing extraction for %s — proposal %s is still being voted on",
@@ -1474,9 +1536,11 @@ Respond in JSON format:
             # names this target, and the extraction is pinned to it.
             # While one runs, the chain answers from the running extraction's pin
             # and a second press has nothing to ask: the monitor turns it away.
+            running_map = self._running_extractions()
             target = (self._resolve_extraction_target(monitor)
                       if self._has_something_to_send(monitor)
-                      and not getattr(monitor, "_extracting", False) else None)
+                      and not getattr(monitor, "_extracting", False)
+                      and conversation_id not in running_map else None)
             remembered = self._remembered_targets()
             if (target is not None and extract_consent is not True
                     and not knowledge_routing.may_send_unasked(target, remembered)
@@ -1520,18 +1584,57 @@ Respond in JSON format:
             )
 
             # A second press while one runs is turned away by the monitor; it
-            # must not touch the running extraction's pin.
-            owns_pin = not getattr(monitor, "_extracting", False)
+            # must not touch the running extraction's pin. The running entry
+            # covers the moment between the first press's task being created
+            # and the monitor raising `_extracting` in it.
+            owns_pin = (not getattr(monitor, "_extracting", False)
+                        and conversation_id not in running_map)
             if owns_pin:
                 monitor.extraction_target = target
                 monitor.fallbacks_need_consent = extract_consent is not True
                 monitor.remembered_targets = remembered
+            # The model call runs as its own task, held per conversation, so
+            # cancel_knowledge_extraction can stop it while this press answers.
+            running = None
+            cancelled = False
             try:
-                proposal = await monitor.generate_commit_proposal(
-                    force=True,
-                    proposed_by=self.p2p_manager.node_id,
-                    initiated_by=initiated_by,
-                )
+                if owns_pin:
+                    running = {
+                        "task": asyncio.create_task(monitor.generate_commit_proposal(
+                            force=True,
+                            proposed_by=self.p2p_manager.node_id,
+                            initiated_by=initiated_by,
+                        )),
+                        "settled": asyncio.Event(),
+                    }
+                    running_map[conversation_id] = running
+                    try:
+                        proposal = await running["task"]
+                    except asyncio.CancelledError:
+                        # Only the cancel command's cancel becomes an answer; a
+                        # cancel of this press itself (shutdown) goes on up.
+                        current = asyncio.current_task()
+                        if not running.get("cancel_requested") or (current and current.cancelling()):
+                            # The model call goes down with the press, not on alone.
+                            running["task"].cancel()
+                            raise
+                    except Exception:
+                        # A layer below that turned the cancel into an error.
+                        if not running.get("cancel_requested"):
+                            raise
+                    # Whatever the model call did with the cancel, a cancelled
+                    # press proposes nothing.
+                    cancelled = bool(running.get("cancel_requested"))
+                    if cancelled:
+                        proposal = None
+                elif conversation_id in running_map:
+                    proposal = "EXTRACTION_IN_PROGRESS"
+                else:
+                    proposal = await monitor.generate_commit_proposal(
+                        force=True,
+                        proposed_by=self.p2p_manager.node_id,
+                        initiated_by=initiated_by,
+                    )
             except knowledge_routing.FallbackNeedsConsent as e:
                 logger.info("Extraction for %s not retried: %s", conversation_id, e)
                 return await self._refuse_extraction(
@@ -1546,6 +1649,21 @@ Respond in JSON format:
                     monitor.extraction_target = None
                     monitor.fallbacks_need_consent = False
                     monitor.remembered_targets = []
+                if running is not None:
+                    if running_map.get(conversation_id) is running:
+                        del running_map[conversation_id]
+                    running["settled"].set()
+
+            if cancelled:
+                logger.info("Knowledge extraction for %s cancelled before the vote", conversation_id)
+                message = ("Knowledge extraction was cancelled before the vote; "
+                           "nothing was proposed.")
+                await self.local_api.broadcast_event(
+                    "knowledge_extraction_cancelled",
+                    {"conversation_id": conversation_id, "message": message},
+                )
+                return {"status": "cancelled", "conversation_id": conversation_id,
+                        "message": message}
 
             # The monitor turns a second press away with a sentinel string, not a
             # proposal; it must not reach `proposal.topic` below.

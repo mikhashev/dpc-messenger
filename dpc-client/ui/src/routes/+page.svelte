@@ -12,7 +12,7 @@
   import { loadBlockedNodes, resetBlockedNodesLoad, blockPeer, unblockPeer } from "$lib/services/blockedPeers";
   import { blockConfirmQuestion, blockedNotice, unblockedNotice, groupsWithMember, peerLabel } from "$lib/utils/blockedPeers";
   import { confirmAsync } from "$lib/utils/dialog";
-  import { requestExtraction, type ConsentDecision } from "$lib/extractionConsent";
+  import { cancelOutcome, requestExtraction, type ConsentDecision } from "$lib/extractionConsent";
   import ExtractionConsentDialog from "$lib/components/ExtractionConsentDialog.svelte";
   import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from "$lib/utils/messageMapper";
   import { HISTORY_PAGE_LIMIT, olderThanPage } from "$lib/utils/historyPaging";
@@ -915,11 +915,11 @@
   // and only a yes resends the command with consent.
   // The question is a dialog with a box, not a bare confirm: a pending one holds the
   // press until the owner answers. A newer question declines the older one.
-  let extractionAsk = $state<{ text: string; rememberLabel: string; resolve: (d: ConsentDecision) => void } | null>(null);
+  let extractionAsk = $state<{ text: string; rememberLabel: string; conversationId: string; resolve: (d: ConsentDecision) => void } | null>(null);
 
-  function askExtraction(text: string, rememberLabel: string): Promise<ConsentDecision> {
+  function askExtraction(conversationId: string, text: string, rememberLabel: string): Promise<ConsentDecision> {
     extractionAsk?.resolve({ proceed: false, remember: false });
-    return new Promise((resolve) => { extractionAsk = { text, rememberLabel, resolve }; });
+    return new Promise((resolve) => { extractionAsk = { text, rememberLabel, conversationId, resolve }; });
   }
 
   function answerExtraction(proceed: boolean, remember: boolean) {
@@ -936,7 +936,7 @@
     try {
       const outcome = await requestExtraction(
         conversationId, sendCommand,
-        askExtraction,
+        (text, label) => askExtraction(conversationId, text, label),
         (nodeId) => getPeerDisplayName(nodeId),
       );
       if (outcome.kind !== "running") stopExtracting(conversationId);
@@ -949,6 +949,31 @@
     } catch (e) {
       // A timeout or a transport error produces no event at all.
       stopExtracting(conversationId);
+      showExtractionFailure = true;
+      extractionFailureMessage = (e as Error).message;
+    }
+  }
+
+  // The same button while extracting: stop the model before the vote starts. A
+  // cancel taken leaves the state to the pressed command, which answers
+  // `cancelled` (and the knowledge_extraction_cancelled event follows); no
+  // failure dialog either way, and an open vote dialog is not touched.
+  async function handleCancelExtraction(conversationId: string) {
+    // While the consent question is open nothing runs in the backend yet: Cancel
+    // is a no to that question, so a later Yes cannot start an extraction the
+    // button no longer shows (the declined press clears the state).
+    if (extractionAsk?.conversationId === conversationId) {
+      answerExtraction(false, false);
+      return;
+    }
+    try {
+      const outcome = cancelOutcome(await sendCommand("cancel_knowledge_extraction", { conversation_id: conversationId }));
+      if (outcome.stop) stopExtracting(conversationId);
+      if (outcome.message) {
+        showExtractionFailure = true;
+        extractionFailureMessage = outcome.message;
+      }
+    } catch (e) {
       showExtractionFailure = true;
       extractionFailureMessage = (e as Error).message;
     }
@@ -1270,6 +1295,7 @@
             sleepAgents={groupSleepAgents}
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
+            onCancelExtraction={handleCancelExtraction}
             onToggleSleep={handleToggleSleep}
             onGroupSleep={handleGroupSleep}
           />
@@ -1325,6 +1351,8 @@
         {groupPanelRef}
         {isSleeping}
         onEndSession={handleEndSession}
+        isExtracting={extractingChats.has(activeChatId)}
+        onCancelExtraction={handleCancelExtraction}
         bind:chatPanelHeight
         bind:showAgentBoard
         bind:currentInput
@@ -1715,6 +1743,7 @@
       closeCommitDialog();
     }
   }}
+  onExtractionCancelled={(conversationId) => stopExtracting(conversationId)}
   onShowExtractionFallback={(message, conversationId) => {
     showExtractionFallback = true;
     extractionFallbackMessage = message;
