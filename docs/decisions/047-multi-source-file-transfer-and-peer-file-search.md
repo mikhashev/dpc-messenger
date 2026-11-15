@@ -310,7 +310,8 @@ replaces a push with a pull. Whether a bandwidth share like this must be opt-in 
   include only files of groups the requester is a member of. 1:1 files are never listed.
 - **How it travels, in this order:** (i) to every connected member of the group, at once,
   10 s timeout as `SKILL_SEARCH`; (ii) the `holders` a catalog names are asked in turn,
-  directly if connected — so in the star the hub node's answer reaches members behind it;
+  directly if connected — so in the star the hub node's answer reaches members behind it
+  (how chunks then reach a holder with no connection to the searcher is **Q13**);
   (iii) the DHT, once it bootstraps, with records keyed by `hash` and signed by the holder,
   readable only by members — a separate decision, not part of this one (**Q6**).
 - A search reveals the searcher's interest to the members it asks; it is never sent to a
@@ -328,7 +329,7 @@ unanswered in 30 s (today's `RECEIVE_STALL_TIMEOUT_S`) goes back to the queue; w
 queue is empty, the remaining outstanding indices are asked again of idle holders and the
 first answer wins (the endgame); at most **`max_sources`** holders per download (proposed 4).
 Only complete holders serve in this decision; a node part-way through a download serving
-the chunks it has is **Q7**.
+the chunks it has is **Q7** (and **Q12**).
 
 Holder side: at most `max_concurrent_transfers` requesters served at once, the existing
 cap; requests beyond it get `busy`.
@@ -493,7 +494,8 @@ is new.
 6. **The DHT:** holder records in it are a later decision; does it wait for the DHT to
    bootstrap on the owner's nodes, which no card schedules now? (Mike)
 7. **Partial holders:** may a node part-way through a download serve the chunks it has (the
-   swarm effect for a fresh file), or only complete holders, as proposed? (Mike)
+   swarm effect for a fresh file), or only complete holders, as proposed? (Mike) — the
+   2026-11-15 review argues for yes, in the first working version: Q12.
 8. **Partials left behind:** how long a resumable partial lives before it is removed at
    start, and whether the person sees a list of them. (Mike)
 9. **Agents fetching:** is search enough, or should an agent tool also start a download
@@ -503,10 +505,51 @@ is new.
 11. **1:1 files:** resume from the sender only, as proposed, or also extra sources when the
     two parties share a group that holds the same hash? (Mike)
 
+### Raised in review, 2026-11-15
+
+A review of this draft found Option B a good fit for the team's archive — holders found
+among members, chunks pulled from several nodes, each chunk verified, resume after a
+restart, and access rules kept inside DPC — and asked for three places to be settled before
+implementation. They are recorded here as questions, not decisions.
+
+12. **Partial holders in the first working version, not deferred.** The review asks that
+    Q7 be answered yes and moved into phase 3: as proposed, only a node holding the whole
+    file serves it, so for large model weights a fresh receiver helps nobody until it has
+    every chunk. Serving from a partial download would change, at least: rule 4's
+    "complete" condition (a partial holder serves only chunks it has verified against a
+    `chunks_hash` whose signature verified); the `held_files` entry, which would carry the
+    `.received` bitmap or a reference to it; the catalog, which would have to say which
+    chunks a holder has (a bitmap or ranges) so the scheduler does not ask for what is not
+    there; and the scheduler, which would prefer the rarest missing chunks over file order.
+    (Mike)
+13. **A route to a holder this node has no connection to.** §5 (ii) lets the hub node of the
+    star answer "a node behind me holds this file", but then asks that holder only "directly
+    if connected" — which in the star a member behind the hub usually is not. §7 already
+    rules out the volunteer relay (C10) and gossip, so the transport to such a holder has to
+    be written out. Candidates: (a) the hub node forwards `FILE_CHUNK_REQUEST` and
+    `FILE_DATA` between two members it is connected to, at its own bandwidth and under its
+    own switch — the chunks stay verifiable end to end against the signed list, and the
+    hub learns who fetches what from whom, which as a member of the group it may already
+    see; (b) the hub fetches the chunks itself and serves them as a holder, which needs no
+    forwarding command but needs Q12 to be useful before the hub has the whole file;
+    (c) no route: holders without a connection are dropped from the candidates, and the
+    record says so. (Mike)
+14. **A manifest for a whole model repository.** A model is weights, configuration and
+    tokenizer files that are only useful together. The review proposes a description of
+    one repository revision — the revision, and every file's path in the repository, size
+    and hash — so that a node can ask for "this revision of this model" and receive all of
+    it. The hash and name search of §5 is its base. To be settled: who signs it and under
+    which preimage tag (beside `dptp-file-v1`, not reusing it); whether the revision is the
+    upstream one (for example a Hugging Face commit) or one this node assigns (`Not
+    verified` which upstream revision ids are stable enough); that a path inside the
+    repository is not a local path, so §5's "never a path" rule has to name the difference;
+    where the files land on the receiver; and the phase — after phase 4 at the earliest. Any
+    name for it goes to **Names for Mike** first. (Mike)
+
 ## Authors
 
 - **Mike** — the request and the reason; Decision pending
-- **CC** — Analysis, Draft (2026-10-29)
+- **CC** — Analysis, Draft (2026-10-29); review questions 12–14 recorded (2026-11-15)
 
 ## References
 
