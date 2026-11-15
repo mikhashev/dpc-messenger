@@ -125,6 +125,12 @@ whether audio or images do (audio cannot be text-redacted).
 
 1. **LAN host.** Where does `host_scope: lan` fall: redacted like a vendor, or exempt?
    Another machine of the owner's is not this machine. Mike to decide.
+   **Decided for knowledge extraction (Mike's call, 2026-11-14):** a model at a `lan`
+   address is treated as leaving this machine. Extract Knowledge asks before sending the
+   conversation to it, and the owner can remember a yes per target. A yes for a local
+   alias is bound to its facts (alias, type, kind, `host_scope` and URL: if any changes,
+   the question comes back); a yes for a peer is bound to the alias and the peer alone.
+   The redaction exemption this question is about is not decided here.
 2. **No detector model.** On a node without the model (offline, first run): block every
    cloud call, or ship the model in an extra? P3 forces the choice before the code
    says "block".

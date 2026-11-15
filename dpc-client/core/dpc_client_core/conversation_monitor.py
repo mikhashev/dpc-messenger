@@ -674,6 +674,15 @@ class ConversationMonitor:
         self.last_compute_host: str | None = None  # Track last compute host used
         self.last_model: str | None = None  # Track last model used
         self.last_provider: str | None = None  # Track last provider used
+        # Set by KnowledgeService for one extraction: the target resolved once
+        # (knowledge_routing.extraction_target), so the call goes where the owner
+        # was asked about even if provenance moves meanwhile; and whether a retry
+        # elsewhere must refuse unless it needs no question.
+        self.extraction_target: Optional[Dict[str, Any]] = None
+        self.fallbacks_need_consent: bool = False
+        # The owner's remembered yes entries for this press (set beside the pin);
+        # a retry to one of them needs no question. The monitor never reads the firewall.
+        self.remembered_targets: List[Dict[str, Any]] = []
 
         # Conversation type classification (v0.9.3)
         self.conversation_type: str = "general"  # Detected type: task/technical/decision/general
@@ -838,6 +847,24 @@ class ConversationMonitor:
         finally:
             self._extracting = False
 
+    def _guard_fallback_target(
+        self, compute_host: Optional[str], alias: Optional[str], cause: BaseException,
+        model: Optional[str] = None,
+    ) -> None:
+        """Raise FallbackNeedsConsent when a guarded extraction's retry would leave this machine.
+
+        `model` is what the retry would send, so a refusal names it rather than
+        a default the retry does not ask for.
+        """
+        if not getattr(self, "fallbacks_need_consent", False):
+            return
+        own = getattr(getattr(self, "p2p_manager", None), "own_addresses", None)
+        target = knowledge_routing.extraction_target(
+            getattr(self.llm_manager, "providers", None) or {}, compute_host, alias,
+            model=model, own_addresses=own)
+        if not knowledge_routing.may_send_unasked(target, getattr(self, "remembered_targets", None)):
+            raise knowledge_routing.FallbackNeedsConsent(target, cause)
+
     def _cold_fallback_alias(self) -> Optional[str]:
         """The alias a retry may use here, or None when there is none."""
         configured = ""
@@ -907,6 +934,9 @@ class ConversationMonitor:
         Returns:
             (compute_host, model, provider) tuple
         """
+        pinned = getattr(self, "extraction_target", None)
+        if pinned:
+            return (pinned.get("compute_host"), pinned.get("model"), pinned.get("provider_alias"))
         chosen = knowledge_routing.chosen_provider(
             getattr(self.llm_manager, "knowledge_provider", None),
             getattr(self.llm_manager, "providers", None) or {})
@@ -1031,13 +1061,21 @@ Return ONLY: "yes" or "no"
 Conversation:
 {messages_text}"""
 
+        # The prompt carries the conversation, so it goes to the extraction's own
+        # target, never to the global default; a peer target is not asked here.
+        pinned = getattr(self, "extraction_target", None)
+        if pinned and pinned.get("compute_host"):
+            logger.info("Monitor %s: extraction runs on a peer — self-reflection not confirmed, "
+                        "classified general", self.conversation_id)
+            return False
+        query_kwargs = {"provider_alias": pinned.get("provider_alias")} if pinned else {}
         try:
-            # A step of a person's extraction, on the default alias and with no hold: unmarked it
+            # A step of a person's extraction, with no hold: unmarked it
             # could stop a holder and drop parked conversations for a 10 s classification. With
             # the swap on it neither swaps nor queues (ADR-044, the card queue, rule 10).
             with a_background_call("self_reflection_confirmation"):
                 result = await asyncio.wait_for(
-                    self.llm_manager.query(prompt=prompt),
+                    self.llm_manager.query(prompt=prompt, **query_kwargs),
                     timeout=10.0  # Don't block extraction if LLM is slow
                 )
             confirmed = result.strip().lower().startswith("yes")
@@ -1393,6 +1431,7 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                     # same transcript as the call that failed.
                     local_retry = self._cold_fallback_alias() if compute_host else None
                     if local_retry:
+                        self._guard_fallback_target(None, local_retry, primary_error)
                         logger.warning("Remote inference failed, retrying on '%s': %s", local_retry, primary_error)
                         fallback_attempted = True
                         try:
@@ -1421,21 +1460,23 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                     # connection — the host now refuses an unproved tier (D2), so
                     # dialling it only spends a round trip on a call that was
                     # always going to be refused, logged as a misleading ERROR.
-                    elif not compute_host and self.conversation_id.startswith("dpc-node-"):
-                        proved, tier = self._check_peer_proof(self.conversation_id)
+                    elif not compute_host and (self.conversation_id.startswith("dpc-node-") or self.last_compute_host):
+                        remote_host = self.last_compute_host or self.conversation_id
+                        proved, tier = self._check_peer_proof(remote_host)
                         if proved is False:
                             logger.info(
                                 "Not retrying peer %s for knowledge extraction — connection "
                                 "is not proved (tier=%s), the host would refuse it: %s",
-                                self.conversation_id, tier, primary_error,
+                                remote_host[:20], tier, primary_error,
                             )
                         else:
+                            self._guard_fallback_target(remote_host, None, primary_error, model=self.last_model)
                             logger.warning("Local inference failed, trying remote inference as fallback: %s", primary_error)
                             fallback_attempted = True
                             try:
                                 result = await self.ai_query_func(
                                     prompt=prompt,
-                                    compute_host=self.conversation_id,  # Try peer compute
+                                    compute_host=remote_host,  # Try peer compute
                                     model=self.last_model,
                                     provider=None
                                 )
@@ -1472,6 +1513,8 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                 # Try parsing the whole response
                 result = json.loads(response.strip())
                 return float(result.get('score', 0.0))
+        except knowledge_routing.FallbackNeedsConsent:
+            raise  # a refusal, not a score of 0.0
         except Exception as e:
             logger.error("Error calculating knowledge score: %s", e, exc_info=True)
             logger.error("  LLM Response preview: %s...", response[:200] if 'response' in locals() and response is not None and isinstance(response, str) else 'N/A')
@@ -1747,6 +1790,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     # same transcript as the call that failed.
                     local_retry = self._cold_fallback_alias() if compute_host else None
                     if local_retry:
+                        self._guard_fallback_target(None, local_retry, primary_error)
                         logger.warning("Remote inference failed, retrying on '%s': %s", local_retry, primary_error)
                         fallback_attempted = True
                         try:
@@ -1784,6 +1828,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                                 remote_host[:20], tier, primary_error,
                             )
                         else:
+                            self._guard_fallback_target(remote_host, None, primary_error, model=self.last_model)
                             logger.warning("Local inference failed, trying remote compute %s as fallback: %s", remote_host[:20], primary_error)
                             fallback_attempted = True
                             try:
@@ -1960,6 +2005,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
             return proposal
 
+        except knowledge_routing.FallbackNeedsConsent:
+            raise  # a refusal for KnowledgeService to name, not a failed extraction
         except Exception as e:
             logger.error("Error generating commit proposal: %s", e, exc_info=True)
             logger.error("  LLM Response preview: %s...", response[:300] if 'response' in locals() and response is not None and isinstance(response, str) else 'N/A')

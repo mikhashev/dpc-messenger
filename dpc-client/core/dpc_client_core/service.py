@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 _BACKEND_OWNED_PROFILE_KEYS = frozenset()
 
 from .__version__ import __version__
-from .firewall import NODE_ID_RE, VENDOR_PROVIDER_TYPES, ContextFirewall, is_blocked_by
+from .firewall import KNOWLEDGE_EXTRACTION_KEY, NODE_ID_RE, VENDOR_PROVIDER_TYPES, ContextFirewall, is_blocked_by
 from .dpc_agent.pricing import vendor_ceiling_currency
 from . import node_ledger
 from .hub_client import HubClient
@@ -376,6 +376,17 @@ def _bounded_hostname_lookup(hostname: str, deadline_s: float) -> list:
     return box["result"]
 
 
+def _only_remembered_targets_changed(before: Dict[str, Any], after: Dict[str, Any]) -> bool:
+    """A rules save changed the `knowledge_extraction` section and nothing else.
+
+    A save that changed nothing at all is not this case: an editor Save still
+    re-announces, as it always has.
+    """
+    def rest(rules: Dict[str, Any]) -> Dict[str, Any]:
+        return {k: v for k, v in rules.items() if k != KNOWLEDGE_EXTRACTION_KEY}
+    return before != after and rest(before) == rest(after)
+
+
 class CoreService:
     """
     The main orchestrating class for the D-PC client's backend.
@@ -649,6 +660,7 @@ class CoreService:
                 group_manager=self.group_manager,
                 instruction_set=self.instruction_set,
                 firewall=self.firewall,
+                save_firewall_rules=self.save_firewall_rules,
                 send_ai_query=self.send_ai_query,
                 broadcast_to_peers=self._broadcast_to_peers,
                 broadcast_to_group=self._broadcast_to_group,
@@ -5039,6 +5051,7 @@ class CoreService:
         optimistic concurrency lands.
         """
         try:
+            before = self.firewall.get_rules_as_dict()
             self._merge_unknown_agent_profile_keys(rules_dict)
             # Owned by block_peer / unblock_peer: an editor snapshot taken
             # before a Block would otherwise lift it on Save.
@@ -5050,6 +5063,13 @@ class CoreService:
                 # blocked no rule is its id, as no group may hold it.
                 for blocked_id in on_disk:
                     dropped += ContextFirewall._remove_node_mentions(rules_dict, blocked_id)
+            # The remembered Extract Knowledge targets: an editor (or a client)
+            # that does not carry the section must not wipe it. One that does
+            # carry it decides (that is how the editor removes an entry).
+            if KNOWLEDGE_EXTRACTION_KEY not in rules_dict:
+                kept = self.firewall.get_rules_as_dict().get(KNOWLEDGE_EXTRACTION_KEY)
+                if kept is not None:
+                    rules_dict[KNOWLEDGE_EXTRACTION_KEY] = kept
             if dropped:
                 logger.info("Editor save: dropped %d entr(ies) naming a blocked node: %s",
                             len(dropped), ", ".join(dropped))
@@ -5061,15 +5081,21 @@ class CoreService:
             if not success:
                 return {"status": "error", "message": message, "errors": errors}
 
-            await self._notify_peers_of_provider_changes()
+            # A save that changed only the remembered Extract Knowledge targets
+            # (a "Don't ask again", or its Remove) tells peers and agents nothing:
+            # neither reads that section, and a peer would hear a provider change.
+            # `rules_dict` is what was written (merges and path repair done in place), so a
+            # concurrent writer between the save and a re-read cannot widen the comparison.
+            if not _only_remembered_targets_changed(before, rules_dict):
+                await self._notify_peers_of_provider_changes()
 
-            try:
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                    for mgr in dpc_agent_provider._managers.values():
-                        mgr.sync_firewall_settings()
-            except Exception as e:
-                logger.warning("Failed to sync agent firewall settings: %s", e)
+                try:
+                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                        for mgr in dpc_agent_provider._managers.values():
+                            mgr.sync_firewall_settings()
+                except Exception as e:
+                    logger.warning("Failed to sync agent firewall settings: %s", e)
 
             await self.local_api.broadcast_event("firewall_rules_updated", {"message": message})
             return {"status": "success", "message": message}
@@ -6068,9 +6094,13 @@ class CoreService:
         self,
         conversation_id: str,
         initiated_by: str = "user_request",
+        extract_consent: Any = False,
+        remember: bool = False,
     ) -> Dict[str, Any]:
-        """Delegated to KnowledgeService."""
-        return await self.knowledge_service.end_conversation_session(conversation_id, initiated_by)
+        """Delegated to KnowledgeService (`extract_consent`: the target echoed back, or True;
+        `remember`: the question's "don't ask again" box)."""
+        return await self.knowledge_service.end_conversation_session(
+            conversation_id, initiated_by, extract_consent=extract_consent, remember=remember)
 
     def _history_page_refused(self, conversation_id: str, error: Exception) -> Dict[str, Any]:
         """The answer a pager stops on: never the newest page in its place."""

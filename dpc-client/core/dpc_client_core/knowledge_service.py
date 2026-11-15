@@ -32,10 +32,12 @@ from typing import Any, Callable, Dict, List, Optional
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
 from .managers.llama_server_supervisor import card_queue_refusal_in
-from . import ai_chats, conversation_paths
+from . import ai_chats, conversation_paths, knowledge_routing
 from dpc_protocol.pcm_core import PCMCore
 
 logger = logging.getLogger(__name__)
+
+CONSENT_TARGET_FIELDS = knowledge_routing.CONSENT_TARGET_FIELDS
 
 NODE_KEY = "node.key"
 
@@ -74,6 +76,7 @@ class KnowledgeService:
         instruction_set,
         *,
         firewall=None,
+        save_firewall_rules: Optional[Callable] = None,
         send_ai_query: Callable,
         broadcast_to_peers: Callable,
         broadcast_to_group: Callable,
@@ -103,6 +106,9 @@ class KnowledgeService:
         # agents. Nothing set it before, so the gate below read None and never fired:
         # `L6 reindex skipped` has zero occurrences in any log against 175 reindexes.
         self.firewall = firewall
+        # CoreService.save_firewall_rules: the editor's own save, the one the file
+        # transfer "always allow" writes through (validation, hot reload, event).
+        self._save_firewall_rules = save_firewall_rules
         self._send_ai_query = send_ai_query
         self._broadcast_to_peers_func = broadcast_to_peers
         self._broadcast_to_group_func = broadcast_to_group
@@ -800,6 +806,12 @@ class KnowledgeService:
         cached = cache.get_peer(node_id) if cache is not None else None
         return getattr(cached, "display_name", None) or node_id[:20]
 
+    def _describe_target(self, target: Dict[str, Any]) -> str:
+        """`knowledge_routing.describe_target` with the peer's name, as the UI says it."""
+        host = target.get("compute_host")
+        return knowledge_routing.describe_target(
+            target, self._offline_name(host) if host else None)
+
     async def _refuse_extraction(
         self, conversation_id: str, reason: str, message: str
     ) -> Dict[str, Any]:
@@ -1321,15 +1333,84 @@ Respond in JSON format:
     # End conversation session + knowledge proposal flow
     # ─────────────────────────────────────────────────────────────
 
+    def _resolve_extraction_target(self, monitor) -> Optional[Dict[str, Any]]:
+        """The extraction target, resolved once by the monitor's own chain.
+
+        None when the chain names nothing: that extraction fails as it did
+        before, and there is no destination to ask about.
+        """
+        try:
+            compute_host, model, alias = monitor._infer_inference_settings()
+        except knowledge_routing.NoKnowledgeProvider:
+            return None
+        return knowledge_routing.extraction_target(
+            getattr(self.llm_manager, "providers", None) or {}, compute_host, alias,
+            model=model,
+            own_addresses=getattr(getattr(self, "p2p_manager", None), "own_addresses", None),
+            peer_metadata=getattr(self, "peer_metadata", None),
+        )
+
+    def _remembered_targets(self) -> List[Dict[str, Any]]:
+        """The owner's "don't ask again" entries, as the firewall holds them now."""
+        firewall = getattr(self, "firewall", None)
+        return firewall.remembered_extraction_targets() if firewall is not None else []
+
+    async def _remember_extraction_target(self, target: Dict[str, Any]) -> None:
+        """Write `target`'s entry through the editor's own save (the one the file
+        transfer "always allow" uses): validated, hot-reloaded, `firewall_rules_updated`.
+        A save that fails is logged and the extraction still runs: the owner said yes
+        to this one, and the question comes back next time."""
+        save = getattr(self, "_save_firewall_rules", None)
+        firewall = getattr(self, "firewall", None)
+        if save is None or firewall is None:
+            logger.warning("Cannot remember %s: no firewall save path", self._describe_target(target))
+            return
+        rules = firewall.get_rules_as_dict()
+        if not knowledge_routing.add_remembered(rules, target):
+            return  # already remembered: no second entry
+        saved = await save(rules)
+        if saved.get("status") != "success":
+            logger.warning("Could not remember %s: %s", self._describe_target(target), saved.get("message"))
+            return
+        logger.info("Extraction to %s is sent without asking from now on (entry written)",
+                    self._describe_target(target))
+
+    @staticmethod
+    def _has_something_to_send(monitor) -> bool:
+        """Read without touching the buffers: the history, as the rebuild reads it."""
+        history = getattr(monitor, "message_history", None) or []
+        return any(not m.get("turn_end") for m in history if isinstance(m, dict)) or bool(
+            getattr(monitor, "message_buffer", None))
+
     async def end_conversation_session(
         self,
         conversation_id: str,
         initiated_by: str = "user_request",
+        extract_consent: Any = False,
+        remember: bool = False,
     ) -> Dict[str, Any]:
         """Manually end a conversation session and extract knowledge.
 
         UI Integration: Called when user clicks "End Session & Save Knowledge" button.
-        Also called by agent_telegram_bridge for /endsession command.
+        Also called by agent_telegram_bridge for /extract_knowledge command.
+
+        `extract_consent` (GLOSSARY consent_required) is the target the owner
+        was asked about, echoed back: the extraction runs when it names the
+        target resolved now, compared as a remembered yes is (a local alias on
+        all of `CONSENT_TARGET_FIELDS`, the URL included; a peer on alias and
+        peer). A target that is not proven to run on this machine and is
+        not named that way gets `consent_required` and nothing starts.
+        `True` consents to any target and leaves the fallbacks as they were:
+        the Telegram /extract_knowledge command sends it (its /help says so),
+        and so can any local API client, which spreads its payload into this
+        handler. `False` or absent asks.
+
+        A target the owner chose "don't ask again" for (privacy_rules.json
+        `knowledge_extraction.send_without_asking`: a local alias bound to all
+        its facts, a peer to alias and peer) is sent to without the question. `remember` is that box on the question's
+        resend: the entry is written only when it is true, the echo names the
+        target resolved now, and that target asks at all; `extract_consent`
+        `True` never writes one.
         """
         try:
             monitor = None
@@ -1389,6 +1470,32 @@ Respond in JSON format:
                 refused["offline"] = list(offline)
                 return refused
 
+            # Resolved once, before anything is touched or sent: the question
+            # names this target, and the extraction is pinned to it.
+            # While one runs, the chain answers from the running extraction's pin
+            # and a second press has nothing to ask: the monitor turns it away.
+            target = (self._resolve_extraction_target(monitor)
+                      if self._has_something_to_send(monitor)
+                      and not getattr(monitor, "_extracting", False) else None)
+            remembered = self._remembered_targets()
+            if (target is not None and extract_consent is not True
+                    and not knowledge_routing.may_send_unasked(target, remembered)
+                    and not knowledge_routing.same_target(extract_consent, target)):
+                logger.info(
+                    "Extraction for %s waits for consent: %s",
+                    conversation_id, self._describe_target(target),
+                )
+                return {
+                    "status": "consent_required",
+                    "conversation_id": conversation_id,
+                    **{k: target[k] for k in CONSENT_TARGET_FIELDS},
+                }
+
+            if (remember is True and target is not None
+                    and knowledge_routing.same_target(extract_consent, target)
+                    and not knowledge_routing.proven_on_this_machine(target)):
+                await self._remember_extraction_target(target)
+
             logger.info("End Session - attempting manual extraction for %s", conversation_id)
             logger.info(
                 "Full conversation: %d messages (incremental buffer: %d), Score: %.2f",
@@ -1412,11 +1519,42 @@ Respond in JSON format:
                 conversation_id,
             )
 
-            proposal = await monitor.generate_commit_proposal(
-                force=True,
-                proposed_by=self.p2p_manager.node_id,
-                initiated_by=initiated_by,
-            )
+            # A second press while one runs is turned away by the monitor; it
+            # must not touch the running extraction's pin.
+            owns_pin = not getattr(monitor, "_extracting", False)
+            if owns_pin:
+                monitor.extraction_target = target
+                monitor.fallbacks_need_consent = extract_consent is not True
+                monitor.remembered_targets = remembered
+            try:
+                proposal = await monitor.generate_commit_proposal(
+                    force=True,
+                    proposed_by=self.p2p_manager.node_id,
+                    initiated_by=initiated_by,
+                )
+            except knowledge_routing.FallbackNeedsConsent as e:
+                logger.info("Extraction for %s not retried: %s", conversation_id, e)
+                return await self._refuse_extraction(
+                    conversation_id, "fallback_needs_consent",
+                    f"Knowledge extraction on {self._describe_target(target or {})} "
+                    f"failed ({e.cause}). The retry would send this conversation to "
+                    f"{self._describe_target(e.target)}, which you were not "
+                    f"asked about, so nothing was sent there.",
+                )
+            finally:
+                if owns_pin:
+                    monitor.extraction_target = None
+                    monitor.fallbacks_need_consent = False
+                    monitor.remembered_targets = []
+
+            # The monitor turns a second press away with a sentinel string, not a
+            # proposal; it must not reach `proposal.topic` below.
+            if proposal == "EXTRACTION_IN_PROGRESS":
+                return await self._refuse_extraction(
+                    conversation_id, "extraction_in_progress",
+                    "Knowledge is already being extracted from this conversation. "
+                    "Wait for it to finish.",
+                )
 
             # THE-COLD-FALLBACK-HIDES-A-D2-REFUSAL-BEHIND-A-SUCCESSFUL-EXTRACTION:
             # the monitor's retry is the right call — extraction still ran — but

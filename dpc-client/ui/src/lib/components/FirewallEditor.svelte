@@ -11,6 +11,7 @@
   import type { ComputeRules } from './inferenceSharing';
   import { confirmAsync } from '$lib/utils/dialog';
   import { PROVED_CONNECTION_ALLOW_VALUES, provedConnectionEntry, setProvedConnectionRule } from '$lib/fileTransferPermission';
+  import { rememberedEntryLine, withCurrentRemembered, type RememberedEntry } from '$lib/extractionConsent';
 
   export let open: boolean = false;
 
@@ -95,6 +96,8 @@
     nodes?: Record<string, Record<string, string>>;
     // Node ids refused at the door; owned by block_peer / unblock_peer, not by Save.
     blocked_nodes?: string[];
+    // Extract Knowledge targets the owner chose "Don't ask again" for (backend CONSENT_TARGET_FIELDS).
+    knowledge_extraction?: { send_without_asking?: RememberedEntry[] };
     groups?: Record<string, Record<string, string>>;
     ai_scopes?: Record<string, Record<string, string>>;
     device_sharing?: Record<string, Record<string, string>>;
@@ -135,7 +138,7 @@
   }
 
   let rules: FirewallRules | null = null;
-  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'image-transfer' | 'notifications' | 'dpc-agent' | 'agent-profiles' | 'peers' | 'blocked' = 'hub';
+  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'image-transfer' | 'notifications' | 'dpc-agent' | 'agent-profiles' | 'peers' | 'blocked' | 'knowledge-extraction' = 'hub';
   let editMode: boolean = false;
   let editedRules: FirewallRules | null = null;
   let isSaving: boolean = false;
@@ -195,7 +198,7 @@
   let unblockingId: string | null = null;
   let unblockError: string = '';
 
-  $: if (open && selectedTab === 'blocked' && !blockedNamesLoaded) {
+  $: if (open && (selectedTab === 'blocked' || selectedTab === 'knowledge-extraction') && !blockedNamesLoaded) {
     loadBlockedNames();
   }
   $: if (!open) {
@@ -218,6 +221,18 @@
     } catch (error) {
       console.error('Error loading cached peers for the Blocked tab:', error);
     }
+  }
+
+  // Knowledge Extraction tab: a remembered yes is removed in the edit session and goes with
+  // Save. Save sends the list on disk minus these, so a yes remembered meanwhile survives.
+  let removedRemembered: RememberedEntry[] = [];
+
+  function removeRemembered(index: number) {
+    const list = editedRules?.knowledge_extraction?.send_without_asking;
+    if (!editedRules || !list) return;
+    const [gone] = list.splice(index, 1);
+    if (gone) removedRemembered = [...removedRemembered, gone];
+    editedRules = editedRules; // trigger reactivity
   }
 
   // Unblock acts at once through unblock_peer; it is not part of Save. The backend
@@ -325,6 +340,7 @@
   function startEditing() {
     if (!rules) return;
     editMode = true;
+    removedRemembered = [];
     // Deep copy the rules for editing
     editedRules = JSON.parse(JSON.stringify(rules));
 
@@ -362,6 +378,7 @@
   function cancelEditing() {
     editMode = false;
     editedRules = null;
+    removedRemembered = [];
     saveMessage = '';
     saveMessageType = '';
     saveErrors = [];
@@ -381,8 +398,18 @@
     editedRules.blocked_nodes = [...$blockedNodeIds];
 
     try {
+      // The remembered Extract Knowledge list is written by the question too, so
+      // it is read again here and only this session's removals are applied.
+      const payload = await withCurrentRemembered(editedRules, removedRemembered, sendCommand);
+      if (!payload) {
+        saveMessage = 'Could not read the current rules before saving, so nothing was saved. Try again.';
+        saveMessageType = 'error';
+        return;
+      }
+      editedRules = payload;
+
       const result = await sendCommand('save_firewall_rules', {
-        rules_dict: editedRules
+        rules_dict: payload
       });
 
       if (result.status === 'success') {
@@ -395,6 +422,7 @@
         // Exit edit mode immediately (so close button works correctly)
         editMode = false;
         editedRules = null;
+        removedRemembered = [];
 
         // Clear success message after short delay
         setTimeout(() => {
@@ -1170,6 +1198,13 @@
           on:click={() => selectedTab = 'blocked'}
         >
           Blocked
+        </button>
+        <button
+          class="tab"
+          class:active={selectedTab === 'knowledge-extraction'}
+          on:click={() => selectedTab = 'knowledge-extraction'}
+        >
+          Knowledge Extraction
         </button>
       </div>
 
@@ -2440,6 +2475,36 @@
               </div>
             {:else}
               <p class="empty">No blocked nodes.</p>
+            {/if}
+          </div>
+
+        {:else if selectedTab === 'knowledge-extraction'}
+          <div class="section">
+            <h3>Knowledge Extraction</h3>
+            <p class="help-text">
+              Extract Knowledge asks before a conversation goes to a model that is not proven to run on
+              this machine. These are the models you chose "Don't ask again" for. A yes holds only
+              while the model's address, kind and place stay as they were; if any changes, the question
+              comes back. A yes for a peer holds for that model name on that peer. Remove a line in
+              edit mode, then Save.
+            </p>
+            {#if (displayRules?.knowledge_extraction?.send_without_asking ?? []).length > 0}
+              <div class="node-list">
+                {#each displayRules?.knowledge_extraction?.send_without_asking ?? [] as entry, index}
+                  {@const line = rememberedEntryLine(entry, entry.compute_host ? blockedNames[entry.compute_host] : null)}
+                  <div class="node-item">
+                    <span>
+                      <strong>{line.name}</strong>
+                      <code>{line.where}</code>
+                    </span>
+                    {#if editMode}
+                      <button class="btn-small" on:click={() => removeRemembered(index)}>Remove</button>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="empty">Nothing is remembered: every model that is not on this machine asks.</p>
             {/if}
           </div>
         {/if}

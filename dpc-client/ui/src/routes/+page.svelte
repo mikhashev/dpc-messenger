@@ -12,6 +12,8 @@
   import { loadBlockedNodes, resetBlockedNodesLoad, blockPeer, unblockPeer } from "$lib/services/blockedPeers";
   import { blockConfirmQuestion, blockedNotice, unblockedNotice, groupsWithMember, peerLabel } from "$lib/utils/blockedPeers";
   import { confirmAsync } from "$lib/utils/dialog";
+  import { requestExtraction, type ConsentDecision } from "$lib/extractionConsent";
+  import ExtractionConsentDialog from "$lib/components/ExtractionConsentDialog.svelte";
   import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from "$lib/utils/messageMapper";
   import { HISTORY_PAGE_LIMIT, olderThanPage } from "$lib/utils/historyPaging";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
@@ -908,17 +910,42 @@
     // Model download dialog handlers (v0.13.5)
   // handleModelDownload + handleModelDownloadCancel moved to ModelDownloadPanel.svelte (Step 8)
 
+  // Every Extract Knowledge button comes here. A model this machine runs gets no
+  // dialog; for any other the backend answers consent_required before sending,
+  // and only a yes resends the command with consent.
+  // The question is a dialog with a box, not a bare confirm: a pending one holds the
+  // press until the owner answers. A newer question declines the older one.
+  let extractionAsk = $state<{ text: string; rememberLabel: string; resolve: (d: ConsentDecision) => void } | null>(null);
+
+  function askExtraction(text: string, rememberLabel: string): Promise<ConsentDecision> {
+    extractionAsk?.resolve({ proceed: false, remember: false });
+    return new Promise((resolve) => { extractionAsk = { text, rememberLabel, resolve }; });
+  }
+
+  function answerExtraction(proceed: boolean, remember: boolean) {
+    const pending = extractionAsk;
+    extractionAsk = null;
+    pending?.resolve({ proceed, remember: proceed && remember });
+  }
+
   async function handleEndSession(conversationId: string) {
-    // No confirm dialog — user can Reject the proposal if extraction was accidental.
     extractingChats = new Set(extractingChats).add(conversationId);
     // The response is read, not only the events: the backend answers a refusal
     // under an OK envelope, and a caller that ignores it leaves the button
     // disabled at "Extracting..." with no way back.
     try {
-      const answer: any = await sendCommand("end_conversation_session", {
-        conversation_id: conversationId
-      });
-      if (answer === false || answer?.status === "error") stopExtracting(conversationId);
+      const outcome = await requestExtraction(
+        conversationId, sendCommand,
+        askExtraction,
+        (nodeId) => getPeerDisplayName(nodeId),
+      );
+      if (outcome.kind !== "running") stopExtracting(conversationId);
+      if (outcome.kind === "failed") {
+        // A refusal also arrives as an event with the same sentence; every
+        // other way out arrives only here.
+        showExtractionFailure = true;
+        extractionFailureMessage = outcome.message;
+      }
     } catch (e) {
       // A timeout or a transport error produces no event at all.
       stopExtracting(conversationId);
@@ -1297,6 +1324,7 @@
         {whisperModelLoading}
         {groupPanelRef}
         {isSleeping}
+        onEndSession={handleEndSession}
         bind:chatPanelHeight
         bind:showAgentBoard
         bind:currentInput
@@ -1396,6 +1424,8 @@
      shell commands. Subscribes to pendingShellApprovals store fed by
      coreService.ts shell_approval_request WS handler. -->
 <ShellApprovalDialog />
+
+<ExtractionConsentDialog question={extractionAsk} onAnswer={answerExtraction} />
 
 <!-- ChatHistorySyncPanel: loads history from backend when switching to peer/agent/group chat (Step 8) -->
 <ChatHistorySyncPanel

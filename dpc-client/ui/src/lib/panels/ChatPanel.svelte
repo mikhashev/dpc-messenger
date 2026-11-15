@@ -110,6 +110,7 @@
     currentInput = $bindable(''),
     isSleeping = false,
     onOpenVote = null,
+    onEndSession,
   }: {
     activeChatId: string;
     chatHistories: Writable<Map<string, Message[]>>;
@@ -141,6 +142,8 @@
     showAgentBoard?: boolean;
     currentInput?: string;
     onOpenVote?: (() => void) | null;
+    /** The page's Extract Knowledge handler, shared with SessionControls. */
+    onEndSession: (conversationId: string) => void | Promise<void>;
   } = $props();
 
   // Where a recording can actually go. An AI or agent chat has no node to
@@ -469,13 +472,6 @@
           sent.catch((error: unknown) => console.error('[AI Chats] Failed to save the instruction set:', error));
         }
       }
-    }
-  }
-
-  async function handleEndSession(conversationId: string) {
-    const proceed = await confirmAsync('End this conversation session and extract knowledge?', { kind: 'info' });
-    if (proceed) {
-      sendCommand('end_conversation_session', { conversation_id: conversationId });
     }
   }
 
@@ -1233,7 +1229,7 @@
       <TokenWarningBanner
         severity={tokenWarningLevel === 'critical' ? 'critical' : 'warning'}
         percentage={estimatedUsage.percentage}
-        onEndSession={() => handleEndSession(activeChatId)}
+        onEndSession={() => onEndSession(activeChatId)}
         dismissible={tokenWarningLevel !== 'critical'}
       />
     {/if}

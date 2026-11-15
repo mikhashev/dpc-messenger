@@ -19,14 +19,11 @@ import ipaddress
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
+from dpc_client_core.firewall import LOCAL_PROVIDER_TYPES as LOCAL_TYPES
+from dpc_client_core.firewall import VENDOR_PROVIDER_TYPES as VENDOR_TYPES
 from dpc_client_core.peer_cache import in_local_networks
 
-# The same classes firewall.py uses for the serving lists.
-LOCAL_TYPES = frozenset({"ollama", "llamacpp_server", "strata", "local_whisper"})
-VENDOR_TYPES = frozenset({
-    "openai_compatible", "anthropic", "zai", "deepseek", "neuraldeep", "gemini", "github_models",
-    "gigachat",
-})
+# LOCAL_TYPES and VENDOR_TYPES are firewall.py's classes for the serving lists.
 OPENAI_OWN_HOSTS = ("api.openai.com",)  # as providers/openai_provider.py
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
 REMOTE_PREFIX = "remote:"

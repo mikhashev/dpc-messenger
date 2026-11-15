@@ -599,6 +599,7 @@ Send a voice message and it will be transcribed and processed\\.
 • /stop — stop the running turn and drop messages not yet sent to the agent
 • /newsession — start fresh conversation \\(current history archived\\)
 • /extract\\_knowledge — extracts knowledge, shows inline approve/reject buttons
+• /extract\\_knowledge sends this conversation to the configured knowledge\\-extraction model without asking, even when that model is a cloud service\\.
 • /sleep — starts sleep consolidation \\(requires empty chat\\)
 • You can approve or reject the knowledge proposal directly here
 
@@ -781,9 +782,12 @@ Send a voice message and it will be transcribed and processed\\.
         )
 
         try:
+            # The command asks no question about where the conversation goes;
+            # /help says so (the "sends this conversation ... without asking" line).
             result = await service.end_conversation_session(
                 conversation_id,
                 initiated_by="telegram",
+                extract_consent=True,
             )
             status = result.get("status", "unknown")
 

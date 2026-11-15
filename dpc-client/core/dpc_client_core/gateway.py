@@ -125,7 +125,7 @@ from dpc_protocol.protocol import PeerRefused
 
 from .dpc_agent.llm_adapter import DpcLlmAdapter
 from .dpc_agent.pricing import get_billing_model, price_call, vendor_ceiling_currency
-from .firewall import ServingLists
+from .firewall import TRANSCRIPTION_ONLY_PROVIDER_TYPES, ServingLists
 from .guest_vendor_quota import guest_vendor_quota_refusal
 from .llm_manager import accepts_reasoning_effort, entry_point_for, flatten_messages
 from .managers.llama_server_supervisor import (
@@ -739,7 +739,7 @@ def parse_remote_name(name: str) -> Optional[Tuple[str, str]]:
 # it among `LOCAL_PROVIDER_TYPES`, so such an alias may legitimately stand in
 # `compute.serving_local` and be offered to a peer for transcription — it is
 # simply not a chat model, on either half of this door's menu.
-TRANSCRIPTION_ONLY_PROVIDER_TYPES = frozenset({"local_whisper"})
+# The set itself, TRANSCRIPTION_ONLY_PROVIDER_TYPES, lives in firewall.py.
 
 
 def serves_chat(provider_type: Optional[str]) -> bool:

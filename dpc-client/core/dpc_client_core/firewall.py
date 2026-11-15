@@ -115,8 +115,13 @@ SERVING_ALIAS_KEY = 'serving_alias'
 
 # Which provider types may stand in which list, by the resource they spend:
 # a local type's is the card, a vendor type's is money and needs a ceiling.
+# The UI's LOCAL_SERVING_TYPES (inferenceSharing.ts) means what the door offers peers, not this.
 # The last two are somebody else's model and belong in neither (D7 part 1).
 LOCAL_PROVIDER_TYPES = frozenset({'ollama', 'llamacpp_server', 'strata', 'local_whisper'})
+# A local type that transcribes and does not chat: it may stand in serving_local
+# for a peer's transcription, but it answers no chat completion (gateway.serves_chat)
+# and extracts no knowledge (knowledge_routing).
+TRANSCRIPTION_ONLY_PROVIDER_TYPES = frozenset({'local_whisper'})
 VENDOR_PROVIDER_TYPES = frozenset({
     'openai_compatible', 'anthropic', 'zai', 'deepseek', 'neuraldeep', 'gemini', 'github_models',
     'gigachat',
@@ -163,6 +168,20 @@ FILE_TRANSFER_PROVED_CONNECTION_DEFAULT = {
 }
 # The values `file_transfer.proved_connection.file_transfer.allow` takes.
 FILE_TRANSFER_PROVED_CONNECTION_ALLOW_VALUES = ('allow', 'ask', 'deny')
+
+# `knowledge_extraction.send_without_asking`: the targets the owner chose "don't
+# ask again" for in the Extract Knowledge question (consent_required). Each entry
+# is the target's facts. For a local alias a yes holds only while all of them
+# still match, so the same alias at another URL, host scope, type or kind asks
+# again; for a peer it is bound to the alias and the peer alone. The fields are
+# `knowledge_routing.CONSENT_TARGET_FIELDS` (a test keeps the two in step). Written
+# through the editor's own save by `KnowledgeService`; the editor shows the
+# entries with a Remove button. Mike's call, 2026-11-14; the names are proposed.
+KNOWLEDGE_EXTRACTION_KEY = 'knowledge_extraction'
+SEND_WITHOUT_ASKING_KEY = 'send_without_asking'
+KNOWLEDGE_EXTRACTION_ENTRY_FIELDS = (
+    'provider_alias', 'provider_type', 'provider_kind', 'host_scope', 'compute_host', 'url',
+)
 
 # ISO 4217 List One (current currencies and funds) as published by SIX, the
 # standard's maintenance agency: list-one.xml, Pblshd="2026-01-01", 178 codes.
@@ -1731,6 +1750,9 @@ class ContextFirewall:
                 # every allow below. Changed by Block / Unblock (block_peer,
                 # unblock_peer), not by hand.
                 "blocked_nodes": [],
+                # Extract Knowledge targets the owner chose "don't ask again" for;
+                # written by the question's checkbox, removed in the editor.
+                "knowledge_extraction": {"send_without_asking": []},
                 "file_groups": {
                     "_comment": "Define aliases for groups of context files (supports wildcards)",
                     "work": ["work_*.json", "projects.json"],
@@ -2496,7 +2518,7 @@ class ContextFirewall:
 
         try:
             # Validate top-level structure
-            valid_top_level_keys = ['hub', 'blocked_nodes', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', 'dpc_agent', 'agent_profiles', '_comment']
+            valid_top_level_keys = ['hub', 'blocked_nodes', 'knowledge_extraction', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', 'dpc_agent', 'agent_profiles', '_comment']
 
             for key in config_dict.keys():
                 if key not in valid_top_level_keys:
@@ -2525,6 +2547,38 @@ class ContextFirewall:
                                 f"Invalid node ID in blocked_nodes: {node_id!r} "
                                 f"(should be 'dpc-node-' followed by 32 lowercase hex characters)"
                             )
+
+            # Validate knowledge_extraction: the remembered Extract Knowledge targets
+            if KNOWLEDGE_EXTRACTION_KEY in config_dict:
+                section = config_dict[KNOWLEDGE_EXTRACTION_KEY]
+                if not isinstance(section, dict):
+                    errors.append(f"'{KNOWLEDGE_EXTRACTION_KEY}' section must be a dictionary")
+                else:
+                    for key in section:
+                        if key != SEND_WITHOUT_ASKING_KEY and not str(key).startswith('_'):
+                            errors.append(f"Unknown key in {KNOWLEDGE_EXTRACTION_KEY}: '{key}'")
+                    entries = section.get(SEND_WITHOUT_ASKING_KEY, [])
+                    label = f"{KNOWLEDGE_EXTRACTION_KEY}.{SEND_WITHOUT_ASKING_KEY}"
+                    if not isinstance(entries, list):
+                        errors.append(f"'{label}' must be a list of target entries")
+                    else:
+                        for index, entry in enumerate(entries):
+                            where = f"{label}[{index}]"
+                            if not isinstance(entry, dict):
+                                errors.append(f"'{where}' must be an object")
+                                continue
+                            for key, value in entry.items():
+                                if key not in KNOWLEDGE_EXTRACTION_ENTRY_FIELDS:
+                                    errors.append(f"Unknown field in {where}: '{key}'")
+                                elif value is not None and not isinstance(value, str):
+                                    errors.append(f"'{where}.{key}' must be a string or null, not {value!r}")
+                            # An entry that names neither a model nor a peer would match a target that has neither.
+                            if not any(isinstance(entry.get(k), str) and entry[k]
+                                       for k in ('provider_alias', 'compute_host')):
+                                errors.append(f"'{where}' must name a provider_alias or a compute_host")
+                            host = entry.get('compute_host')
+                            if isinstance(host, str) and host and not NODE_ID_RE.fullmatch(host):
+                                errors.append(f"Invalid node ID in {where}.compute_host: {host!r}")
 
             # Validate node_groups section
             if 'node_groups' in config_dict:
@@ -2946,6 +3000,18 @@ class ContextFirewall:
         except Exception as e:
             return (False, f"Firewall reload failed: {str(e)}")
 
+    def remembered_extraction_targets(self) -> List[Dict[str, Any]]:
+        """The Extract Knowledge targets the owner chose "don't ask again" for.
+
+        Read from the loaded rules; a malformed section yields nothing, which
+        means every target asks.
+        """
+        section = self.rules.get(KNOWLEDGE_EXTRACTION_KEY)
+        entries = section.get(SEND_WITHOUT_ASKING_KEY) if isinstance(section, dict) else None
+        if not isinstance(entries, list):
+            return []
+        return [dict(e) for e in entries if isinstance(e, dict)]
+
     def get_rules_as_dict(self) -> Dict[str, Any]:
         """Read raw rules from disk as a JSON dict."""
         config_text = self.access_file_path.read_text()
@@ -3104,6 +3170,12 @@ class ContextFirewall:
             for index, value in enumerate(rules):
                 if value == node_id:
                     removed.append(path)
+                    continue
+                # A remembered Extract Knowledge target on this peer goes whole:
+                # without its compute_host it would be a different target's yes.
+                if (path == f"{KNOWLEDGE_EXTRACTION_KEY}.{SEND_WITHOUT_ASKING_KEY}"
+                        and isinstance(value, dict) and value.get('compute_host') == node_id):
+                    removed.append(f"{path}[{index}]")
                     continue
                 removed.extend(ContextFirewall._remove_node_mentions(value, node_id, f"{path}[{index}]"))
                 kept.append(value)
