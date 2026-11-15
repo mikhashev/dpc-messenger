@@ -705,6 +705,30 @@ async def test_a_writer_landing_after_a_section_only_save_does_not_widen_it(tmp_
     assert (node.peer_notices, node.agent_syncs) == (0, 0)
 
 
+@pytest.mark.asyncio
+async def test_an_editor_save_between_the_remembers_read_and_write_is_the_one_lost(tmp_path):
+    """The accepted window, in the direction it loses: the service writes the rules it
+    read before the editor's Save, so the yes survives and the editor's change does not
+    (GLOSSARY `send_without_asking`)."""
+    node = _Node(tmp_path, _vendor_llm())
+    asked, _ = await node.press(provenance=VENDOR)
+    save = node.core.save_firewall_rules
+
+    async def editor_save_lands_first(rules_dict):
+        edited = node.firewall.get_rules_as_dict()
+        edited["node_groups"] = {"friends": [PEER]}
+        assert (await save(edited))["status"] == "success"
+        return await save(rules_dict)
+
+    node.svc._save_firewall_rules = editor_save_lands_first
+
+    result, _ = await node.press(provenance=VENDOR, consent=_echo(asked), remember=True)
+
+    assert result["status"] == "success"
+    assert len(node.entries()) == 1
+    assert "friends" not in json.loads(node.rules_path.read_text(encoding="utf-8")).get("node_groups", {})
+
+
 @pytest.mark.parametrize("touch_remembered", [False, True])
 @pytest.mark.asyncio
 async def test_an_editor_save_that_changed_another_section_still_tells_them(tmp_path, touch_remembered):
