@@ -14,7 +14,11 @@
  * Absent is absent. A round that did not state the reused count, a prompt of 0
  * tokens, or a count larger than its prompt gets no number at all — a percentage
  * nobody reported would be made up. A real 0 (the provider said it reused
- * nothing) is a number and reads `cache hit rate: 0%`.
+ * nothing) is a number and reads `cache hit rate: 0.0%`.
+ *
+ * One decimal, cut down rather than rounded (Mike's call, 2026-11-15): 989 tokens
+ * read again out of 217,786 is 99.5%, and only a round that read nothing again
+ * may say 100.0%.
  */
 
 import { formatTokens } from './contextOccupancy';
@@ -22,7 +26,7 @@ import { formatTokens } from './contextOccupancy';
 export interface CacheRate {
     cached: number;
     prompt: number;
-    /** Integer percent, cached / prompt. */
+    /** Percent with one decimal, cached / prompt, cut down: 100 only when all was reused. */
     pct: number;
 }
 
@@ -39,12 +43,12 @@ export function cacheFromSpeed(speed: Record<string, any> | null | undefined): C
     const cached = wholeCount(speed?.cached_tokens);
     const prompt = wholeCount(speed?.prompt_tokens);
     if (cached === null || prompt === null || prompt <= 0 || cached > prompt) return null;
-    return { cached, prompt, pct: Math.round((cached / prompt) * 100) };
+    return { cached, prompt, pct: Math.floor((cached * 1000) / prompt) / 10 };
 }
 
 /** The part as the header renders it. */
 export function cacheLabel(rate: CacheRate): string {
-    return `cache hit rate: ${rate.pct}%`;
+    return `cache hit rate: ${rate.pct.toFixed(1)}%`;
 }
 
 /** The raw numbers behind the percent; `rounds` is given for a finished turn. */

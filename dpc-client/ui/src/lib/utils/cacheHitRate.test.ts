@@ -1,5 +1,5 @@
 /**
- * The header shows `cache hit rate: N%`, and the two ways it can lie are the ones held
+ * The header shows `cache hit rate: N.N%`, and the two ways it can lie are the ones held
  * here: a made-up number where nothing was reported, and a median where the
  * turn needs a weighted sum.
  */
@@ -8,15 +8,27 @@ import { describe, it, expect } from 'vitest';
 import { cacheFromSpeed, cacheLabel, cacheTitle } from './cacheHitRate';
 
 describe('one round', () => {
-    it('is cached over prompt, in integer percent', () => {
+    it('is cached over prompt, with one decimal', () => {
         const rate = cacheFromSpeed({ cached_tokens: 111593, prompt_tokens: 113343 })!;
-        expect(rate.pct).toBe(98);
-        expect(cacheLabel(rate)).toBe('cache hit rate: 98%');
+        expect(rate.pct).toBe(98.4);
+        expect(cacheLabel(rate)).toBe('cache hit rate: 98.4%');
     });
 
-    it('shows a real zero as 0%', () => {
+    it('says 99.5% where a whole-percent strip said 100% (the round of 2026-11-15)', () => {
+        const rate = cacheFromSpeed({ cached_tokens: 217786 - 989, prompt_tokens: 217786 })!;
+        expect(cacheLabel(rate)).toBe('cache hit rate: 99.5%');
+    });
+
+    it('says 100.0% only when nothing was read again', () => {
+        expect(cacheLabel(cacheFromSpeed({ cached_tokens: 99999, prompt_tokens: 100000 })!))
+            .toBe('cache hit rate: 99.9%');
+        expect(cacheLabel(cacheFromSpeed({ cached_tokens: 5000, prompt_tokens: 5000 })!))
+            .toBe('cache hit rate: 100.0%');
+    });
+
+    it('shows a real zero as 0.0%', () => {
         const rate = cacheFromSpeed({ cached_tokens: 0, prompt_tokens: 800 })!;
-        expect(cacheLabel(rate)).toBe('cache hit rate: 0%');
+        expect(cacheLabel(rate)).toBe('cache hit rate: 0.0%');
     });
 
     it('shows nothing when either number is missing', () => {
@@ -46,7 +58,7 @@ describe('a finished turn', () => {
     // test_the_finished_strip_is_stored_with_the_message.py); the header divides.
     it('reads the stored sums as the token-weighted rate', () => {
         const rate = cacheFromSpeed({ rounds: 3, cached_tokens: 47700, prompt_tokens: 60000, median: true })!;
-        expect(rate.pct).toBe(80);
+        expect(rate.pct).toBe(79.5);
     });
 
     it('says the rounds in the tooltip', () => {
