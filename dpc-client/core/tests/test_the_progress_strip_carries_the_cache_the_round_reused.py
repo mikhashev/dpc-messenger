@@ -18,7 +18,7 @@ Two decisions the tests hold in place:
 
 import asyncio
 
-from dpc_client_core.dpc_agent.loop import round_progress_payload, run_llm_loop
+from dpc_client_core.dpc_agent.loop import round_progress_payload, run_llm_loop, speed_summary_of
 
 WINDOW = 262144
 RESERVE = 16384
@@ -172,3 +172,104 @@ class TestItReachesTheCallbackTheUiListensOn:
         strip = _run(usage, tmp_path, monkeypatch).strips[-1]
         assert "cached_tokens" not in strip
         assert strip["context_used"] == 3030
+
+
+def _usage(prompt, cached):
+    return {"prompt_tokens": prompt, "completion_tokens": 10, "total_tokens": prompt + 10,
+            "cached_tokens": cached, "prefilled_tokens": prompt - cached}
+
+
+class _ScriptedLlm:
+    def __init__(self, *steps):
+        self.steps = list(steps)
+
+    async def chat(self, messages, **kwargs):
+        return self.steps.pop(0)
+
+
+class _ProbeTools:
+    _ctx = None
+
+    def schemas(self, core_only=False, include_restricted=False):
+        return [{"name": "probe"}]
+
+    def get_timeout(self, name):
+        return 5
+
+    def execute(self, name, args, ctx=None):
+        return "probed"
+
+
+def _asks(prompt, cached):
+    return ({"role": "assistant", "content": "", "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "probe", "arguments": "{}"}}]},
+        _usage(prompt, cached))
+
+
+def _says(prompt, cached):
+    return ({"role": "assistant", "content": "done", "tool_calls": []}, _usage(prompt, cached))
+
+
+class TestTheLiveStripCarriesTheTurnSoFar:
+    """The header's cache figure is the turn's average, live as well as finished:
+    each round's strip carries `speed_summary`, the shape the stored one has."""
+
+    def _run_rounds(self, steps, tmp_path, monkeypatch):
+        monkeypatch.setattr("dpc_client_core.dpc_agent.loop.load_agent_config", lambda _n: {})
+        recorder = _Recorder()
+        _text, _u, trace = asyncio.run(run_llm_loop(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=_ProbeTools(),
+            llm=_ScriptedLlm(*steps),
+            agent_root=tmp_path,
+            emit_progress=recorder,
+            context_window=WINDOW,
+            context_reserve=RESERVE,
+        ))
+        return recorder, trace
+
+    def _last_strip_of_each_round(self, recorder):
+        by_round = {}
+        for strip in recorder.strips:
+            by_round[strip["round"]] = strip
+        return [by_round[r] for r in sorted(by_round)]
+
+    def test_the_summary_grows_round_by_round_and_is_the_summary_of_the_rounds_so_far(
+            self, tmp_path, monkeypatch):
+        recorder, trace = self._run_rounds(
+            [_asks(1000, 0), _asks(2000, 1800), _says(3000, 2900)], tmp_path, monkeypatch)
+        strips = self._last_strip_of_each_round(recorder)
+        assert len(strips) == 3
+        sums = [(s["speed_summary"]["cached_tokens"], s["speed_summary"]["prompt_tokens"],
+                 s["speed_summary"]["rounds"]) for s in strips]
+        assert sums == [(0, 1000, 1), (1800, 3000, 2), (4700, 6000, 3)]
+        for i, strip in enumerate(strips, 1):
+            plain = [{k: v for k, v in s.items() if k != "speed_summary"} for s in strips[:i]]
+            assert strip["speed_summary"] == speed_summary_of(plain)
+
+    def test_the_last_live_summary_is_the_one_stored_with_the_turn(self, tmp_path, monkeypatch):
+        recorder, trace = self._run_rounds(
+            [_asks(1000, 0), _says(1500, 1000)], tmp_path, monkeypatch)
+        assert self._last_strip_of_each_round(recorder)[-1]["speed_summary"] == trace["speed_summary"]
+
+    def test_the_round_fields_stay_as_they_were(self, tmp_path, monkeypatch):
+        recorder, _trace = self._run_rounds(
+            [_asks(1000, 0), _says(1500, 1000)], tmp_path, monkeypatch)
+        last = self._last_strip_of_each_round(recorder)[-1]
+        assert (last["cached_tokens"], last["prompt_tokens"], last["round"]) == (1000, 1500, 2)
+
+    def test_a_round_with_no_split_still_carries_the_turn_so_far(self, tmp_path, monkeypatch):
+        steps = [_asks(1000, 0),
+                 ({"role": "assistant", "content": "done", "tool_calls": []},
+                  {"prompt_tokens": 1500, "completion_tokens": 10, "total_tokens": 1510})]
+        recorder, _trace = self._run_rounds(steps, tmp_path, monkeypatch)
+        last = self._last_strip_of_each_round(recorder)[-1]
+        assert "cached_tokens" not in last
+        s = last["speed_summary"]
+        assert (s["rounds"], s["cached_tokens"], s["prompt_tokens"]) == (2, 0, 1000)
+
+    def test_the_live_summary_is_not_the_traces_object(self, tmp_path, monkeypatch):
+        recorder, trace = self._run_rounds(
+            [_asks(1000, 0), _says(1500, 1000)], tmp_path, monkeypatch)
+        live = self._last_strip_of_each_round(recorder)[-1]["speed_summary"]
+        assert live == trace["speed_summary"] and live is not trace["speed_summary"]

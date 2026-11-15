@@ -8,7 +8,7 @@
     import { getToolLabel, getToolArgPreview } from '$lib/utils/toolDisplay';
     import { liveToolArgPreview } from '$lib/utils/liveToolArg';
     import { occupancyFromSpeed, occupancyLabel, occupancyTitle } from '$lib/utils/contextOccupancy';
-    import { cacheFromSpeed, cacheLabel, cacheTitle } from '$lib/utils/cacheHitRate';
+    import { cachePart } from '$lib/utils/cacheHitRate';
     import { cutFromSpeed, cutLabel, cutTitle } from '$lib/utils/contextCut';
     import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
     import { firstRound, roundJumpLabel, roundJumpTitle } from '$lib/utils/roundJump';
@@ -145,12 +145,8 @@
     let ctxTitle = $derived(
         ctx ? occupancyTitle(ctx, { round: speed?.round, median: !!speed?.median }) : '',
     );
-    // The cache half: this round's rate live, the turn's token-weighted rate once
-    // finished (the summary carries the sums). cacheHitRate.ts says why.
-    let cache = $derived(cacheFromSpeed(speed));
-    let cacheHint = $derived(
-        cache ? cacheTitle(cache, { rounds: speed?.median ? speed?.rounds : null }) : '',
-    );
+    // The cache half: the turn's token-weighted average, live and finished.
+    let cache = $derived(cachePart(speed));
     // The run's last context cut, so a falling context number has its reason
     // beside it (contextCut.ts).
     let cut = $derived(cutFromSpeed(speed));
@@ -220,7 +216,7 @@
                         <span class="speed-part cut" title={cutTitle(cut)}>{cutLabel(cut)}</span>
                     {/if}
                     {#if cache}
-                        <span class="speed-part cache" title={cacheHint}>{cacheLabel(cache)}</span>
+                        <span class="speed-part cache" title={cache.title}>{cache.label}</span>
                     {/if}
                     {#if speed.model || speed.alias}
                         <span class="speed-model">{speed.model || speed.alias}</span>

@@ -1,11 +1,11 @@
 /**
- * The header shows `cache hit rate: N.N%`, and the two ways it can lie are the ones held
- * here: a made-up number where nothing was reported, and a median where the
- * turn needs a weighted sum.
+ * The header shows `avg cache hit rate: N.N%` (the turn's average), and the ways it can
+ * lie are the ones held here: a made-up number where nothing was reported, a median
+ * where the turn needs a weighted sum, and an "avg" where only one round was sent.
  */
 
 import { describe, it, expect } from 'vitest';
-import { cacheFromSpeed, cacheLabel, cacheTitle } from './cacheHitRate';
+import { cacheFromSpeed, cacheLabel, cacheTitle, cachePart } from './cacheHitRate';
 
 describe('one round', () => {
     it('is cached over prompt, with one decimal', () => {
@@ -68,5 +68,58 @@ describe('a finished turn', () => {
         );
         expect(cacheTitle(rate, { rounds: 1 })).toContain('over 1 round');
         expect(cacheTitle(rate, { rounds: 1 })).not.toContain('rounds');
+    });
+});
+
+describe('the header part, the turn average', () => {
+    // Round 3 read 989 of 217,786 again; the turn so far read less than that share.
+    const live = {
+        round: 3, cached_tokens: 217786 - 989, prompt_tokens: 217786,
+        speed_summary: { rounds: 3, cached_tokens: 300000, prompt_tokens: 400000, median: true },
+    };
+
+    it('live: the label is the running average, not the round', () => {
+        const part = cachePart(live)!;
+        expect(part.label).toBe('avg cache hit rate: 75.0%');
+    });
+
+    it('live: the tooltip has the turn raw numbers and the last round', () => {
+        expect(cachePart(live)!.title).toBe(
+            '300,000 of 400,000 prompt tokens reused from the cache over 3 rounds; '
+            + 'last round 99.5%: 989 of 217,786 read again',
+        );
+    });
+
+    it('live: a round with no pair still shows the turn average, no last-round clause', () => {
+        const part = cachePart({ round: 4, speed_summary: live.speed_summary })!;
+        expect(part.label).toBe('avg cache hit rate: 75.0%');
+        expect(part.title).toBe('300,000 of 400,000 prompt tokens reused from the cache over 3 rounds');
+    });
+
+    it('finished: the stored summary is the average, rounds in the tooltip, no last round', () => {
+        const part = cachePart({ rounds: 12, cached_tokens: 900, prompt_tokens: 1000, median: true })!;
+        expect(part.label).toBe('avg cache hit rate: 90.0%');
+        expect(part.title).toBe('900 of 1,000 prompt tokens reused from the cache over 12 rounds');
+    });
+
+    it('live, older backend: the round numbers under the old label, never "avg"', () => {
+        const part = cachePart({ round: 2, cached_tokens: 111593, prompt_tokens: 113343 })!;
+        expect(part.label).toBe('cache hit rate: 98.4%');
+        expect(part.label).not.toContain('avg');
+        expect(part.title).toBe('111,593 of 113,343 prompt tokens reused from the cache');
+    });
+
+    it('live: a summary with no cache counts does not become an average', () => {
+        const part = cachePart({
+            cached_tokens: 10, prompt_tokens: 100,
+            speed_summary: { rounds: 2, cached_tokens: null, prompt_tokens: null, median: true },
+        })!;
+        expect(part.label).toBe('cache hit rate: 10.0%');
+    });
+
+    it('shows nothing when nothing was stated', () => {
+        expect(cachePart(null)).toBeNull();
+        expect(cachePart({ round: 1 })).toBeNull();
+        expect(cachePart({ rounds: 2, cached_tokens: null, prompt_tokens: null, median: true })).toBeNull();
     });
 });

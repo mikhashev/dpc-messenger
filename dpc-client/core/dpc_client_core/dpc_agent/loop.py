@@ -253,6 +253,10 @@ def round_progress_payload(
     `last_context_cut` is the run's last context cut (`CompactionState`), carried
     as it is so the strip can say why the context number fell; absent before the
     first cut, and it rides an existing strip rather than making one.
+
+    The turn so far (`speed_summary`, the shape `speed_summary_of` returns) is
+    added by `run_llm_loop` after this call, since only the loop holds the earlier
+    rounds' strips.
     """
     payload: Dict[str, Any] = dict(speed) if speed else {}
     if (
@@ -2808,8 +2812,13 @@ async def run_llm_loop(
                 # Kept current after every round, so whichever branch ends the
                 # turn (a Stop and a Kill too) returns the rounds that ran.
                 if _round_speed:
+                    # The turn so far rides the live strip under the stored
+                    # summary's own key, so the header's cache figure can be the
+                    # turn's average while the loop runs (Mike's call, 2026-11-15).
+                    _turn_so_far = speed_summary_of(_round_strips + [_round_speed])
+                    _round_speed["speed_summary"] = dict(_turn_so_far)
                     _round_strips.append(_round_speed)
-                    llm_trace["speed_summary"] = speed_summary_of(_round_strips)
+                    llm_trace["speed_summary"] = _turn_so_far
             except CallKilled:
                 log.warning("Agent killed by user mid-call in round %d", round_idx)
                 llm_trace["stopped_by_user"] = True
