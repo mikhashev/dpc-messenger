@@ -728,116 +728,118 @@ class DpcAgent:
         # Log context window usage — warn if approaching limit or sections were trimmed
         _estimated = cap_info.get("estimated_tokens_before", 0)
         _ctx_window = (session_state or {}).get("tokens_limit") or 204800
-        # On a local engine the prompt is counted by the engine and the window is the one it
-        # reports, not chars/4 against the alias number (ADR-033 amendment, 2026-11-11).
-        _engine = local_engine_of(getattr(self, "llm", None))
-        if _engine is not None and not (stop_event is not None and stop_event.is_set()):
-            _on_engine = await self._measure_on_the_engine(
-                _engine, messages, conversation_id, stop_event, kill_event)
-            if _on_engine is not None:
-                _estimated, _ctx_window = _on_engine
-        _real_last = (session_state or {}).get("tokens_after_last_response") or 0
-        if _real_last > _estimated:
-            log.debug(
-                "Context estimate raised to last real prompt count: %d → %d tokens",
-                _estimated, _real_last,
-            )
-            _estimated = _real_last
-        _trimmed = cap_info.get("trimmed_sections", [])
-        if _trimmed:
-            log.warning(
-                "Context trimmed (approaching limit): %s | estimated: %d / %d tokens (%.0f%%)",
-                _trimmed, _estimated, _ctx_window, _estimated / _ctx_window * 100,
-            )
-        elif _estimated > _ctx_window * 0.8:
-            log.warning(
-                "Context window >80%% full: estimated %d / %d tokens (%.0f%%)",
-                _estimated, _ctx_window, _estimated / _ctx_window * 100,
-            )
-        else:
-            log.debug(
-                "Context size: estimated %d / %d tokens (%.0f%%)",
-                _estimated, _ctx_window, _estimated / _ctx_window * 100,
-            )
-
-        # Hard block: refuse to call LLM if context window is nearly full.
-        # Without this guard the LLM call hangs silently (AGENT-CTX-1).
-        _reserve = context_reserve_of(_ctx_window)
-        if _ctx_window - _estimated < _reserve:
-            _pct = _estimated / _ctx_window * 100
-            log.error(
-                "Context window overflow blocked: %d / %d tokens (%.0f%%)",
-                _estimated, _ctx_window, _pct,
-            )
-            # No model call, so nothing of the previous turn may stand as this
-            # one's: its thinking and tool calls would be saved on this record.
-            # The refusal is the context guard's, a turn ended by a guard.
-            self._last_usage = {}
-            self._last_trace = {"turn_end": "guard"}
-            return (
-                f"⚠️ Context window full ({_estimated:,} / {_ctx_window:,} tokens, "
-                f"{_pct:.0f}%). End session to continue."
-            )
-
-        ctx = ToolContext(
-            agent_root=self.agent_root,
-            current_task_id=conversation_id,
-            current_task_type="chat",
-            check_back_depth=check_back_depth,
-            tool_whitelist=allowed_tools,
-            emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None, speed=None: None),
-            firewall=self._firewall,  # For extended sandbox paths
-            conversation_monitor=conversation_monitor,  # For knowledge extraction tool
-            reply_telegram_chat_id=reply_telegram_chat_id,
-            message_source=message_source,
-            # Which memory layers this turn may see (ADR-048); the file tools ask it.
-            turn_class=audience_class,
-            open_layers=layers_open,
-            # Where this run came from, for anything that has to ask a person
-            # something (tier-1 shell approval today). The title is whatever the
-            # caller already resolved — group chats carry it in chat_context;
-            # for the rest the service names the conversation from its id.
-            conversation_id=conversation_id,
-            conversation_title=(chat_context or {}).get("chat_name") or None,
-            skill_store=self.skill_store,  # For execute_skill tool
-            dpc_service=self._service,  # For firewall checks
-        )
-        # Store main event loop so sync tools running in executor threads can schedule
-        # async calls back onto it via asyncio.run_coroutine_threadsafe.
-        ctx.agent_event_loop = asyncio.get_event_loop()
-        self._event_loop = ctx.agent_event_loop
-        ctx._agent = self  # Enable schedule_task and other agent-dependent tools
-        self.tools.set_context(ctx)
-
-        # Use provided task_id or generate one; never use conversation_id as task identity
-        import uuid as _uuid
-        import json as _json
-        event_task_id = task_id or f"chat-{_uuid.uuid4().hex[:8]}"
-        started_at = utc_now_iso()
-
-        # Log task start
-        append_jsonl(self.agent_root / "logs" / "events.jsonl", {
-            "ts": started_at,
-            "type": "task_start",
-            "task_id": event_task_id,
-            "conversation_id": conversation_id,
-            "text_preview": message[:200] if message else "",
-        })
-
-        # The brief this prompt carries is consumed when the first request with it has
-        # been answered, not when the prompt was built: a pre-flight refusal, a guard, a
-        # provider refusal or a Kill before that leaves it for the next turn.
-        def _consume_brief() -> None:
-            try:
-                _mark_morning_brief_consumed(self.memory, _brief_sent)
-            finally:
-                _record_tail()
-
-        # Run LLM loop. The request stands on its local alias from the first round to the
-        # last, so its holder is busy between them too (ADR-044, amendment 2026-11-02, the
-        # card queue, rule 1); the loop moves the hold when a switch lands between rounds.
-        async with card_held_for(local_alias_of(self.llm), "accepted_request",
+        # One accepted_request from the pre-turn check to the loop's last round (ADR-044, amendment
+        # 2026-11-02, the card queue, rule 1): a count that let go sent the loop behind another
+        # alias's waiter, two swaps for a token count. A guard's refusal or a Stop ends it too.
+        async with card_held_for(local_alias_of(getattr(self, "llm", None)), "accepted_request",
                                  agent_id=self.agent_root.name, conversation_id=conversation_id):
+            # On a local engine the prompt is counted by the engine and the window is the one it
+            # reports, not chars/4 against the alias number (ADR-033 amendment, 2026-11-11).
+            _engine = local_engine_of(getattr(self, "llm", None))
+            if _engine is not None and not (stop_event is not None and stop_event.is_set()):
+                _on_engine = await self._measure_on_the_engine(
+                    _engine, messages, conversation_id, stop_event, kill_event)
+                if _on_engine is not None:
+                    _estimated, _ctx_window = _on_engine
+            _real_last = (session_state or {}).get("tokens_after_last_response") or 0
+            if _real_last > _estimated:
+                log.debug(
+                    "Context estimate raised to last real prompt count: %d → %d tokens",
+                    _estimated, _real_last,
+                )
+                _estimated = _real_last
+            _trimmed = cap_info.get("trimmed_sections", [])
+            if _trimmed:
+                log.warning(
+                    "Context trimmed (approaching limit): %s | estimated: %d / %d tokens (%.0f%%)",
+                    _trimmed, _estimated, _ctx_window, _estimated / _ctx_window * 100,
+                )
+            elif _estimated > _ctx_window * 0.8:
+                log.warning(
+                    "Context window >80%% full: estimated %d / %d tokens (%.0f%%)",
+                    _estimated, _ctx_window, _estimated / _ctx_window * 100,
+                )
+            else:
+                log.debug(
+                    "Context size: estimated %d / %d tokens (%.0f%%)",
+                    _estimated, _ctx_window, _estimated / _ctx_window * 100,
+                )
+
+            # Hard block: refuse to call LLM if context window is nearly full.
+            # Without this guard the LLM call hangs silently (AGENT-CTX-1).
+            _reserve = context_reserve_of(_ctx_window)
+            if _ctx_window - _estimated < _reserve:
+                _pct = _estimated / _ctx_window * 100
+                log.error(
+                    "Context window overflow blocked: %d / %d tokens (%.0f%%)",
+                    _estimated, _ctx_window, _pct,
+                )
+                # No model call, so nothing of the previous turn may stand as this
+                # one's: its thinking and tool calls would be saved on this record.
+                # The refusal is the context guard's, a turn ended by a guard.
+                self._last_usage = {}
+                self._last_trace = {"turn_end": "guard"}
+                return (
+                    f"⚠️ Context window full ({_estimated:,} / {_ctx_window:,} tokens, "
+                    f"{_pct:.0f}%). End session to continue."
+                )
+
+            ctx = ToolContext(
+                agent_root=self.agent_root,
+                current_task_id=conversation_id,
+                current_task_type="chat",
+                check_back_depth=check_back_depth,
+                tool_whitelist=allowed_tools,
+                emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None, speed=None: None),
+                firewall=self._firewall,  # For extended sandbox paths
+                conversation_monitor=conversation_monitor,  # For knowledge extraction tool
+                reply_telegram_chat_id=reply_telegram_chat_id,
+                message_source=message_source,
+                # Which memory layers this turn may see (ADR-048); the file tools ask it.
+                turn_class=audience_class,
+                open_layers=layers_open,
+                # Where this run came from, for anything that has to ask a person
+                # something (tier-1 shell approval today). The title is whatever the
+                # caller already resolved — group chats carry it in chat_context;
+                # for the rest the service names the conversation from its id.
+                conversation_id=conversation_id,
+                conversation_title=(chat_context or {}).get("chat_name") or None,
+                skill_store=self.skill_store,  # For execute_skill tool
+                dpc_service=self._service,  # For firewall checks
+            )
+            # Store main event loop so sync tools running in executor threads can schedule
+            # async calls back onto it via asyncio.run_coroutine_threadsafe.
+            ctx.agent_event_loop = asyncio.get_event_loop()
+            self._event_loop = ctx.agent_event_loop
+            ctx._agent = self  # Enable schedule_task and other agent-dependent tools
+            self.tools.set_context(ctx)
+
+            # Use provided task_id or generate one; never use conversation_id as task identity
+            import uuid as _uuid
+            import json as _json
+            event_task_id = task_id or f"chat-{_uuid.uuid4().hex[:8]}"
+            started_at = utc_now_iso()
+
+            # Log task start
+            append_jsonl(self.agent_root / "logs" / "events.jsonl", {
+                "ts": started_at,
+                "type": "task_start",
+                "task_id": event_task_id,
+                "conversation_id": conversation_id,
+                "text_preview": message[:200] if message else "",
+            })
+
+            # The brief this prompt carries is consumed when the first request with it has
+            # been answered, not when the prompt was built: a pre-flight refusal, a guard, a
+            # provider refusal or a Kill before that leaves it for the next turn.
+            def _consume_brief() -> None:
+                try:
+                    _mark_morning_brief_consumed(self.memory, _brief_sent)
+                finally:
+                    _record_tail()
+
+            # Run LLM loop under the turn's hold, so its holder is busy between rounds too; the
+            # loop moves the hold when a switch lands between rounds.
             response, usage, trace = await run_llm_loop(
                 messages=messages,
                 tools=self.tools,
@@ -939,7 +941,8 @@ class DpcAgent:
         first request will report an engine that is really down in its own words).
 
         Asking starts the child if it is not up, which is what the first request does next;
-        so it is asked under the same hold on the card, and a Stop ends the wait. The
+        so it is asked under the turn's own hold on the card, taken by `process` around this
+        check and the loop together, and a Stop ends the wait. The
         window is capped by the agent's own `context_window` when that is lower. The count
         is the messages' text as one request (chat template included); the tool schemas
         that ride with it are not in it, as they were not in the estimate."""
@@ -949,10 +952,8 @@ class DpcAgent:
             return tokens, window
 
         try:
-            async with card_held_for(local_alias_of(self.llm), "accepted_request",
-                                     agent_id=self.agent_root.name, conversation_id=conversation_id):
-                tokens, window = await _chat_unless_killed(
-                    _chat_unless_killed(_ask(), stop_event), kill_event)
+            tokens, window = await _chat_unless_killed(
+                _chat_unless_killed(_ask(), stop_event), kill_event)
         except CallKilled:
             return None  # the Stop is read by the loop's first round
         except Exception as e:
