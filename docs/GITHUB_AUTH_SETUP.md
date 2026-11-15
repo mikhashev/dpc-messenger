@@ -124,7 +124,7 @@ The client can automatically connect to the Hub on startup using a configured de
 ```ini
 [hub]
 # Enable/disable auto-connect on startup
-auto_connect = true  # default: true
+auto_connect = true  # default: false (settings.py)
 
 [oauth]
 # Default provider for auto-connect
@@ -135,7 +135,7 @@ default_provider = github  # options: 'google' or 'github' (default: google)
 
 | Setting | Result |
 |---------|--------|
-| `auto_connect = true` + `default_provider = google` | Auto-connects with Google on startup (default) |
+| `auto_connect = true` + `default_provider = google` | Auto-connects with Google on startup (Google is the default provider) |
 | `auto_connect = true` + `default_provider = github` | Auto-connects with GitHub on startup |
 | `auto_connect = false` | Starts offline; user must click login button manually |
 
@@ -160,14 +160,14 @@ default_provider = github  # options: 'google' or 'github' (default: google)
    - User chooses Google or GitHub via UI buttons
    - Useful for testing or switching between providers
 
-3. **Default (Google):**
+3. **Google with auto-connect:**
    ```ini
    [hub]
    auto_connect = true
    [oauth]
    default_provider = google
    ```
-   - Standard behavior, auto-connects with Google
+   - Auto-connects with Google (the default is `auto_connect = false`: start offline)
 
 **Environment Variable Override:**
 

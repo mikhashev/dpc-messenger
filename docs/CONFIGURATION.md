@@ -1551,13 +1551,13 @@ Each DPC Client device generates a **unique cryptographic identity** on first in
 **Identity Files (stored in `~/.dpc/`):**
 - `node.key` - RSA private key (2048-bit, unique per device)
 - `node.crt` - Self-signed X.509 certificate
-- `node.id` - Node identifier (e.g., `dpc-node-8b066c7f3d7eb627`)
+- `node.id` - Node identifier (`dpc-node-` followed by 32 hex characters)
 
 **How Node ID is Generated:**
 ```
 1. Generate RSA key pair (2048-bit)
 2. Hash public key with SHA256
-3. Node ID = "dpc-node-" + first 16 hex characters of hash
+3. Node ID = "dpc-node-" + first 32 hex characters of hash (dpc_protocol/crypto.py)
 ```
 
 **Key Characteristics:**
@@ -2023,6 +2023,341 @@ For NeuralDeep, `balance` also carries a `quota` block — the vendor's
 403 or other non-2xx and sticky on a 401. See
 [decisions/041, amendment 2026-09-28](decisions/041-openai-compatible-gateway-as-a-dpc-surface.md#d5--api-backed-models-are-shareable-and-the-quota-is-a-financial-control)
 and the glossary's **quota block** / **vendor account** rows.
+
+---
+
+## Firewall rules (`privacy_rules.json`)
+
+This section moved here from `CLAUDE.md` on 2026-11-15. Access control file format
+(`~/.dpc/privacy_rules.json`; a complete example is
+[privacy_rules.example.json](../dpc-client/privacy_rules.example.json)):
+
+```json
+{
+  "hub": {
+    "personal.json:profile.name": "allow",
+    "personal.json:profile.description": "allow"
+  },
+  "blocked_nodes": [],
+  "node_groups": {
+    "friends": ["dpc-node-alice-123", "dpc-node-bob-456"],
+    "trusted": ["dpc-node-charlie-789"]
+  },
+  "groups": {
+    "friends": {
+      "personal.json:profile.*": "allow",
+      "personal.json:knowledge.*": "allow"
+    }
+  },
+  "nodes": {
+    "dpc-node-alice-123": {
+      "personal.json:*": "allow"
+    }
+  },
+  "compute": {
+    "enabled": false,
+    "allow_nodes": [],
+    "allow_groups": [],
+    "allowed_models": []
+  },
+  "transcription": {
+    "enabled": false,
+    "allow_nodes": [],
+    "allow_groups": [],
+    "allowed_models": [],
+    "send_to_nodes": [],
+    "send_to_groups": []
+  },
+  "file_transfer": {
+    "proved_connection": {
+      "file_transfer.allow": "ask",
+      "file_transfer.max_size_mb": 1000,
+      "file_transfer.allowed_mime_types": ["*"]
+    },
+    "groups": {
+      "friends": {"file_transfer.allow": "allow", "file_transfer.max_size_mb": 100}
+    },
+    "nodes": {
+      "dpc-node-alice-123": {"file_transfer.allow": "allow", "file_transfer.allowed_mime_types": ["image/*"]}
+    }
+  },
+  "notifications": {
+    "enabled": true,
+    "show_when_focused": false,
+    "allowed_events": ["message_received", "file_received", "peer_connected"]
+  }
+}
+```
+
+### `blocked_nodes` keeps a node out, and wins over every allow
+
+A node id in it gets no
+session either way: the listener closes it after its key is proved and before HELLO_ACK,
+telling it nothing (as at `max_proved_connections_per_ip`), and nothing dials it, answers
+its Hub offer, relays for it or delivers its gossip. Its group records are kept but not
+relayed and wake nobody. In the DHT (UDP) a packet that names a blocked id as its sender
+is dropped with no reply and changes nothing, nothing is handed out under that id in
+FIND_NODE or FIND_VALUE, and a STORE or a value keyed by it is refused; `block_peer` also
+drops its routing entry (replacement cache included) and any value stored under it.
+**That check is on the id a packet claims, and nothing proves the claim**: DHT messages
+are unsigned, so a block by id stops a client that keeps its id and not one that lies
+about it, until the RPCs are signed (a separate card). The list is written by Block
+(`block_peer`), which also removes
+the node from every group and deletes every other entry in this file that is its id (a key,
+a value or a list item; a sandbox path that merely contains the id stays), and is
+cleared by Unblock (`unblock_peer`), which restores none of that; the editor's Save keeps
+the list on disk and drops any entry that is a blocked id, so a snapshot from before the
+Block puts nothing back. A block names a key, so it does not survive the peer's reinstall. Mike's
+call, 2026-10-31; the DHT part, Mike's call, 2026-11-05. The group side is in
+[GROUP_CHAT.md — Group Management](GROUP_CHAT.md#group-management).
+
+### Transcription has two directions and two permissions
+
+`enabled` / `allow_nodes` /
+`allow_groups` / `allowed_models` govern *serving*: whether a peer may use this node's
+Whisper. `send_to_nodes` / `send_to_groups` govern the opposite — whether this node's own
+audio may leave the machine when local transcription fails and no cloud provider is
+configured, which is when the fallback chain asks a peer (Mike's call, 2026-09-07). They
+are separate because sharing a model with a friend is not consent to hand them your
+microphone. Both send lists default to empty, meaning never; a peer chosen by hand as
+`remote:<node>:<alias>` bypasses them, because choosing it is the consent.
+
+### Who may send this node a file
+
+Files, pasted screenshots and voice alike: decided
+by the first entry that names the sender, allow or deny, with that entry's size and MIME
+limits: its `file_transfer.nodes` entry; else its first group in `node_groups` order that
+has a `file_transfer.groups` entry; else, when this node holds a proved connection with it
+(`p2p_manager.PROVED_CONNECTION_TYPES`, direct TLS), `file_transfer.proved_connection`,
+which an older rules file without the key gets from a code default. **Proved means the
+peer proved the key of its own node id, not that anyone knows it**: an inbound direct
+connection is accepted from any DPC node that reaches the port, so the default of that
+entry is `ask` (allow, 1000 MB, `*` was the first form and was changed after review);
+`allow` with its limits is the owner's opt-in, `deny` refuses, and `ask` is a value of
+this entry alone. A sender none of these decides for, or whose entry says ask, is not
+refused: the offer waits for the user's "allow files from X?", "always allow" writes a
+node entry through the editor's save — with the limits of the `proved_connection` entry,
+which the dialog prints beside the box — and a decline sends FILE_CANCEL with a
+`denial_reason`. For a group file the decision is about the node that sent the offer; its
+author is an unsigned field, so the dialog reads "from X via Y" when they differ and the
+entry is written for Y. An offer that waits for a person has a deadline: after 120 s with
+no answer the receiver refuses it with FILE_CANCEL `no_answer` and drops the download, and
+a sender that has had neither FILE_ACCEPT nor FILE_CANCEL for 180 s frees the upload by
+itself (`OFFER_ANSWER_DEADLINE_S`, `UNANSWERED_UPLOAD_RELEASE_S` in
+`file_transfer_manager.py`, constants and not settings). Mike's call, 2026-10-25.
+
+### Agent tools: `default_enabled` is required (S148)
+
+The canonical default for whether an agent tool is enabled in `privacy_rules.json` lives on `ToolEntry.default_enabled` (single source of truth). When you register a new `ToolEntry` in any `dpc_agent/tools/*.py` module, you **must** pass `default_enabled=True|False` explicitly — there is no derived fallback. `True` = safe-by-default (read-only introspection, sandbox-confined reads, etc.); `False` = opt-in (anything destructive, network-egress, restricted, or that touches user-visible state outside the sandbox). The field defaults to `False` (fail-closed) if omitted, so a forgotten tool will be invisible to agents until the user toggles it on in the UI.
+
+On startup, `firewall.py:_seed_missing_tools_into_rules()` walks the registry and auto-adds any tool absent from `dpc_agent.tools` (global) or each `agent_profiles.<id>.tools` block with the registered `default_enabled`. Existing user values are never overwritten. This eliminates the historical drift where new tools landed in code but stayed invisible until manually added to firewall defaults (AGENT-TOOL-FIREWALL-DEFAULT-DRIFT, closed S148).
+
+### In-app editors
+
+The client provides in-app editors for key configuration files, so files need not be edited
+by hand and the service need not restart.
+
+**Personal Context editor:**
+- **Location**: the **"📚 View Personal Context"** button in the sidebar
+- **Features**: edit mode with live preview; editable Profile fields (name, description);
+  editable AI Instructions (primary instructions, bias mitigation settings); real-time
+  validation; save without restart; changes apply immediately to active sessions
+- **Editable fields**: Profile (name, description, core values); AI Instructions (primary
+  instruction text); Bias Mitigation (multi-perspective analysis, challenge status quo,
+  cultural sensitivity)
+- **Read-only fields**: knowledge topics (managed via the Knowledge Commit system), commit
+  history, metadata (version, timestamps)
+
+**Firewall Rules editor:**
+- **Location**: the **"🛡️ Firewall Rules"** button in the sidebar
+- **Format**: JSON (stored as `~/.dpc/privacy_rules.json`)
+- **UI style**: form-based interface matching the Personal Context editor; native HTML form
+  elements (no Monaco editor)
+- **Features**: tab-based navigation; Edit/Save/Cancel workflow with unsaved changes
+  detection; real-time validation on save; hot-reload — changes apply immediately without
+  restarting the service
+- **Tabs** (as first built; the editor has grown more since, and the screen is the authority):
+  - **Hub Sharing**: control what the Hub can see for discovery
+  - **Node Groups**: define groups of nodes with add/remove functionality
+  - **Inference Sharing**: enable/configure remote inference with checkboxes and textareas
+  - **Peer Permissions**: view per-node and per-group access rules
+- **Validation**: JSON structure; node ID format (`dpc-node-*`); rule values (`allow`,
+  `deny`); compute settings (boolean, lists); node group memberships
+
+**Backend commands** (WebSocket API):
+- `get_personal_context` - Load current personal context
+- `save_personal_context` - Save updated personal context
+- `reload_personal_context` - Reload from disk
+- `get_firewall_rules` - Load current firewall rules as JSON dict
+- `save_firewall_rules` - Save and validate new firewall rules (accepts JSON dict)
+
+**Hot-reload mechanism:**
+- Firewall rules reload automatically when saved via UI
+- Personal context updates propagate to active P2P connections
+- No service restart required for configuration changes
+- WebSocket events notify the UI of successful updates
+
+**Example workflow (Firewall Rules):** open "🛡️ Firewall Rules" → Edit → pick the tab → edit
+with the form elements → Save → the backend validates and applies the rules → they take
+effect immediately for all new requests; a success message shows and the editor leaves edit
+mode after 2 seconds.
+
+**Manual file editing** is still supported: edit the file in an external editor, then use
+"Reload from Disk"; the backend validates before applying and rejects invalid changes with
+error details.
+
+### UI integration pattern for new firewall fields
+
+When adding a UI component that displays data from `privacy_rules.json` (a node groups
+dropdown, a compute settings toggle):
+1. The writable store is `firewallRulesUpdated` in `src/lib/services/providers.ts`, re-exported
+   from `coreService.ts`; a new UI-reactive field gets its store there the same way
+2. `coreService.ts` handles the `firewall_rules_updated` event and sets the store
+3. In the UI component, write a load function with a guard flag (like `aiScopesLoaded` in
+   `ChatPanel.svelte`) to prevent infinite reactive loops
+4. Add a reactive statement that reloads the data when `$firewallRulesUpdated` changes and the
+   connection is active
+5. The UI then stays in sync with `privacy_rules.json` without a page refresh — for example, the
+   AI scopes dropdown reloads immediately after the user saves firewall rules
+
+The pattern is documented in `firewall.py`, `coreService.ts` and `+page.svelte`.
+
+---
+
+## AI providers (`providers.json`)
+
+Configured in `~/.dpc/providers.json`, through the **AI Providers** screen or by hand
+(examples in [`dpc-client/providers.example.json`](../dpc-client/providers.example.json)).
+Implementations are in `dpc-client/core/dpc_client_core/providers/`; `providers/base.py`
+holds `AIProvider`, the base class every provider extends (a conventional base class, not
+an `abc.ABC`; [ADR-002](decisions/002-provider-abc.md)). This list moved here from
+`CLAUDE.md` on 2026-11-15.
+
+- **Ollama** (`ollama_provider.py`): local models (llama3, mistral, qwen, etc.) via the Ollama
+  API; its daemon settings are in [The Ollama daemon's own environment](#the-ollama-daemons-own-environment-not-dpcs-and-dpc-cannot-set-it)
+- **llama-server child** (`llamacpp_server`, `llamacpp_server_provider.py`): local GGUF
+  models served by a `llama-server` process DPC starts and stops itself, supervised by
+  `managers/llama_server_supervisor.py`
+  ([ADR-040](decisions/040-local-inference-second-path-as-a-dpc-owned-llama-server.md))
+- **Strata** (`strata`, `strata_provider.py`): Flash-Next served by a Strata launcher DPC
+  supervises as a second local child (`managers/strata_supervisor.py`), with conversation
+  parking; one local engine holds the card at a time. A call served to a peer parks
+  (checkpointing on) only when the alias's `guest_conversation_cache` is on and the
+  conversation cache has room for it right before the call; otherwise it goes out with
+  checkpointing off
+  ([ADR-044](decisions/044-strata-as-a-second-supervised-local-engine.md), amendment of
+  2026-11-13, which replaced "every peer call is sent with checkpointing off")
+- **OpenAI compatible** (`openai_provider.py`): OpenAI and compatible APIs (OpenAI, LM Studio, etc.)
+- **Anthropic** (`anthropic_provider.py`): Claude models
+- **DeepSeek** (`deepseek` type, `deepseek_provider.py`): pay-per-token V4 models
+  (`deepseek-v4-flash` / `deepseek-v4-pro`) via an OpenAI-compatible endpoint; native
+  pay-per-token cost and account-balance tracking, per-call reasoning-effort control
+- **NeuralDeep** (`neuraldeep` type, `neuraldeep_provider.py`): OpenAI-compatible gateway
+  (qwen3.8/3.6, gpt-oss, gemma-4, kimi) billed in roubles; tools, vision, reasoning, thinking
+  off via the `-noreason` model, RUB cost beside the USD meter and wallet balance from
+  `/v1/limits`. Cloud, opt-in
+- **Z.AI** (`zai` type, `zai_provider.py`): GLM models over the prepaid pay-per-token platform
+  API — one provider, one endpoint; the `zai_coding` type is gone (see [Z.AI](#zai) below)
+- **Gemini** (`gemini_provider.py`): Google Gemini models
+- **GigaChat** (`gigachat_provider.py`): Sber GigaChat models
+- **GitHub Models** (`github_models_provider.py`): retired by GitHub on 2026-07-30; the file
+  stays one release so an old alias loads and fails each call with that message. Not offered
+  in the editor
+- **Remote peer** (`remote_peer_provider.py`): offload inference to a connected peer
+  ([REMOTE_INFERENCE.md](REMOTE_INFERENCE.md))
+- **DPC agent** (`dpc_agent_provider.py`): agent-to-agent inference
+- **Whisper** (`whisper_provider.py`): local transcription-only provider
+
+### Z.AI
+
+> ⚠️ **Untested since the rewrite, and the balance is empty.** This section used to
+> contradict itself: a warning naming a month-long ban, and eight lines below it, praise
+> for the endpoint that caused the ban ("avoids prepaid balance requirements"). Both
+> halves are replaced. The code now speaks only to the prepaid platform API, but no live
+> call has been made through it — the platform balance read $0.00 on 2026-08-23 and
+> `ZAI_API_KEY` is unset — so the paths below are verified against the vendor's docs and
+> the test suite, not against a response. Tested providers remain Ollama, Anthropic and
+> DeepSeek.
+
+**Which endpoint, and why it is not a preference.** Z.AI sells two things through one
+account: the **GLM Coding Plan**, a flat-fee subscription, and the **open platform API**,
+prepaid and billed per token. The Coding Plan reaches the models through three base URLs
+— `api/anthropic`, `api/coding/paas/v4` and `api/v1` — and the vendor limits it to a
+published list of tools:
+
+> "The GLM Coding Plan is limited to use within the following officially supported tools
+> and product environments; users may not use their subscription benefits for tools or
+> scenarios outside of this scope."
+> — [docs.z.ai/devpack/tool/others](https://docs.z.ai/devpack/tool/others), read 2026-08-23
+
+That list holds 19 products (16 coding agents plus OpenClaw, Hermes Agent and
+SillyTavern), as read on 2026-08-23. D-PC Messenger is not one of them, and reaching the
+Coding Plan from here is what got this account banned for a month. The same account
+carries the owner's ZCode subscription, which *is* on the list — so his own use is
+legitimate and ours is what puts it at risk. The usage policy counts: "Accounts with more
+than three violations may be banned."
+
+`ZaiProvider` therefore **raises at construction** on any of the three subscription URLs
+rather than warning, and a 1313 Fair-Usage code — which should be unreachable on the paid
+API — is logged at ERROR as a canary rather than retried.
+
+**Implementation.** The `zai` provider type talks to
+`https://api.z.ai/api/paas/v4` with the **OpenAI** SDK (`AsyncOpenAI`), converting
+Anthropic message and tool shapes on both sides because the agent layer speaks Anthropic.
+All four call paths — plain, stream, tools, vision — record usage; the stream sends
+`stream_options: {include_usage: true}` and reads the usage-only chunk, which arrives with
+an empty `choices`.
+
+**Installation:** nothing extra — `uv sync` in `dpc-client/core`; the openai package is
+already included.
+
+**Configuration:**
+1. Top up the prepaid balance at [z.ai/manage-apikey/billing](https://z.ai/manage-apikey/billing)
+   — auto-recharge is off by default, and the service is suspended when the balance runs out
+2. Get an API key from [docs.z.ai](https://docs.z.ai)
+3. Set the environment variable:
+   ```bash
+   export ZAI_API_KEY="your_key_here"
+   ```
+4. Add to `~/.dpc/providers.json`:
+   ```json
+   {
+     "alias": "zai_glm47",
+     "type": "zai",
+     "model": "glm-4.7",
+     "api_key_env": "ZAI_API_KEY",
+     "base_url": "https://api.z.ai/api/paas/v4",
+     "context_window": 128000
+   }
+   ```
+
+**Available models** (as read 2026-08-23):
+- **Text:** `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.7-flashx`, `glm-4.7-flash` (free), `glm-4.6`, `glm-4.5`, `glm-4.5-x`, `glm-4.5-air`, `glm-4.5-airx`, `glm-4.5-flash` (free), `glm-4-32b-0414-128k`
+- **Vision:** `glm-5v-turbo`, `glm-4.6v`, `glm-4.6v-flashx`, `glm-4.6v-flash` (free), `glm-4.5v`, `glm-ocr`
+
+**Pricing** (USD per 1M tokens, input / cached input / output, from
+[docs.z.ai/guides/overview/pricing](https://docs.z.ai/guides/overview/pricing), 2026-08-23):
+
+| Model | Input | Cached | Output |
+|---|---|---|---|
+| GLM-5.3 / 5.2 / 5.1 | $1.4 | $0.26 | $4.4 |
+| GLM-5 | $1.0 | $0.2 | $3.2 |
+| GLM-4.7 / 4.6 / 4.5 | $0.6 | $0.11 | $2.2 |
+| GLM-4.5-Air | $0.2 | $0.03 | $1.1 |
+| GLM-4.7-FlashX | $0.07 | $0.01 | $0.4 |
+| GLM-4.7-Flash, GLM-4.5-Flash | free | free | free |
+
+The full table lives in `dpc_agent/pricing.py` (`ZAI_RATES`), which is what the cost meter
+reads. DeepSeek's doubled peak hours do **not** apply to these rates — both vendors share
+one rate table and `_peak_applies` keeps the windows with the vendor that has them.
+
+**Rate limits:**
+Concurrency-based, not token-based — GLM-4.7: 2, GLM-4.6: 3, GLM-4.5: 10 concurrent
+requests. Read from the docs during the Coding Plan era and **not re-verified**: the
+platform's live limits page (`z.ai/manage-apikey/rate-limits`) is behind a login. The
+numbers survive in `dpc_agent/budget.py` and are only reached by an agent explicitly
+configured `billing_model = subscription`; a z.ai agent belongs in `pay_per_use`, where
+dollars are tracked instead.
 
 ---
 

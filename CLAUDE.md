@@ -55,1609 +55,185 @@ the gitignored layer only (`docs/BACKLOG_FORMAT.md` §6; the commit hook refuses
 
 ## Project Overview
 
-**D-PC Messenger** is a privacy-first, peer-to-peer messaging platform enabling collaborative AI intelligence through secure sharing of personal contexts. The project implements a novel "transactional communication" paradigm with end-to-end encryption and no server-stored messages.
-
-**Architecture:** Multi-package monorepo with Python backend services and Tauri + SvelteKit desktop frontend.
-
----
-
-## Repository Structure
+**D-PC Messenger** is a privacy-first, peer-to-peer messaging platform for collaborative AI
+through secure sharing of personal contexts: "transactional communication", end-to-end
+encryption, no server-stored messages. A multi-package monorepo: Python backend services and
+a Tauri + SvelteKit desktop frontend. Why: [VISION.md](VISION.md); what next: [ROADMAP.md](ROADMAP.md).
 
 ```
 dpc-messenger/
 ├── dpc-protocol/         # Shared protocol library (LGPL v3)
 ├── dpc-client/
-│   ├── core/             # Python backend service
-│   └── ui/               # Tauri + SvelteKit frontend
+│   ├── core/             # Python backend service (GPL v3)
+│   └── ui/               # Tauri + SvelteKit frontend (GPL v3)
 ├── dpc-hub/              # Federation Hub server (AGPL v3)
-├── specs/                # Protocol specifications
+├── specs/                # Protocol specifications (CC0)
 └── docs/                 # Documentation
 ```
 
----
+Licences per component: [LICENSING.md](LICENSING.md) is authoritative; the root `LICENSE` is
+the GPL v3 text GitHub shows.
+
+## Architecture in one screen
+
+The full inventory is [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); these are the facts needed
+on every task.
+
+- **Backend** `dpc-client/core/dpc_client_core/`: `service.py` (CoreService) owns the
+  lifecycle and wires coordinators (`inference_orchestrator.py`, `context_coordinator.py`,
+  `p2p_coordinator.py`, `coordinators/`) to managers (`p2p_manager.py`, `managers/`).
+  Incoming P2P commands go through `message_router.py` to `message_handlers/`. AI providers
+  are in `providers/` behind `llm_manager.py`; the embedded agent is `dpc_agent/` (tools in
+  `dpc_agent/tools/`); access control is `firewall.py`; settings `settings.py`. All I/O is
+  asyncio.
+- **UI** `dpc-client/ui`: Tauri 2 + SvelteKit 5 (runes). It talks to the backend over a
+  WebSocket on localhost:9999 (`local_api.py` ↔ `src/lib/coreService.ts`); domain logic is in
+  `src/lib/panels/` and `src/lib/services/`.
+- **Hub** `dpc-hub`: optional FastAPI + PostgreSQL server for OAuth login and WebRTC
+  signalling only — never message routing or storage. It holds one device per user account
+  ([CONFIGURATION.md](docs/CONFIGURATION.md#device-identity-and-multi-device-considerations)).
+- **Protocol** `dpc-protocol`: node identity and certificates, DPTP framing, the Personal
+  Context Model, knowledge commits.
+- **DPTP**: a 10-byte ASCII length header + JSON `{"command": "...", "payload": {...}}`;
+  every command is in [specs/dptp_v1.md](specs/dptp_v1.md).
+- **Connections**: six tiers tried in order — IPv6 direct, IPv4 direct TLS, Hub WebRTC, UDP
+  hole punching (off by default), volunteer relay, gossip store-and-forward
+  ([ARCHITECTURE.md](docs/ARCHITECTURE.md#connection-tiers-6-tier-fallback-hierarchy)).
+- **Node id**: `dpc-node-` + the first 32 hex characters of the SHA256 of the RSA public key;
+  identity files `~/.dpc/node.{key,crt,id}`.
+- **Config** under `~/.dpc/` (`C:\Users\<user>\.dpc\` on Windows): `config.ini` (overridden by
+  `DPC_<SECTION>_<KEY>` environment variables), `providers.json`, `privacy_rules.json`,
+  `personal.json`, `device_context.json` (re-collected in the background on every start),
+  received files in `conversations/{peer_id}/files/`, logs in `logs/dpc-client.log`.
+- **Cross-platform**: code runs on Windows, Linux and macOS — `pathlib.Path` for paths; no
+  signal handlers on Windows (KeyboardInterrupt); check a library on each platform before
+  suggesting it ([ARCHITECTURE.md](docs/ARCHITECTURE.md#cross-platform-compatibility)).
 
 ## Common Commands
 
-### Client Development
-
-**Backend (Python):**
+**Client backend:**
 ```bash
 cd dpc-client/core
-uv sync                           # Install dependencies (default, no extras)
-uv run python run_service.py      # Run backend service (ports 8888, 9999)
-uv run pytest                     # Run tests
-uv run pytest --cov=dpc_client_core  # Run with coverage
+uv sync --all-extras              # install dependencies with every extra (see the rule below)
+uv run python run_service.py      # backend service (ports 8888 P2P, 9999 UI WebSocket)
+uv run pytest                     # tests; --cov=dpc_client_core for coverage
 ```
 
-> ⚠️ **`uv sync` is declarative, not additive.** It makes the environment match
-> exactly what the command asks for, so a bare `uv sync` **uninstalls** every
-> optional extra installed earlier — `browser` (camoufox, playwright),
-> `graph-ner` (gliner), `graph-grafeo` (grafeo), `pdf` (pypdfium2), `voice-memory` (torch, transformers,
-> sentence-transformers, faiss, librosa: local Whisper voice and memory search),
-> `mlx` (Apple Silicon only).
-> Re-syncing an environment that uses extras asks the package rather than a
-> memory:
->
-> ```bash
-> uv sync --all-extras
-> ```
->
-> This replaced a hand-written list of `--extra` flags on 2026-09-18. The list
-> had fallen behind `pyproject.toml` — it named three extras where six were
-> declared, so running it as written removed `pypdfium2` and took document
-> reading away in silence. `--all-extras` cannot fall behind, and it is safe on
-> every platform only because **each extra carries its own platform markers**:
-> add one without them and this command breaks on an untested OS.
->
-> The same applies to `uv sync --extra X` on its own: it keeps `X` and drops the
-> others. Check with `uv sync --dry-run` before running it on a live environment
-> — it prints exactly what would be uninstalled. An extra that is not declared
-> is not ignored: uv refuses with `Extra \`X\` is not defined`.
->
-> **To add one extra without touching the rest, pass `--inexact`** — it leaves
-> alone anything the command did not name: `uv sync --extra pdf --inexact`.
-> Measured 2026-09-02 on this machine: the same line without it would have
-> uninstalled 17 packages. Repeat the full list only when the environment is
-> meant to become exactly what the line says, because `--inexact` also keeps
-> packages a dependency change was supposed to remove.
+> ⚠️ **`uv sync` is declarative, not additive.** A bare `uv sync` uninstalls every optional
+> extra installed earlier (`browser`, `graph-ner`, `graph-grafeo`, `pdf`, `voice-memory`,
+> `mlx`), and `uv sync --extra X` keeps X and drops the rest. Re-sync with
+> `uv sync --all-extras`; add one extra without touching the others with
+> `uv sync --extra X --inexact`; check first with `uv sync --dry-run`, which prints what would
+> be uninstalled. `--all-extras` is safe on every OS only because **each extra carries its own
+> platform markers** — add one without them and the command breaks on an untested platform.
+> Never reach for `uv sync --reinstall`: it drops every extra not named on the line. Extras and their history: [QUICK_START.md](QUICK_START.md#optional-features).
 
-**Platform-Specific Dependencies (macOS Apple Silicon):**
-
-The client supports GPU-accelerated Whisper transcription on Apple Silicon (M1/M2/M3/M4) via MLX, but this is **optional** and not installed by default.
-
-```bash
-cd dpc-client/core
-
-# Install without MLX (default, lightweight)
-uv sync
-
-# Install with MLX support (enables GPU-accelerated offline transcription)
-uv sync --extra mlx --inexact
-```
-
-> These two are alternatives, not steps — and `--extra mlx` alone drops any
-> other extras (see the `uv sync` warning above). On a machine that also uses
-> `browser`/`graph-ner`/`pdf`/`voice-memory`, take them all at once with `uv sync --all-extras`:
-> `mlx` carries `sys_platform == 'darwin' and platform_machine == 'arm64'`, so
-> the same command installs it on Apple Silicon and skips it everywhere else.
-
-**Technical Details:**
-- **Dependencies**: `mlx>=0.4.0`, `mlx-whisper>=0.2.0`
-- **Platform Markers**: `sys_platform == 'darwin' and platform_machine == 'arm64'`
-- **Size Impact**: MLX packages add ~500MB to installation
-- **Defined In**: `[project.optional-dependencies] mlx = ["mlx", "mlx-whisper"]`
-- **Graceful Fallback**: If MLX not installed, client uses OpenAI-compatible API or skips transcription
-- **Cross-Platform Safety**: `--extra mlx` flag is safely ignored on Windows/Linux (platform markers prevent installation)
-
-**Why Optional?**
-- Keeps default installation lightweight (~200MB vs ~700MB with MLX)
-- Not all users need offline transcription (can use cloud-based Whisper via OpenAI API)
-- Users can add MLX support later without reinstalling other dependencies
-
-**Frontend (Tauri + SvelteKit):**
+**Frontend:**
 ```bash
 cd dpc-client/ui
-npm install                       # Install dependencies
-npm run dev                       # Vite dev server only (port 1420)
-npm run tauri dev                 # Full Tauri development mode
-npm run build                     # Build frontend
-npm run tauri build               # Build production desktop app
+npm install
+npm run tauri dev                 # full app; `npm run dev` is the Vite server only (port 1420)
 npm run check                     # TypeScript type checking
+npm run build                     # frontend; `npm run tauri build` for the desktop app
 ```
 
-**Build Outputs:**
-- Windows: `dpc-client/ui/src-tauri/target/release/dpc-messenger.exe`
-- Installers: `dpc-client/ui/src-tauri/target/release/bundle/`
-
-### Hub Development
-
+**Hub** (optional; direct TLS works without it):
 ```bash
 cd dpc-hub
-docker-compose up -d              # Start PostgreSQL
-cp .env.example .env              # Configure environment
-uv sync                           # Install dependencies
-uv run alembic upgrade head       # Run database migrations
-uv run uvicorn dpc_hub.main:app --reload  # Start dev server
-
-# Database migrations
-uv run alembic revision --autogenerate -m "description"  # Create migration
-uv run alembic upgrade head       # Apply migrations
-uv run alembic downgrade -1       # Rollback last migration
-
-# Testing and linting
-uv run pytest                     # Run tests
-uv run pytest --cov=dpc_hub       # Run with coverage
-uv run black dpc_hub/             # Format code
-uv run flake8 dpc_hub/            # Lint
-uv run mypy dpc_hub/              # Type checking
+docker-compose up -d && cp .env.example .env && uv sync
+uv run alembic upgrade head       # migrations; new one: alembic revision --autogenerate -m "..."
+uv run uvicorn dpc_hub.main:app --reload
+uv run pytest -v --cov=dpc_hub    # also: black, flake8, mypy on dpc_hub/
 ```
+Test every migration as upgrade head → downgrade -1 → upgrade head. OAuth credentials:
+[dpc-hub/README.md](dpc-hub/README.md), [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md);
+the client starts offline by default (`[hub] auto_connect = false`).
 
-### Protocol Library
+**Protocol library:** `cd dpc-protocol && uv sync && uv run pytest`.
+
+**Full stack locally:** Hub (optional), backend and `npm run tauri dev` in three terminals
+([QUICK_START.md](QUICK_START.md)).
+
+## Testing
 
 ```bash
-cd dpc-protocol
-uv sync                           # Install dependencies
-uv run pytest                     # Run tests
+cd dpc-client/core
+uv run pytest -v
+uv run pytest tests/test_local_api.py   # one file
 ```
 
-### OAuth Configuration (Hub)
-
-The Hub supports multiple OAuth providers for authentication:
-
-**Supported Providers:**
-- **Google OAuth** (required) - Primary authentication provider
-- **GitHub OAuth** (optional) - Developer-friendly alternative
-
-**Setup:**
-1. Copy `.env.example` to `.env` in `dpc-hub/`
-2. Add OAuth credentials:
-   ```bash
-   # Google OAuth (required)
-   GOOGLE_CLIENT_ID="your_google_client_id"
-   GOOGLE_CLIENT_SECRET="your_google_client_secret"
-
-   # GitHub OAuth (optional)
-   GITHUB_CLIENT_ID="your_github_client_id"
-   GITHUB_CLIENT_SECRET="your_github_client_secret"
-   ```
-
-**Creating OAuth Apps:**
-- **Google**: [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
-  - Callback URL: `http://localhost:8000/auth/google/callback` (dev)
-- **GitHub**: [GitHub Developer Settings](https://github.com/settings/developers)
-  - Callback URL: `http://localhost:8000/auth/github/callback` (dev)
-
-**Client Usage (Backend):**
-```python
-# Login with Google (default)
-await hub_client.login(provider="google")
-
-# Login with GitHub
-await hub_client.login(provider="github")
-```
-
-**Client UI:**
-The UI displays two separate login buttons in the sidebar:
-- **Google** button (blue) - Primary authentication
-- **GitHub** button (black) - Alternative authentication
-
-Users can choose their preferred provider before connecting to the Hub.
-
-**Provider Switching:**
-Users can authenticate with either provider using the same email. The Hub automatically updates the account's provider field to reflect the most recently used authentication method. No data is lost when switching providers.
-
-**Configuration (Optional):**
-Set OAuth preferences in `~/.dpc/config.ini`:
-```ini
-[hub]
-auto_connect = false  # Auto-connect to Hub on startup (default: false)
-
-[oauth]
-default_provider = github  # Provider for auto-connect: 'google' or 'github' (default: google)
-```
-
-**Auto-Connect Behavior:**
-- When `auto_connect = true`: Client automatically connects to Hub on startup using `default_provider`
-- When `auto_connect = false`: Client starts in offline mode; users must click a login button manually
-- Default: auto-connect is **off** (`auto_connect = false`, `settings.py`) — client starts offline; users click a login button. Set `auto_connect = true` to enable startup auto-connect.
-
-**Example Configurations:**
-```ini
-# Auto-connect with GitHub
-[hub]
-auto_connect = true
-[oauth]
-default_provider = github
-
-# Start offline, require manual login
-[hub]
-auto_connect = false
-```
-
-See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub setup instructions.
-
----
-
-## Architecture Overview
-
-### Connection Types (6-Tier Fallback Hierarchy - v0.10.1)
-
-D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near-universal P2P connectivity. The ConnectionOrchestrator tries each strategy in priority order until one succeeds, making the Hub completely optional.
-
-**Priority 1: IPv6 Direct** (40%+ networks, no NAT)
-   - Direct connection over IPv6 (no NAT required)
-   - Lowest latency, best performance
-   - Server listens on port 8888 (default)
-   - **IPv6 URIs**: Use bracket notation: `dpc://[2001:db8::1]:8888?node_id=...`
-   - Timeout: 60s (increased in v0.10.1 for mobile/CGNAT support)
-   - Location: `connection_strategies/ipv6_direct.py`
-
-**Priority 2: IPv4 Direct** (Local network / port forward)
-   - Direct TLS connection over IPv4
-   - Uses self-signed X.509 certificates for node identity
-   - **Dual-stack support**: IPv4 and IPv6
-   - **Configuration**: Set `listen_host` in config.ini:
-     - `dual` (default) - Listens on both IPv4 and IPv6
-     - `0.0.0.0` - IPv4 only
-     - `::` - IPv6 only
-   - Timeout: 60s (increased in v0.10.1 for mobile/CGNAT support)
-   - Location: `connection_strategies/ipv4_direct.py`, `p2p_manager.py`
-
-**Priority 3: Hub WebRTC** (When Hub available)
-   - NAT traversal via STUN/TURN (existing infrastructure)
-   - Hub provides signaling only (no message routing)
-   - Uses aiortc library
-   - Timeout: 30s (configurable via connection.webrtc_timeout)
-   - Location: `connection_strategies/hub_webrtc.py`, `webrtc_peer.py`
-
-**Priority 4: UDP Hole Punching** (60-70% NAT, Hub-independent)
-   - DHT-coordinated simultaneous UDP send (birthday paradox)
-   - **DTLS 1.2 encryption** (v0.10.1+) - End-to-end encrypted UDP transport
-   - STUN-like endpoint discovery via DHT peers
-   - NAT type detection (cone vs symmetric)
-   - Success rate: 60-70% for cone NAT (fails gracefully for symmetric NAT)
-   - Timeout: 15s
-   - **Status**: Experimental (PoC) with DTLS encryption; **disabled by default** (`enable_hole_punching = false` in `settings.py`) — opt-in
-   - Location: `connection_strategies/udp_hole_punch.py`, `managers/hole_punch_manager.py`
-   - Testing: See `archive/docs/MANUAL_TESTING_GUIDE.md` (archived)
-
-**Priority 5: Volunteer Relay** (100% NAT coverage, Hub-independent)
-   - Relay discovery via DHT quality scoring (uptime 50%, capacity 30%, latency 20%)
-   - End-to-end encryption maintained (relay sees only encrypted payloads)
-   - Privacy-preserving: relay cannot decrypt message content
-   - Optional server mode: volunteer as relay (opt-in via `relay.volunteer = true`)
-   - Timeout: 20s
-   - Location: `connection_strategies/volunteer_relay.py`, `managers/relay_manager.py`, `transports/relayed_connection.py`
-
-**Priority 6: Gossip Store-and-Forward** (Disaster fallback, eventual delivery)
-   - Multi-hop epidemic routing (fanout=3 random peers)
-   - **End-to-end hybrid encryption (AES-GCM + RSA-OAEP)** (v0.10.2)
-     - No payload size limit (replaces ~190 byte RSA limit)
-     - AES-256-GCM for data encryption (authenticated, detects tampering)
-     - RSA-OAEP for encrypting AES keys
-     - Forward secrecy: random AES key per message
-   - **DHT certificate discovery** (v0.10.2)
-     - Certificates published to DHT on startup
-     - Fallback: cache → active connections → DHT query
-     - Key format: `cert:<node_id>`
-   - Vector clocks for distributed causality tracking
-   - Anti-entropy sync (5-minute interval for message reconciliation)
-   - TTL: 24 hours, max hops: 5
-   - Use cases: offline messaging, infrastructure outages, disaster scenarios
-   - Not real-time (eventual delivery guarantee)
-   - Timeout: 5s (before falling back to gossip)
-   - **Status**: Experimental (PoC) (v0.10.2)
-   - Location: `connection_strategies/gossip_store_forward.py`, `managers/gossip_manager.py`, `transports/gossip_connection.py`
-
-**Key Benefits:**
-- **Hub-optional architecture**: System works without Hub using direct, DHT, relay, gossip fallback
-- **Near-universal connectivity**: 6 fallback layers ensure connections in almost any network condition
-- **Disaster resilience**: Gossip protocol provides eventual delivery during infrastructure outages
-- **Zero infrastructure cost**: Volunteer relays replace expensive TURN servers
-
-**Configuration:** See `settings.py` for `[connection]`, `[hole_punch]`, `[relay]`, `[gossip]` config sections
-
-### Key Components
-
-**Client Backend (`dpc-client/core`):**
-
-**Service Layer:**
-- `service.py` - Main orchestrator (CoreService)
-  - Lifecycle management (startup/shutdown)
-  - Component initialization
-  - Configuration loading
-  - WebSocket API server coordination
-  - MessageRouter integration for command dispatch
-
-**Extracted Domain Services (refactor/grand, v0.21.0):**
-- `voice_service.py` - Whisper model lifecycle and voice message handling
-- `knowledge_service.py` - Knowledge commit flows (wired to ConversationMonitor via callbacks)
-- `telegram_service.py` - Telegram bot initialization glue (managers in `managers/`)
-- `agent_service.py` - Agent lifecycle wiring (LLMManager, AgentManager, KnowledgeService)
-
-**Message Routing System (v0.8.0+):**
-- `message_router.py` - Command dispatcher for P2P messages
-  - Routes incoming messages to appropriate handlers
-  - Handler registry pattern for extensibility
-  - Supports handler registration/unregistration at runtime
-- `message_handlers/hello_handler.py` - HELLO command (initial handshake)
-- `message_handlers/text_handler.py` - SEND_TEXT command (chat messages)
-- `message_handlers/context_handler.py` - Context request/response handlers
-  - RequestContextHandler - REQUEST_CONTEXT requests
-  - ContextResponseHandler - CONTEXT_RESPONSE handling
-  - RequestDeviceContextHandler - REQUEST_DEVICE_CONTEXT requests
-  - DeviceContextResponseHandler - DEVICE_CONTEXT_RESPONSE handling
-- `message_handlers/inference_handler.py` - AI inference handlers
-  - RemoteInferenceRequestHandler - REMOTE_INFERENCE_REQUEST
-  - RemoteInferenceResponseHandler - REMOTE_INFERENCE_RESPONSE
-- `message_handlers/provider_handler.py` - Provider discovery handlers
-  - GetProvidersHandler - GET_PROVIDERS requests
-  - ProvidersResponseHandler - PROVIDERS_RESPONSE handling
-- `message_handlers/knowledge_handler.py` - Knowledge commit handlers
-  - ContextUpdatedHandler - CONTEXT_UPDATED broadcast
-  - ProposeKnowledgeCommitHandler - PROPOSE_KNOWLEDGE_COMMIT
-  - VoteKnowledgeCommitHandler - VOTE_KNOWLEDGE_COMMIT
-  - KnowledgeCommitResultHandler - KNOWLEDGE_COMMIT_RESULT
-- `message_handlers/gossip_handler.py` - Gossip protocol handlers
-  - GossipSyncHandler - GOSSIP_SYNC anti-entropy reconciliation
-  - GossipMessageHandler - GOSSIP_MESSAGE epidemic routing (v0.10.2 target)
-- `message_handlers/group_handler.py` - Group chat message routing
-- `message_handlers/skill_handler.py` - Agent skill invocation requests
-- `message_handlers/relay_register_handler.py` - Relay node registration
-- `message_handlers/relay_message_handler.py` - Relay message forwarding
-- `message_handlers/relay_response_handler.py` - Relay response handling
-- `message_handlers/relay_disconnect_handler.py` - Relay disconnect cleanup
-- `message_handlers/transcription_handler.py` - Transcription request/response
-- `message_handlers/voice_transcription_handler.py` - Voice message transcription sharing
-- File transfer handlers (v0.11.0) — split into individual files:
-  - `message_handlers/file_offer_handler.py` - FILE_OFFER (incoming offer, firewall check, user prompt)
-  - `message_handlers/file_accept_handler.py` - FILE_ACCEPT (start chunked transfer)
-  - `message_handlers/file_chunk_handler.py` - FILE_CHUNK (receive and reassemble chunks)
-  - `message_handlers/file_chunk_retry_handler.py` - FILE_CHUNK_RETRY (retransmit failed chunk)
-  - `message_handlers/file_complete_handler.py` - FILE_COMPLETE (verify hash, finalize transfer)
-  - `message_handlers/file_cancel_handler.py` - FILE_CANCEL (cleanup on cancellation)
-
-**Coordinators (v0.10.0+):**
-- `connection_orchestrator.py` - 6-tier connection fallback coordinator (v0.10.0)
-  - **Integration Status:** Fully implemented and integrated in CoreService
-  - Tries IPv6, IPv4, WebRTC, hole punch, relay, gossip in priority order
-  - Per-strategy timeout configuration
-  - Connection statistics tracking (success rate, strategy usage)
-  - Dynamic strategy enable/disable
-- `inference_orchestrator.py` - AI inference coordination (local/remote)
-  - Executes queries on local LLM or remote peer
-  - Assembles prompts with contexts and history
-  - Tracks token usage and model metadata
-- `context_coordinator.py` - Context request/response coordination
-  - Manages personal and device context sharing
-  - Applies firewall rules before responding
-  - Tracks pending requests with asyncio.Future
-- `p2p_coordinator.py` - P2P connection lifecycle coordination
-  - Direct TLS connections (via dpc:// URIs)
-  - WebRTC connections (via Hub signaling)
-  - Peer messaging and broadcasting
-- `coordinators/telegram_coordinator.py` - Telegram ↔ DPC message bridge and routing
-- `skill_coordinator.py` - Agent skill discovery, routing, and result delivery
-
-**Embedded Agent System (`dpc_agent/`, v0.18.0+):**
-- `dpc_agent/agent.py` - Core agent class (tool dispatch, memory, task execution)
-- `dpc_agent/loop.py` - Autonomous agent run loop
-- `dpc_agent/memory.py` - Per-agent persistent memory
-- `dpc_agent/sleep_pipeline.py` - Sleep consolidation, morning brief generation
-- `dpc_agent/task_queue.py` - Async task queue with priority scheduling
-- `dpc_agent/budget.py` - Token/compute budget enforcement
-- `dpc_agent/skill_store.py` - Dynamic skill registry and versioning
-- `dpc_agent/tools/` - Agent tool implementations (shell, editor, browser, etc.)
-- See [docs/agent/DPC_AGENT_GUIDE.md](docs/agent/DPC_AGENT_GUIDE.md) for usage
-
-**Retrieval Backend (`dpc_agent/retrieval/`, ADR-024 §1.6, 2026-05-18):**
-
-Composable abstraction over vector + text + fusion channels. Lets the
-graph backend (SQLite / Grafeo via ADR-024 §1.5) and the retrieval
-backend be picked independently per agent.
-
-- `dpc_agent/retrieval/base.py` — `VectorIndex`, `TextIndex`, `HybridFuser`
-  ABCs + `RetrievalBackend` composite dataclass
-- `dpc_agent/retrieval/native.py` — `NativeVectorIndex` / `NativeTextIndex`
-  / `NativeHybridFuser` wrappers over the existing `FaissIndex` +
-  `BM25Index` + `reciprocal_rank_fusion` code (default in production)
-- `dpc_agent/retrieval/grafeo.py` — `GrafeoVectorIndex` /
-  `GrafeoTextIndex` / `GrafeoHybridFuser` using Grafeo native HNSW + BM25
-  (opt-in via config flag)
-- `dpc_agent/retrieval/factory.py` — `make_backend_for_agent(agent_root)`
-  reads `<agent_root>/config.json` `retrieval_*` keys and dispatches.
-  Production call-sites use this helper, never `FaissIndex(...)` directly.
-
-Per-agent config flags (`~/.dpc/agents/<id>/config.json`, all optional):
-- `retrieval_vector`: `"native"` (default) | `"grafeo"`
-- `retrieval_text`: `"native"` (default) | `"grafeo"`
-- `retrieval_fusion`: `"custom"` (default) | `"grafeo"` (currently aliases
-  custom — Grafeo's native `db.hybrid_search` would drop our LAYER_WEIGHTS
-  policy, see ADR-024 §1.6c)
-
-Rollback: remove the keys + restart; FAISS state at
-`<agent_root>/state/memory_index/{vectors.faiss,bm25/}` is untouched.
-
-**Knowledge & Consensus System (v0.9.0+):**
-- `consensus_manager.py` - Multi-party knowledge voting
-  - Devil's advocate mechanism (required dissenter for 3+ participants)
-  - Voting session management with configurable thresholds
-  - Timeout handling and vote aggregation
-  - **Known Issue:** No locking during proposal edits (documented in code)
-- `conversation_monitor.py` - Background knowledge detection
-  - Real-time conversation analysis
-  - AI-powered knowledge extraction
-  - Configurable detection threshold
-  - Supports local and remote inference
-
-**Managers:**
-- `p2p_manager.py` - Low-level P2P connection manager (TLS + WebRTC)
-- `managers/agent_manager.py` - Agent lifecycle, task execution, tool dispatch
-- `managers/agent_telegram_bridge.py` - Bridge between agent system and Telegram
-- `managers/group_manager.py` - Group chat membership, history, metadata
-- `managers/instruction_manager.py` - Per-peer custom AI instruction management
-- `managers/prompt_manager.py` - Prompt template assembly and caching
-- `managers/token_count_manager.py` - Token counting and context window tracking
-- `managers/hole_punch_manager.py` - UDP hole punching coordinator (v0.10.0)
-  - DHT-based endpoint discovery (reflexive address from 3 random DHT peers)
-  - NAT type detection (cone vs symmetric)
-  - Coordinated simultaneous UDP send
-- `managers/relay_manager.py` - Volunteer relay management (v0.10.0)
-  - Client mode: find_relay() via DHT, quality scoring, connect_via_relay()
-  - Server mode: announce_relay_availability(), handle_relay_register(), handle_relay_message()
-  - Privacy-preserving (forwards encrypted payloads only)
-- `managers/gossip_manager.py` - Epidemic gossip protocol (v0.10.0)
-  - send_gossip(), handle_gossip_message(), _forward_message() (fanout=3)
-  - Anti-entropy sync loop (5-minute interval, vector clock reconciliation)
-  - Message deduplication, TTL enforcement
-- `managers/file_transfer_manager.py` - File transfer coordination (v0.11.0)
-  - Chunked file transfer (64KB chunks, SHA256 verification; the file is read once for both digests)
-  - Receiving writes chunks at their offsets into a `.tmp` file beside the final one, renamed on completion; after 30 s with no chunk the receiver re-asks up to 64 missing indices, and after 3 empty rounds cancels with `missing_chunks`
-  - Active transfer tracking (upload/download progress)
-  - Background process for large files (>50MB)
-  - Hash verification and cleanup on cancel/error
-  - Per-peer storage: `~/.dpc/conversations/{peer_id}/files/`
-- `webrtc_peer.py` - WebRTC peer wrapper (aiortc)
-- `hub_client.py` - Federation Hub communication (OAuth, WebSocket signaling)
-- `llm_manager.py` - AI provider registry and routing (implementations in `providers/`)
-  - `providers/base.py` - `AIProvider`, the base class every provider extends (a conventional base class, not an `abc.ABC`)
-  - `providers/llamacpp_server_provider.py` (provider type `llamacpp_server`) - DPC-owned `llama-server` child, supervised by `managers/llama_server_supervisor.py` (ADR-040)
-  - `providers/strata_provider.py` (provider type `strata`) - Strata launcher as a second supervised local child, `managers/strata_supervisor.py`; one local engine holds the card at a time (ADR-044)
-  - `providers/ollama_provider.py`, `openai_provider.py`, `anthropic_provider.py`, `zai_provider.py`
-  - `providers/gemini_provider.py`, `gigachat_provider.py`
-  - `providers/github_models_provider.py` - retired stub (GitHub Models ended 2026-07-30): an old alias loads and each call says so; no longer offered in the editor
-  - `providers/whisper_provider.py` - local Whisper transcription
-  - `providers/remote_peer_provider.py` - remote inference over P2P
-  - `providers/dpc_agent_provider.py` - agent-to-agent inference
-- `firewall.py` - Context access control system
-- `local_api.py` - WebSocket API for UI (localhost:9999)
-- `settings.py` - Configuration management
-- `device_context_collector.py` - Device/system info collector (generates device_context.json)
-
-**Caching Systems:**
-- `context_cache.py` - In-memory personal/device context cache
-- `peer_cache.py` - Known peers cache (persisted to known_peers.json)
-- `token_cache.py` - OAuth token cache for offline mode
-- `connection_status.py` - Connection state tracking with operation mode (online/offline/degraded)
-
-### Session & Chat Management (v0.11.3+)
-
-**Session Manager:**
-- `session_manager.py` - Collaborative session management
-  - Mutual approval voting system for session resets
-  - Multi-party session coordination
-  - Prevents accidental data loss in group conversations
-  - Tracks voting state and participant approvals
-
-**Message Handlers:**
-- `message_handlers/session_handler.py` - Session protocol handlers
-  - NEW_SESSION_PROPOSAL - Initiate session reset vote
-  - NEW_SESSION_VOTE - Cast approval/rejection vote
-  - NEW_SESSION_RESULT - Distribute voting results
-  - Handles history clearing for all participants
-
-- `message_handlers/chat_history_handlers.py` - Chat history synchronization
-  - CHAT_HISTORY_REQUEST - Request peer's conversation history
-  - CHAT_HISTORY_RESPONSE - Send conversation history to peer
-  - Automatic sync on reconnect
-  - Backend→frontend sync for page refresh scenarios
-  - See [CHAT_HISTORY_SYNC_DESIGN.md](archive/docs/CHAT_HISTORY_SYNC_DESIGN.md) for full specification (archived)
-
-**Frontend Components:**
-- `NewSessionDialog.svelte` - UI for session reset voting
-  - Displays vote status from all participants
-  - Real-time vote tracking
-  - Approval/rejection actions
-
-**Client Frontend (`dpc-client/ui`):**
-- Built with SvelteKit 5.0 + Tauri 2.x
-- Entry point: `src/routes/+page.svelte` (layout shell; domain logic in `src/lib/panels/`)
-- Backend communication: `src/lib/coreService.ts` (WebSocket client, thin bootstrapper)
-- SSG mode with adapter-static (SPA fallback)
-- **Domain panels** (`src/lib/panels/`, 15 files): ChatPanel, AgentPanel, VoicePanel, GroupPanel, TelegramPanel, KnowledgeEventsPanel, ModelDownloadPanel, HistorySyncPanel, ChatHistorySyncPanel, SessionEventsPanel, MessageRouterPanel, PersistencePanel, AgentManagementPanel, GroupManagementPanel, AddAIChatPanel
-- **Domain services** (`src/lib/services/`, 13 files): messaging.ts, agents.ts, connection.ts, voice.ts, knowledge.ts, telegram.ts, groups.ts, fileTransfer.ts, session.ts, providers.ts
-
-**Notification System (v0.11.3+):**
-- `notificationService.ts` - Native desktop notifications
-  - OS permission request integration
-  - Window focus tracking
-  - Background event notifications
-  - Tauri integration for platform-native notifications
-  - Firewall-controlled notification settings
-
-**Hub Server (`dpc-hub`):**
-- `main.py` - FastAPI application and routes
-- `auth.py` - OAuth 2.0 + JWT authentication
-- `crypto_validation.py` - Node identity validation
-- `models.py` - SQLAlchemy database models
-- `crud.py` - Database operations
-- `connection_manager.py` - WebSocket signaling manager
-- Database: PostgreSQL with Alembic migrations
-
-**Protocol Library (`dpc-protocol`):**
-- `crypto.py` - Node identity, RSA keys, X.509 certificates
-- `protocol.py` - Message serialization (10-byte header + JSON)
-- `pcm_core.py` - Personal Context Model data structures
-- `knowledge_commit.py` - Knowledge commit data structures and signing
-- `commit_integrity.py` - Commit hash verification and chain integrity
-- `markdown_manager.py` - Markdown rendering utilities
-- See [dpc-protocol/README.md](dpc-protocol/README.md) for comprehensive library documentation
-
-### Message Protocol (DPTP)
-
-Messages use binary framing: 10-byte ASCII length header + JSON payload
-
-**Formal specification:** [specs/dptp_v1.md](specs/dptp_v1.md)
-
-**Example Message Types:**
-```python
-{"command": "HELLO", "payload": {"node_id": "...", "display_name": "..."}}
-{"command": "REQUEST_CONTEXT", "payload": {"request_id": "...", "query": "..."}}
-{"command": "SEND_TEXT", "payload": {"text": "..."}}
-{"command": "AI_QUERY", "payload": {"query": "...", "use_context": [...]}}
-
-# File Transfer (v0.11.0)
-{"command": "FILE_OFFER", "payload": {"transfer_id": "...", "filename": "...", "size_bytes": 1024, "hash": "sha256:...", "mime_type": "..."}}
-{"command": "FILE_ACCEPT", "payload": {"transfer_id": "..."}}
-{"command": "FILE_CHUNK", "payload": {"transfer_id": "...", "chunk_index": 0, "total_chunks": 10, "data": "base64..."}}
-{"command": "FILE_COMPLETE", "payload": {"transfer_id": "...", "hash": "sha256:..."}}
-{"command": "FILE_CANCEL", "payload": {"transfer_id": "...", "reason": "user_cancelled|user_rejected|already_received|no_answer|firewall_denied|hash_mismatch|chunk_verification_failed|missing_chunks|send_error|receive_error", "denial_reason": "optional, with firewall_denied or user_rejected"}}
-
-# Voice Messages (v0.13.0) - Reuses FILE_OFFER with voice_metadata
-{"command": "FILE_OFFER", "payload": {"transfer_id": "...", "filename": "voice_2026-01-04_12-34-56.webm", "size_bytes": 245000, "hash": "sha256:...", "mime_type": "audio/webm", "voice_metadata": {"duration_seconds": 30.5, "sample_rate": 48000, "channels": 1, "codec": "opus", "recorded_at": "2026-01-04T12:34:56Z"}}}
-```
-
-**Voice Messages (v0.13.0-v0.15.0):**
-
-Voice messages use the existing file transfer infrastructure (FILE_OFFER/FILE_CHUNK/FILE_COMPLETE) with additional `voice_metadata` in the payload. Voice files are stored in `~/.dpc/conversations/{peer_id}/files/` and displayed in the chat with audio player controls.
-
-**Recording:**
-- **Format**: WAV (16-bit PCM, 48kHz mono) via Tauri Rust backend (`audio_recorder.rs`)
-- **Cross-platform**:
-  - Windows: Native via Edge WebView2
-  - Linux: Rust cpal library with ALSA/PipeWire support (v0.15.0+)
-  - macOS: Requires Info.plist permissions
-- **Storage**: `~/.dpc/conversations/{peer_id}/files/`
-
-**Transcription:**
-- **Local Whisper**: `LocalWhisperProvider` in `providers/whisper_provider.py`
-- **GPU Acceleration**:
-  - MLX (Apple Silicon M1/M2/M3/M4) - Optional via `uv sync --extra mlx --inexact`
-  - CUDA (NVIDIA GPUs) - Auto-detected
-  - MPS (macOS Metal) - Fallback
-  - CPU - Universal fallback
-- **Features**:
-  - Lazy loading (model loads on first use)
-  - Adaptive batch_size (reduces VRAM for long messages)
-  - VRAM management with `unload_model_async()`
-  - Retroactive transcription (v0.13.1+)
-  - Offline mode with interactive download (v0.13.1+)
-
-**VRAM Management (v0.15.0):**
-- Models unload when auto-transcribe disabled
-- `torch.cuda.empty_cache()` called after unloading
-- Unload-before-load enforced in `providers/whisper_provider.py` — VRAM conflict fixed in Sprint 1
-- See `providers/whisper_provider.py` (`_unload_model`, `unload_model_async`) for implementation
-
-**Voice Metadata Fields:**
-- `duration_seconds` (number): Recording duration in seconds
-- `sample_rate` (integer): Audio sample rate in Hz (e.g., 48000)
-- `channels` (integer): Number of audio channels (1 = mono, 2 = stereo)
-- `codec` (string): Audio codec used (e.g., "wav", "opus")
-- `recorded_at` (string): ISO 8601 timestamp when voice was recorded
-
-**Configuration:**
-```ini
-[voice_messages]
-enabled = true
-max_duration_seconds = 300  # 5 minutes
-max_size_mb = 10
-mime_types = audio/wav,audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg
-```
-
-**Frontend Components:**
-- `VoiceRecorder.svelte` - Recording UI with MediaRecorder/Tauri backend integration
-- `VoicePlayer.svelte` - Audio playback with play/pause, seek, volume, speed control
-- `ChatPanel.svelte` - Renders voice attachments using VoicePlayer
-
-**Backend Commands:**
-- `send_voice_message` (WebSocket) - Send voice message via file transfer
-- `VOICE_TRANSCRIPTION` (DPTP) - Share transcriptions with peers
-
----
-
-**Telegram Bot Integration (v0.14.0+):**
-
-Complete Telegram bot integration for voice transcription and messaging bridging.
-
-**Architecture:**
-- `managers/telegram_manager.py` - Bot lifecycle, whitelist, message sending
-- `coordinators/telegram_coordinator.py` - Message bridge and routing
-- `message_handlers/telegram_handler.py` - Telegram-specific handlers
-
-**Features:**
-- Voice message transcription using local Whisper
-- Two-way messaging bridge (Telegram ↔ DPC)
-- Whitelist-only access control
-- File transfer support (images, documents)
-- Notifications and unread counters
-- Auto-linking to conversations
-
-**Configuration (`~/.dpc/config.ini`):**
-```ini
-[telegram]
-enabled = true
-bot_token = 123456789:ABCdefGHIjklMNOpqrsTUVwxyz
-allowed_chat_ids = ["123456789"]
-transcription_enabled = true
-bridge_to_p2p = false
-```
-
-**See:** [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for complete guide
-
-### Conversation History & Context Inclusion (Phase 7+)
-
-**Overview:**
-D-PC Messenger uses a simple, reliable approach: contexts are included in every message when the checkbox is checked. This ensures information is never lost and gives users direct control over token usage.
-
-**Key Features:**
-- **Full Conversation History**: All user/assistant messages sent with every query
-- **Simple Context Inclusion**: When checkbox checked → contexts always included; unchecked → never included
-- **User Control**: Checkbox directly controls token usage (no hidden optimization)
-- **Visual Status Indicators**: "Updated" badges show when context has changed (for peer cache invalidation)
-- **Hard Limit Enforcement**: Blocks queries at 100% context window usage
-
-**How It Works:**
-
-**First Message in Conversation:**
-```
-[System Instruction]
-
---- CONTEXTUAL DATA ---
-<CONTEXT source="local">
-{personal.json content}
-</CONTEXT>
-<DEVICE_CONTEXT source="local">
-{device_context.json content}
-</DEVICE_CONTEXT>
---- END OF CONTEXTUAL DATA ---
-
---- CONVERSATION HISTORY ---
-USER: What GPU programming frameworks should I use?
---- END OF CONVERSATION HISTORY ---
-```
-
-**Subsequent Messages (checkbox still checked):**
-```
-[System Instruction]
-
---- CONTEXTUAL DATA ---
-<CONTEXT source="local">
-{personal.json content}  ← STILL INCLUDED
-</CONTEXT>
-<DEVICE_CONTEXT source="local">
-{device_context.json content}  ← STILL INCLUDED
-</DEVICE_CONTEXT>
---- END OF CONTEXTUAL DATA ---
-
---- CONVERSATION HISTORY ---
-USER: What GPU programming frameworks should I use?
-ASSISTANT: [previous response about CUDA, OpenCL, etc.]
-USER: Which one is best for my RTX 3060?
---- END OF CONVERSATION HISTORY ---
-```
-
-**When Contexts are Included:**
-- **Checkbox checked**: Contexts included in EVERY message (personal, device, peer)
-- **Checkbox unchecked**: Contexts never included (privacy/token-saving mode)
-- **Simple rule**: Checkbox state = Context inclusion (no hidden optimization)
-
-**What Gets Stored in Conversation History:**
-- **Conversation history stores**: Only USER messages (prompts) and ASSISTANT messages (AI responses)
-- **Context data is NOT stored**: Context data is sent as separate "CONTEXTUAL DATA" section, controlled by checkbox state
-- **Context is ephemeral**: Each message includes context fresh based on current checkbox state
-- **Why this design:**
-  - Gives users per-message control over token usage (context can be large)
-  - Allows privacy control (turn off context for sensitive questions)
-  - Context data can change over time, so it's always sent fresh rather than cached
-  - Conversation history remains lightweight (only prompts and responses)
-
-**Example:**
-- Message 1 (context ON): Sends context + conversation history → AI gets full context
-- Message 2 (context OFF): Sends only conversation history → AI only knows what was said before, not your personal data
-- Message 3 (context ON again): Sends context + conversation history → AI gets fresh context again
-
-This means if you enable context for one message and disable it for the next, the AI will "forget" your personal context details but still remember the conversation flow.
-
-**Backend Implementation:**
-- **ConversationMonitor** tracks:
-  - `message_history` - full conversation (user/assistant messages)
-  - `peer_context_hashes` - per-peer context tracking (for cache invalidation)
-- **CoreService** methods:
-  - `_compute_context_hash()` - SHA256 hashing (for UI badges and peer cache)
-  - `_assemble_final_prompt()` - builds prompt with context (if checkbox checked) + history
-  - `reset_conversation()` - clears history for "New Chat" button
-
-**Frontend Implementation:**
-- **State tracking**:
-  - `currentContextHash` - current hash from backend (updated on save)
-  - `peerContextHashes` - per-peer current hashes
-- **Visual indicators**:
-  - Green "UPDATED" badge on context toggle when hash mismatch detected (peer cache)
-  - Green "UPDATED" badges on peer checkboxes when peer contexts changed
-- **Hard limit UI**:
-  - Textarea/send button disabled at 100% context usage
-  - Placeholder text: "Context window full - End session to continue"
-
-**Events:**
-- `personal_context_updated` - broadcasted when user saves personal context (includes new hash for peer cache invalidation)
-- `peer_context_updated` - broadcasted when peer context change detected (includes node_id, hash)
-
-**Commands:**
-- `reset_conversation(conversation_id)` - clears history
-
-**Rationale for Simplified Approach:**
-- Modern AI models have large context windows (128K+ tokens)
-- 10-message conversation with contexts always included: ~160KB (still << 128K limit)
-- Simple checkbox control is more predictable and reliable than automatic optimization
-- Fixes edge case where context info is "lost" if AI doesn't mention it in response
-- User can uncheck checkbox anytime to save tokens in long conversations
-
-### Node Identity System
-
-- Node IDs: `dpc-node-[32 hex chars]` (SHA256 hash of RSA public key)
-- Cryptographic files stored in `~/.dpc/`:
-  - `node.key` - RSA private key (2048-bit)
-  - `node.crt` - X.509 self-signed certificate
-  - `node.id` - Node identifier
-- Hub validates node identity via certificate verification
-
-**Important Limitation: Single Device Per User**
-
-The current Hub implementation supports **one device per user account** (one device per email address):
-- Each device generates a unique cryptographic identity (`node_id`)
-- Hub database schema: Users table has one `node_id` field per user (not one-to-many)
-- When logging in from a second device, the Hub overwrites the first device's `node_id`
-- This "orphans" the first device from Hub services (WebRTC signaling won't work)
-- Direct P2P (TLS) connections still work without Hub
-
-**Database Schema (dpc-hub/dpc_hub/models.py:15-49):**
-```python
-class User(Base):
-    email = Column(String, unique=True)  # User identity
-    node_id = Column(String, unique=True)  # ⚠️ Only ONE node_id per user
-    provider = Column(String)  # 'google' or 'github'
-```
-
-**Workarounds:**
-- Use different email addresses for each device
-- Direct TLS P2P connections don't require Hub registration
-
-**Future Enhancement:**
-Multi-device support would require:
-- Database schema change: One-to-many relationship (User → multiple Devices)
-- UI for device management
-- Signaling updates to route to specific devices
-
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#device-identity-and-multi-device-considerations) for detailed explanation.
-
-### Configuration System
-
-**Configuration Hierarchy (highest priority first):**
-1. Environment variables (e.g., `DPC_HUB_URL`, `DPC_OAUTH_CALLBACK_PORT`)
-2. Config file (`~/.dpc/config.ini`)
-3. Built-in defaults
-
-**Configuration Files:**
-- Windows: `C:\Users\<username>\.dpc\config.ini`
-- Linux/Mac: `~/.dpc/config.ini`
-- Providers: `~/.dpc/providers.json` (AI provider configs)
-- Privacy Rules: `~/.dpc/privacy_rules.json` (context sharing rules)
-- Personal Context: `~/.dpc/personal.json` (auto-generated)
-- Device Context: `~/.dpc/device_context.json` (auto-generated, structured hardware/software info)
-- File Storage: `~/.dpc/conversations/{peer_id}/files/` (received files, per-peer isolation)
-
-**Automatic Device Context Collection:**
-
-The client automatically collects device and system information on startup and stores it in a **separate `device_context.json` file** with structured fields. This enables environment-aware AI assistance without repeatedly asking "What GPU do you have?" or "How much RAM?"
-
-**Storage Architecture:**
-- **device_context.json**: Structured JSON file (`~/.dpc/device_context.json`) with hardware/software details
-- **personal.json**: Contains reference to device_context.json in metadata.external_contexts
-- **Auto-updates**: Refreshes on every client startup (detects driver updates, new tools, etc.), in the background: the start does not wait for it, and until it lands readers get the previous `device_context.json` (none on a first run). The file is replaced atomically; a failed or stop-overtaken collection writes nothing
-
-**What's collected:**
-
-*Hardware (with structured fields):*
-```json
-{
-  "hardware": {
-    "cpu": {
-      "cores_physical": 4,
-      "cores_logical": 4,
-      "architecture": "AMD64"
-    },
-    "memory": {
-      "ram_gb": 23.95,
-      "ram_tier": "32GB"
-    },
-    "gpu": {
-      "type": "nvidia",
-      "model": "NVIDIA GeForce RTX 3060",
-      "vram_gb": 12.0,
-      "vram_mib": 12288,
-      "driver_version": "576.28",
-      "cuda_version": "12.8"
-    },
-    "storage": {
-      "free_gb": 150.25,
-      "total_gb": 500.0,
-      "free_tier": "100GB+",
-      "type": "SSD"
-    }
-  }
-}
-```
-
-*Software (with structured fields):*
-```json
-{
-  "software": {
-    "os": {
-      "family": "Windows",
-      "version": "10",
-      "architecture": "64bit"
-    },
-    "runtime": {
-      "python": {
-        "version": "3.12.0",
-        "major": 3,
-        "minor": 12
-      }
-    },
-    "shell": {"type": "bash.exe"},
-    "dev_tools": {
-      "git": "2.47",
-      "docker": "28.4",
-      "node": "22.14"
-    },
-    "package_managers": ["pip", "uv", "npm", "winget"]
-  }
-}
-```
-
-*Timestamps (for tracking):*
-```json
-{
-  "created_at": "2025-11-17T07:00:00.000000Z",
-  "last_updated": "2025-11-17T08:30:00.000000Z",
-  "collection_timestamp": "2025-11-17T08:30:00.000000Z"
-}
-```
-
-*Special Instructions (schema v1.1+):*
-```json
-{
-  "schema_version": "1.1",
-  "special_instructions": {
-    "interpretation": {
-      "privacy_tiers": "ram_tier and free_tier are privacy-rounded values...",
-      "capability_inference": "Map GPU VRAM to model sizes: 12GB → 13B models...",
-      "version_compatibility": "Match CUDA version with PyTorch/TensorFlow...",
-      "platform_specificity": "Consider OS family when suggesting commands..."
-    },
-    "privacy": {
-      "sensitive_paths": "Never share executable paths - only versions...",
-      "optional_fields": "ai_models requires opt-in (collect_ai_models=true)...",
-      "default_sharing": "Only software.os and dev_tools by default..."
-    },
-    "update_protocol": {
-      "auto_refresh": "Refreshes on client startup...",
-      "opt_in_features": "Enable ai_models with collect_ai_models=true...",
-      "staleness_check": "Recommend refresh if >7 days old..."
-    },
-    "usage_scenarios": {
-      "local_inference": "Consider GPU VRAM and installed models...",
-      "remote_inference": "Match peer GPU capabilities...",
-      "dev_environment": "Prioritize user's package managers...",
-      "cross_platform": "Provide platform-native instructions..."
-    }
-  }
-}
-```
-
-The `special_instructions` block (added in schema v1.1) provides comprehensive guidelines for AI systems on how to interpret and use device context data. This includes privacy rules (which fields to filter), capability inference rules (mapping GPU specs to model sizes), and platform-specific guidance (suggesting appropriate commands for Windows/Linux/macOS). See [docs/DEVICE_CONTEXT_SPEC.md](docs/DEVICE_CONTEXT_SPEC.md) for full specification.
-
-**Cross-Platform Support:**
-- **NVIDIA GPUs**: Full details via nvidia-smi (Windows/Linux/macOS)
-- **AMD GPUs**: rocm-smi (Linux)
-- **Apple GPUs**: Metal detection (macOS)
-- **Intel GPUs**: lspci parsing (Linux)
-
-**Privacy Features:**
-- Both exact RAM (23.95GB) and privacy tier (32GB) stored
-- Tool versions rounded to major.minor
-- No serial numbers, MAC addresses, or hostnames
-- Separate file = easy to exclude from sharing
-- Firewall controls what gets shared
-
-**Configuration:**
-```ini
-[system]
-auto_collect_device_info = true   # Master toggle
-collect_hardware_specs = true     # CPU/RAM/disk/GPU details
-collect_dev_tools = true          # Git, Docker, Node, etc.
-collect_ai_models = false         # Ollama models (opt-in for inference-sharing)
-```
-
-**Example AI Assistance** (powered by special_instructions):
-- **GPU-aware**: "Your RTX 3060 (12GB VRAM) can run llama3:13b comfortably"
-- **Driver-aware**: "CUDA 12.8 detected - use PyTorch 2.5+ for compatibility"
-- **Resource-aware**: "You have 24GB RAM - can run 2 models simultaneously"
-- **Platform-specific**: "Windows 10 detected - use WSL2 for better Linux compatibility"
-- **Inference-sharing**: "Alice has RTX 4090 (24GB) - offload training to her GPU"
-- **Privacy-aware**: "Sharing only OS version and dev tools, hardware specs require explicit allow rules"
-
-### In-App Configuration Editors
-
-The client provides in-app editors for key configuration files, eliminating the need to manually edit files or restart the service.
-
-**Personal Context Editor:**
-- **Location**: Click **"📚 View Personal Context"** button in sidebar
-- **Features**:
-  - Edit mode with live preview
-  - Editable Profile fields (name, description)
-  - Editable AI Instructions (primary instructions, bias mitigation settings)
-  - Real-time validation
-  - Save changes without restart
-  - Changes apply immediately to active sessions
-- **Editable Fields**:
-  - Profile: Name, description, core values
-  - AI Instructions: Primary instruction text
-  - Bias Mitigation: Multi-perspective analysis, challenge status quo, cultural sensitivity
-- **Read-Only Fields**:
-  - Knowledge topics (managed via Knowledge Commit system)
-  - Commit history
-  - Metadata (version, timestamps)
-
-**Firewall Rules Editor:**
-- **Location**: Click **"🛡️ Firewall Rules"** button in sidebar
-- **Format**: JSON (stored as `~/.dpc/privacy_rules.json`)
-- **UI Style**: Form-based interface matching Personal Context editor (DRY principle)
-- **Features**:
-  - Tab-based navigation (Hub Sharing, Node Groups, Inference Sharing, Peer Permissions)
-  - Native HTML form elements (no Monaco editor)
-  - Edit/Save/Cancel workflow with unsaved changes detection
-  - Real-time validation on save
-  - Hot-reload: Changes apply immediately without restarting service
-- **Tabs**:
-  - **Hub Sharing**: Control what the Hub can see for discovery
-  - **Node Groups**: Define groups of nodes with add/remove functionality
-  - **Inference Sharing**: Enable/configure remote inference with checkboxes and textareas
-  - **Peer Permissions**: View per-node and per-group access rules (read-only for now)
-- **Validation**:
-  - Checks JSON structure
-  - Validates node ID format (`dpc-node-*`)
-  - Validates rule values (`allow`, `deny`)
-  - Validates compute settings (boolean, lists)
-  - Validates node group memberships
-
-**Backend Commands** (available via WebSocket API):
-- `get_personal_context` - Load current personal context
-- `save_personal_context` - Save updated personal context
-- `reload_personal_context` - Reload from disk
-- `get_firewall_rules` - Load current firewall rules as JSON dict
-- `save_firewall_rules` - Save and validate new firewall rules (accepts JSON dict)
-
-**Hot-Reload Mechanism:**
-- Firewall rules reload automatically when saved via UI
-- Personal context updates propagate to active P2P connections
-- No service restart required for configuration changes
-- WebSocket events notify UI of successful updates
-
-**UI Integration Pattern for New Firewall Fields:**
-When adding new UI components that display data from `privacy_rules.json` (e.g., node groups dropdown, compute settings toggle):
-1. Create a writable store in `coreService.ts` (e.g., `export const firewallRulesUpdated = writable<any>(null)`)
-2. Add event handler in `coreService.ts` for `firewall_rules_updated` event to update the store
-3. In UI component, create a load function with a guard flag (like `aiScopesLoaded`) to prevent infinite reactive loops
-4. Add reactive statement to reload data when `$firewallRulesUpdated` changes and connection is active
-5. This ensures UI stays in sync with `privacy_rules.json` without requiring page refresh
-- **Example**: AI scopes dropdown reloads immediately after user saves firewall rules
-- **Pattern documented in**: `firewall.py`, `coreService.ts`, `+page.svelte`
-
-**Example Workflow** (Firewall Rules):
-1. Click "🛡️ Firewall Rules" button
-2. Click "Edit" button in header
-3. Use tabs to navigate to desired section (Hub Sharing, Node Groups, etc.)
-4. Edit rules using form elements (selects, inputs, textareas, checkboxes)
-5. Click "Save" button
-6. Backend validates and applies rules
-7. Changes take effect immediately for all new requests
-8. Success message shown in UI, automatically exits edit mode after 2 seconds
-
-**Manual File Editing** (Still Supported):
-- Files can still be edited manually in external editors
-- Use "Reload from Disk" button to apply external changes
-- Backend validates before applying
-- Invalid changes are rejected with error details
-
----
-
-## Development Workflow
-
-### Commit message hook — one command per clone
+Coverage HTML lands in `htmlcov/index.html`. If `uv run pytest` fails with `uv trampoline
+failed to canonicalize script path`, the tests are fine: run `uv run python -m pytest` and see
+[QUICK_START.md](QUICK_START.md#if-a-command-in-venv-stops-starting-windows) for the repair.
+
+## Commit message hook — one command per clone
 
 ```bash
 git config core.hooksPath tools/git-hooks
 ```
 
-The hook refuses a commit message containing Cyrillic and warns when a
-teammate's name stands beside a quotation. Both rules exist because a commit
-message is public and permanent while a chat line is neither: on 2026-08-28 ten
-of the 432 commits on `dev` were found to carry somebody's words from the team
-room, the oldest three weeks old, and the messages had to be rewritten. Write
-the reason in English and attribute the decision — «Mike's call, 2026-08-28» —
-rather than transcribing the sentence; the verbatim line stays in the working
-chat, and what lands in a tracked document is the decision with its attribution.
-Deliberate exception: `git commit --no-verify`.
-
-The check is `tools/git-hooks/commit_msg_check.py`; its tests run in the client
-suite (`tests/test_a_commit_message_carries_no_quoted_chat.py`), because
-`tools/` is imported by no package and would otherwise go untested.
-
-The file git calls is the shell wrapper `tools/git-hooks/commit-msg`. It has to carry
-the executable bit *in the index* (`git ls-files -s` shows `100755`) and LF endings
-(`.gitattributes` pins them): with either missing, git prints a one-line hint and
-runs nothing, which is how the rule held only on Windows from 2026-08-28 to 2026-09-05
-— the bit was `100644`, and Windows does not check it. The wrapper starts `python3`,
-then `python`, then `py -3`, trusting each only after it has run once, because the
-Microsoft Store leaves a `python3.exe` stub on PATH. The same test file checks the
-bit, the endings and one end-to-end run through `sh`.
-
-### Starting Full Stack Locally
-
-**Terminal 1 - Hub (optional for Direct TLS only):**
-```bash
-cd dpc-hub
-docker-compose up -d
-uv run alembic upgrade head
-uv run uvicorn dpc_hub.main:app --reload
-```
-
-**Terminal 2 - Client Backend:**
-```bash
-cd dpc-client/core
-uv run python run_service.py
-```
-
-**Terminal 3 - Client Frontend:**
-```bash
-cd dpc-client/ui
-npm run tauri dev
-```
-
-### Testing
-
-**Client Core:**
-```bash
-cd dpc-client/core
-uv run pytest -v
-uv run pytest tests/test_local_api.py  # Run specific test
-```
-
-**Hub:**
-```bash
-cd dpc-hub
-uv run pytest -v --cov=dpc_hub
-```
-
-**Coverage Reports:**
-- HTML: `htmlcov/index.html` (generated after running with --cov)
-
-> If `uv run pytest` fails with `uv trampoline failed to canonicalize script
-> path`, the tests are fine — the launcher `.exe` in `.venv\Scripts` has a stale
-> absolute path baked in (typically after a Windows OneDrive Documents
-> redirection is switched on or off). `uv run python -m pytest` works regardless;
-> the repair is in
-> [QUICK_START.md](QUICK_START.md#if-a-command-in-venv-stops-starting-windows).
-> Do **not** reach for `uv sync --reinstall` — it drops every extra not named on
-> the line.
-
----
-
-## Key Architectural Patterns
-
-### Async/Await Throughout
-
-All I/O operations use asyncio. Key patterns:
-- Background tasks tracked in task sets
-- Graceful shutdown with signal handlers (Unix) or KeyboardInterrupt (Windows)
-- Connection pooling for database (asyncpg)
-
-### Service-Oriented Backend
-
-CoreService orchestrates independent components via coordinators and managers:
-
-**Coordinators (High-Level):**
-- InferenceOrchestrator - AI query execution and prompt assembly
-- ContextCoordinator - Context sharing with firewall integration
-- P2PCoordinator - P2P connection lifecycle and messaging
-
-**Managers (Low-Level):**
-- P2PManager - Socket-level connection management
-- HubClient - Federation Hub communication
-- LLMManager - AI provider API integration
-- ContextFirewall - Access control rules engine
-- LocalApiServer - WebSocket API for UI
-
-**Pattern:** Coordinators provide clean APIs for high-level operations, delegating to managers for low-level implementation. This enables easier testing, better separation of concerns, and cleaner extension points for Phase 2 features.
-
-### Event-Driven UI Communication
-
-UI connects via WebSocket (localhost:9999) for:
-- Sending commands to backend
-- Receiving real-time events (new messages, connection status)
-
-### Security-First Design
-
-- Private keys never leave client device
-- Hub never sees message contents or personal contexts
-- TLS 1.2+ for all connections
-- Certificate validation required
-- JWT tokens with short expiration and blacklist support
-
----
-
-## Special Considerations
-
-### Cross-Platform Compatibility
-
-- **Windows:** Signal handlers not supported, uses KeyboardInterrupt
-- **Unix/Linux:** Proper SIGINT/SIGTERM handling
-- Use `pathlib.Path` for file paths
-
-### WebRTC NAT Traversal
-
-- STUN servers for public IP discovery (Google STUN)
-- TURN relay for symmetric NAT — **opt-in, nothing configured by default.** Fill
-  `[turn]` username/credential/servers in `config.ini` (or `DPC_TURN_*` env vars);
-  a fresh config ships empty so no traffic reaches a third party unasked
-- ICE candidate gathering and connectivity checks
-- Connection state monitoring in `webrtc_peer.py`
-
-### Database Migrations (Hub)
-
-- Alembic for schema versioning
-- Always test migrations before deployment:
-  ```bash
-  uv run alembic upgrade head    # Apply
-  uv run alembic downgrade -1    # Test rollback
-  uv run alembic upgrade head    # Reapply
-  ```
-
-### Context Firewall Rules
-
-Access control file format (`~/.dpc/privacy_rules.json`):
-```json
-{
-  "hub": {
-    "personal.json:profile.name": "allow",
-    "personal.json:profile.description": "allow"
-  },
-  "blocked_nodes": [],
-  "node_groups": {
-    "friends": ["dpc-node-alice-123", "dpc-node-bob-456"],
-    "trusted": ["dpc-node-charlie-789"]
-  },
-  "groups": {
-    "friends": {
-      "personal.json:profile.*": "allow",
-      "personal.json:knowledge.*": "allow"
-    }
-  },
-  "nodes": {
-    "dpc-node-alice-123": {
-      "personal.json:*": "allow"
-    }
-  },
-  "compute": {
-    "enabled": false,
-    "allow_nodes": [],
-    "allow_groups": [],
-    "allowed_models": []
-  },
-  "transcription": {
-    "enabled": false,
-    "allow_nodes": [],
-    "allow_groups": [],
-    "allowed_models": [],
-    "send_to_nodes": [],
-    "send_to_groups": []
-  },
-  "file_transfer": {
-    "proved_connection": {
-      "file_transfer.allow": "ask",
-      "file_transfer.max_size_mb": 1000,
-      "file_transfer.allowed_mime_types": ["*"]
-    },
-    "groups": {
-      "friends": {"file_transfer.allow": "allow", "file_transfer.max_size_mb": 100}
-    },
-    "nodes": {
-      "dpc-node-alice-123": {"file_transfer.allow": "allow", "file_transfer.allowed_mime_types": ["image/*"]}
-    }
-  },
-  "notifications": {
-    "enabled": true,
-    "show_when_focused": false,
-    "allowed_events": ["message_received", "file_received", "peer_connected"]
-  }
-}
-```
-
-**`blocked_nodes` keeps a node out, and wins over every allow.** A node id in it gets no
-session either way: the listener closes it after its key is proved and before HELLO_ACK,
-telling it nothing (as at `max_proved_connections_per_ip`), and nothing dials it, answers
-its Hub offer, relays for it or delivers its gossip. Its group records are kept but not
-relayed and wake nobody. In the DHT (UDP) a packet that names a blocked id as its sender
-is dropped with no reply and changes nothing, nothing is handed out under that id in
-FIND_NODE or FIND_VALUE, and a STORE or a value keyed by it is refused; `block_peer` also
-drops its routing entry (replacement cache included) and any value stored under it.
-**That check is on the id a packet claims, and nothing proves the claim**: DHT messages
-are unsigned, so a block by id stops a client that keeps its id and not one that lies
-about it, until the RPCs are signed (a separate card). The list is written by Block
-(`block_peer`), which also removes
-the node from every group and deletes every other entry in this file that is its id (a key,
-a value or a list item; a sandbox path that merely contains the id stays), and is
-cleared by Unblock (`unblock_peer`), which restores none of that; the editor's Save keeps
-the list on disk and drops any entry that is a blocked id, so a snapshot from before the
-Block puts nothing back. A block names a key, so it does not survive the peer's reinstall. Mike's
-call, 2026-10-31; the DHT part, Mike's call, 2026-11-05.
-
-**Transcription has two directions and two permissions.** `enabled` / `allow_nodes` /
-`allow_groups` / `allowed_models` govern *serving*: whether a peer may use this node's
-Whisper. `send_to_nodes` / `send_to_groups` govern the opposite — whether this node's own
-audio may leave the machine when local transcription fails and no cloud provider is
-configured, which is when the fallback chain asks a peer (Mike's call, 2026-09-07). They
-are separate because sharing a model with a friend is not consent to hand them your
-microphone. Both send lists default to empty, meaning never; a peer chosen by hand as
-`remote:<node>:<alias>` bypasses them, because choosing it is the consent.
-
-**Who may send this node a file** (files, pasted screenshots and voice alike) is decided
-by the first entry that names the sender, allow or deny, with that entry's size and MIME
-limits: its `file_transfer.nodes` entry; else its first group in `node_groups` order that
-has a `file_transfer.groups` entry; else, when this node holds a proved connection with it
-(`p2p_manager.PROVED_CONNECTION_TYPES`, direct TLS), `file_transfer.proved_connection`,
-which an older rules file without the key gets from a code default. **Proved means the
-peer proved the key of its own node id, not that anyone knows it**: an inbound direct
-connection is accepted from any DPC node that reaches the port, so the default of that
-entry is `ask` (allow, 1000 MB, `*` was the first form and was changed after review);
-`allow` with its limits is the owner's opt-in, `deny` refuses, and `ask` is a value of
-this entry alone. A sender none of these decides for, or whose entry says ask, is not
-refused: the offer waits for the user's "allow files from X?", "always allow" writes a
-node entry through the editor's save — with the limits of the `proved_connection` entry,
-which the dialog prints beside the box — and a decline sends FILE_CANCEL with a
-`denial_reason`. For a group file the decision is about the node that sent the offer; its
-author is an unsigned field, so the dialog reads "from X via Y" when they differ and the
-entry is written for Y. An offer that waits for a person has a deadline: after 120 s with
-no answer the receiver refuses it with FILE_CANCEL `no_answer` and drops the download, and
-a sender that has had neither FILE_ACCEPT nor FILE_CANCEL for 180 s frees the upload by
-itself (`OFFER_ANSWER_DEADLINE_S`, `UNANSWERED_UPLOAD_RELEASE_S` in
-`file_transfer_manager.py`, constants and not settings). Mike's call, 2026-10-25.
-
-**Adding a new agent tool — `default_enabled` is required (S148):**
-
-The canonical default for whether an agent tool is enabled in `privacy_rules.json` lives on `ToolEntry.default_enabled` (single source of truth). When you register a new `ToolEntry` in any `dpc_agent/tools/*.py` module, you **must** pass `default_enabled=True|False` explicitly — there is no derived fallback. `True` = safe-by-default (read-only introspection, sandbox-confined reads, etc.); `False` = opt-in (anything destructive, network-egress, restricted, or that touches user-visible state outside the sandbox). The field defaults to `False` (fail-closed) if omitted, so a forgotten tool will be invisible to agents until the user toggles it on in the UI.
-
-On startup, `firewall.py:_seed_missing_tools_into_rules()` walks the registry and auto-adds any tool absent from `dpc_agent.tools` (global) or each `agent_profiles.<id>.tools` block with the registered `default_enabled`. Existing user values are never overwritten. This eliminates the historical drift where new tools landed in code but stayed invisible until manually added to firewall defaults (AGENT-TOOL-FIREWALL-DEFAULT-DRIFT, closed S148).
-
----
-
-## Debugging Tips
-
-### Backend Issues
-
-**Check logs:**
-```bash
-# View real-time logs (console output in development)
-cd dpc-client/core
-uv run python run_service.py
-
-# View log file (production logs)
-tail -f ~/.dpc/logs/dpc-client.log
-
-# Enable DEBUG logging for specific modules
-export DPC_LOG_MODULE_LEVELS="dpc_client_core.p2p_manager:DEBUG,dpc_client_core.webrtc_peer:DEBUG"
-uv run python run_service.py
-```
-
-**Logging System:**
-- All components use Python standard library `logging`
-- Logs stored in `~/.dpc/logs/dpc-client.log` (auto-rotates at 10MB)
-- Per-module log levels configurable via `config.ini` or env vars
-- See [docs/LOGGING.md](docs/LOGGING.md) for complete guide
-
-**Common issues:**
-- Port 8888 or 9999 already in use
-- Certificate files missing in `~/.dpc/`
-- AI provider not configured in `~/.dpc/providers.json`
-
-### Frontend Issues
-
-**Check Tauri dev tools:**
-- Right-click in app → "Inspect Element"
-- Console shows WebSocket connection status
-
-**Common issues:**
-- Backend not running (WebSocket connection fails)
-- SvelteKit HMR port conflicts (port 1420)
-
-### Hub Issues
-
-**Check database connection:**
-```bash
-docker-compose ps  # Ensure PostgreSQL is running
-uv run alembic current  # Check migration status
-```
-
-**Common issues:**
-- PostgreSQL not started
-- Missing environment variables in `.env`
-- OAuth credentials not configured
-
-### WebRTC Connection Issues
-
-**Test STUN/TURN connectivity:**
-```bash
-cd dpc-client/core
-uv run pytest tests/test_turn_connectivity.py
-```
-
-**Check signaling:**
-- Hub WebSocket endpoint: `ws://localhost:8000/ws/signal` (dev)
-- Both clients must be logged in and connected to Hub
-
----
-
-## File Locations Reference
-
-### Client Backend Entry Point
-- `dpc-client/core/run_service.py` - Starts CoreService
-
-### Frontend Entry Point
-- `dpc-client/ui/src/routes/+page.svelte` - Main chat interface
-- `dpc-client/ui/src-tauri/src/main.rs` - Tauri entry point
-
-### Hub Entry Point
-- `dpc-hub/dpc_hub/main.py` - FastAPI application
-
-### Configuration Files
-- `~/.dpc/config.ini` - Client configuration
-- `~/.dpc/providers.json` - AI provider settings
-- `~/.dpc/privacy_rules.json` - Context firewall rules
-- `~/.dpc/node.{key,crt,id}` - Node identity files
-
-### Important Documentation
-- `README.md` - Project overview
-- `QUICK_START.md` - 5-minute setup guide (repo root, not `docs/`)
-- `docs/WEBRTC_SETUP_GUIDE.md` - Production deployment
-- `docs/CONFIGURATION.md` - Complete configuration reference
-- `docs/LOGGING.md` - Logging system configuration and troubleshooting
-- `docs/DEVICE_CONTEXT_SPEC.md` - Device context schema and special instructions specification
-- `docs/GITHUB_AUTH_SETUP.md` - GitHub OAuth setup and testing
-- `docs/agent/DPC_AGENT_GUIDE.md` - Embedded autonomous AI agent testing and usage guide
-- `docs/agent/DPC_AGENT_TELEGRAM.md` - Agent Telegram integration for two-way messaging
-- `specs/dptp_v1.md` - DPTP (D-PC Transfer Protocol) formal specification
-- `specs/hub_api_v1.md` - Hub API specification
-- `dpc-protocol/README.md` - Protocol library documentation and usage examples
-- `VISION.md` - Business vision, market opportunity, and mission (investor/co-founder focused)
-- `docs/decisions/` - Architecture Decision Records (ADRs) for major structural choices
-  - `001-service-split.md` - Why and how service.py was split into domain services (refactor/grand)
-  - `002-provider-abc.md` - LLM provider abstract base class design
-  - `003-frontend-stores.md` - Frontend hybrid local/global store strategy
-
----
-
-## AI Providers
-
-D-PC Messenger supports multiple AI providers for local and cloud-based inference:
-
-### Supported Providers
-- **Ollama**: Local models (llama3, mistral, qwen, etc.) via Ollama API
-- **llama-server child** (`llamacpp_server`): local GGUF models served by a `llama-server` process DPC starts and stops itself ([ADR-040](docs/decisions/040-local-inference-second-path-as-a-dpc-owned-llama-server.md))
-- **Strata** (`strata`): Flash-Next served by a Strata launcher DPC supervises as a child, with conversation parking; a peer call is served with checkpointing off ([ADR-044](docs/decisions/044-strata-as-a-second-supervised-local-engine.md))
-- **OpenAI Compatible**: OpenAI and compatible APIs (OpenAI, LM Studio, etc.)
-- **Anthropic**: Claude models (Claude 3.5 Sonnet, Claude Opus, etc.)
-- **DeepSeek**: Pay-per-token V4 models (`deepseek-v4-flash` / `deepseek-v4-pro`) via OpenAI-compatible endpoint; native pay-per-token cost + account-balance tracking and per-call reasoning-effort control (`deepseek` provider type, `deepseek_provider.py`)
-- **NeuralDeep**: OpenAI-compatible gateway (qwen3.8/3.6, gpt-oss, gemma-4, kimi) billed in roubles; tools, vision, reasoning, thinking off via the `-noreason` model, RUB cost beside the USD meter and wallet balance from `/v1/limits`. Cloud, opt-in (`neuraldeep` provider type, `neuraldeep_provider.py`)
-- **Z.AI**: GLM models (GLM-4.7, GLM-4.6, GLM-5.3, etc.) over the prepaid pay-per-token platform API (`zai` provider type, `zai_provider.py`). One provider, one endpoint — the `zai_coding` type is gone, see below
-- **Gemini**: Google Gemini models via `gemini_provider.py`
-- **GigaChat**: Sber GigaChat models via `gigachat_provider.py`
-- **GitHub Models**: retired by GitHub on 2026-07-30; `github_models_provider.py` stays one release so an old alias loads and fails each call with that message. Not offered in the editor
-- **Remote Peer**: Offload inference to a connected peer via `remote_peer_provider.py`
-- **Whisper**: Local transcription-only provider via `whisper_provider.py`
-
-### Z.AI Setup
-
-> ⚠️ **Untested since the rewrite, and the balance is empty.** This section used to
-> contradict itself: a warning naming a month-long ban, and eight lines below it, praise
-> for the endpoint that caused the ban ("avoids prepaid balance requirements"). Both
-> halves are replaced. The code now speaks only to the prepaid platform API, but no live
-> call has been made through it — the platform balance read $0.00 on 2026-08-23 and
-> `ZAI_API_KEY` is unset — so the paths below are verified against the vendor's docs and
-> the test suite, not against a response. Tested providers remain Ollama, Anthropic and
-> DeepSeek.
-
-**Which endpoint, and why it is not a preference.** Z.AI sells two things through one
-account: the **GLM Coding Plan**, a flat-fee subscription, and the **open platform API**,
-prepaid and billed per token. The Coding Plan reaches the models through three base URLs
-— `api/anthropic`, `api/coding/paas/v4` and `api/v1` — and the vendor limits it to a
-published list of tools:
-
-> "The GLM Coding Plan is limited to use within the following officially supported tools
-> and product environments; users may not use their subscription benefits for tools or
-> scenarios outside of this scope."
-> — [docs.z.ai/devpack/tool/others](https://docs.z.ai/devpack/tool/others), read 2026-08-23
-
-That list holds 19 products (16 coding agents plus OpenClaw, Hermes Agent and
-SillyTavern). D-PC Messenger is not one of them, and reaching the Coding Plan from here is
-what got this account banned for a month. The same account carries the owner's ZCode
-subscription, which *is* on the list — so his own use is legitimate and ours is what puts
-it at risk. The usage policy counts: "Accounts with more than three violations may be
-banned."
-
-`ZaiProvider` therefore **raises at construction** on any of the three subscription URLs
-rather than warning, and a 1313 Fair-Usage code — which should be unreachable on the paid
-API — is logged at ERROR as a canary rather than retried.
-
-**Implementation.** The `zai` provider type talks to
-`https://api.z.ai/api/paas/v4` with the **OpenAI** SDK (`AsyncOpenAI`), converting
-Anthropic message and tool shapes on both sides because the agent layer speaks Anthropic.
-All four call paths — plain, stream, tools, vision — record usage; the stream sends
-`stream_options: {include_usage: true}` and reads the usage-only chunk, which arrives with
-an empty `choices`.
-
-**Installation:**
-```bash
-cd dpc-client/core
-uv sync  # the openai package is already included
-```
-
-**Configuration:**
-1. Top up the prepaid balance at [z.ai/manage-apikey/billing](https://z.ai/manage-apikey/billing)
-   — auto-recharge is off by default, and the service is suspended when the balance runs out
-2. Get an API key from [docs.z.ai](https://docs.z.ai)
-3. Set the environment variable:
-   ```bash
-   export ZAI_API_KEY="your_key_here"
-   ```
-4. Add to `~/.dpc/providers.json`:
-   ```json
-   {
-     "alias": "zai_glm47",
-     "type": "zai",
-     "model": "glm-4.7",
-     "api_key_env": "ZAI_API_KEY",
-     "base_url": "https://api.z.ai/api/paas/v4",
-     "context_window": 128000
-   }
-   ```
-
-**Available Models:**
-- **Text:** `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.7-flashx`, `glm-4.7-flash` (free), `glm-4.6`, `glm-4.5`, `glm-4.5-x`, `glm-4.5-air`, `glm-4.5-airx`, `glm-4.5-flash` (free), `glm-4-32b-0414-128k`
-- **Vision:** `glm-5v-turbo`, `glm-4.6v`, `glm-4.6v-flashx`, `glm-4.6v-flash` (free), `glm-4.5v`, `glm-ocr`
-
-**Pricing** (USD per 1M tokens, input / cached input / output, from
-[docs.z.ai/guides/overview/pricing](https://docs.z.ai/guides/overview/pricing), 2026-08-23):
-
-| Model | Input | Cached | Output |
-|---|---|---|---|
-| GLM-5.3 / 5.2 / 5.1 | $1.4 | $0.26 | $4.4 |
-| GLM-5 | $1.0 | $0.2 | $3.2 |
-| GLM-4.7 / 4.6 / 4.5 | $0.6 | $0.11 | $2.2 |
-| GLM-4.5-Air | $0.2 | $0.03 | $1.1 |
-| GLM-4.7-FlashX | $0.07 | $0.01 | $0.4 |
-| GLM-4.7-Flash, GLM-4.5-Flash | free | free | free |
-
-The full table lives in `dpc_agent/pricing.py` (`ZAI_RATES`), which is what the cost meter
-reads. DeepSeek's doubled peak hours do **not** apply to these rates — both vendors share
-one rate table and `_peak_applies` keeps the windows with the vendor that has them.
-
-**Rate Limits:**
-Concurrency-based, not token-based — GLM-4.7: 2, GLM-4.6: 3, GLM-4.5: 10 concurrent
-requests. Read from the docs during the Coding Plan era and **not re-verified**: the
-platform's live limits page (`z.ai/manage-apikey/rate-limits`) is behind a login. The
-numbers survive in `dpc_agent/budget.py` and are only reached by an agent explicitly
-configured `billing_model = subscription`; a z.ai agent belongs in `pay_per_use`, where
-dollars are tracked instead.
-
-**See also:** `dpc-client/providers.example.json` for complete configuration examples
-
----
-
-### Context7 Plugin Integration
-
-D-PC Messenger can leverage the Context7 plugin for intelligent library documentation retrieval when AI agents suggest tools or libraries based on code analysis.
-
-**When AI Suggests Libraries:**
-1. AI analyzes codebase and identifies relevant libraries/frameworks
-2. Context7 plugin retrieves up-to-date documentation
-3. Examples provided are from official documentation sources
-4. Ensures cross-platform compatibility before suggesting
-
-**Cross-Platform Safety:**
-- AI checks platform compatibility before suggesting libraries
-- Context7 retrieves platform-specific documentation
-- Prevents suggesting macOS-only libraries for Windows builds
-
-**Before Suggesting Libraries, Verify:**
-- **Windows**: WebView2 (Edge), MSVC compatibility, WASAPI for audio
-- **Linux**: WebKitGTK limitations, ALSA/PipeWire for audio
-- **macOS**: WKWebView limitations, Core Audio for audio, Metal for GPU
-- **Tauri constraints**: No `getUserMedia` on macOS WKWebView
-
-**Example Workflow:**
-```
-User: "How do I add video recording?"
-AI: Analyzes code → Detects Tauri 2.x → Suggests @tauri-apps/plugin-screen-capture
-→ Uses Context7 to fetch latest API docs → Provides code examples
-```
-
----
-
-## Technology Stack
-
-### Backend
-- Python 3.12+ with uv
-- FastAPI (Hub), WebSockets (Client)
-- aiortc (WebRTC implementation)
-- SQLAlchemy + asyncpg + Alembic (Hub database)
-- cryptography library (PKI)
-- ollama, openai, anthropic, zai-sdk (AI SDKs)
-- transformers, torch, librosa, soundfile (Whisper transcription)
-- python-telegram-bot 21.x (Telegram integration)
-
-### Frontend
-- SvelteKit 5.0 (Svelte 5 with runes)
-- Tauri 2.x (Rust)
-- TypeScript 5.6
-- Vite 6.0
-- adapter-static (SPA mode)
-- **Testing**: Vitest (unit tests), Playwright (E2E tests - in development)
-- **Audio**: cpal (Rust) for cross-platform recording
-
-### Infrastructure
-- Docker + Docker Compose
-- PostgreSQL
-- Nginx (production)
-
----
-
-## License Structure
-
-- Desktop Client: GPL v3
-- Protocol Libraries: LGPL v3
-- Federation Hub: AGPL v3
-- Protocol Specs: CC0
-
-See `LICENSING.md` for details. The root `LICENSE` file is the GPL v3 text the repository declares to GitHub; `LICENSING.md` is the authoritative per-component statement.
+The hook **refuses a commit message containing Cyrillic** and **warns when a teammate's name
+stands beside a quotation**: a commit message is public and permanent, a chat line is
+neither. Write the reason in English and attribute the decision — «Mike's call, 2026-08-28» —
+rather than transcribing the sentence. Deliberate exception: `git commit --no-verify`. The
+wrapper `tools/git-hooks/commit-msg` must keep `100755` in the index and LF endings, or git
+skips it on Linux and macOS; the why is in the comments of `commit-msg` and
+`commit_msg_check.py`, the tests in `tests/test_a_commit_message_carries_no_quoted_chat.py`.
+
+## Security and privacy invariants
+
+Each changes how code here is written; the detail is in the linked section.
+
+- **Private keys never leave the device; the Hub never sees message contents or personal
+  contexts.** TLS 1.2+ with certificate validation on every connection.
+- **TURN is opt-in.** A fresh config ships `[turn]` empty, so no traffic reaches a third party
+  unasked; fill it or set `DPC_TURN_*` ([docs/TURN_SETUP.md](docs/TURN_SETUP.md)).
+- **`blocked_nodes` keeps a node out and wins over every allow**: no session, dial, Hub answer,
+  relay, gossip or file; DHT packets that claim its id are dropped (a claim nothing proves
+  until the RPCs are signed). Block writes it and deletes every rule naming the id; Unblock
+  restores none of that. Mike's call, 2026-10-31; the DHT part, 2026-11-05
+  ([CONFIGURATION.md](docs/CONFIGURATION.md#blocked_nodes-keeps-a-node-out-and-wins-over-every-allow)).
+- **Who may send this node a file** (files, screenshots, voice): the first entry naming the
+  sender decides — its `file_transfer.nodes` entry, else its first group with a
+  `file_transfer.groups` entry, else `file_transfer.proved_connection` (direct TLS, default
+  `ask`); anyone else is asked, and 120 s without an answer refuses with `no_answer`. Mike's
+  call, 2026-10-25 ([CONFIGURATION.md](docs/CONFIGURATION.md#who-may-send-this-node-a-file)).
+- **Transcription has two directions and two permissions**: `enabled`/`allow_*` govern serving
+  peers our Whisper; `send_to_nodes`/`send_to_groups` (empty = never) govern our own audio
+  leaving the machine on fallback; a peer picked by hand as `remote:<node>:<alias>` is the
+  consent. Mike's call, 2026-09-07
+  ([CONFIGURATION.md](docs/CONFIGURATION.md#transcription-has-two-directions-and-two-permissions)).
+- **Adding a new agent tool — `default_enabled` is required (S148).** Pass
+  `default_enabled=True|False` explicitly on its `ToolEntry`: `True` only for safe-by-default
+  tools (read-only, sandbox-confined); anything destructive, network-egress, restricted or
+  touching state outside the sandbox is `False`. Startup seeds missing tools into
+  `privacy_rules.json` and never overwrites a user value
+  ([CONFIGURATION.md](docs/CONFIGURATION.md#agent-tools-default_enabled-is-required-s148)).
+- **Z.AI only through the prepaid platform API.** `ZaiProvider` raises on the GLM Coding Plan
+  URLs (`api/anthropic`, `api/coding/paas/v4`, `api/v1`); reaching the plan from DPC got the
+  account banned for a month ([CONFIGURATION.md](docs/CONFIGURATION.md#zai)).
+
+## Where to find
+
+| Need | Document |
+|---|---|
+| A word and the document that owns it | [docs/GLOSSARY.md](docs/GLOSSARY.md) |
+| The board: `backlog.md` entries, fields, the check | [docs/BACKLOG_FORMAT.md](docs/BACKLOG_FORMAT.md) |
+| Component inventory, connection tiers, prompt assembly, voice, tech stack | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Every `config.ini` key, env vars, `privacy_rules.json`, `providers.json` and AI providers, in-app editors, device identity | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
+| Setup on Windows/macOS/Linux, extras, GPU, `.dpc` contents | [QUICK_START.md](QUICK_START.md) |
+| Device context schema and `special_instructions` | [docs/DEVICE_CONTEXT_SPEC.md](docs/DEVICE_CONTEXT_SPEC.md) |
+| Logging, per-module levels, start-up troubleshooting | [docs/LOGGING.md](docs/LOGGING.md) |
+| Group chats, Block / Unblock | [docs/GROUP_CHAT.md](docs/GROUP_CHAT.md) |
+| Inference served to and by peers | [docs/REMOTE_INFERENCE.md](docs/REMOTE_INFERENCE.md) |
+| Knowledge commits and the knowledge graph | [docs/KNOWLEDGE_ARCHITECTURE.md](docs/KNOWLEDGE_ARCHITECTURE.md) |
+| Embedded agent: tools, memory, retrieval flags; agent on Telegram | [docs/agent/DPC_AGENT_GUIDE.md](docs/agent/DPC_AGENT_GUIDE.md), [docs/agent/DPC_AGENT_TELEGRAM.md](docs/agent/DPC_AGENT_TELEGRAM.md) |
+| Telegram bot bridge | [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) |
+| Hub OAuth (Google, GitHub), Hub API | [dpc-hub/README.md](dpc-hub/README.md), [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md), [specs/hub_api_v1.md](specs/hub_api_v1.md) |
+| WebRTC deployment and TURN | [docs/WEBRTC_SETUP_GUIDE.md](docs/WEBRTC_SETUP_GUIDE.md), [docs/TURN_SETUP.md](docs/TURN_SETUP.md) |
+| macOS build | [docs/MACOS_BUILD.md](docs/MACOS_BUILD.md) |
+| The wire (DPTP) | [specs/dptp_v1.md](specs/dptp_v1.md) |
+| Roles and participants | [protocol-13-public.md](protocol-13-public.md) |
+| Decisions: one ADR per file, `NNN-<the decision>.md`, amendments at the end | [docs/decisions/](docs/decisions/) |
+| Protocol library API | [dpc-protocol/README.md](dpc-protocol/README.md) |
+| Vision, roadmap, licences | [VISION.md](VISION.md), [ROADMAP.md](ROADMAP.md), [LICENSING.md](LICENSING.md) |

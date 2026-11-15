@@ -398,4 +398,4 @@ For issues or questions:
 1. Check logs: `~/.dpc/logs/dpc-client.log`
 2. Verify configuration in `~/.dpc/config.ini`
 3. Check [GitHub Issues](https://github.com/your-repo/issues)
-4. Review [CLAUDE.md](../CLAUDE.md) for architecture details
+4. Review [ARCHITECTURE.md](ARCHITECTURE.md) for architecture details

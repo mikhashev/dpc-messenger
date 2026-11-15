@@ -208,6 +208,26 @@ Look for:
 - JSON serialization failures
 - Command validation errors
 
+### Common Start-up Issues (no log needed)
+
+Moved from `CLAUDE.md`'s debugging tips on 2026-11-15. Per-module levels are set in the
+`[logging.modules]` section of `config.ini` (see [Per-Module Configuration](#per-module-configuration));
+`DPC_LOG_MODULE_LEVELS`, used in the examples above, is not read by any Python file in
+`dpc_client_core` (checked 2026-11-15), so prefer the config section.
+
+- **Backend:** port 8888 or 9999 already in use; certificate files missing in `~/.dpc/`;
+  AI provider not configured in `~/.dpc/providers.json`.
+- **Frontend:** check the Tauri dev tools (right-click in the app → "Inspect Element"; the
+  console shows the WebSocket connection status). Usual causes: the backend is not running
+  (the WebSocket connection fails), or a SvelteKit HMR port conflict on 1420.
+- **Hub:** `docker-compose ps` (is PostgreSQL running?) and `uv run alembic current`
+  (migration status). Usual causes: PostgreSQL not started, missing variables in `.env`,
+  OAuth credentials not configured.
+- **WebRTC:** test STUN/TURN with `uv run pytest tests/test_turn_connectivity.py` in
+  `dpc-client/core` (see [WEBRTC_SETUP_GUIDE.md](WEBRTC_SETUP_GUIDE.md)); the Hub signalling
+  endpoint is `ws://localhost:8000/ws/signal` in development, and both clients must be logged
+  in and connected to the Hub.
+
 ### Ctrl+C Does Not Stop the Backend (Windows)
 
 A process on the backend's console that switches it to raw input and is killed

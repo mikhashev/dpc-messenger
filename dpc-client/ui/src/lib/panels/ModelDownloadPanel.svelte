@@ -91,7 +91,7 @@
   }
 
   // Fetch once on WS connect (guard flag prevents refetching on every
-  // reactive tick — see CLAUDE.md's "UI Integration Pattern" note).
+  // reactive tick — see the "UI integration pattern" note in docs/CONFIGURATION.md).
   $effect(() => {
     const state = $connectionStatus;
     if (state === 'connected' && lastConnectionState !== 'connected') {

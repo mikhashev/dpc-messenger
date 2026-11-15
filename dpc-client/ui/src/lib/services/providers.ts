@@ -26,7 +26,7 @@ export const aiResponseWithImage = writable<AIResponseWithImageEvent | null>(nul
 
 // Firewall rules update store — triggers provider list reload in UI.
 // Free-form JSON (full privacy_rules.json object).
-// See CLAUDE.md "UI Integration Pattern for New Firewall Fields" for usage pattern.
+// See docs/CONFIGURATION.md "UI integration pattern for new firewall fields" for usage pattern.
 export const firewallRulesUpdated = writable<Record<string, any> | null>(null);
 
 // Pay-per-use provider account balance (DeepSeek /user/balance), populated by

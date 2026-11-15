@@ -516,6 +516,33 @@ Device context sharing is controlled via `~/.dpc/privacy_rules.json`:
 
 ---
 
+## Collection Sources and Privacy
+
+*Moved from `CLAUDE.md` on 2026-11-15.*
+
+**Where the hardware fields come from:**
+- **NVIDIA GPUs**: full details via nvidia-smi (Windows/Linux/macOS)
+- **AMD GPUs**: rocm-smi (Linux)
+- **Apple GPUs**: Metal detection (macOS)
+- **Intel GPUs**: lspci parsing (Linux)
+
+**Privacy features:**
+- Both exact RAM (e.g. 23.95GB) and a privacy tier (32GB) are stored
+- Tool versions rounded to major.minor
+- No serial numbers, MAC addresses, or hostnames
+- A separate file, so it is easy to exclude from sharing
+- The firewall controls what gets shared
+
+**What it enables** (through `special_instructions`):
+- GPU-aware: "Your RTX 3060 (12GB VRAM) can run llama3:13b comfortably"
+- Driver-aware: "CUDA 12.8 detected - use PyTorch 2.5+ for compatibility"
+- Resource-aware: "You have 24GB RAM - can run 2 models simultaneously"
+- Platform-specific: "Windows 10 detected - use WSL2 for better Linux compatibility"
+- Inference-sharing: "Alice has RTX 4090 (24GB) - offload training to her GPU"
+- Privacy-aware: "Sharing only OS version and dev tools, hardware specs require explicit allow rules"
+
+---
+
 ## Version History
 
 ### v1.1 (2025-11-18)
@@ -579,6 +606,6 @@ See [device_context_example.json](../dpc-client/device_context_example.json) for
 ## Related Documentation
 
 - [Configuration Guide](CONFIGURATION.md) - Device collection settings
-- [Quick Start Guide](QUICK_START.md) - First-time setup
-- [CLAUDE.md](../CLAUDE.md) - Architecture overview
+- [Quick Start Guide](../QUICK_START.md) - First-time setup
+- [ARCHITECTURE.md](ARCHITECTURE.md) - Architecture overview
 - [PCM Specification](https://github.com/personal-context-manager) - Personal Context Model

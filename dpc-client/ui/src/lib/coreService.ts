@@ -146,7 +146,7 @@ import { historyRestored, newSessionProposal, newSessionResult, conversationRese
 
 // Re-export all service stores for backward compatibility.
 // NOTE: When adding new UI-reactive fields from privacy_rules.json, add the store in
-// services/providers.ts and re-export it here. See CLAUDE.md "UI Integration Pattern".
+// services/providers.ts and re-export it here. See docs/CONFIGURATION.md "UI integration pattern".
 export { connectionStatus, nodeStatus, coreMessages };
 export { p2pMessages, unreadMessageCounts };
 export { blockedNodeIds };

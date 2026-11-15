@@ -416,6 +416,14 @@ cd dpc-client/core
 uv pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
 ```
 
+**Apple Silicon (M1/M2/M3/M4) — MLX:** GPU-accelerated local Whisper through MLX is the
+optional `mlx` extra (`mlx>=0.4.0`, `mlx-whisper>=0.2.0`), off by default. Add it with
+`uv sync --extra mlx --inexact`, or take it with `uv sync --all-extras`: its lines carry
+`sys_platform == 'darwin' and platform_machine == 'arm64'`, so it installs on Apple Silicon
+and is skipped on Windows, Linux and Intel macOS. Without it the client falls back to an
+OpenAI-compatible transcription API or skips transcription. An older note put its size at
+about 500 MB; that figure has not been re-measured.
+
 ---
 
 ## Optional features
@@ -445,6 +453,14 @@ uv sync --all-extras
 | `graph-ner` | gliner — named-entity extraction (includes `voice-memory`, gliner runs on torch) |
 | `pdf` | pypdfium2 — PDF reading for `read_document` |
 | `mlx` | macOS Apple Silicon only — GPU Whisper via MLX |
+
+`--all-extras` replaced a hand-written list of `--extra` flags in the developer notes on
+2026-09-18. The list had fallen behind `pyproject.toml` — it named three extras where six
+were declared — so running it as written removed `pypdfium2` and took document reading away
+in silence. `--all-extras` cannot fall behind, and it is safe on every platform only because
+each extra carries its own platform markers: an extra added without them breaks this command
+on an untested OS. An extra that is not declared is not ignored: uv refuses with
+``Extra `X` is not defined``. `uv sync --dry-run` prints exactly what a sync would uninstall.
 
 > **`browser` installs the package, not the browser.** The Camoufox browser
 > itself is a separate one-time download, pinned to release `v152.0.4-beta.28`
