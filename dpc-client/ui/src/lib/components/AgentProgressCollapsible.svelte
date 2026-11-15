@@ -11,6 +11,7 @@
     import { cacheFromSpeed, cacheLabel, cacheTitle } from '$lib/utils/cacheHitRate';
     import { cutFromSpeed, cutLabel, cutTitle } from '$lib/utils/contextCut';
     import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
+    import { newestRound, roundJumpLabel, roundJumpTitle, findRoundHeader } from '$lib/utils/roundJump';
     import { sendCommand } from '$lib/coreService';
     import {
         pressAction, stopButtonLabel, stopButtonTitle, stopButtonDisabled, type StopState,
@@ -74,6 +75,18 @@
         if (next.has(round)) next.delete(round);
         else next.add(round);
         collapsedRounds = next;
+    }
+
+    // Back to the start of the newest round (roundJump.ts). The list's autoscroll
+    // needs no pause here: ChatMessageList follows streaming text only while its
+    // `atBottom` holds, and the scroll this starts clears it until the reader
+    // returns to the bottom.
+    let rootEl = $state<HTMLElement | null>(null);
+    let newest = $derived(newestRound(toolCalls));
+    function jumpToNewestRound(e: Event) {
+        e.stopPropagation();
+        if (newest === null) return;
+        findRoundHeader(rootEl, newest)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     }
 
     // Stop used to be fire-and-forget: the envelope said OK while the payload
@@ -174,7 +187,7 @@
 </script>
 
 {#if toolCalls.length > 0 || isLive}
-    <div class="tool-calls-collapsible" class:live={isLive}>
+    <div class="tool-calls-collapsible" class:live={isLive} bind:this={rootEl}>
         <button
             class="tool-calls-header"
             onclick={() => expanded = !expanded}
@@ -235,6 +248,7 @@
                     <div class="round-group">
                         <button
                             class="round-header"
+                            data-round={group.round}
                             onclick={() => toggleRound(group.round)}
                             aria-expanded={!roundCollapsed}
                         >
@@ -308,6 +322,13 @@
                         {#if stopState === 'error'}
                             <span class="stop-note error">{stopNote}</span>
                         {/if}
+                        {#if newest !== null}
+                            <button
+                                class="round-jump"
+                                title={roundJumpTitle(newest)}
+                                onclick={jumpToNewestRound}
+                            >{roundJumpLabel(newest)}</button>
+                        {/if}
                     </div>
                 {/if}
             </div>
@@ -346,6 +367,25 @@
         font-size: 1em;
         padding: 8px 28px;
         min-width: 120px;
+    }
+    /* Out of the flex flow: Stop stays centred whatever sits at the right. */
+    .round-jump {
+        position: absolute;
+        right: 0;
+        top: 50%;
+        transform: translateY(-50%);
+        padding: 4px 10px;
+        font-size: 0.85em;
+        white-space: nowrap;
+        cursor: pointer;
+        color: var(--text-secondary, #9ca3af);
+        background: transparent;
+        border: 1px solid var(--border-color, #475569);
+        border-radius: 4px;
+    }
+    .round-jump:hover {
+        color: var(--text-primary, #e5e7eb);
+        border-color: #60a5fa;
     }
     .stop-note.error {
         color: #f87171;
