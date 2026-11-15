@@ -224,6 +224,56 @@ async def test_a_cancel_after_the_extraction_finished_does_not_withdraw_its_prop
 
 
 @pytest.mark.asyncio
+async def test_a_cancel_once_the_model_call_has_returned_is_refused_and_the_proposal_is_announced(tmp_path):
+    """The window between the model task finishing and the press resuming from it.
+
+    The cancel is driven from a callback queued before the model returns, so it runs
+    after the task is done and before the press has woken from `await task`. It reads
+    `task.done()`, sets no `cancel_requested`, and is refused; the press goes on to
+    announce the finished proposal.
+    """
+    llm = _llm()
+    monitor = _monitor(llm)
+    svc = _node(tmp_path, monitor, llm)
+    seen = {}
+
+    def _cancel_in_the_window():
+        entry = svc._running_extractions().get(CHAT)
+        seen["task_done"] = entry is not None and entry["task"].done()
+        seen["press_still_waiting"] = not pressed.done() and entry is not None
+        coro = KnowledgeService.cancel_knowledge_extraction(svc, CHAT)
+        try:
+            coro.send(None)  # a refusal awaits nothing, so it finishes in this one step
+        except StopIteration as done:
+            seen["answer"] = done.value
+        else:
+            coro.close()
+            seen["answer"] = "the cancel awaited, so it was not refused"
+        seen["cancel_requested"] = entry.get("cancel_requested") if entry else None
+
+    async def _generate(**kwargs):
+        asyncio.get_running_loop().call_soon(_cancel_in_the_window)
+        return _proposal(monitor.conversation_id)
+
+    monitor._generate_commit_proposal = _generate
+
+    pressed = await _start(svc)
+    result = await asyncio.wait_for(pressed, 5)
+
+    assert seen["task_done"] is True, "the cancel arrived after the model task finished"
+    assert seen["press_still_waiting"] is True, "and before the press resumed from it"
+    assert seen["answer"]["status"] == "error", seen
+    assert seen["answer"]["reason"] == "extraction_not_running", seen
+    assert not seen["cancel_requested"], "a finished task is never marked cancel_requested"
+    assert result["status"] == "success", result
+    assert result["proposal_id"] == "prop-1"
+    assert "knowledge_commit_proposed" in _event_names(svc)
+    assert "knowledge_extraction_cancelled" not in _event_names(svc)
+    svc.consensus_manager.propose_commit.assert_awaited_once()
+    assert monitor.proposals_created == 1
+
+
+@pytest.mark.asyncio
 async def test_a_second_press_during_a_running_extraction_still_answers_extraction_in_progress(tmp_path):
     llm = _llm()
     monitor = _monitor(llm)

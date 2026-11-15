@@ -1457,8 +1457,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     // AI instruction creation timeout: 60s (remote LLM processing can take time)
                     timeout = 60000;
                 } else if (command === 'end_conversation_session') {
-                    // 180s: knowledge extraction + consensus exceeds the 60s default on groups
-                    timeout = 180000;
+                    // 300s: knowledge extraction + consensus exceeds the 60s default on groups
+                    // (Mike's call, 2026-11-15; was 180s)
+                    timeout = 300000;
                 } else if (command === 'transcribe_audio') {
                     // Voice transcription timeout: 240s (v0.13.1+)
                     // First use: model download (~3GB, 1-2min) + load (~20s) + compile (~30s) + transcribe (~5s)
