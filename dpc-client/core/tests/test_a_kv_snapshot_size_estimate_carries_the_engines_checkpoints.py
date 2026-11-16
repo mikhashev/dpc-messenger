@@ -43,6 +43,11 @@ def _entry(folder, *, nbytes=LIVE_BYTES, n_saved=LIVE_TOKENS, save_ms=33_156, en
                         record=record, n_saved=n_saved, nbytes=nbytes, save_ms=save_ms, now=time.time())
 
 
+def _fit(held):
+    """A held fit without its size samples, which every save now records."""
+    return {k: v for k, v in held.items() if k != "size_samples"}
+
+
 def _estimate(sizes, tokens):
     return kv.estimate_bytes(tokens, sizes["floor_bytes"], sizes["bytes_per_token"],
                              sizes.get("checkpoint_bytes", 0.0))
@@ -81,7 +86,7 @@ def test_the_live_save_fits_the_part_per_token_without_the_checkpoints(tmp_path)
 
 def test_a_save_without_an_engine_line_fits_exactly_as_before(tmp_path):
     assert kv.add_entry(tmp_path, _entry(tmp_path), cap_bytes=10 ** 12)
-    assert kv.read_index(tmp_path)["sizes"]["qwen"] == {
+    assert _fit(kv.read_index(tmp_path)["sizes"]["qwen"]) == {
         "floor_bytes": LLAMA_FLOOR, "bytes_per_token": (LIVE_BYTES - LLAMA_FLOOR) / LIVE_TOKENS}
     assert "checkpoint_bytes" not in kv.alias_sizes(tmp_path, "qwen", "llamacpp_server")
 
@@ -99,14 +104,14 @@ def test_strata_counts_without_bytes_fit_as_before(tmp_path):
     floor = kv.SEED_SIZES["strata"]["floor_bytes"]
     kv.add_entry(tmp_path, _entry(tmp_path, engine="strata", nbytes=1_499_976_756, n_saved=82_754),
                  cap_bytes=10 ** 12, checkpoint_count=1, checkpoint_bytes=None)
-    assert kv.read_index(tmp_path)["sizes"]["qwen"] == {
+    assert _fit(kv.read_index(tmp_path)["sizes"]["qwen"]) == {
         "floor_bytes": floor, "bytes_per_token": (1_499_976_756 - floor) / 82_754}
 
 
 @pytest.mark.parametrize("bad", [LIVE_BYTES, LIVE_BYTES + 1, -1, float("nan"), True, "2244"])
 def test_checkpoint_bytes_that_cannot_be_part_of_the_file_are_ignored(tmp_path, bad):
     kv.add_entry(tmp_path, _entry(tmp_path), cap_bytes=10 ** 12, checkpoint_count=15, checkpoint_bytes=bad)
-    assert kv.read_index(tmp_path)["sizes"]["qwen"] == {
+    assert _fit(kv.read_index(tmp_path)["sizes"]["qwen"]) == {
         "floor_bytes": LLAMA_FLOOR, "bytes_per_token": (LIVE_BYTES - LLAMA_FLOOR) / LIVE_TOKENS}
 
 
@@ -114,7 +119,7 @@ def test_checkpoints_that_leave_the_rest_below_the_floor_fall_back_to_the_whole_
     # 600 MB at 5K tokens with 2 checkpoints of 150 MiB: the rest is under the 0.47 GB seed floor.
     kv.add_entry(tmp_path, _entry(tmp_path, nbytes=600_000_000, n_saved=5_000), cap_bytes=10 ** 12,
                  checkpoint_count=2, checkpoint_bytes=round(299.291 * MIB))
-    assert kv.read_index(tmp_path)["sizes"]["qwen"] == {
+    assert _fit(kv.read_index(tmp_path)["sizes"]["qwen"]) == {
         "floor_bytes": LLAMA_FLOOR, "bytes_per_token": (600_000_000 - LLAMA_FLOOR) / 5_000}
 
 
@@ -184,7 +189,7 @@ async def test_a_save_with_no_engine_line_refits_as_before(tmp_path):
     outcome = await stop_by_hand(holder)
 
     assert outcome["outcome"] == kv.SAVED
-    assert kv.read_index(folder)["sizes"][ALIAS] == {"floor_bytes": 1e6, "bytes_per_token": (size - 1e6) / 1500}
+    assert _fit(kv.read_index(folder)["sizes"][ALIAS]) == {"floor_bytes": 1e6, "bytes_per_token": (size - 1e6) / 1500}
 
 
 @pytest.mark.asyncio

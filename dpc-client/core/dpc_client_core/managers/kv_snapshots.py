@@ -84,6 +84,12 @@ SEED_SIZES: Dict[str, Dict[str, float]] = {
     "strata": {"floor_bytes": 236e6, "bytes_per_token": 15.3e3},
     "llamacpp_server": {"floor_bytes": 0.47e9, "bytes_per_token": 22.6e3},
 }
+# Saves an alias keeps for its size fit (`size_samples`: tokens, file bytes, the checkpoint bytes
+# the engine named or null), and the token spread two of them need before floor and slope are fitted
+# together: at a 10K spread even 1 MB of noise per file moves a 200K estimate by under 1 %, while
+# 20 % would refuse the first two 27B files (78,757 and 93,828 tokens).
+SIZE_SAMPLES_PER_ALIAS = 8
+SIZE_FIT_MIN_SPREAD_TOKENS = 10_000
 
 # File names: opaque random hex, so a listing names no agent and no conversation.
 # Strata refuses a leading dot and path characters (`slot_filename_problem`, pin v0.2.11).
@@ -720,8 +726,8 @@ def add_entry(folder: PathLike, entry: Dict[str, Any], *, cap_bytes: int, now: O
     that alone exceeds the cap, is deleted and not added (False). An older entry of the same key is replaced; then the
     folder is swept at `now` (default: the entry's `saved_at`, else the wall clock) with
     the cap applied, never to this file. Also records the folder's write rate and the
-    alias's bytes per token, fitted without the context checkpoints the engine said it
-    wrote (`engine_checkpoints_of`). Raises OSError when the index cannot be read or written."""
+    alias's floor and bytes per token, fitted over its `size_samples` without the context
+    checkpoints the engine said it wrote (`engine_checkpoints_of`). Raises OSError when the index cannot be read or written."""
     folder = Path(folder)
     name = entry.get("file")
     if not _FINAL_RE.match(name or "") or not _valid_entry(entry):
@@ -1117,9 +1123,11 @@ def alias_sizes(folder: PathLike, alias: str, engine: str) -> Dict[str, float]:
         measured = None
     sizes = seed_sizes(engine)
     if isinstance(measured, dict):
-        for key in ("floor_bytes", "bytes_per_token"):
-            if _number(measured.get(key)) and measured[key] > 0:
-                sizes[key] = float(measured[key])
+        # A fitted floor may be zero; a part per token never.
+        if _number(measured.get("floor_bytes")) and measured["floor_bytes"] >= 0:
+            sizes["floor_bytes"] = float(measured["floor_bytes"])
+        if _number(measured.get("bytes_per_token")) and measured["bytes_per_token"] > 0:
+            sizes["bytes_per_token"] = float(measured["bytes_per_token"])
         if _number(measured.get("checkpoint_bytes")) and measured["checkpoint_bytes"] >= 0:
             sizes["checkpoint_bytes"] = float(measured["checkpoint_bytes"])
     return sizes
@@ -1153,17 +1161,64 @@ def _note_rates_locked(index: Dict[str, Any], entry: Dict[str, Any],
         floor = held.get("floor_bytes") if isinstance(held, dict) else None
         if not _number(floor):
             floor = seed_sizes(entry.get("engine") or "")["floor_bytes"]
-        # One measurement fits one unknown: the floor stays, the part per token follows the file less
+        known = _number(checkpoint_bytes) and 0 <= checkpoint_bytes < nbytes
+        samples = (_size_samples(held) + [[tokens, nbytes, checkpoint_bytes if known else None]])[
+            -SIZE_SAMPLES_PER_ALIAS:]
+        # Never both kinds in one fit: with the engine's checkpoint bytes only checkpoint-free samples,
+        # without them only whole files (whose checkpoints, if any, the estimate does not add back).
+        if known:
+            fit = _fit_sizes([(t, b - c) for t, b, c in samples if c is not None])
+        else:
+            fit = _fit_sizes([(t, b) for t, b, c in samples if c is None])
+        sizes: Optional[Dict[str, Any]] = None
+        if fit is not None:
+            sizes = {"floor_bytes": fit[0], "bytes_per_token": fit[1]}
+        # Else one measurement fits one unknown: the floor stays, the part per token follows the file less
         # the checkpoints the engine named; none named, or nothing left above the floor: the whole file.
-        if _number(checkpoint_bytes) and 0 <= checkpoint_bytes < nbytes and nbytes - checkpoint_bytes > floor:
-            sizes = {"floor_bytes": float(floor),
-                     "bytes_per_token": (nbytes - checkpoint_bytes - floor) / tokens,
-                     "checkpoint_bytes": float(checkpoint_bytes)}
+        elif known and nbytes - checkpoint_bytes > floor:
+            sizes = {"floor_bytes": float(floor), "bytes_per_token": (nbytes - checkpoint_bytes - floor) / tokens}
+        elif nbytes > floor:
+            sizes = {"floor_bytes": float(floor), "bytes_per_token": (nbytes - floor) / tokens}
+            known = False
+        if sizes is not None and known:
+            sizes["checkpoint_bytes"] = float(checkpoint_bytes)
             if isinstance(checkpoint_count, int) and not isinstance(checkpoint_count, bool) and checkpoint_count >= 0:
                 sizes["checkpoint_count"] = checkpoint_count
-            index["sizes"][alias] = sizes
-        elif nbytes > floor:
-            index["sizes"][alias] = {"floor_bytes": float(floor), "bytes_per_token": (nbytes - floor) / tokens}
+        if sizes is None:                     # no fit: the held one stays
+            sizes = {k: v for k, v in held.items() if k != "size_samples"} if isinstance(held, dict) else {}
+        sizes["size_samples"] = samples
+        index["sizes"][alias] = sizes
+
+
+def _size_samples(held: Any) -> List[List[Any]]:
+    """The well-formed `size_samples` of a held fit: [tokens, file bytes, checkpoint bytes or None]."""
+    raw = held.get("size_samples") if isinstance(held, dict) else None
+    out: List[List[Any]] = []
+    for s in raw if isinstance(raw, list) else ():
+        if not (isinstance(s, list) and len(s) == 3):
+            continue
+        tokens, nbytes, ck = s
+        if (isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0
+                and _number(nbytes) and nbytes > 0 and (ck is None or (_number(ck) and 0 <= ck < nbytes))):
+            out.append([tokens, nbytes, ck])
+    return out
+
+
+def _fit_sizes(points: Sequence[Tuple[int, float]]) -> Optional[Tuple[float, float]]:
+    """(floor, bytes per token) by least squares over (tokens, bytes); None with fewer than two points,
+    less than `SIZE_FIT_MIN_SPREAD_TOKENS` between them, a floor below zero or a slope not above it."""
+    if len(points) < 2:
+        return None
+    xs = [x for x, _ in points]
+    if max(xs) - min(xs) < SIZE_FIT_MIN_SPREAD_TOKENS:
+        return None
+    mx = sum(xs) / len(points)
+    my = sum(y for _, y in points) / len(points)
+    slope = sum((x - mx) * (y - my) for x, y in points) / sum((x - mx) ** 2 for x in xs)
+    floor = my - slope * mx
+    if not (math.isfinite(floor) and math.isfinite(slope) and floor >= 0 and slope > 0):
+        return None
+    return float(floor), float(slope)
 
 
 def note_restore_rate(folder: PathLike, nbytes: int, ms: float) -> None:
