@@ -885,6 +885,38 @@ def prefix_digest(messages: Sequence[Any], k: Optional[int] = None) -> Tuple[str
     return hashlib.sha256(text.encode("utf-8")).hexdigest(), k
 
 
+def _canonical(message: Any) -> str:
+    """One message in the canonical JSON form `prefix_digest` uses (same `dumps` arguments)."""
+    return json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
+def message_fingerprints(messages: Sequence[Any]) -> Dict[str, Any]:
+    """Measurement only: {hashes, base_end, msg0_chars} of a wire message list.
+
+    `hashes` are the first 8 hex characters of each message's sha256 over the canonical
+    JSON; `base_end` is the index just after the last "user" message (the turn base, 0 when
+    there is none); `msg0_chars` is the length of message 0's canonical JSON. Logged at a save
+    and at a restore, so a "prefix moved" can be traced to the indices that differ."""
+    messages = list(messages or [])
+    texts = [_canonical(m) for m in messages]
+    base_end = 0
+    for i, m in enumerate(messages):
+        if isinstance(m, dict) and m.get("role") == "user":
+            base_end = i + 1
+    return {
+        "hashes": [hashlib.sha256(t.encode("utf-8")).hexdigest()[:8] for t in texts],
+        "base_end": base_end,
+        "msg0_chars": len(texts[0]) if texts else 0,
+    }
+
+
+def fingerprint_words(fingerprint: Dict[str, Any]) -> str:
+    """The fingerprint as the tail of a log line: count, base end, message 0's length, short hashes."""
+    hashes = fingerprint["hashes"]
+    return (f"messages={len(hashes)} base_end={fingerprint['base_end']} "
+            f"msg0_chars={fingerprint['msg0_chars']} hashes={','.join(hashes)}")
+
+
 def matches(entry: Dict[str, Any], messages: Sequence[Any]) -> bool:
     """Whether the request's first `prefix_messages` hash to the saved value."""
     k = entry.get("prefix_messages")
@@ -1222,6 +1254,7 @@ def note_engine_call(
     conversation_id: Optional[str] = None,
     peer_id: Optional[str] = None,
     prefix: Optional[Tuple[str, int]] = None,
+    fingerprint: Optional[Dict[str, Any]] = None,
     at: float,
 ) -> int:
     """Note a call about to reach the engine (point 2) and return its sequence number.
@@ -1247,6 +1280,8 @@ def note_engine_call(
             "peer_id": peer_id,
             "prefix_sha256": sha,
             "prefix_messages": k,
+            # Memory only, never copied to the index (`new_entry` names its keys): see `message_fingerprints`.
+            "fingerprint": fingerprint,
             "seq": seq,
             "sent": None,
             "at": at,

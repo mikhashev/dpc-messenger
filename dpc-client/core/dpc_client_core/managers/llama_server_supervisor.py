@@ -4058,6 +4058,14 @@ class LlamaServerSupervisor:
             "%s tokens", self.ENGINE, alias, record.get("agent_id"), conversation,
             slot, nbytes, ms, entry["n_saved"],
         )
+        fingerprint = record.get("fingerprint")
+        if fingerprint:
+            try:
+                logger.info("%s[%s]: KV snapshot prefix at save: agent %s conversation %s %s",
+                            self.ENGINE, alias, record.get("agent_id"), conversation,
+                            _kv.fingerprint_words(fingerprint))
+            except Exception:
+                logger.debug("KV snapshot prefix line not written", exc_info=True)
         outcome = _kv_outcome(_kv.SAVED, _kv.describe_outcome(_kv.SAVED), nbytes, ms)
         _kv.reset_storage_streak(alias)
         _kv.note_save(alias, outcome)

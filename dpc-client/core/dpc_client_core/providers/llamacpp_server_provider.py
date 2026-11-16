@@ -473,6 +473,17 @@ class LlamaServerProvider(DeepSeekProvider):
         except Exception:
             logger.debug("'%s': the call could not be marked sent", self.alias, exc_info=True)
 
+    @staticmethod
+    def _fingerprint_of(messages: Optional[List[Any]]) -> Optional[Dict[str, Any]]:
+        """The measurement-only fingerprint of a call's messages; None when it cannot be made."""
+        if messages is None:
+            return None
+        try:
+            return kv_snapshots.message_fingerprints(messages)
+        except Exception:
+            logger.debug("KV snapshot fingerprint not computed", exc_info=True)
+            return None
+
     async def _note_engine_call(self, messages: Optional[List[Any]]) -> None:
         """Record this call as the alias's last, then restore its conversation's KV
         snapshot when the engine is empty and the call is the owner's. Neither runs while
@@ -485,7 +496,7 @@ class LlamaServerProvider(DeepSeekProvider):
             seq = kv_snapshots.note_engine_call(
                 self.alias, caller_kind=kind, agent_id=agent_id, conversation_id=conversation_id,
                 peer_id=peer, prefix=kv_snapshots.prefix_digest(messages) if messages is not None else None,
-                at=time.time(),
+                fingerprint=self._fingerprint_of(messages), at=time.time(),
             )
         except Exception:
             logger.warning("'%s': the last engine call could not be recorded", self.alias, exc_info=True)
@@ -534,6 +545,15 @@ class LlamaServerProvider(DeepSeekProvider):
         if entry is None:
             return
         name = entry.get("file")
+        # Measurement only: set beside the `at save` line to see which indices moved.
+        fingerprint = self._fingerprint_of(messages)
+        if fingerprint is not None:
+            try:
+                logger.info("%s: KV snapshot prefix at restore: agent %s conversation %s file %s saved_k %s %s",
+                            alias, agent_id or "-", conversation_id, name, entry.get("prefix_messages"),
+                            kv_snapshots.fingerprint_words(fingerprint))
+            except Exception:
+                logger.debug("KV snapshot prefix line not written", exc_info=True)
         if not kv_snapshots.matches(entry, messages):
             await asyncio.to_thread(kv_snapshots.remove_entry, folder, name, reason=_PREFIX_MISMATCH)
             logger.info("%s: KV snapshot %s (%s) not restored: the prefix moved since the save; "
