@@ -1496,6 +1496,7 @@
   proposal={$knowledgeCommitProposal}
   sourceChat={chatLabel($knowledgeCommitProposal?.conversation_id ?? '')}
   voteError={commitVoteError}
+  selfNodeId={$nodeStatus?.node_id || ''}
   on:vote={handleCommitVote}
   on:close={closeCommitDialog}
 />

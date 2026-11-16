@@ -24,18 +24,23 @@ NOT in scope (stays in service.py or other handlers):
 import asyncio
 import json
 import logging
-import re
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
-from .managers.llama_server_supervisor import card_queue_refusal_in
 from . import ai_chats, conversation_paths, knowledge_routing
 from dpc_protocol.pcm_core import PCMCore
 
 logger = logging.getLogger(__name__)
+
+# A vote carrying an edit to a proposal other participants vote on (GLOSSARY).
+EDIT_REFUSED_REASON = "shared_proposal_not_editable"
+EDIT_REFUSED_MESSAGE = (
+    "Other participants vote on this text, so it cannot be edited here: "
+    "approve it, reject it, or ask for changes with a comment."
+)
 
 CONSENT_TARGET_FIELDS = knowledge_routing.CONSENT_TARGET_FIELDS
 
@@ -612,60 +617,34 @@ class KnowledgeService:
         UI Integration: Called when user clicks approve/reject/request_changes
         in KnowledgeCommitDialog component.
 
-        If entries/summary are provided (from UI edit mode), the proposal is
-        updated before the vote is cast so the commit reflects user edits.
+        If entries/summary differ from the proposal (UI edit mode), the proposal
+        is updated before the vote is cast so the commit reflects the edit; a
+        proposal with other participants refuses an edit.
         """
         try:
-            is_ai_chat = False
-            ai_agent_node_id = None
+            is_solo = False
             if proposal_id in self.consensus_manager.sessions:
-                session = self.consensus_manager.sessions[proposal_id]
-                conversation_id = session.proposal.conversation_id
-                if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
-                    is_ai_chat = True
-                    ai_agent_node_id = conversation_id
-                elif conversation_id.startswith("agent_"):
-                    is_ai_chat = True
-                    ai_agent_node_id = conversation_id
-                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                        agent_mgr = dpc_agent_provider._managers.get(conversation_id)
-                        if agent_mgr and agent_mgr.agent_id:
-                            ai_agent_node_id = agent_mgr.agent_id
+                conversation_id = self.consensus_manager.sessions[proposal_id].proposal.conversation_id
+                # Only the owner votes in an AI, agent or Telegram chat (ADR-009), so
+                # the vote has nobody to reach. `agent-` is an agent linked to Telegram.
+                is_solo = conversation_id == "local_ai" or conversation_id.startswith(
+                    ("ai_", "agent_", "agent-", "telegram-")
+                )
 
             broadcast_func = self._broadcast_to_peers
-            if is_ai_chat:
+            if is_solo:
                 async def _no_op_broadcast(message: Dict[str, Any]) -> None:
                     pass
                 broadcast_func = _no_op_broadcast
 
-            # Apply user edits from UI edit mode before casting the vote.
-            # This ensures the commit contains user-modified entries/summary.
+            # An edit changes the text of this node's copy only, so a second
+            # participant would sign a commit with another hash: refused outright.
             if proposal_id in self.consensus_manager.sessions:
-                session = self.consensus_manager.sessions[proposal_id]
-                if entries is not None:
-                    from dpc_protocol.pcm_core import KnowledgeEntry as KE, KnowledgeSource as KS
-                    rebuilt = []
-                    for e in entries:
-                        if isinstance(e, dict):
-                            src = e.get("source", {})
-                            if isinstance(src, dict):
-                                src = KS(**{k: v for k, v in src.items() if k in KS.__dataclass_fields__})
-                            rebuilt.append(KE(
-                                content=e.get("content", ""),
-                                tags=e.get("tags", []),
-                                source=src,
-                                confidence=e.get("confidence", 1.0),
-                                alternative_viewpoints=e.get("alternative_viewpoints", []),
-                                edited_by=e.get("edited_by"),
-                                edited_at=e.get("edited_at"),
-                            ))
-                        else:
-                            rebuilt.append(e)
-                    session.proposal.entries = rebuilt
-                if summary is not None:
-                    session.proposal.summary = summary
-
+                refused = self._apply_vote_edits(
+                    self.consensus_manager.sessions[proposal_id], entries, summary
+                )
+                if refused:
+                    return refused
 
             # Only a vote that asserts something about the text needs the text.
             # A refusal is «I do not sign this»; an abstention is «I cannot
@@ -684,17 +663,6 @@ class KnowledgeService:
                 comment=comment,
                 broadcast_func=broadcast_func,
             )
-
-            if success and is_ai_chat and not conversation_id.startswith("agent_"):
-                # ADR-009: agent chat = solo voting (Mike only).
-                # Agent is not a voter — same as "AI provider is not a voter" in local_ai.
-                logger.info(
-                    "User voted on AI chat proposal %s, triggering AI evaluation",
-                    proposal_id,
-                )
-                asyncio.create_task(
-                    self._ai_agent_vote_on_proposal(proposal_id, ai_agent_node_id)
-                )
 
             if success:
                 # Whether this node judged the text decides whether it signs the
@@ -724,6 +692,59 @@ class KnowledgeService:
         except Exception as e:
             logger.error("Error voting on knowledge commit: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    def _apply_vote_edits(
+        self, session, entries: Optional[list], summary: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Apply the text a vote carries, or refuse it; None means go on voting.
+
+        Text equal to the proposal's own is no edit and touches nothing, so a
+        vote that sends the proposal back leaves the commit hash alone. A real
+        edit is allowed only when this node is the sole participant.
+        """
+        from dataclasses import asdict
+        from dpc_protocol.knowledge_commit import _rebuild
+        from dpc_protocol.pcm_core import KnowledgeEntry, KnowledgeSource
+
+        # A closed vote is answered "already decided" by the caller; an edit
+        # check here would hide that or change a proposal nobody can vote on.
+        if session.status != "voting":
+            return None
+
+        proposal = session.proposal
+        rebuilt = None
+        if entries is not None:
+            rebuilt = []
+            for e in entries:
+                if not isinstance(e, dict):
+                    rebuilt.append(e)
+                    continue
+                entry = _rebuild(KnowledgeEntry, e)
+                src = e.get("source")
+                entry.source = _rebuild(KnowledgeSource, src) if isinstance(src, dict) else src
+                rebuilt.append(entry)
+            if [asdict(x) for x in rebuilt] == [asdict(x) for x in proposal.entries]:
+                rebuilt = None
+        new_summary = summary if summary is not None and summary != proposal.summary else None
+        if rebuilt is None and new_summary is None:
+            return None
+
+        me = getattr(self.p2p_manager, "node_id", None)
+        if any(p != me for p in (proposal.participants or ())):
+            logger.warning(
+                "Vote on %s refused: it carries an edit and the proposal has other participants",
+                proposal.proposal_id,
+            )
+            return {
+                "status": "error",
+                "reason": EDIT_REFUSED_REASON,
+                "message": EDIT_REFUSED_MESSAGE,
+            }
+        if rebuilt is not None:
+            proposal.entries = rebuilt
+        if new_summary is not None:
+            proposal.summary = new_summary
+        return None
 
     # -------------------------------------------------------------
     # A vote held back until the records it judges arrive
@@ -1195,209 +1216,6 @@ class KnowledgeService:
             extra={"missing_messages": len(pending.get("missing") or [])},
         )
 
-    async def _ai_agent_vote_on_proposal(
-        self, proposal_id: str, ai_agent_node_id: str
-    ) -> None:
-        """Have the AI agent evaluate and cast a vote on a knowledge proposal."""
-        try:
-            if proposal_id not in self.consensus_manager.sessions:
-                logger.warning("AI vote: Proposal %s not found", proposal_id)
-                return
-
-            session = self.consensus_manager.sessions[proposal_id]
-            proposal = session.proposal
-
-            if ai_agent_node_id in session.votes:
-                logger.info(
-                    "AI agent %s already voted on proposal %s",
-                    ai_agent_node_id, proposal_id,
-                )
-                return
-
-            agent_provider_alias = None
-            conversation_history = None
-            conv_id = proposal.conversation_id
-            if conv_id and conv_id.startswith("agent_"):
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                    _mgr = dpc_agent_provider._managers.get(conv_id)
-                    if _mgr:
-                        # Resolve underlying LLM provider — NOT "dpc_agent" itself,
-                        # which would route through agent.process_message() and pollute
-                        # history.json with the voting prompt (#20/#10/#16).
-                        _raw_alias = _mgr.config.get("provider_alias")
-                        if _raw_alias == "dpc_agent" or not _raw_alias:
-                            # Use the agent's actual LLM provider (agent_provider → default)
-                            agent_provider_alias = (
-                                getattr(self.llm_manager, "agent_provider", None)
-                                or self.llm_manager.default_provider
-                            )
-                        else:
-                            agent_provider_alias = _raw_alias
-                        _monitor = _mgr._agent_monitors.get(conv_id)
-                        if _monitor:
-                            conversation_history = _monitor.full_conversation
-
-            ai_decision = await self._evaluate_knowledge_proposal_for_ai_vote(
-                proposal,
-                provider_alias=agent_provider_alias,
-                conversation_history=conversation_history,
-            )
-
-            if ai_decision is None:
-                logger.warning(
-                    "AI agent %s could not evaluate proposal %s — abstaining (no vote cast)",
-                    ai_agent_node_id, proposal_id,
-                )
-                return
-
-            logger.info(
-                "AI agent %s voting on proposal %s: %s - %s",
-                ai_agent_node_id,
-                proposal_id,
-                ai_decision["vote"],
-                ai_decision.get("comment", ""),
-            )
-
-            async def _no_op(msg):
-                pass
-
-            original_node_id = self.consensus_manager.node_id
-            self.consensus_manager.node_id = ai_agent_node_id
-            try:
-                await self.consensus_manager.cast_vote(
-                    proposal_id=proposal_id,
-                    vote=ai_decision["vote"],
-                    comment=ai_decision.get("comment"),
-                    broadcast_func=_no_op,
-                )
-            finally:
-                self.consensus_manager.node_id = original_node_id
-
-        except Exception as e:
-            refusal = card_queue_refusal_in(e)
-            if refusal is None:
-                logger.error("Error in AI agent voting: %s", e, exc_info=True)
-                return
-            # The vote is a request and may be refused the card; no model failed to judge anything.
-            logger.warning(
-                "AI agent %s abstains on proposal %s (no vote cast): the card queue refused alias '%s': %s",
-                ai_agent_node_id, proposal_id,
-                agent_provider_alias or self.llm_manager.default_provider, refusal,
-            )
-
-    async def _evaluate_knowledge_proposal_for_ai_vote(
-        self,
-        proposal,
-        provider_alias: Optional[str] = None,
-        conversation_history: Optional[list] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Evaluate a knowledge proposal and return an AI vote decision."""
-        try:
-            entries_text = ""
-            for i, entry in enumerate(proposal.entries, 1):
-                entries_text += f"\n{i}. {entry.content} (confidence: {entry.confidence:.2f})"
-                if hasattr(entry, 'tags') and entry.tags:
-                    entries_text += f" [tags: {', '.join(entry.tags)}]"
-
-            conversation_text = ""
-            if conversation_history:
-                lines = []
-                for msg in conversation_history:
-                    if hasattr(msg, 'sender_name'):
-                        role = msg.sender_name.upper()
-                        content = msg.text
-                    else:
-                        role = msg.get("role", "unknown").upper()
-                        content = msg.get("content", "")
-                    lines.append(f"{role}: {content}")
-                conversation_text = (
-                    "\n\n**Full Conversation (source of the extracted knowledge):**\n"
-                    + "\n\n".join(lines)
-                )
-
-            prompt = f"""You extracted the following knowledge entries from the conversation below. Now review them and vote on whether they should be saved to the user's personal knowledge base.
-
-**Proposal Topic:** {proposal.topic}
-**Summary:** {proposal.summary}
-**Average Confidence:** {proposal.avg_confidence:.2f}
-
-**Knowledge Entries:**{entries_text}
-{conversation_text}
-
-**Your Task:**
-Evaluate each entry against the actual conversation above:
-1. **Accuracy**: Does this correctly reflect what was said or concluded in the conversation?
-2. **Relevance**: Is this genuinely useful knowledge worth preserving long-term?
-3. **Redundancy**: Does this duplicate or contradict existing common knowledge?
-4. **Quality**: Is the entry clear, specific, and well-formulated?
-
-**Voting Options:**
-- `approve`: Entries accurately reflect the conversation and are worth saving
-- `reject`: Entries are factually wrong, misrepresent the conversation, or are harmful
-- `request_changes`: Entries have potential but need revision (explain what specifically)
-
-**IMPORTANT:**
-- Ground your evaluation in the conversation above — not just general world knowledge
-- Personal preferences, technical conclusions, and learned insights are all valid
-- If most entries are good but a few misrepresent the conversation, vote request_changes
-- Only reject if entries are genuinely wrong or harmful
-
-Respond in JSON format:
-{{
-    "vote": "approve" | "reject" | "request_changes",
-    "comment": "Brief explanation of your decision (1-2 sentences)",
-    "entry_feedback": [
-        {{"index": 1, "assessment": "good" | "needs_work" | "problematic", "note": "optional note"}}
-    ]
-}}
-"""
-
-            logger.debug(
-                "Evaluating knowledge proposal %s with provider=%s",
-                proposal.proposal_id, provider_alias or "default",
-            )
-            response = await self.llm_manager.query(
-                prompt=prompt,
-                provider_alias=provider_alias,
-                max_tokens=500,
-                conversation_id=proposal.conversation_id,
-            )
-
-            response_text = response
-            json_match = re.search(r'\{[\s\S]*\}', response_text)
-            if json_match:
-                decision = json.loads(json_match.group())
-            else:
-                decision = json.loads(response_text)
-
-            vote = decision.get("vote", "approve")
-            comment = decision.get("comment", "")
-
-            entry_feedback = decision.get("entry_feedback", [])
-            if entry_feedback and vote == "request_changes":
-                feedback_notes = []
-                for ef in entry_feedback:
-                    if ef.get("assessment") != "good" and ef.get("note"):
-                        feedback_notes.append(f"Entry {ef.get('index')}: {ef.get('note')}")
-                if feedback_notes:
-                    comment += " | " + "; ".join(feedback_notes[:3])
-
-            return {"vote": vote, "comment": comment[:500]}
-
-        except json.JSONDecodeError as e:
-            logger.warning(
-                "AI vote evaluation returned invalid JSON, agent will abstain: %s", e
-            )
-            return None
-        except Exception as e:
-            if card_queue_refusal_in(e) is not None:
-                raise  # the vote names it: not an evaluation that went wrong
-            logger.error(
-                "Error in AI vote evaluation, agent will abstain: %s", e, exc_info=True
-            )
-            return None
-
     # ─────────────────────────────────────────────────────────────
     # End conversation session + knowledge proposal flow
     # ─────────────────────────────────────────────────────────────
@@ -1713,13 +1531,15 @@ Respond in JSON format:
                     )
                     return
 
-                # ADR-009: agent chat = solo voting (Mike only, agent is not a voter).
-                # Remove agent from participants so consensus finalizes on Mike's vote alone.
-                if conversation_id.startswith("agent_"):
-                    user_node_id = self.p2p_manager.node_id
-                    proposal.participants = [
-                        p for p in proposal.participants if p == user_node_id
-                    ]
+                # ADR-009: AI, agent and Telegram chats = solo voting (the owner only).
+                # Set the roster rather than filter it: a Telegram chat names only its
+                # bot, and a filter would leave nobody to vote. It sits above the
+                # announcement because participants go into the commit hash.
+                if (
+                    conversation_id == "local_ai"
+                    or conversation_id.startswith(("ai_", "agent_", "agent-", "telegram-"))
+                ):
+                    proposal.participants = [self.p2p_manager.node_id]
 
                 # Extraction takes a minute or more and a member can drop
                 # inside it, so the roster is read again here. This has to
@@ -1751,9 +1571,7 @@ Respond in JSON format:
 
                 if (
                     conversation_id == "local_ai"
-                    or conversation_id.startswith("ai_")
-                    or conversation_id.startswith("telegram-")
-                    or conversation_id.startswith("agent_")
+                    or conversation_id.startswith(("ai_", "agent_", "agent-", "telegram-"))
                 ):
                     logger.info(
                         "%s - private conversation, knowledge will not be shared with peers",
@@ -2298,7 +2116,7 @@ Respond in JSON format:
     ) -> None:
         """Broadcast KNOWLEDGE_COMMIT_RESULT to remote participants and emit UI event.
 
-        Solo-vote conversations (agent_*, local_ai, ai_*, telegram-*) reduce
+        Solo-vote conversations (local_ai, ai_*, agent_*, agent-*, telegram-*) set
         participants to [local_node_id] for voting. The local node is never in
         p2p_manager.peers, so iterating it produced a misleading "Broadcasted"
         log with zero recipients. Filter self out before iterating.

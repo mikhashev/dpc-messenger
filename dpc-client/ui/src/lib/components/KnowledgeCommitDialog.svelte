@@ -12,6 +12,15 @@
   // A refused vote — the session closed before this click reached it — used to
   // vanish: the dialog closed on click and the backend's refusal went nowhere.
   export let voteError: string = '';
+  // This node's id: a proposal with any other participant cannot be edited here,
+  // because an edit changes this node's copy only and the commit hash would differ.
+  export let selfNodeId: string = '';
+
+  // selfNodeId is empty while the socket is down or restarting; a lone participant
+  // is still a solo proposal then, so Edit stays. The backend decides in the end.
+  $: canEdit = !!proposal && (selfNodeId
+    ? proposal.participants.every((p) => p === selfNodeId)
+    : proposal.participants.length === 1);
 
   const dispatch = createEventDispatcher();
 
@@ -23,6 +32,15 @@
   let editedEntries: KnowledgeEntry[] = [];
   let editedSummary = '';
   let currentUserId = ''; // Will be set from nodeStatus
+  // Set only when Save changed something: an untouched proposal goes back to
+  // the backend as nothing, never as a copy of itself.
+  let edited = false;
+  let editedFor = '';
+  $: if ((proposal?.proposal_id ?? '') !== editedFor) {
+    editedFor = proposal?.proposal_id ?? '';
+    edited = false;
+    editMode = false;
+  }
 
   // Initialize edited entries when entering edit mode
   function startEditing() {
@@ -41,15 +59,21 @@
 
   function saveEdits() {
     if (proposal) {
-      // Update entries with edit attribution
-      const now = new Date().toISOString();
-      editedEntries = editedEntries.map(entry => ({
-        ...entry,
-        edited_by: currentUserId || 'user',
-        edited_at: now
-      }));
-      proposal.entries = editedEntries;
-      proposal.summary = editedSummary;
+      const changed =
+        editedSummary !== proposal.summary ||
+        JSON.stringify(editedEntries) !== JSON.stringify(proposal.entries);
+      if (changed) {
+        // Update entries with edit attribution
+        const now = new Date().toISOString();
+        editedEntries = editedEntries.map(entry => ({
+          ...entry,
+          edited_by: currentUserId || 'user',
+          edited_at: now
+        }));
+        proposal.entries = editedEntries;
+        proposal.summary = editedSummary;
+        edited = true;
+      }
     }
     editMode = false;
   }
@@ -81,8 +105,10 @@
       proposal_id: proposal?.proposal_id,
       vote,
       comment: voteComment,
-      entries: proposal?.entries,
-      summary: proposal?.summary
+      // The backend is authoritative: it refuses an edit on a shared proposal.
+      // Gating here on selfNodeId dropped an edit the dialog still showed.
+      entries: edited ? proposal?.entries : undefined,
+      summary: edited ? proposal?.summary : undefined
     });
     voteComment = '';
   }
@@ -114,7 +140,9 @@
         </div>
         <div class="header-actions">
           {#if !editMode}
-            <button class="btn-edit" on:click={startEditing}>Edit</button>
+            {#if canEdit}
+              <button class="btn-edit" on:click={startEditing}>Edit</button>
+            {/if}
           {:else}
             <button class="btn-save" on:click={saveEdits}>Save</button>
             <button class="btn-cancel" on:click={cancelEditing}>Cancel</button>

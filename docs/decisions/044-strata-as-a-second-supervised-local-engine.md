@@ -1401,3 +1401,11 @@ Names: `guest_conversation_cache` is new (GLOSSARY). Its "guest" is the peer a c
   - **`note_clearable` only grows** for the backend's life (conversation ids, small); after a restart nothing is saved until a call has been sent and its size is known (Ark).
   - **The unmounted-disk check is a heuristic**: an empty folder under `/mnt`, `/media`, `/run/media` or `/Volumes`. A disk mounted elsewhere whose parent folder exists is not told apart from a folder that is simply missing, and `mkdir` would create it on the system disk (Ark). The log line names the heuristic.
 - **The rename also covers** ADR-046's other "Strata session files" mentions (not only point 7.3); like 7.3 they read "KV snapshots" from here on and are not rewritten (Johnny).
+
+## Amendment, 2026-11-16 — the AI's vote is gone
+
+The "vote" in the sentence "The vote and the group image are requests too" no longer exists:
+`_ai_agent_vote_on_proposal` and its evaluation prompt were removed, because only people vote, and only
+on Extract Knowledge (Mike's call, 2026-11-16; [ADR-009](009-knowledge-flows-redesign.md) already said the
+AI provider in a Local AI chat is not a voter). The group image stays a request.
+

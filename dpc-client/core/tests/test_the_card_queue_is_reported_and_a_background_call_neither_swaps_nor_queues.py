@@ -25,7 +25,6 @@ from dpc_client_core.dpc_agent import sleep_pipeline
 from dpc_client_core.dpc_agent.llm_adapter import DpcLlmAdapter
 from dpc_client_core.dpc_agent.run_gate import RunGate
 from dpc_client_core.dpc_agent.skill_reflection import SkillReflector
-from dpc_client_core.knowledge_service import KnowledgeService
 from dpc_client_core.managers import llama_server_supervisor as base_mod
 from dpc_client_core.managers.llama_server_supervisor import (
     BackgroundCallSkipped,
@@ -575,21 +574,6 @@ class TestTheCallSites:
         assert last_background_skip()[WHAT]["alias"] == S
 
 
-VOTE = '{"vote": "approve", "comment": "accurate"}'
-
-
-def _a_vote_on(llm):
-    proposal = SimpleNamespace(proposal_id="p1", conversation_id="ai_chat", entries=[], topic="t", summary="s",
-                               avg_confidence=0.9)
-    service = KnowledgeService.__new__(KnowledgeService)
-    service.llm_manager = llm
-    service.consensus_manager = SimpleNamespace(
-        sessions={"p1": SimpleNamespace(proposal=proposal, votes={})}, node_id="me",
-        cast_vote=AsyncMock(return_value=True),
-    )
-    return service
-
-
 class TestWhatStaysARequest:
     """Automatic, unmarked and with nobody waiting at the door, and still requests: with the swap
     on each stands in line and takes the card in its turn."""
@@ -613,13 +597,6 @@ class TestWhatStaysARequest:
         return answer
 
     @pytest.mark.asyncio
-    async def test_the_vote_takes_a_place_and_votes(self, tmp_path):
-        f, s = _pair(tmp_path)
-        service = _a_vote_on(_QueryThatNeedsTheEngine(s, VOTE))
-        await self._in_line_then_served(f, s, service._ai_agent_vote_on_proposal("p1", "ai-node"))
-        service.consensus_manager.cast_vote.assert_awaited_once()
-
-    @pytest.mark.asyncio
     async def test_the_group_image_takes_a_place_and_is_described(self, tmp_path):
         f, s = _pair(tmp_path)
         service = MagicMock(llm_manager=_QueryThatNeedsTheEngine(s, "a picture"))
@@ -640,42 +617,7 @@ class TestWhatStaysARequest:
         assert finding["x"] == 1
 
 
-class TestTheVoteAndTheImageNameTheirRefusal:
-    @pytest.mark.asyncio
-    async def test_a_refused_vote_is_one_line_naming_the_refusal_and_the_alias_and_casts_nothing(
-        self, tmp_path, settings, caplog,
-    ):
-        settings.set_local_engine_swap(True, 0, 0)  # no wait: a busy holder refuses it at once
-        f, s = _pair(tmp_path)
-        await f.ensure_running()
-        slot = f.call_slot()
-        await slot.__aenter__()
-        service = _a_vote_on(_QueryThatNeedsTheEngine(s, VOTE))
-
-        with caplog.at_level(logging.INFO, logger="dpc_client_core.knowledge_service"):
-            await asyncio.wait_for(service._ai_agent_vote_on_proposal("p1", "ai-node"), 5)
-        await slot.__aexit__(None, None, None)
-
-        said = [r for r in caplog.records if r.name == "dpc_client_core.knowledge_service"]
-        assert len(said) == 1, [r.getMessage() for r in said]
-        line = said[0]
-        assert line.levelno == logging.WARNING and line.exc_info is None
-        message = line.getMessage()
-        assert f"the card queue refused alias '{S}'" in message and "cannot load" in message
-        assert "could not evaluate" not in message and "Error in AI" not in message
-        service.consensus_manager.cast_vote.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_model_that_fails_the_vote_still_reads_as_could_not_evaluate(self, caplog):
-        llm = SimpleNamespace(default_provider="d", query=AsyncMock(side_effect=RuntimeError("the model is gone")))
-        service = _a_vote_on(llm)
-
-        with caplog.at_level(logging.WARNING):
-            await service._ai_agent_vote_on_proposal("p1", "ai-node")
-
-        assert "Error in AI vote evaluation" in caplog.text and "could not evaluate" in caplog.text
-        assert "the card queue refused" not in caplog.text
-
+class TestTheImageNamesItsRefusal:
     @pytest.mark.asyncio
     async def test_a_refused_group_image_reaches_the_person_in_the_refusals_own_words(
         self, tmp_path, settings,

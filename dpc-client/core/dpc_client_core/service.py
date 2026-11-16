@@ -6038,19 +6038,6 @@ class CoreService:
             proposal_id, vote, comment, entries=entries, summary=summary
         )
 
-    async def _ai_agent_vote_on_proposal(self, proposal_id: str, ai_agent_node_id: str) -> None:
-        """Delegated to KnowledgeService."""
-        await self.knowledge_service._ai_agent_vote_on_proposal(proposal_id, ai_agent_node_id)
-
-    async def _evaluate_knowledge_proposal_for_ai_vote(
-        self,
-        proposal,
-        provider_alias: Optional[str] = None,
-        conversation_history: Optional[list] = None,
-    ) -> Dict[str, Any]:
-        """Delegated to KnowledgeService."""
-        return await self.knowledge_service._evaluate_knowledge_proposal_for_ai_vote(proposal, provider_alias=provider_alias, conversation_history=conversation_history)
-
     async def _broadcast_to_peers(self, message: Dict[str, Any]) -> None:
         """Broadcast message to all connected peers.
 
