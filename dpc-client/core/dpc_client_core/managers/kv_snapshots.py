@@ -714,12 +714,14 @@ def _same_key(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
     return all(a.get(k) == b.get(k) for k in ("alias", "agent_id", "conversation_id"))
 
 
-def add_entry(folder: PathLike, entry: Dict[str, Any], *, cap_bytes: int, now: Optional[float] = None) -> bool:
+def add_entry(folder: PathLike, entry: Dict[str, Any], *, cap_bytes: int, now: Optional[float] = None,
+              checkpoint_count: Any = None, checkpoint_bytes: Any = None) -> bool:
     """Index a file just renamed to its final name. A file already expired at `now`, or
     that alone exceeds the cap, is deleted and not added (False). An older entry of the same key is replaced; then the
     folder is swept at `now` (default: the entry's `saved_at`, else the wall clock) with
     the cap applied, never to this file. Also records the folder's write rate and the
-    alias's bytes per token. Raises OSError when the index cannot be read or written."""
+    alias's bytes per token, fitted without the context checkpoints the engine said it
+    wrote (`engine_checkpoints_of`). Raises OSError when the index cannot be read or written."""
     folder = Path(folder)
     name = entry.get("file")
     if not _FINAL_RE.match(name or "") or not _valid_entry(entry):
@@ -752,7 +754,7 @@ def add_entry(folder: PathLike, entry: Dict[str, Any], *, cap_bytes: int, now: O
             else:
                 kept.append(old)
         index["entries"] = [e for e in kept if e.get("file") != name] + [dict(entry)]
-        _note_rates_locked(index, entry)
+        _note_rates_locked(index, entry, checkpoint_count, checkpoint_bytes)
         _sweep_locked(folder, index, stale, alias=None, now=now, expected=None,
                       cap_bytes=cap_bytes, keep=name)
         write_index(folder, index)
@@ -946,9 +948,9 @@ def matches(entry: Dict[str, Any], messages: Sequence[Any]) -> bool:
 
 # ---------------------------------------------------------------- arithmetic
 
-def estimate_bytes(tokens: Any, floor: float, per_token: float) -> int:
-    """A file's size: the floor plus the part per token."""
-    return int(round(float(floor) + float(per_token) * max(0, int(tokens or 0))))
+def estimate_bytes(tokens: Any, floor: float, per_token: float, checkpoint_bytes: float = 0.0) -> int:
+    """A file's size: the floor, the part per token and the alias's last measured context checkpoints."""
+    return int(round(float(floor) + float(per_token) * max(0, int(tokens or 0)) + float(checkpoint_bytes or 0.0)))
 
 
 def save_bound(
@@ -1000,7 +1002,8 @@ def worth_saving(
     if tokens is None or isinstance(tokens, bool) or int(tokens) <= 0:
         return False, "size unknown"
     tokens = int(tokens)
-    nbytes = estimate_bytes(tokens, alias_sizes["floor_bytes"], alias_sizes["bytes_per_token"])
+    nbytes = estimate_bytes(tokens, alias_sizes["floor_bytes"], alias_sizes["bytes_per_token"],
+                            alias_sizes.get("checkpoint_bytes", 0.0))
     write = _rate(folder_rates, "write_bytes_per_s")
     if write is None:
         return True, "write rate unknown, tried once"
@@ -1106,7 +1109,8 @@ def seed_sizes(engine: str) -> Dict[str, float]:
 
 
 def alias_sizes(folder: PathLike, alias: str, engine: str) -> Dict[str, float]:
-    """The alias's floor and bytes per token: measured in the index, else the engine's seed."""
+    """The alias's floor and bytes per token: measured in the index, else the engine's seed;
+    plus `checkpoint_bytes` only when the last fit measured the checkpoints."""
     try:
         measured = read_index(folder)["sizes"].get(alias)
     except (OSError, ValueError, TypeError, KeyError):
@@ -1116,6 +1120,8 @@ def alias_sizes(folder: PathLike, alias: str, engine: str) -> Dict[str, float]:
         for key in ("floor_bytes", "bytes_per_token"):
             if _number(measured.get(key)) and measured[key] > 0:
                 sizes[key] = float(measured[key])
+        if _number(measured.get("checkpoint_bytes")) and measured["checkpoint_bytes"] >= 0:
+            sizes["checkpoint_bytes"] = float(measured["checkpoint_bytes"])
     return sizes
 
 
@@ -1134,7 +1140,8 @@ def _rate_sample(nbytes: Any, ms: Any) -> bool:
             and _number(ms) and ms >= RATE_SAMPLE_MIN_MS)
 
 
-def _note_rates_locked(index: Dict[str, Any], entry: Dict[str, Any]) -> None:
+def _note_rates_locked(index: Dict[str, Any], entry: Dict[str, Any],
+                       checkpoint_count: Any = None, checkpoint_bytes: Any = None) -> None:
     nbytes = entry.get("bytes") or 0
     ms = entry.get("save_ms")
     if not _rate_sample(nbytes, ms):
@@ -1146,8 +1153,16 @@ def _note_rates_locked(index: Dict[str, Any], entry: Dict[str, Any]) -> None:
         floor = held.get("floor_bytes") if isinstance(held, dict) else None
         if not _number(floor):
             floor = seed_sizes(entry.get("engine") or "")["floor_bytes"]
-        # One measurement fits one unknown: the floor stays, the part per token follows the file.
-        if nbytes > floor:
+        # One measurement fits one unknown: the floor stays, the part per token follows the file less
+        # the checkpoints the engine named; none named, or nothing left above the floor: the whole file.
+        if _number(checkpoint_bytes) and 0 <= checkpoint_bytes < nbytes and nbytes - checkpoint_bytes > floor:
+            sizes = {"floor_bytes": float(floor),
+                     "bytes_per_token": (nbytes - checkpoint_bytes - floor) / tokens,
+                     "checkpoint_bytes": float(checkpoint_bytes)}
+            if isinstance(checkpoint_count, int) and not isinstance(checkpoint_count, bool) and checkpoint_count >= 0:
+                sizes["checkpoint_count"] = checkpoint_count
+            index["sizes"][alias] = sizes
+        elif nbytes > floor:
             index["sizes"][alias] = {"floor_bytes": float(floor), "bytes_per_token": (nbytes - floor) / tokens}
 
 
@@ -1372,24 +1387,43 @@ _CHECKPOINTS_LLAMA_RE = re.compile(r"appended (\d+) context checkpoint\(s\) \(([
 _CHECKPOINTS_STRATA_RE = re.compile(r"session saved \d+ tokens, (\d+) of (\d+) checkpoints")
 
 
+def _engine_save_line(log_text: str, staging: str) -> Tuple[Optional["re.Match[str]"], bool]:
+    """(the match of the last engine save line naming `staging`, whether it is llama-server's)."""
+    if not staging:
+        return None, False
+    for line in reversed((log_text or "").splitlines()):
+        if staging not in line:
+            continue
+        m = _CHECKPOINTS_LLAMA_RE.search(line)
+        if m:
+            return m, True
+        m = _CHECKPOINTS_STRATA_RE.search(line)
+        if m:
+            return m, False
+    return None, False
+
+
 def engine_checkpoints_words(log_text: str, staging: str) -> Optional[str]:
     """`engine_checkpoints ...` from the engine's own save line naming `staging`, or None.
 
     llama-server: `appended 2 context checkpoint(s) (299.291 MiB) to '<...staging>'`, read as
     `engine_checkpoints 2 (299.291 MiB)`. Strata: `session saved N tokens, 1 of 6 checkpoints, ...
     to <...staging>`, read as `engine_checkpoints 1 of 6`. The last such line wins."""
-    if not staging:
+    m, llama = _engine_save_line(log_text, staging)
+    if m is None:
         return None
-    for line in reversed((log_text or "").splitlines()):
-        if staging not in line:
-            continue
-        m = _CHECKPOINTS_LLAMA_RE.search(line)
-        if m:
-            return f"engine_checkpoints {m.group(1)} ({m.group(2)} MiB)"
-        m = _CHECKPOINTS_STRATA_RE.search(line)
-        if m:
-            return f"engine_checkpoints {m.group(1)} of {m.group(2)}"
-    return None
+    if llama:
+        return f"engine_checkpoints {m.group(1)} ({m.group(2)} MiB)"
+    return f"engine_checkpoints {m.group(1)} of {m.group(2)}"
+
+
+def engine_checkpoints_of(log_text: str, staging: str) -> Optional[Tuple[int, Optional[int]]]:
+    """(count, bytes) of the context checkpoints in `staging`, from the line `engine_checkpoints_words`
+    reads; bytes None where the engine names none (Strata). None: no such line."""
+    m, llama = _engine_save_line(log_text, staging)
+    if m is None:
+        return None
+    return int(m.group(1)), (int(round(float(m.group(2)) * 1024 ** 2)) if llama else None)
 
 
 def note_engine_tokens(alias: str, call_seq: int, prompt: Any, reply: Any) -> bool:

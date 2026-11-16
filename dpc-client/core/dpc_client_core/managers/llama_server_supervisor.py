@@ -3971,7 +3971,8 @@ class LlamaServerSupervisor:
             return self._kv_skip("size unknown")
         sizes = await asyncio.to_thread(_kv.alias_sizes, folder, alias, self.PROCESS_LAUNCHER)
         rates = await asyncio.to_thread(_kv.folder_rates, folder)
-        estimate = _kv.estimate_bytes(tokens, sizes["floor_bytes"], sizes["bytes_per_token"])
+        estimate = _kv.estimate_bytes(tokens, sizes["floor_bytes"], sizes["bytes_per_token"],
+                                      sizes.get("checkpoint_bytes", 0.0))
         self._kv_cold_source = None
         got = await self._kv_cold_rate(tokens)
         cold, rows = got if isinstance(got, tuple) else (got, None)
@@ -4049,7 +4050,9 @@ class LlamaServerSupervisor:
             nbytes=nbytes, save_ms=ms, now=time.time(), ttl_s=_kv.ttl_s_of(self.config),
         )
         cap = _kv.cap_bytes_of(self.config)
-        if not await asyncio.to_thread(_kv.add_entry, folder, entry, cap_bytes=cap):
+        count, ck_bytes = self._kv_engine_checkpoints(staging) or (None, None)
+        if not await asyncio.to_thread(_kv.add_entry, folder, entry, cap_bytes=cap,
+                                       checkpoint_count=count, checkpoint_bytes=ck_bytes):
             return self._kv_not_saved(_kv.FAILED, None, ms,
                                       f"the file ({nbytes} bytes) alone exceeds the cap of {cap} bytes")
         if _kv.is_cleared(conversation):  # cleared while the entry was being written
@@ -4074,17 +4077,29 @@ class LlamaServerSupervisor:
         _kv.note_save(alias, outcome)
         return outcome
 
-    def _kv_engine_checkpoints_words(self, staging: str) -> str:
-        """How many checkpoints the engine wrote into `staging`, from its own log tail; a
-        measurement only. Read in place, no await: the entry is already indexed."""
+    def _kv_engine_save_line(self, staging: str, read_line: Any) -> Any:
+        """`read_line(log text, staging)` over the engine's own log tails; the first not None."""
         for path in self._output_log_paths():
             read = self._read_tail(path=path)
             if read is None:
                 continue
-            words = _kv.engine_checkpoints_words(read[0].decode("utf-8", errors="replace"), staging)
-            if words is not None:
-                return words
-        return "engine_checkpoints unknown"
+            found = read_line(read[0].decode("utf-8", errors="replace"), staging)
+            if found is not None:
+                return found
+        return None
+
+    def _kv_engine_checkpoints_words(self, staging: str) -> str:
+        """How many checkpoints the engine wrote into `staging`, from its own log tail; a
+        measurement only. Read in place, no await: the entry is already indexed."""
+        return self._kv_engine_save_line(staging, _kv.engine_checkpoints_words) or "engine_checkpoints unknown"
+
+    def _kv_engine_checkpoints(self, staging: str) -> Optional[Tuple[int, Optional[int]]]:
+        """(count, bytes) of the checkpoints in `staging` for the size refit; None when unread."""
+        try:
+            return self._kv_engine_save_line(staging, _kv.engine_checkpoints_of)
+        except Exception:
+            logger.debug("KV snapshot checkpoints not read", exc_info=True)
+            return None
 
     async def _kv_cleared_during_the_save(self, folder: Path, final: str, ms: int,
                                           indexed: bool) -> Dict[str, Any]:
