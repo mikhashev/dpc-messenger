@@ -1,10 +1,13 @@
-"""A KV snapshot is saved only when save and restore beat the cold read (ADR-044, 2026-11-13, points 4 and 8).
+"""A KV snapshot is saved only when its restore beats the cold read (ADR-044, 2026-11-13,
+points 4 and 8; amendment of 2026-11-16: the threshold counts the restore only).
 
 The rates are the spec's 2026-11-13 measurements of a 4.05 GB Strata file
 (SSD: saved in 2.1 s, restored in 3.2 s; HDD: 37.8 s and 43.3 s) and the ledger's
-cold median of 3,755 tok/s on the Strata alias. By CC's arithmetic in the spec,
-Strata from SSD breaks even at about 1.2K tokens and from HDD never at a stop.
-A save's HTTP answer decides whether saving goes on: only a 500 suspends it.
+cold median of 3,755 tok/s on the Strata alias. The save runs at a swap or a stop while
+the GPU idles, so only the restore is set against the cold read: Strata from SSD breaks
+even at about 0.7K tokens, from HDD at about 24K (it never did while the save counted).
+The save still has to fit its bound. A save's HTTP answer decides whether saving goes
+on: only a 500 suspends it.
 """
 
 import shutil
@@ -19,6 +22,8 @@ SSD = {"write_bytes_per_s": FILE / 2.1, "read_bytes_per_s": FILE / 3.2}
 HDD = {"write_bytes_per_s": FILE / 37.8, "read_bytes_per_s": FILE / 43.3}
 STRATA = kv.SEED_SIZES["strata"]
 COLD = 3_755.0
+# The Strata folder on an HDD as measured 2026-11-16: write 102 MB/s, read 90 MB/s.
+HDD_16 = {"write_bytes_per_s": 102e6, "read_bytes_per_s": 90e6}
 
 
 @pytest.fixture(autouse=True)
@@ -28,23 +33,34 @@ def _clean_state():
     kv.reset_state()
 
 
-def test_strata_from_hdd_never_passes_at_a_stop():
-    for tokens in (1_000, 10_000, 100_000, 250_000, 1_000_000):
+def test_strata_from_hdd_passes_at_a_stop_from_about_24k_tokens():
+    for tokens in (1_000, 10_000, 15_000):
         ok, reason = kv.worth_saving(tokens, HDD, STRATA, COLD)
         assert not ok, tokens
         assert reason.startswith("below the size threshold")
+    for tokens in (40_000, 100_000, 250_000, 1_000_000):
+        assert kv.worth_saving(tokens, HDD, STRATA, COLD)[0], tokens
 
 
-def test_strata_from_ssd_passes_from_about_1_2k_tokens():
-    assert not kv.worth_saving(1_000, SSD, STRATA, COLD)[0]
-    assert kv.worth_saving(1_400, SSD, STRATA, COLD)[0]
+def test_strata_from_ssd_passes_from_about_0_7k_tokens():
+    assert not kv.worth_saving(600, SSD, STRATA, COLD)[0]
+    assert kv.worth_saving(900, SSD, STRATA, COLD)[0]
     assert kv.worth_saving(250_000, SSD, STRATA, COLD)[0]
 
 
-def test_an_idle_save_counts_only_the_restore():
-    # Strata HDD, restore only: break-even about 24K tokens (spec, point 4).
-    assert not kv.worth_saving(15_000, HDD, STRATA, COLD, at_stop=False)[0]
-    assert kv.worth_saving(40_000, HDD, STRATA, COLD, at_stop=False)[0]
+def test_the_hdd_of_2026_11_16_saves_where_save_plus_restore_never_did():
+    # Restore 0.17 ms/token against a cold 0.27 ms/token; save plus restore was 0.32.
+    assert 15.3e3 / 90e6 * 1e3 == pytest.approx(0.17, abs=0.005)
+    assert (15.3e3 / 102e6 + 15.3e3 / 90e6) * 1e3 > 1e3 / 3_750
+    assert not kv.worth_saving(10_000, HDD_16, STRATA, 3_750)[0]
+    ok, words = kv.worth_saving(100_000, HDD_16, STRATA, 3_750)
+    assert ok and words.startswith("restore ~") and "save" not in words
+
+
+def test_the_words_name_the_restore_only():
+    ok, words = kv.worth_saving(250_000, SSD, STRATA, COLD)
+    restore = kv.estimate_bytes(250_000, STRATA["floor_bytes"], STRATA["bytes_per_token"]) / SSD["read_bytes_per_s"]
+    assert ok and words == f"restore ~{restore:.1f} s against a cold read ~{250_000 / COLD:.1f} s"
 
 
 def test_unknown_inputs_say_so():

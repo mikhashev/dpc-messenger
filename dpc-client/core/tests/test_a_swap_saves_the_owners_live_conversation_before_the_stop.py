@@ -337,6 +337,53 @@ async def test_the_decision_line_says_how_thin_the_cold_rate_is(tmp_path, caplog
     assert "estimate " in line and "of the bound left" in line and "saving (" in line
 
 
+def _measured(folder, write, read):
+    """The folder's rates, and a 0.47 GB floor with 1 byte per token for this alias."""
+    folder.mkdir(parents=True, exist_ok=True)
+    kv_snapshots.write_index(folder, {**kv_snapshots.read_index(folder),
+                                      "rates": {"write_bytes_per_s": write, "read_bytes_per_s": read},
+                                      "sizes": {ALIAS: {"floor_bytes": 0.47e9, "bytes_per_token": 1.0}}})
+
+
+@pytest.mark.asyncio
+async def test_a_stop_saves_when_the_restore_beats_the_cold_read_though_save_plus_restore_does_not(
+        tmp_path, caplog):
+    """Amendment of 2026-11-16: the threshold counts the restore only."""
+    holder, _new, fake, folder = await saving_pair(tmp_path)
+    # 1500 tokens: save ~4.7 s, restore ~5.9 s, cold read 10 s.
+    _measured(folder, 0.1e9, 0.08e9)
+    note_call()
+
+    async def cold(tokens):
+        return 150.0, 3
+
+    holder._kv_cold_rate = cold
+    with caplog.at_level(logging.INFO, logger=base_mod.logger.name):
+        outcome = await stop_by_hand(holder)
+
+    assert outcome["outcome"] == kv_snapshots.SAVED
+    line, = [r.getMessage() for r in caplog.records if "KV snapshot decision" in r.getMessage()]
+    assert "saving (restore ~5.9 s against a cold read ~10.0 s)" in line
+    assert "estimate 470001500 bytes in 4.7 s" in line
+
+
+@pytest.mark.asyncio
+async def test_a_save_over_its_bound_is_still_skipped_though_its_restore_pays(tmp_path):
+    holder, _new, fake, folder = await saving_pair(tmp_path)
+    # The restore (~47 s) beats the cold read (50 s), but the save alone takes ~94 s of a 60 s ceiling.
+    _measured(folder, 5e6, 10e6)
+    note_call()
+
+    async def cold(tokens):
+        return 30.0, 3
+
+    holder._kv_cold_rate = cold
+    outcome = await stop_by_hand(holder)
+
+    assert outcome["outcome"] == kv_snapshots.SKIPPED and fake.calls == []
+    assert "estimate over the bound: ~94.0 s" in outcome["reason"]
+
+
 @pytest.mark.asyncio
 async def test_the_ledger_hook_reads_rows_and_counts_them(tmp_path):
     """The base `_kv_cold_rate` over the test's ledger: no rows, rate and count unknown-or-zero."""

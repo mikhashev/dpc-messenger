@@ -1420,3 +1420,12 @@ AI provider in a Local AI chat is not a voter). The group image stays a request.
 4. **Where it breaks.** A group-history merge that reorders and re-chains entries (`conversation_monitor.py`, `restore_chronological_order` after a merge); `clear_before`; a context cut that rewrites early messages (the known limit above); a system message that changes between turns, seen at the start of about a third of turns in the logs of 2026-11-12..16, cause not established. Each fails the check, and the file is deleted as before.
 5. **The open risk.** The restored slot holds the old turn's tool rounds, so it is longer than the new prompt and the engine must reuse only the common beginning. `llama-server` does that by its prompt-cache prefix match; on Strata it is unverified. The acceptance is the `reuse=` figure of the `llamacpp usage` line on the first call after a restore.
 6. **Not changed.** The owner's chat sends one message, so its turn base is 1 and it is still refused as a single-prompt call; an agent's turn whose base is one message is still saved.
+
+
+## Amendment, 2026-11-16 — the size threshold counts the restore only
+
+*(Mike's call, 2026-11-16. This replaces, in point 4's size threshold, "save plus restore" and "Both sides count at a stop, because the save is paid by the request waiting for the card".)*
+
+A conversation is saved at a swap or a stop when its estimated restore is shorter than its estimated cold read; the save is no longer added. The save runs while the GPU idles, the cold read holds it. The save still has to fit its bound (`save_bound`, the 60 s ceiling), checked as before. Measured 2026-11-16 on the Strata folder on an HDD (write 102 MB/s, read 90 MB/s, 15.3 KB per token, cold prefill 3,700-3,800 tok/s): restore 0.17 ms per token against 0.27 ms cold, save plus restore 0.32 ms, so the old rule never saved Strata on an HDD.
+
+With the restore alone deciding, an inflated read rate would call every restore free. The read rate the threshold uses, and the one a restore records, is therefore at most twice the folder's write rate: a restore of a file written minutes earlier on 2026-11-16 read from the Windows file cache and recorded 2.3 GB/s for a disk that does about 90-130 MB/s.

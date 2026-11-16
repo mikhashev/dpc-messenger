@@ -6,6 +6,11 @@ after the last "user" message, message 0's canonical length), kept in the in-mem
 logged beside a successful save and at every restore attempt that found an index entry. The
 matching, the deletion and the outcomes are the ones the other KV snapshot tests pin; the
 fingerprint is never written to the index.
+
+The save line also says how many engine calls of the conversation shared the turn base
+before the save (`calls_in_turn`) and how many context checkpoints the engine wrote into the
+file (`engine_checkpoints`, from the engine's own log line naming the staging file): the
+engine keeps only `ctx_checkpoints` of them, so a turn of more calls loses its base.
 """
 
 import hashlib
@@ -24,6 +29,7 @@ from tests.test_a_kv_snapshot_is_restored_only_into_an_empty_engine_for_its_own_
 from tests.test_a_swap_saves_the_owners_live_conversation_before_the_stop import (  # noqa: F401
     ALIAS, card, index_entries, kv_state, saving_pair, settings, swap_on,
 )
+from tests.test_one_local_engine_holds_the_card import _strata
 
 PROVIDER_LOGGER = "dpc_client_core.providers.llamacpp_server_provider"
 
@@ -100,9 +106,94 @@ async def test_a_successful_save_logs_the_prefix_of_the_call_it_saved(tmp_path, 
 
     lines = [r.getMessage() for r in caplog.records if "KV snapshot prefix at save:" in r.getMessage()]
     assert lines == [f"llama-server[{ALIAS}]: KV snapshot prefix at save: agent a1 conversation c1 "
-                     + kv.fingerprint_words(fp)]
+                     + kv.fingerprint_words(fp) + " calls_in_turn 1 engine_checkpoints unknown"]
     entry, = index_entries(folder)
-    assert "fingerprint" not in entry
+    assert "fingerprint" not in entry and "calls_in_turn" not in entry
+
+
+# ---- calls_in_turn and engine_checkpoints: the checkpoint-count probe, measurement only
+
+LLAMA_LINE = ("189.58.475.647 I slot save_slot_ch: id  0 | task -1 | appended 2 context checkpoint(s) "
+              "(299.291 MiB) to 'D:\\kv\\qwen\\{name}'")
+LLAMA_DRAFT = ("190.02.198.763 I slot save_slot_dr: id  0 | task -1 | appended the draft state (368.683 MiB) "
+               "to 'D:\\kv\\qwen\\{name}'")
+STRATA_LINE = ("strata serve: session saved 82754 tokens, 1 of 6 checkpoints, 1499976756 bytes to "
+               "D:\\kv\\flash\\{name} in 14580.0 ms (state 60.1 ms)")
+
+
+def _send(conversation="c1", prefix=("ab" * 32, 3), alias=ALIAS):
+    seq = kv.note_engine_call(alias, caller_kind="agent", agent_id="a1", conversation_id=conversation,
+                              prefix=prefix, at=time.time())
+    assert kv.mark_sent(alias, seq)
+    return kv.engine_call_of(alias)["calls_in_turn"]
+
+
+def test_calls_of_one_turn_are_counted_and_the_count_restarts_when_the_base_or_conversation_changes():
+    assert [_send(), _send(), _send()] == [1, 2, 3]
+    assert _send(prefix=("cd" * 32, 5)) == 1
+    assert _send(prefix=("cd" * 32, 5)) == 2
+    assert _send(conversation="c2", prefix=("cd" * 32, 5)) == 1
+    assert _send(conversation="c1", prefix=("cd" * 32, 5)) == 1
+    # Another alias keeps its own count; a call with no conversation or no prefix is always 1.
+    assert _send(alias="other") == 1
+    assert _send(conversation=None) == 1 and _send(conversation=None) == 1
+    assert _send(prefix=None) == 1 and _send(prefix=None) == 1
+
+
+def test_a_pending_call_is_not_counted_until_it_is_sent():
+    assert _send() == 1
+    kv.note_engine_call(ALIAS, caller_kind="agent", agent_id="a1", conversation_id="c1",
+                        prefix=("ab" * 32, 3), at=time.time())   # noted, never sent
+    assert _send() == 2
+
+
+def test_the_engines_save_line_is_read_for_its_own_staging_file_only():
+    name, other = "dpc-kv-" + "1" * 32 + ".staging", "dpc-kv-" + "2" * 32 + ".staging"
+    llama = "\n".join([LLAMA_LINE.format(name=other), LLAMA_LINE.format(name=name).replace("2 context", "3 context"),
+                       LLAMA_DRAFT.format(name=name)])
+    assert kv.engine_checkpoints_words(llama, name) == "engine_checkpoints 3 (299.291 MiB)"
+    assert kv.engine_checkpoints_words(llama, other) == "engine_checkpoints 2 (299.291 MiB)"
+    assert kv.engine_checkpoints_words(llama, "dpc-kv-" + "3" * 32 + ".staging") is None
+    assert kv.engine_checkpoints_words(STRATA_LINE.format(name=name), name) == "engine_checkpoints 1 of 6"
+    assert kv.engine_checkpoints_words(LLAMA_DRAFT.format(name=name), name) is None
+    assert kv.engine_checkpoints_words("", name) is None and kv.engine_checkpoints_words(llama, "") is None
+
+
+@pytest.mark.asyncio
+async def test_the_save_line_counts_the_turns_calls_and_the_checkpoints_the_engine_wrote(tmp_path, caplog):
+    holder, new, fake, folder = await saving_pair(tmp_path)
+    real = fake.action
+
+    async def save_and_log(slot, action, filename, timeout):
+        result = await real(slot, action, filename, timeout)
+        holder._log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(holder._log_path, "a", encoding="utf-8") as f:
+            f.write(LLAMA_LINE.format(name=filename) + "\n" + LLAMA_DRAFT.format(name=filename) + "\n")
+        return result
+
+    holder._slot_action = save_and_log
+    fp = kv.message_fingerprints(SAMPLE)
+    kv.note_clearable("c1")
+    for _ in range(3):
+        seq = kv.note_engine_call(ALIAS, caller_kind="agent", agent_id="a1", conversation_id="c1",
+                                  prefix=kv.prefix_digest(SAMPLE, 5), fingerprint=fp, at=time.time())
+        assert kv.mark_sent(ALIAS, seq)
+
+    with caplog.at_level(logging.INFO, logger=base_mod.logger.name):
+        await new.ensure_running()
+
+    line, = [r.getMessage() for r in caplog.records if "KV snapshot prefix at save:" in r.getMessage()]
+    assert line.endswith(kv.fingerprint_words(fp) + " calls_in_turn 3 engine_checkpoints 2 (299.291 MiB)")
+
+
+@pytest.mark.asyncio
+async def test_strata_reads_the_checkpoints_from_its_engine_log(tmp_path):
+    sup = _strata(tmp_path, "flash")
+    name = "dpc-kv-" + "4" * 32 + ".staging"
+    assert sup._kv_engine_checkpoints_words(name) == "engine_checkpoints unknown"
+    sup._engine_log_path.parent.mkdir(parents=True, exist_ok=True)
+    sup._engine_log_path.write_text("noise\n" + STRATA_LINE.format(name=name) + "\nmore noise\n", encoding="utf-8")
+    assert sup._kv_engine_checkpoints_words(name) == "engine_checkpoints 1 of 6"
 
 
 @pytest.mark.asyncio

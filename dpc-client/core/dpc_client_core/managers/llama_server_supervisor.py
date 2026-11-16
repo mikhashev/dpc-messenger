@@ -3540,14 +3540,14 @@ class LlamaServerSupervisor:
             raise LlamaServerError(f"{self.ENGINE}[{self.alias}] is not running")
         return await self._get("/slots")
 
-    def _read_tail(self, window: int = 65536) -> Optional[Tuple[bytes, int]]:
-        """(the last `window` bytes, the absolute offset they start at).
+    def _read_tail(self, window: int = 65536, path: Optional[Path] = None) -> Optional[Tuple[bytes, int]]:
+        """(the last `window` bytes, the absolute offset they start at) of `path`, else `_log_path`.
 
         Bytes rather than text: one of the two readers remembers where it
         stopped, and that position has to mean the same thing as the seek.
         """
         try:
-            with open(self._log_path, "rb") as f:
+            with open(path if path is not None else self._log_path, "rb") as f:
                 f.seek(0, 2)
                 size = f.tell()
                 start = max(0, size - window)
@@ -4062,15 +4062,29 @@ class LlamaServerSupervisor:
         fingerprint = record.get("fingerprint")
         if fingerprint:
             try:
-                logger.info("%s[%s]: KV snapshot prefix at save: agent %s conversation %s %s",
+                logger.info("%s[%s]: KV snapshot prefix at save: agent %s conversation %s %s "
+                            "calls_in_turn %s %s",
                             self.ENGINE, alias, record.get("agent_id"), conversation,
-                            _kv.fingerprint_words(fingerprint))
+                            _kv.fingerprint_words(fingerprint), record.get("calls_in_turn") or "unknown",
+                            self._kv_engine_checkpoints_words(staging))
             except Exception:
                 logger.debug("KV snapshot prefix line not written", exc_info=True)
         outcome = _kv_outcome(_kv.SAVED, _kv.describe_outcome(_kv.SAVED), nbytes, ms)
         _kv.reset_storage_streak(alias)
         _kv.note_save(alias, outcome)
         return outcome
+
+    def _kv_engine_checkpoints_words(self, staging: str) -> str:
+        """How many checkpoints the engine wrote into `staging`, from its own log tail; a
+        measurement only. Read in place, no await: the entry is already indexed."""
+        for path in self._output_log_paths():
+            read = self._read_tail(path=path)
+            if read is None:
+                continue
+            words = _kv.engine_checkpoints_words(read[0].decode("utf-8", errors="replace"), staging)
+            if words is not None:
+                return words
+        return "engine_checkpoints unknown"
 
     async def _kv_cleared_during_the_save(self, folder: Path, final: str, ms: int,
                                           indexed: bool) -> Dict[str, Any]:

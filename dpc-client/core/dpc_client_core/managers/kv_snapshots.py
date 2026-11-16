@@ -69,6 +69,9 @@ GIB = 1024 ** 3
 # or near-instant file measures latency, not the disk. Production files start at ~236 MB.
 RATE_SAMPLE_MIN_BYTES = 16 * 1024 ** 2
 RATE_SAMPLE_MIN_MS = 50
+# The read rate the threshold uses is at most this many times the folder's write rate: a file
+# read back from the OS file cache measures memory, not the disk (ADR-044, amendment 2026-11-16).
+READ_RATE_CAP_OF_WRITE = 2.0
 # Free space a save leaves on the disk beyond its own estimate (point 4): Strata's
 # own session reserve (`session_min_free_mib = 4096`, an engine default read in the
 # Strata repository copy, not passed by DPC); below it the engine answers 507.
@@ -966,19 +969,30 @@ def estimate_save_s(nbytes: int, folder_rates: Optional[Dict[str, Any]]) -> Opti
     return None if rate is None else nbytes / rate
 
 
+def capped_read_rate(folder_rates: Optional[Dict[str, Any]]) -> Optional[float]:
+    """The folder's read rate as the threshold uses it: at most `READ_RATE_CAP_OF_WRITE` times
+    its write rate, so a sample read from the OS file cache never makes a restore look free.
+    No write rate: the read rate as recorded. None while unmeasured."""
+    read = _rate(folder_rates, "read_bytes_per_s")
+    write = _rate(folder_rates, "write_bytes_per_s")
+    if read is None or write is None:
+        return read
+    return min(read, READ_RATE_CAP_OF_WRITE * write)
+
+
 def worth_saving(
     tokens: Any,
     folder_rates: Optional[Dict[str, Any]],
     alias_sizes: Dict[str, Any],
     cold_rate: Optional[float],
-    *,
-    at_stop: bool = True,
 ) -> Tuple[bool, str]:
-    """Whether estimated save plus restore beats the cold read at this length (point 4).
+    """Whether the estimated restore beats the cold read at this length (point 4).
 
-    Tokens unknown: skip, "size unknown". No write rate yet: tried once, which
-    measures it. No cold rows: "threshold unknown", tried. No read rate yet: the
-    write rate stands in. `at_stop` False (slice 3's idle save) counts the restore only."""
+    The restore only (amendment of 2026-11-16): the save runs at a swap or a stop while
+    the GPU idles, the cold read holds it. The save still has to fit its bound, which the
+    caller checks. Tokens unknown: skip, "size unknown". No write rate yet: tried once,
+    which measures it. No cold rows: "threshold unknown", tried. No read rate yet: the
+    write rate stands in; a read rate is capped by `capped_read_rate`."""
     if tokens is None or isinstance(tokens, bool) or int(tokens) <= 0:
         return False, "size unknown"
     tokens = int(tokens)
@@ -988,10 +1002,10 @@ def worth_saving(
         return True, "write rate unknown, tried once"
     if not cold_rate or cold_rate <= 0:
         return True, "threshold unknown"
-    read = _rate(folder_rates, "read_bytes_per_s") or write
-    cost = nbytes / read + (nbytes / write if at_stop else 0.0)
+    read = capped_read_rate(folder_rates) or write
+    cost = nbytes / read
     cold = tokens / float(cold_rate)
-    words = f"{'save and restore' if at_stop else 'restore'} ~{cost:.1f} s against a cold read ~{cold:.1f} s"
+    words = f"restore ~{cost:.1f} s against a cold read ~{cold:.1f} s"
     if cost < cold:
         return True, words
     return False, f"below the size threshold: {words}"
@@ -1134,7 +1148,8 @@ def _note_rates_locked(index: Dict[str, Any], entry: Dict[str, Any]) -> None:
 
 
 def note_restore_rate(folder: PathLike, nbytes: int, ms: float) -> None:
-    """Record the folder's read rate from one restore (a sample too small to measure is ignored)."""
+    """Record the folder's read rate from one restore (a sample too small to measure is ignored),
+    capped at `READ_RATE_CAP_OF_WRITE` times the recorded write rate, with a line when it is."""
     if not _rate_sample(nbytes, ms):
         return
     folder = Path(folder)
@@ -1143,7 +1158,14 @@ def note_restore_rate(folder: PathLike, nbytes: int, ms: float) -> None:
             index, stale, exists = _load(folder)
             if not exists or stale:
                 return
-            index["rates"]["read_bytes_per_s"] = nbytes / (ms / 1000.0)
+            measured = nbytes / (ms / 1000.0)
+            write = _rate(index["rates"], "write_bytes_per_s")
+            recorded = measured if write is None else min(measured, READ_RATE_CAP_OF_WRITE * write)
+            if recorded < measured:
+                logger.info("KV snapshots read rate of %s capped: measured %.1f MB/s, recorded %.1f MB/s "
+                            "(%g x the write rate %.1f MB/s; a read from the OS file cache measures memory)",
+                            folder, measured / 1e6, recorded / 1e6, READ_RATE_CAP_OF_WRITE, write / 1e6)
+            index["rates"]["read_bytes_per_s"] = recorded
             write_index(folder, index)
         except OSError as e:  # a rate is advisory
             logger.info("KV snapshots read rate of %s not recorded: %s", folder, e)
@@ -1320,10 +1342,44 @@ def mark_sent(alias: str, seq: int) -> bool:
         record["sent"] = next(_SENT)
         # When it went on the wire, so a supervisor can tell an engine (re)loaded after it.
         record["sent_mono"] = time.monotonic()
+        # Measurement only: consecutive sent calls of one conversation on one turn base.
+        record["calls_in_turn"] = _calls_in_turn(_RECORDS.get(alias), record)
         _RECORDS[alias] = record
         if record["conversation_id"]:
             _CLEARED.discard(record["conversation_id"])
         return True
+
+
+def _calls_in_turn(previous: Optional[Dict[str, Any]], record: Dict[str, Any]) -> int:
+    """1, or one more than `previous` when both name the same conversation and prefix sha."""
+    same = (previous is not None and record.get("conversation_id") and record.get("prefix_sha256")
+            and previous.get("conversation_id") == record["conversation_id"]
+            and previous.get("prefix_sha256") == record["prefix_sha256"])
+    return int(previous.get("calls_in_turn") or 1) + 1 if same else 1
+
+
+_CHECKPOINTS_LLAMA_RE = re.compile(r"appended (\d+) context checkpoint\(s\) \(([\d.]+) MiB\)")
+_CHECKPOINTS_STRATA_RE = re.compile(r"session saved \d+ tokens, (\d+) of (\d+) checkpoints")
+
+
+def engine_checkpoints_words(log_text: str, staging: str) -> Optional[str]:
+    """`engine_checkpoints ...` from the engine's own save line naming `staging`, or None.
+
+    llama-server: `appended 2 context checkpoint(s) (299.291 MiB) to '<...staging>'`, read as
+    `engine_checkpoints 2 (299.291 MiB)`. Strata: `session saved N tokens, 1 of 6 checkpoints, ...
+    to <...staging>`, read as `engine_checkpoints 1 of 6`. The last such line wins."""
+    if not staging:
+        return None
+    for line in reversed((log_text or "").splitlines()):
+        if staging not in line:
+            continue
+        m = _CHECKPOINTS_LLAMA_RE.search(line)
+        if m:
+            return f"engine_checkpoints {m.group(1)} ({m.group(2)} MiB)"
+        m = _CHECKPOINTS_STRATA_RE.search(line)
+        if m:
+            return f"engine_checkpoints {m.group(1)} of {m.group(2)}"
+    return None
 
 
 def note_engine_tokens(alias: str, call_seq: int, prompt: Any, reply: Any) -> bool:

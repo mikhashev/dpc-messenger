@@ -1,6 +1,7 @@
 """Spec tests for the KV snapshot arithmetic: save bound, size threshold and the
 status-code classes. Written from ADR-044 (amendment 2026-11-13, points 4, 5, 8)
-and the slice-1 plan (section 2, P1) without sight of the implementation.
+and the slice-1 plan (section 2, P1) without sight of the implementation; the
+threshold follows the amendment of 2026-11-16 (the restore only).
 """
 
 import pytest
@@ -84,12 +85,14 @@ def _sizes(floor=STRATA_FLOOR_BYTES, per_token=STRATA_BYTES_PER_TOKEN):
     return {"floor_bytes": floor, "bytes_per_token": per_token}
 
 
-@pytest.mark.parametrize("tokens", [10_000, 50_000, 250_000])
-def test_strata_from_an_hdd_never_pays_at_a_stop(tokens):
+@pytest.mark.parametrize("tokens, pays", [(10_000, False), (50_000, True), (250_000, True)])
+def test_strata_from_an_hdd_pays_at_a_stop_from_about_24k_tokens(tokens, pays):
+    # Amendment of 2026-11-16: only the restore counts (~0.16 s per 1K tokens plus a 2.5 s
+    # floor against ~0.27 s of cold read); save plus restore never paid.
     ok, reason = kv.worth_saving(tokens, _rates(HDD_WRITE_B_S, HDD_READ_B_S),
                                  _sizes(), STRATA_COLD_TOK_S)
-    assert ok is False
-    assert reason  # the skip carries its reason for the log line
+    assert ok is pays
+    assert reason  # the decision carries its words for the log line
 
 
 @pytest.mark.parametrize("tokens", [5_000, 10_000, 50_000, 250_000])
