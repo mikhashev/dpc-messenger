@@ -1129,8 +1129,9 @@ class StrataSupervisor(LlamaServerSupervisor):
         # the save ended is that stop's, not a death to latch (`_watch_engine`).
         self._kv_save_in_flight = False
         # Whether the engine holds the model as last seen (start, /metrics, DPC's own /load),
-        # when DPC last saw it loaded with no call of its own behind the load (monotonic), and
-        # the last stop measured while the model was loaded.
+        # when DPC last saw it loaded with no call of its own behind the load (monotonic; a
+        # start counts, its smoke fills slot 0 unrecorded), and the last stop measured while
+        # the model was loaded.
         self._kv_engine_loaded = False
         self._kv_loaded_mono: Optional[float] = None
         self._kv_loaded_stop_s: Optional[float] = None
@@ -1874,7 +1875,8 @@ class StrataSupervisor(LlamaServerSupervisor):
             )
         self._claim_card()
         self._kv_engine_loaded = False
-        self._kv_loaded_mono = None
+        # The record outlives the process: no call sent before this launch is in the new engine.
+        self._kv_loaded_mono = time.monotonic()
         try:
             # Before the start config, which reads the outcome; the base's own call is skipped.
             await asyncio.to_thread(self._prepare_kv_snapshots)
@@ -1919,6 +1921,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             await self._stop_the_spawned(proc)
             raise
         self._kv_engine_loaded = True  # the smoke's call loaded the model, lazy_load or not
+        self._kv_loaded_mono = time.monotonic()  # slot 0 holds the smoke's prompt, no call's
         self._start_watch()
         return self.props or props
 
@@ -2674,6 +2677,7 @@ class StrataSupervisor(LlamaServerSupervisor):
         loaded_at, sent_at = self._kv_loaded_mono, record.get("sent_mono")
         if loaded_at is not None and not (isinstance(sent_at, (int, float)) and sent_at >= loaded_at):
             # The pin keeps `n_prompt_tokens` across an unload and a load: the slot is empty.
+            # After a (re)start it holds the smoke's prompt: not the recorded call's either.
             # One clock tick counts as after (Windows' monotonic clock ticks every ~16 ms).
             return None, None, "the engine was reloaded after the last call"
         prompt, reply = count(record.get("prompt_tokens")), count(record.get("reply_tokens"))

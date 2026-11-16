@@ -6,7 +6,8 @@ room for (ADR-044, amendment 2026-11-13, points 2, 4 and 6).
   records the drafter the engine reported.
 - Slot 0 is live when the pin's `GET /slots` (serve/server.py v0.2.11) gives it
   `n_prompt_tokens` above 0; `[]` (the model unloaded) or 0 is nothing live. Its size is the
-  last call's prompt plus reply; no counts is size unknown.
+  last call's prompt plus reply; no counts is size unknown. A call sent before the engine's last
+  load, a launch included (its smoke fills slot 0 unrecorded), is not what the slot holds.
 - Before a stop is measured, a save leaves 20 s for the process plus `vram_release_timeout_s`;
   a measured stop already holds the VRAM wait, which runs inside `_stop_child`.
 """
@@ -17,8 +18,13 @@ import time
 import pytest
 
 from dpc_client_core.managers import kv_snapshots
+from dpc_client_core.managers.llama_server_supervisor import stop_by_hand
 from dpc_client_core.managers.strata_fetcher import STRATA_ENGINE_VERSION
 
+from tests.test_a_strata_save_answered_500_suspends_saving_for_the_launch_and_nothing_else_does import (
+    note_owner_call,
+    started,
+)
 from tests.test_an_unplugged_kv_snapshots_disk_starts_strata_with_saving_off import (  # noqa: F401
     ALIAS,
     card,
@@ -138,10 +144,43 @@ class TestTheLiveSlot:
         assert await sup._kv_slot_to_save() == (0, 31_200, None)
 
     @pytest.mark.asyncio
+    async def test_a_call_sent_before_a_relaunch_is_not_live_in_the_new_engine(self, tmp_path):
+        """The record outlives the process, and the new launch's smoke fills slot 0 with no record
+        of its own (dpc-client.log.1, 15.11 12:55:52: a save tried on that slot, refused 400)."""
+        self._record(30_000, 500)
+        time.sleep(0.05)  # past a tick of Windows' monotonic clock
+        sup = saving_strata(tmp_path, tmp_path / "kv")
+        await sup.ensure_running()
+
+        async def smoke_held():
+            return [{"id": 0, "n_prompt_tokens": 180}]
+
+        sup.slots = smoke_held
+        assert await sup._kv_slot_to_save() == (None, None, "the engine was reloaded after the last call")
+        self._record(31_000, 200)  # the first call after the start: live again
+        assert await sup._kv_slot_to_save() == (0, 31_200, None)
+
+    @pytest.mark.asyncio
+    async def test_a_relaunch_skips_the_save_of_a_conversation_the_last_stop_saved(self, tmp_path, monkeypatch):
+        sup, launcher, _folder = await started(tmp_path, monkeypatch)
+        note_owner_call()
+        first = await stop_by_hand(sup)
+        assert first["outcome"] == kv_snapshots.SAVED
+        time.sleep(0.05)  # past a tick of Windows' monotonic clock
+
+        await sup.ensure_running()
+        second = await stop_by_hand(sup)
+
+        assert second["outcome"] == kv_snapshots.SKIPPED
+        assert second["reason"] == "the engine was reloaded after the last call"
+        assert len(launcher.requests) == 1  # no save request reached the new engine
+
+    @pytest.mark.asyncio
     async def test_the_watcher_notes_a_load_nobody_dpc_served_and_not_a_calls_own(self, tmp_path):
         sup = saving_strata(tmp_path, tmp_path / "kv", model_params={"idle_unload_s": 600},
                             engine_watch_interval_s=0.01)
         await sup.ensure_running()
+        sup._kv_loaded_mono = None  # the start's own mark: here only the watcher's counts
         self._record(30_000, 500)
         states = iter(["idle", "unloaded", "idle", "unloaded", "idle"])
         polls = []
