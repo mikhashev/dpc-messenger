@@ -487,9 +487,13 @@ class LlamaServerProvider(DeepSeekProvider):
     async def _note_engine_call(self, messages: Optional[List[Any]]) -> None:
         """Record this call as the alias's last, then restore its conversation's KV
         snapshot when the engine is empty and the call is the owner's. Neither runs while
-        the supervisor drains; neither ever fails the call."""
+        the supervisor drains. A failed restore never fails the call (the call runs cold);
+        a cancellation is the exception: it is logged and re-raised, so the call is
+        cancelled with the restore it was awaiting. Every end of a restore that was
+        possible says so in one INFO line."""
         sup = self.supervisor
         if getattr(sup, "_draining", False) is True:
+            self._say_drain_skips_the_restore(sup, messages)
             return
         kind, agent_id, conversation_id, peer = self._caller_of_this_call()
         try:
@@ -520,11 +524,36 @@ class LlamaServerProvider(DeepSeekProvider):
                         self.alias, article, what)
             return
         if getattr(sup, "_in_flight", None) != 0:
+            self._say_not_restored(agent_id, conversation_id, "another call is already in the engine")
             return
         try:
             await self._restore_into_an_empty_engine(sup, agent_id, conversation_id, messages)
+        except asyncio.CancelledError as exc:
+            # A BaseException: `except Exception` below never sees it. The supervisor names the
+            # cancel it caught inside the engine request; this line covers the rest.
+            if not getattr(exc, "kv_restore_logged", False):
+                logger.info("%s: KV snapshot restore cancelled (agent %s conversation %s); "
+                            "the call is cancelled with it", self.alias, agent_id or "-", conversation_id)
+            raise
         except Exception:
             logger.warning("'%s': the KV snapshot restore failed; the call runs cold", self.alias, exc_info=True)
+
+    def _say_not_restored(self, agent_id: Optional[str], conversation_id: Optional[str], reason: str) -> None:
+        """The one INFO line of a restore that did not run, so the log never ends silent."""
+        logger.info("%s: KV snapshot not restored: %s (agent %s conversation %s)",
+                    self.alias, reason, agent_id or "-", conversation_id or "-")
+
+    def _say_drain_skips_the_restore(self, sup: Any, messages: Optional[List[Any]]) -> None:
+        """A drain refuses every call's record and restore, and a drain lasts many calls: say it
+        once per launch, and only when a restore was possible (a fresh engine, an owner call of a
+        conversation), so a peer or a background call during a drain adds nothing."""
+        if getattr(sup, "_kv_engine_fresh", False) is not True or messages is None:
+            return
+        kind, agent_id, conversation_id, _ = self._caller_of_this_call()
+        if not (kv_snapshots.is_owner_kind(kind) and conversation_id):
+            return
+        if kv_snapshots.first_this_launch(self.alias, "restore skipped: draining"):
+            self._say_not_restored(agent_id, conversation_id, "the engine is draining")
 
     async def _restore_into_an_empty_engine(
         self, sup: Any, agent_id: Optional[str], conversation_id: str, messages: List[Any],
@@ -538,8 +567,11 @@ class LlamaServerProvider(DeepSeekProvider):
         folder = kv_snapshots.folder_of(alias)
         restore = getattr(sup, "_restore_kv_snapshot", None)
         folder_off = getattr(sup, "_kv_folder_off_this_launch", None)
-        if (folder is None or restore is None or kv_snapshots.off_reason(alias) == kv_snapshots.FOLDER_MISSING
-                or (folder_off is not None and folder_off() is True)):
+        if folder is None or restore is None:
+            self._say_not_restored(agent_id, conversation_id, "this alias has no KV snapshots folder to restore from")
+            return
+        if kv_snapshots.off_reason(alias) == kv_snapshots.FOLDER_MISSING or (folder_off is not None and folder_off() is True):
+            self._say_not_restored(agent_id, conversation_id, "the KV snapshots folder is off this launch")
             return
         key = f"agent={agent_id or '-'} conv={conversation_id}"
         entry = await asyncio.to_thread(
@@ -547,6 +579,9 @@ class LlamaServerProvider(DeepSeekProvider):
             conversation_id=conversation_id, now=time.time(),
         )
         if entry is None:
+            # Only an owner call of a conversation reaches here, so a miss is that conversation
+            # having no snapshot (never saved, expired or deleted), not a peer's or a background call.
+            self._say_not_restored(agent_id, conversation_id, "no snapshot of this conversation in the index")
             return
         name = entry.get("file")
         # Measurement only: set beside the `at save` line to see which indices moved.

@@ -4118,6 +4118,8 @@ class LlamaServerSupervisor:
         Returns {"outcome", "bytes", "ms", "reason"} with `classify_restore`'s kinds."""
         folder, name = self._kv_folder(), entry.get("file")
         if folder is None or not name:
+            logger.info("%s[%s]: KV snapshot of conversation %s (agent %s) not restored: no KV snapshots folder",
+                        self.ENGINE, self.alias, entry.get("conversation_id"), entry.get("agent_id"))
             return _kv_outcome(_KV_SKIPPED, "no KV snapshots folder")
         if self._draining:
             logger.info("%s[%s]: KV snapshot not restored: the engine is draining", self.ENGINE, self.alias)
@@ -4127,6 +4129,13 @@ class LlamaServerSupervisor:
         try:
             status, body = await self._slot_action(
                 0, "restore", name, timeout if timeout is not None else 2 * _kv.KV_SNAPSHOT_WRITE_CEILING_S)
+        except asyncio.CancelledError as exc:
+            # A BaseException, so the clause below never sees it: say it, mark it so the
+            # provider does not say it twice, and let it through.
+            logger.info("%s[%s]: KV snapshot restore of conversation %s (agent %s) cancelled; the file is kept",
+                        self.ENGINE, self.alias, entry.get("conversation_id"), entry.get("agent_id"))
+            exc.kv_restore_logged = True
+            raise
         except Exception as exc:
             status, body = None, f"{type(exc).__name__}: {exc}"
         ms = int((time.monotonic() - began) * 1000)
