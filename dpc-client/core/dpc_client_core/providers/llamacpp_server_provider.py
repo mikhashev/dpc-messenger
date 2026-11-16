@@ -493,9 +493,13 @@ class LlamaServerProvider(DeepSeekProvider):
             return
         kind, agent_id, conversation_id, peer = self._caller_of_this_call()
         try:
+            # The turn base, not the whole list: the next turn never replays this one's tool
+            # rounds (ADR-044, amendment of 2026-11-16). No user message: the whole list.
+            prefix = (kv_snapshots.prefix_digest(messages, kv_snapshots.base_end(messages) or None)
+                      if messages is not None else None)
             seq = kv_snapshots.note_engine_call(
                 self.alias, caller_kind=kind, agent_id=agent_id, conversation_id=conversation_id,
-                peer_id=peer, prefix=kv_snapshots.prefix_digest(messages) if messages is not None else None,
+                peer_id=peer, prefix=prefix,
                 fingerprint=self._fingerprint_of(messages), at=time.time(),
             )
         except Exception:

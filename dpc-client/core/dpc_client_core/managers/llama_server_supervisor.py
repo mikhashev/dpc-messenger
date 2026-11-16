@@ -3913,6 +3913,7 @@ class LlamaServerSupervisor:
         if kind == _kv.OWNER_CHAT_KIND:
             # The owner's chat sends one rebuilt prompt, so its prefix never matches the next turn;
             # slice 1 saves agents' conversations, whose later turns extend the earlier messages.
+            # The prefix is the turn base now, still 1 for that one message; agents never reach here.
             if record.get("prefix_messages") == 1:
                 return "single-prompt call: no stable prefix"
             return "the owner's own chat is not saved in slice 1"

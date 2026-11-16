@@ -885,6 +885,18 @@ def prefix_digest(messages: Sequence[Any], k: Optional[int] = None) -> Tuple[str
     return hashlib.sha256(text.encode("utf-8")).hexdigest(), k
 
 
+def base_end(messages: Sequence[Any]) -> int:
+    """The index just after the last "user" message: the turn base, 0 when there is none.
+
+    A note hashes only these messages (amendment of 2026-11-16): the next turn replays the
+    history byte for byte but never this turn's tool rounds, which follow the trigger."""
+    end = 0
+    for i, m in enumerate(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user":
+            end = i + 1
+    return end
+
+
 def _canonical(message: Any) -> str:
     """One message in the canonical JSON form `prefix_digest` uses (same `dumps` arguments)."""
     return json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
@@ -894,18 +906,14 @@ def message_fingerprints(messages: Sequence[Any]) -> Dict[str, Any]:
     """Measurement only: {hashes, base_end, msg0_chars} of a wire message list.
 
     `hashes` are the first 8 hex characters of each message's sha256 over the canonical
-    JSON; `base_end` is the index just after the last "user" message (the turn base, 0 when
-    there is none); `msg0_chars` is the length of message 0's canonical JSON. Logged at a save
+    JSON; `base_end` is `base_end(messages)`, the length the prefix is hashed over;
+    `msg0_chars` is the length of message 0's canonical JSON. Logged at a save
     and at a restore, so a "prefix moved" can be traced to the indices that differ."""
     messages = list(messages or [])
     texts = [_canonical(m) for m in messages]
-    base_end = 0
-    for i, m in enumerate(messages):
-        if isinstance(m, dict) and m.get("role") == "user":
-            base_end = i + 1
     return {
         "hashes": [hashlib.sha256(t.encode("utf-8")).hexdigest()[:8] for t in texts],
-        "base_end": base_end,
+        "base_end": base_end(messages),
         "msg0_chars": len(texts[0]) if texts else 0,
     }
 
