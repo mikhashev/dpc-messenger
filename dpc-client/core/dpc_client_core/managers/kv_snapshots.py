@@ -165,6 +165,7 @@ _STATE_LOCK = threading.Lock()
 _FOLDER_LOCKS: Dict[str, threading.RLock] = {}
 _FOLDERS: Dict[str, Dict[str, Any]] = {}          # alias -> {"folder": Path, "cap_bytes": int|None}
 _RECORDS: Dict[str, Dict[str, Any]] = {}          # alias -> the last engine call
+_TURN_CALLS: Dict[Tuple[str, str], Tuple[str, int]] = {}   # (alias, conversation) -> (prefix sha, calls)
 _SEQ = itertools.count(1)                         # sequence numbers of noted calls
 _SENT = itertools.count(1)                        # order in which calls went on the wire
 _PENDING: Dict[str, "OrderedDict[int, Dict[str, Any]]"] = {}   # alias -> noted, not yet sent
@@ -183,6 +184,7 @@ def reset_state() -> None:
         _FOLDER_LOCKS.clear()
         _FOLDERS.clear()
         _RECORDS.clear()
+        _TURN_CALLS.clear()
         _SEQ = itertools.count(1)
         _SENT = itertools.count(1)
         _PENDING.clear()
@@ -831,6 +833,8 @@ def forget_conversation(conversation_id: Optional[str]) -> List[Tuple[str, str]]
         return []
     with _STATE_LOCK:
         _CLEARED.add(conversation_id)
+        for key in [k for k in _TURN_CALLS if k[1] == conversation_id]:
+            del _TURN_CALLS[key]
         folders = {_key(h["folder"]): h["folder"] for h in _FOLDERS.values()}
     out: List[Tuple[str, str]] = []
     for folder in folders.values():
@@ -1343,19 +1347,23 @@ def mark_sent(alias: str, seq: int) -> bool:
         # When it went on the wire, so a supervisor can tell an engine (re)loaded after it.
         record["sent_mono"] = time.monotonic()
         # Measurement only: consecutive sent calls of one conversation on one turn base.
-        record["calls_in_turn"] = _calls_in_turn(_RECORDS.get(alias), record)
+        record["calls_in_turn"] = _calls_in_turn(alias, record)
         _RECORDS[alias] = record
         if record["conversation_id"]:
             _CLEARED.discard(record["conversation_id"])
         return True
 
 
-def _calls_in_turn(previous: Optional[Dict[str, Any]], record: Dict[str, Any]) -> int:
-    """1, or one more than `previous` when both name the same conversation and prefix sha."""
-    same = (previous is not None and record.get("conversation_id") and record.get("prefix_sha256")
-            and previous.get("conversation_id") == record["conversation_id"]
-            and previous.get("prefix_sha256") == record["prefix_sha256"])
-    return int(previous.get("calls_in_turn") or 1) + 1 if same else 1
+def _calls_in_turn(alias: str, record: Dict[str, Any]) -> int:
+    """Calls so far of this conversation on this alias with the same prefix sha (caller holds
+    the lock). Per conversation: another agent's call on the alias does not restart the chain."""
+    conversation, sha = record.get("conversation_id"), record.get("prefix_sha256")
+    if not conversation or not sha:
+        return 1
+    held = _TURN_CALLS.get((alias, conversation))
+    n = held[1] + 1 if held and held[0] == sha else 1
+    _TURN_CALLS[(alias, conversation)] = (sha, n)
+    return n
 
 
 _CHECKPOINTS_LLAMA_RE = re.compile(r"appended (\d+) context checkpoint\(s\) \(([\d.]+) MiB\)")

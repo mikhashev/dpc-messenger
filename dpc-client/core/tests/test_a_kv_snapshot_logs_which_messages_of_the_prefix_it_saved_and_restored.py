@@ -133,11 +133,21 @@ def test_calls_of_one_turn_are_counted_and_the_count_restarts_when_the_base_or_c
     assert _send(prefix=("cd" * 32, 5)) == 1
     assert _send(prefix=("cd" * 32, 5)) == 2
     assert _send(conversation="c2", prefix=("cd" * 32, 5)) == 1
-    assert _send(conversation="c1", prefix=("cd" * 32, 5)) == 1
+    assert _send(conversation="c1", prefix=("cd" * 32, 5)) == 3   # c2's call between did not break c1's chain
     # Another alias keeps its own count; a call with no conversation or no prefix is always 1.
     assert _send(alias="other") == 1
     assert _send(conversation=None) == 1 and _send(conversation=None) == 1
     assert _send(prefix=None) == 1 and _send(prefix=None) == 1
+
+
+def test_another_agents_call_on_the_alias_does_not_restart_a_conversations_count():
+    warren = dict(conversation="warren-c")
+    other = dict(conversation="other-c", prefix=("cd" * 32, 5))
+    assert _send(**warren) == 1
+    assert _send(**other) == 1          # the alias's last call is now the other agent's
+    assert _send(**warren) == 2
+    assert _send(**other) == 2          # its own chain, independent of Warren's
+    assert _send(**warren) == 3
 
 
 def test_a_pending_call_is_not_counted_until_it_is_sent():
