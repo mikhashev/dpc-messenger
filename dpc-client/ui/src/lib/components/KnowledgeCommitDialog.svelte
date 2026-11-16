@@ -308,9 +308,13 @@
         <button class="btn btn-approve" on:click={() => handleVote('approve')}>
           Approve
         </button>
-        <button class="btn btn-changes" on:click={() => handleVote('request_changes')}>
-          Request Changes
-        </button>
+        <!-- A solo proposal is fixed with Edit; Request Changes there ended in
+             revision_needed with nobody to revise. Mike's call, 2026-11-16. -->
+        {#if !canEdit}
+          <button class="btn btn-changes" on:click={() => handleVote('request_changes')}>
+            Request Changes
+          </button>
+        {/if}
         <button class="btn btn-reject" on:click={() => handleVote('reject')}>
           Reject
         </button>

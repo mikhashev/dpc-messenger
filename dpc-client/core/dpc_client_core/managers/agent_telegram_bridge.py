@@ -753,10 +753,12 @@ Send a voice message and it will be transcribed and processed\\.
             f"Review and vote:"
         )
 
+        # An agent chat votes solo, and a button carries no comment for the
+        # agent to revise by: Request Changes only ended in revision_needed.
+        # Mike's call, 2026-11-16: approve or reject.
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
-                InlineKeyboardButton("🔄 Request Changes", callback_data=f"vote:{proposal_id}:request_changes"),
                 InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
             ]
         ])
@@ -810,7 +812,6 @@ Send a voice message and it will be transcribed and processed\\.
                         text = "📚 *Knowledge proposal created\\!*\n\nReview and vote:"
                         keyboard = InlineKeyboardMarkup([[
                             InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
-                            InlineKeyboardButton("🔄 Request Changes", callback_data=f"vote:{proposal_id}:request_changes"),
                             InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
                         ]])
 
@@ -1270,7 +1271,6 @@ Send a voice message and it will be transcribed and processed\\.
                 text = "📚 *Knowledge Proposal*\n\nReview and vote:"
                 keyboard = InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
-                    InlineKeyboardButton("🔄 Request Changes", callback_data=f"vote:{proposal_id}:request_changes"),
                     InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
                 ]])
 
