@@ -121,8 +121,8 @@ STRATA_LINE = ("strata serve: session saved 82754 tokens, 1 of 6 checkpoints, 14
                "D:\\kv\\flash\\{name} in 14580.0 ms (state 60.1 ms)")
 
 
-def _send(conversation="c1", prefix=("ab" * 32, 3), alias=ALIAS):
-    seq = kv.note_engine_call(alias, caller_kind="agent", agent_id="a1", conversation_id=conversation,
+def _send(conversation="c1", prefix=("ab" * 32, 3), alias=ALIAS, agent="a1"):
+    seq = kv.note_engine_call(alias, caller_kind="agent", agent_id=agent, conversation_id=conversation,
                               prefix=prefix, at=time.time())
     assert kv.mark_sent(alias, seq)
     return kv.engine_call_of(alias)["calls_in_turn"]
@@ -148,6 +148,13 @@ def test_another_agents_call_on_the_alias_does_not_restart_a_conversations_count
     assert _send(**warren) == 2
     assert _send(**other) == 2          # its own chain, independent of Warren's
     assert _send(**warren) == 3
+
+
+def test_two_agents_in_one_group_conversation_keep_separate_counts():
+    # The independent review's probe of 8124d6c2: a group turn sends conversation_id=group_id for every agent.
+    warren = dict(conversation="group-abc", agent="warren", prefix=("aa" * 32, 4))
+    johnny = dict(conversation="group-abc", agent="johnny", prefix=("bb" * 32, 4))
+    assert [_send(**warren), _send(**johnny), _send(**warren), _send(**johnny), _send(**warren)] == [1, 1, 2, 2, 3]
 
 
 def test_a_pending_call_is_not_counted_until_it_is_sent():
