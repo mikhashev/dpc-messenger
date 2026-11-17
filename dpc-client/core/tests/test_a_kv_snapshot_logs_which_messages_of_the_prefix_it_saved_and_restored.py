@@ -5,7 +5,8 @@ Measurement only: `kv_snapshots.message_fingerprints` (short sha256 per message,
 after the last "user" message, message 0's canonical length), kept in the in-memory call record,
 logged beside a successful save and at every restore attempt that found an index entry. The
 matching, the deletion and the outcomes are the ones the other KV snapshot tests pin; the
-fingerprint is never written to the index.
+fingerprint itself is never written to the index, only the turn base's short hashes and running
+character counts are (ADR-044, amendment of 2026-11-17).
 
 The save line also says how many engine calls of the conversation shared the turn base
 before the save (`calls_in_turn`) and how many context checkpoints the engine wrote into the
@@ -79,16 +80,23 @@ def test_the_fingerprint_words_name_the_count_the_base_and_the_hashes():
     assert words.endswith("hashes=" + ",".join(_short(m) for m in SAMPLE))
 
 
-def test_the_fingerprint_stays_in_memory_and_never_reaches_the_index_entry():
+def test_the_fingerprint_stays_in_memory_and_only_the_turn_bases_hashes_reach_the_index_entry():
+    """ADR-044, amendment of 2026-11-17: the entry carries the turn base's short hashes and running
+    character counts for a partial match, never the fingerprint itself and never message text."""
     fp = kv.message_fingerprints(SAMPLE)
     seq = kv.note_engine_call(ALIAS, caller_kind="agent", agent_id="a1", conversation_id="c1",
-                              prefix=kv.prefix_digest(SAMPLE), fingerprint=fp, at=time.time())
+                              prefix=kv.prefix_digest(SAMPLE, 5), fingerprint=fp, at=time.time())
     assert kv.mark_sent(ALIAS, seq)
     record = kv.engine_call_of(ALIAS)
     assert record["fingerprint"] == fp
     entry = kv.new_entry(file="dpc-kv-ab.bin", alias=ALIAS, engine="llamacpp_server", identity={},
                          record=record, n_saved=1, nbytes=1, save_ms=1, now=time.time())
-    assert "fingerprint" not in entry and "hashes" not in json.dumps(entry)
+    assert "fingerprint" not in entry and "base_end" not in entry and "msg0_chars" not in entry
+    assert entry["prefix_hashes"] == fp["hashes"][:5]
+    assert entry["prefix_chars"] == [sum(fp["chars"][:i + 1]) for i in range(5)]
+    assert entry["call_chars"] == sum(fp["chars"])  # all 7 messages, the rounds after the base included
+    text = json.dumps(entry)
+    assert not any(m["content"] and m["content"] in text for m in SAMPLE)
     kv.reset_state()
 
 

@@ -632,12 +632,23 @@ class LlamaServerProvider(DeepSeekProvider):
             except Exception:
                 logger.debug("KV snapshot prefix line not written", exc_info=True)
         if not kv_snapshots.matches(entry, messages):
-            await asyncio.to_thread(kv_snapshots.remove_entry, folder, name, reason=_PREFIX_MISMATCH)
-            logger.info("%s: KV snapshot %s (%s) not restored: the prefix moved since the save; "
-                        "deleted, the call runs cold", alias, name, key)
-            kv_snapshots.note_restore(alias, {"outcome": _PREFIX_MISMATCH, "bytes": entry.get("bytes"),
-                                              "ms": None, "reason": "prefix mismatch, deleted"})
-            return
+            # llama-server only: a turn base that differs is restored when its common messages pay
+            # (ADR-044, amendment of 2026-11-17); Strata keeps the exact match.
+            common_part = getattr(sup, "_kv_common_part", None)
+            part = (await common_part(folder, entry, messages)
+                    if common_part is not None and getattr(sup, "ENGINE", None) == LlamaServerSupervisor.ENGINE
+                    else None)
+            if part is not None:
+                logger.info("%s: KV snapshot %s (%s) partly matches: %s: %s", alias, name, key, part[1],
+                            "restoring" if part[0] else "deleted, the call runs cold")
+            if part is None or not part[0]:
+                await asyncio.to_thread(kv_snapshots.remove_entry, folder, name, reason=_PREFIX_MISMATCH)
+                if part is None:
+                    logger.info("%s: KV snapshot %s (%s) not restored: the prefix moved since the save; "
+                                "deleted, the call runs cold", alias, name, key)
+                kv_snapshots.note_restore(alias, {"outcome": _PREFIX_MISMATCH, "bytes": entry.get("bytes"),
+                                                  "ms": None, "reason": "prefix mismatch, deleted"})
+                return
         # Asked again after the awaited lookup, with no await before the slot: a call that
         # entered meanwhile has filled the engine, and a drain refuses the restore.
         if getattr(sup, "_in_flight", None) != 0 or getattr(sup, "_draining", False) is True:

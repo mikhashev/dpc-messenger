@@ -714,6 +714,8 @@ def new_entry(
         # The prefix's length in messages (a count), not the messages themselves.
         "prefix_messages": record.get("prefix_messages"),
     }
+    # Its messages' short hashes and character counts, for a partial match (`common_part`).
+    entry.update(_prefix_fields(record))
     sent, sent_mono = record.get("sent"), record.get("sent_mono")
     if isinstance(sent, int) and not isinstance(sent, bool) and _number(sent_mono):
         # The saved call, by both: a restore compares them with the key's last sent call (`last_sent_of`).
@@ -929,17 +931,25 @@ def _canonical(message: Any) -> str:
     return json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
+def _short_hash(text: str) -> str:
+    """The first 8 hex characters of the sha256 of a message's canonical JSON."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+
+
 def message_fingerprints(messages: Sequence[Any]) -> Dict[str, Any]:
-    """Measurement only: {hashes, base_end, msg0_chars} of a wire message list.
+    """{hashes, chars, base_end, msg0_chars} of a wire message list.
 
     `hashes` are the first 8 hex characters of each message's sha256 over the canonical
-    JSON; `base_end` is `base_end(messages)`, the length the prefix is hashed over;
-    `msg0_chars` is the length of message 0's canonical JSON. Logged at a save
-    and at a restore, so a "prefix moved" can be traced to the indices that differ."""
+    JSON, `chars` each message's canonical length; `base_end` is `base_end(messages)`,
+    the length the prefix is hashed over; `msg0_chars` is the length of message 0's
+    canonical JSON. Logged at a save and at a restore, so a "prefix moved" can be traced
+    to the indices that differ; the turn base's hashes and running character counts, and
+    the call's total, go to the index entry (`new_entry`), never the messages."""
     messages = list(messages or [])
     texts = [_canonical(m) for m in messages]
     return {
-        "hashes": [hashlib.sha256(t.encode("utf-8")).hexdigest()[:8] for t in texts],
+        "hashes": [_short_hash(t) for t in texts],
+        "chars": [len(t) for t in texts],
         "base_end": base_end(messages),
         "msg0_chars": len(texts[0]) if texts else 0,
     }
@@ -962,6 +972,53 @@ def matches(entry: Dict[str, Any], messages: Sequence[Any]) -> bool:
     if len(messages) < k:
         return False
     return prefix_digest(messages, k)[0] == saved
+
+
+def _prefix_fields(record: Dict[str, Any]) -> Dict[str, Any]:
+    """`prefix_hashes` and `prefix_chars` of the record's turn base, from its fingerprint: the first
+    `prefix_messages` short hashes and their running canonical lengths; and `call_chars`, the canonical
+    length of every message of the call, the tool rounds after the base included. Empty when the record
+    has no fingerprint that covers the base (a call noted without one)."""
+    k, fingerprint = record.get("prefix_messages"), record.get("fingerprint")
+    if not (isinstance(k, int) and not isinstance(k, bool) and k > 0 and isinstance(fingerprint, dict)):
+        return {}
+    hashes, chars = fingerprint.get("hashes"), fingerprint.get("chars")
+    if not (isinstance(hashes, list) and isinstance(chars, list) and len(hashes) >= k and len(chars) >= k):
+        return {}
+    return {"prefix_hashes": list(hashes[:k]), "prefix_chars": list(itertools.accumulate(chars[:k])),
+            "call_chars": sum(chars)}
+
+
+def _count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def common_part(entry: Dict[str, Any], messages: Sequence[Any]) -> Optional[Dict[str, int]]:
+    """How much of a saved turn base a request still shares (ADR-044, amendment of 2026-11-17):
+    {messages, of, tokens, n_saved}: the leading whole messages whose short hashes equal the saved
+    ones, out of `prefix_messages`, and the reusable tokens estimated as `n_saved` times the share of
+    the saved call's characters (`call_chars`) those messages hold; without `call_chars`, the share
+    of the base's. The reply the call generated is in `n_saved` but in no message, so the estimate
+    still runs a little high. None for an entry written before `prefix_hashes` and `prefix_chars`,
+    or whose fields do not fit together: today's rule applies to it."""
+    k, hashes, chars = entry.get("prefix_messages"), entry.get("prefix_hashes"), entry.get("prefix_chars")
+    n_saved = entry.get("n_saved")
+    if not (isinstance(k, int) and not isinstance(k, bool) and k > 0
+            and isinstance(n_saved, int) and not isinstance(n_saved, bool) and n_saved > 0
+            and isinstance(hashes, list) and isinstance(chars, list) and len(hashes) == len(chars) == k
+            and all(isinstance(h, str) for h in hashes) and all(_count(c) for c in chars)
+            and all(a <= b for a, b in zip(chars, chars[1:])) and chars[-1] > 0):
+        return None
+    total = entry.get("call_chars")
+    if not (_count(total) and total >= chars[-1]):
+        total = chars[-1]
+    common = 0
+    for saved, message in zip(hashes, list(messages or [])[:k]):
+        if _short_hash(_canonical(message)) != saved:
+            break
+        common += 1
+    tokens = int(n_saved * chars[common - 1] / total) if common else 0
+    return {"messages": common, "of": k, "tokens": tokens, "n_saved": n_saved}
 
 
 # ---------------------------------------------------------------- arithmetic
@@ -1422,7 +1479,7 @@ def note_engine_call(
             "peer_id": peer_id,
             "prefix_sha256": sha,
             "prefix_messages": k,
-            # Memory only, never copied to the index (`new_entry` names its keys): see `message_fingerprints`.
+            # Memory only: `new_entry` copies only hashes and character counts (`_prefix_fields`).
             "fingerprint": fingerprint,
             "seq": seq,
             "sent": None,

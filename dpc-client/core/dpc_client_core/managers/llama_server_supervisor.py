@@ -582,6 +582,12 @@ def _kv_read_rate_words(rates: Optional[Dict[str, Any]]) -> str:
     return f"read rate {used / 1e6:.0f} MB/s{cap}"
 
 
+def _kv_restore_read_rate(rates: Optional[Dict[str, Any]]) -> Optional[float]:
+    """The read rate a restore estimate uses: `capped_read_rate`, else the write rate; None while unmeasured."""
+    write = (rates or {}).get("write_bytes_per_s")
+    return _kv.capped_read_rate(rates) or (write if isinstance(write, (int, float)) and write > 0 else None)
+
+
 def _size_words(nbytes: Any) -> str:
     n = float(nbytes or 0)
     return f"{n / 1e9:.1f} GB" if n >= 1e8 else f"{n / 1e6:.0f} MB"
@@ -4508,8 +4514,7 @@ class LlamaServerSupervisor:
         a save no longer compares, amendment of 2026-11-17); unknown rates try it."""
         tokens, nbytes = entry.get("n_saved"), entry.get("bytes")
         rates = await asyncio.to_thread(_kv.folder_rates, folder)
-        write = (rates or {}).get("write_bytes_per_s")
-        read = _kv.capped_read_rate(rates) or (write if isinstance(write, (int, float)) and write > 0 else None)
+        read = _kv_restore_read_rate(rates)
         if read is None or not nbytes:
             return True, f"restore of {nbytes} bytes: read rate unknown, tried", None
         restore_s = nbytes / read
@@ -4525,6 +4530,40 @@ class LlamaServerSupervisor:
         if restore_s < cold_s:
             return True, words, restore_s
         return False, f"below the size threshold: {words}", restore_s
+
+    async def _kv_common_part(self, folder: Path, entry: Dict[str, Any],
+                              messages: List[Any]) -> Optional[Tuple[bool, str]]:
+        """(restore, words) for a snapshot whose turn base differs from the request's (ADR-044,
+        amendment of 2026-11-17): restored when the estimated cold read of the leading whole
+        messages it shares with the request takes longer than the estimated restore of the file,
+        at the rates `_kv_restore_estimate` reads; unknown rates try it, as there. None on Strata
+        (its reuse of a partial match is unmeasured), for an entry written before the per-message
+        hashes, and with no message in common: the prefix check deletes the file as before."""
+        if self.ENGINE != LlamaServerSupervisor.ENGINE:
+            return None
+        part = _kv.common_part(entry, messages)
+        if part is None or part["messages"] <= 0 or part["tokens"] <= 0:
+            return None
+        tokens, nbytes = part["tokens"], entry.get("bytes")
+        # The engine resumes at its last checkpoint at or below the common part, and checkpoints at user
+        # messages stand at least `checkpoint_min_step` apart (llama.cpp's default 8192): words, not modelled.
+        step = self.config.get("checkpoint_min_step")
+        step = step if isinstance(step, int) and not isinstance(step, bool) and step >= 0 else 8192
+        words = (f"{part['messages']} of {part['of']} messages common "
+                 f"(~{tokens} of {part['n_saved']} tokens, estimate; the engine rounds down to a checkpoint, "
+                 f"up to ~{step} tokens lower)")
+        rates = await asyncio.to_thread(_kv.folder_rates, folder)
+        read = _kv_restore_read_rate(rates)
+        if read is None or not nbytes:
+            return True, f"{words}, restore of {nbytes} bytes: read rate unknown, tried"
+        restore_s = nbytes / read
+        got = await self._kv_cold_rate(tokens)
+        cold = got[0] if isinstance(got, tuple) else got
+        words = f"{words}, restore ~{restore_s:.1f} s ({_kv_read_rate_words(rates)})"
+        if not cold or cold <= 0:
+            return True, f"{words}, threshold unknown, tried"
+        cold_s = tokens / float(cold)
+        return cold_s > restore_s, f"{words} against a cold read of the common part ~{cold_s:.1f} s"
 
     def _kv_restore_since(self, record: Optional[Dict[str, Any]]) -> Optional[str]:
         """Why slot 0 no longer holds `record`'s call (a switch restore was tried after it), or None."""
@@ -4614,11 +4653,20 @@ class LlamaServerSupervisor:
                         self.ENGINE, alias, agent_id or "-", conversation_id, name, entry.get("prefix_messages"),
                         _kv.fingerprint_words(_kv.message_fingerprints(messages)))
         if not _kv.matches(entry, messages):
-            await asyncio.to_thread(_kv.remove_entry, folder, name, reason=_KV_PREFIX_MISMATCH)
-            self._kv_not_restored_at_a_switch(agent_id, conversation_id,
-                                              f"the prefix moved since the save; {name} deleted, the call runs cold")
-            _kv.note_restore(alias, _kv_outcome(_KV_PREFIX_MISMATCH, "prefix mismatch, deleted", entry.get("bytes")))
-            return
+            part = await self._kv_common_part(folder, entry, messages)
+            if part is not None:
+                logger.info("%s[%s]: KV snapshot of %s partly matches%s: %s: %s", self.ENGINE, alias,
+                            _kv_key_words(agent_id, conversation_id), _kv_at_words(), part[1],
+                            "restoring" if part[0] else f"{name} deleted, the call runs cold")
+            if part is None or not part[0]:
+                await asyncio.to_thread(_kv.remove_entry, folder, name, reason=_KV_PREFIX_MISMATCH)
+                if part is None:
+                    self._kv_not_restored_at_a_switch(
+                        agent_id, conversation_id,
+                        f"the prefix moved since the save; {name} deleted, the call runs cold")
+                _kv.note_restore(alias, _kv_outcome(_KV_PREFIX_MISMATCH, "prefix mismatch, deleted",
+                                                    entry.get("bytes")))
+                return
         slot, tokens, why_not = await self._kv_slot_to_save()
         if slot is None and why_not is not None:
             # Two occupied slots: slot 0 may hold a conversation nobody saved.
