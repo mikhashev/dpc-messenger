@@ -2411,7 +2411,7 @@
                     {#if provider.alias === displayConfig.voice_provider}<span class="default-badge voice-badge">🎤 Voice Default</span>{/if}
                     {#if provider.alias === displayConfig.agent_provider}<span class="default-badge agent-badge">🤖 Agent Default</span>{/if}
                     {#if provider.alias === displayConfig.knowledge_provider}<span class="default-badge">🧠 Knowledge Extraction</span>{/if}
-                    <span class="provider-summary">{provider.type}{#if provider.model} · {provider.model}{/if}</span>
+                    <span class="provider-summary">{provider.model ? `${provider.type} · ${provider.model}` : provider.type}</span>
                   </h3>
                   {#if editMode}
                     <button class="btn-delete" on:click={() => deleteProvider(i)}>Delete</button>
