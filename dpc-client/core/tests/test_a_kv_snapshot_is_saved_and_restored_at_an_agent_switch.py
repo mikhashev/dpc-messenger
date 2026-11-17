@@ -756,3 +756,88 @@ async def test_a_switch_restore_that_read_less_than_the_file_deletes_it_and_clai
         assert kv.status_of(ALIAS)["last_restore"]["outcome"] == kv.FAILED
     finally:
         _gone(folder, final)
+
+
+# --- the incoming call's deadline (Johnny's review of e7201c0d, point 1) ---------------------------
+
+
+async def turn_by(p, agent, conversation, messages, wait_s):
+    """A turn whose hold was accepted now with `wait_s` seconds of wait: its one deadline."""
+    from types import SimpleNamespace
+
+    kv.note_clearable(conversation)
+    hold = SimpleNamespace(alias=ALIAS, live=True, agent_id=agent, conversation_id=conversation, borrow=None,
+                           caller=None, accepted_at=base_mod._swap_clock(), wait_s=wait_s)
+    with carrying_card_hold(hold):
+        return await p.generate_with_tools(messages, [], system=SYSTEM)
+
+
+def restore_timeouts(sup):
+    seen = []
+    real = sup._slot_action
+
+    async def slot_action(slot, what, filename, timeout):
+        if what == "restore":
+            seen.append(timeout)
+        return await real(slot, what, filename, timeout)
+
+    sup._slot_action = slot_action
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_switch_save_longer_than_the_incoming_calls_deadline_is_skipped(tmp_path, caplog, monkeypatch):
+    p, sup, engine, folder = await switching(tmp_path)
+    await turn(p, "a1", "c1")
+    monkeypatch.setattr(kv, "estimate_save_s", lambda nbytes, rates: 30.0)
+    with caplog.at_level(logging.INFO, logger=SUP_LOG):
+        await turn_by(p, "a2", "c2", TURN_1, wait_s=10)
+    assert "save" not in engine.events and entries(folder) == []
+    skip, = lines(caplog, "live conversation not saved at a switch")
+    assert "estimate over the bound: ~30.0 s against" in skip
+    left = float(skip.split("against ")[1].split(" s left")[0])
+    assert 0 < left <= 10
+
+
+@pytest.mark.asyncio
+async def test_a_switch_restore_waits_no_longer_than_the_incoming_calls_deadline(tmp_path):
+    p, sup, engine, folder = await switching(tmp_path)
+    snapshot_of(p, folder, "a2", "c2")
+    measured(folder)
+    direct_call(None)
+    seen = restore_timeouts(sup)
+    await turn_by(p, "a2", "c2", TURN_2, wait_s=10)
+    assert len(seen) == 1 and 0 < seen[0] <= 10
+
+
+@pytest.mark.asyncio
+async def test_a_switch_restore_longer_than_the_time_left_is_skipped(tmp_path, caplog):
+    p, sup, engine, folder = await switching(tmp_path)
+    final = snapshot_of(p, folder, "a2", "c2")
+    measured(folder, write=1.0, read=1.0)  # 1024 bytes take ~1024 s
+    direct_call(None)
+    with caplog.at_level(logging.INFO, logger=SUP_LOG):
+        await turn_by(p, "a2", "c2", TURN_2, wait_s=10)
+    assert "restore" not in engine.events
+    assert lines(caplog, "not restored at a switch from agent - conversation - to an agent call (agent a2 "
+                         "conversation c2): restore ~1024.0 s against")
+    assert lines(caplog, "s left before the incoming request's deadline; " + final + " kept")
+
+
+# --- a group chat: two of our agents in one conversation (Johnny's point 9) ------------------------
+
+
+@pytest.mark.asyncio
+async def test_in_a_group_one_agent_after_another_saves_the_first_and_finds_nothing_for_the_second(tmp_path, caplog):
+    """Pins today's behaviour: the key is (agent, conversation), so Ark -> Johnny is a switch."""
+    p, sup, engine, folder = await switching(tmp_path)
+    await turn(p, "ark", "group-1")
+    with caplog.at_level(logging.INFO, logger=SUP_LOG):
+        await turn(p, "johnny", "group-1", TURN_2)
+    assert engine.events == ["request:group-1", "save", "save-end", "request:group-1"]
+    assert [(e["agent_id"], e["conversation_id"]) for e in entries(folder)] == [("ark", "group-1")]
+    decision, = lines(caplog, "KV snapshot decision")
+    assert ("at a switch from agent ark conversation group-1 to an agent call "
+            "(agent johnny conversation group-1)") in decision
+    assert decision.endswith("; incoming: no snapshot of this conversation in the index")
+    assert lines(caplog, "KV snapshot of agent johnny conversation group-1 not restored at a switch")

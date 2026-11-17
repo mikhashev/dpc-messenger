@@ -525,6 +525,9 @@ _KV_SLOT_RESTORED = "slot 0 was restored at a switch after the last sent call, s
 _KV_SLOT_WIPED = "a restore at a switch after the last sent call failed and wiped slot 0"
 _KV_SLOT_UNKNOWN = ("a restore at a switch after the last sent call did not finish, so what slot 0 holds "
                     "is unknown")
+# Kept free of a switch's save and restore before the incoming request's deadline: the call itself
+# still has to go out.
+_KV_SWITCH_DEADLINE_MARGIN_S = 2.0
 
 
 def _kv_key_words(agent_id: Optional[str], conversation_id: Optional[str]) -> str:
@@ -3993,12 +3996,13 @@ class LlamaServerSupervisor:
             return "the owner's own chat is not saved in slice 1"
         return None
 
-    async def _save_live_conversation(self, save_by: Optional[float],
-                                      own_slots: int = 0) -> Optional[Dict[str, Any]]:
+    async def _save_live_conversation(self, save_by: Optional[float], own_slots: int = 0,
+                                      after_s: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """The live conversation to a KV snapshot, before the stop or at a switch. None when
         saving is off or nothing is live; else the outcome. The bound comes first, and
         everything after it, reads included, runs inside it. `own_slots`: call slots in
-        flight that are the save's own (a switch save holds the hook's one)."""
+        flight that are the save's own (a switch save holds the hook's one). `after_s`: what
+        must stay free before `save_by` after the save; left out, the stop still to come."""
         folder = self._kv_folder()
         if folder is None:
             return None
@@ -4014,10 +4018,11 @@ class LlamaServerSupervisor:
         proc = self._proc
         if proc is None or proc.returncode is not None or not self.port:
             return None
-        bound = _kv.save_bound(_swap_clock(), save_by, self._expected_stop_s(),
+        bound = _kv.save_bound(_swap_clock(), save_by, self._expected_stop_s() if after_s is None else after_s,
                                ceiling=_kv.KV_SNAPSHOT_WRITE_CEILING_S)
         if bound <= 0:
-            return self._kv_skip("no time left before the request's stop bound")
+            return self._kv_skip("no time left before the incoming request's deadline" if after_s is not None
+                                 else "no time left before the request's stop bound")
         began = time.monotonic()
         try:
             return await asyncio.wait_for(self._kv_save_within(folder, began + bound, own_slots),
@@ -4397,6 +4402,7 @@ class LlamaServerSupervisor:
                 return
             self.call_slot()
             slot_taken = True
+            save_by = self._kv_switch_save_by()
             incoming = None
             if restores:
                 # Estimated before the save, so the switch's one decision line names both waits.
@@ -4406,7 +4412,8 @@ class LlamaServerSupervisor:
             if saves:
                 # Its own task, shielded: a cancelled caller leaves it writing, and it keeps the
                 # call slot and the lock until it ends (`release`), so no stop cuts the write.
-                task = asyncio.ensure_future(self._save_live_conversation(None, own_slots=1))
+                task = asyncio.ensure_future(self._save_live_conversation(
+                    save_by, own_slots=1, after_s=_KV_SWITCH_DEADLINE_MARGIN_S))
                 try:
                     saved = await asyncio.shield(task)
                 except asyncio.CancelledError:
@@ -4438,7 +4445,7 @@ class LlamaServerSupervisor:
                 no_save = (saved or {}).get("reason") or "nothing to save"
             await self._kv_restore_at_a_switch(record, agent_id, conversation_id, messages,
                                                slot_holds_the_record=lost is None, incoming=incoming,
-                                               no_save=no_save)
+                                               no_save=no_save, save_by=save_by)
         finally:
             if incoming_token is not None:
                 _KV_SWITCH_INCOMING.reset(incoming_token)
@@ -4446,6 +4453,23 @@ class LlamaServerSupervisor:
                 _KV_AT_A_SWITCH.reset(token)
             if not hand_over:
                 release()
+
+    def _kv_switch_save_by(self) -> float:
+        """The incoming request's deadline on `_swap_clock`, as `_QueuedRequest` fixes it: its hold's
+        acceptance plus `swap_wait_s` (or the shorter `waiting_for_the_card_at_most`); a call with no
+        hold on this alias is accepted now. A request with no time left gets the limit on waiting
+        for a stop, as a late request does there."""
+        now = _swap_clock()
+        hold = _CARD_HOLD.get()
+        accepted, wait_s = getattr(hold, "accepted_at", None), getattr(hold, "wait_s", None)
+        if (hold is None or not getattr(hold, "live", False) or getattr(hold, "alias", None) != self.alias
+                or not isinstance(accepted, (int, float)) or not isinstance(wait_s, (int, float))):
+            accepted, wait_s = now, swap_policy()[1]
+        limit = _CARD_WAIT_LIMIT.get()
+        if limit is not None and limit[0] < wait_s:
+            wait_s = limit[0]
+        give_up_at = accepted + wait_s
+        return now + _STOP_WITH_NO_WAIT_LEFT_S if give_up_at <= now else give_up_at
 
     def _kv_sent_before_this_launch(self, record: Optional[Dict[str, Any]]) -> Optional[str]:
         """The reason a record does not name what this launch's slot holds: its call went to an
@@ -4459,20 +4483,22 @@ class LlamaServerSupervisor:
             return None
         return "the last call was sent to an earlier launch of the engine"
 
-    async def _kv_incoming_restore(self, agent_id: Optional[str],
-                                   conversation_id: Optional[str]) -> Tuple[Optional[str], bool, str]:
-        """(file, worth restoring, words) of the incoming conversation's snapshot: its restore
-        against a cold read of what it brings back, the save's read rate and cold rate path."""
+    async def _kv_incoming_restore(
+        self, agent_id: Optional[str], conversation_id: Optional[str],
+    ) -> Tuple[Optional[str], bool, str, Optional[float]]:
+        """(file, worth restoring, words, restore seconds) of the incoming conversation's snapshot:
+        its restore against a cold read of what it brings back, the save's read rate and cold rate path."""
         folder = self._kv_folder()
         entry = None if folder is None else await asyncio.to_thread(
             _kv.lookup, folder, alias=self.alias, agent_id=agent_id, conversation_id=conversation_id,
             now=time.time())
         if entry is None:
-            return None, False, "incoming: no snapshot of this conversation in the index"
-        worth, words = await self._kv_restore_estimate(folder, entry)
-        return entry.get("file"), worth, f"incoming {words}"
+            return None, False, "incoming: no snapshot of this conversation in the index", None
+        worth, words, restore_s = await self._kv_restore_estimate(folder, entry)
+        return entry.get("file"), worth, f"incoming {words}", restore_s
 
-    async def _kv_restore_estimate(self, folder: Path, entry: Dict[str, Any]) -> Tuple[bool, str]:
+    async def _kv_restore_estimate(self, folder: Path,
+                                   entry: Dict[str, Any]) -> Tuple[bool, str, Optional[float]]:
         """Whether restoring `entry` beats a cold read of its `n_saved` tokens (the restore only,
         as `worth_saving` decides a save); unknown rates try it."""
         tokens, nbytes = entry.get("n_saved"), entry.get("bytes")
@@ -4480,7 +4506,7 @@ class LlamaServerSupervisor:
         write = (rates or {}).get("write_bytes_per_s")
         read = _kv.capped_read_rate(rates) or (write if isinstance(write, (int, float)) and write > 0 else None)
         if read is None or not nbytes:
-            return True, f"restore of {nbytes} bytes: read rate unknown, tried"
+            return True, f"restore of {nbytes} bytes: read rate unknown, tried", None
         restore_s = nbytes / read
         cold = None
         if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0:
@@ -4488,10 +4514,12 @@ class LlamaServerSupervisor:
             cold = got[0] if isinstance(got, tuple) else got
         words = f"restore ~{restore_s:.1f} s of {tokens} tokens ({_kv_read_rate_words(rates)})"
         if not cold or cold <= 0:
-            return True, f"{words}, threshold unknown"
+            return True, f"{words}, threshold unknown", restore_s
         cold_s = tokens / float(cold)
         words = f"{words} against a cold read ~{cold_s:.1f} s"
-        return (True, words) if restore_s < cold_s else (False, f"below the size threshold: {words}")
+        if restore_s < cold_s:
+            return True, words, restore_s
+        return False, f"below the size threshold: {words}", restore_s
 
     def _kv_restore_since(self, record: Optional[Dict[str, Any]]) -> Optional[str]:
         """Why slot 0 no longer holds `record`'s call (a switch restore was tried after it), or None."""
@@ -4525,14 +4553,15 @@ class LlamaServerSupervisor:
     async def _kv_restore_at_a_switch(self, record: Optional[Dict[str, Any]], agent_id: Optional[str],
                                       conversation_id: str, messages: List[Any], *,
                                       slot_holds_the_record: bool = True,
-                                      incoming: Optional[Tuple[Optional[str], bool, str]] = None,
-                                      no_save: Optional[str] = None) -> None:
+                                      incoming: Optional[Tuple[Optional[str], bool, str, Optional[float]]] = None,
+                                      no_save: Optional[str] = None, save_by: Optional[float] = None) -> None:
         """The incoming owner conversation's snapshot into slot 0, inside the hook's call slot and
         after the outgoing save ended, and only when slot 0 is empty, another slot is the occupied
         one, or the index holds what slot 0 holds. Kept on any refusal: the engine's 400 cannot
         tell a bad file from no room, and a failed restore has wiped the slot anyway (raw-HTTP
         check, b12110, 2026-11-17). `slot_holds_the_record` False: an earlier switch restore left
-        slot 0 holding a snapshot or nothing, both safe to replace."""
+        slot 0 holding a snapshot or nothing, both safe to replace. `save_by`: the incoming
+        request's deadline (`_swap_clock`), which bounds the restore's wait."""
         alias, folder = self.alias, self._kv_folder()
         if folder is None or self._kv_folder_off_this_launch() or _kv.off_reason(alias) == _kv.FOLDER_MISSING:
             self._kv_not_restored_at_a_switch(agent_id, conversation_id, "the KV snapshots folder is off this launch")
@@ -4540,12 +4569,13 @@ class LlamaServerSupervisor:
         entry = await asyncio.to_thread(_kv.lookup, folder, alias=alias, agent_id=agent_id,
                                         conversation_id=conversation_id, now=time.time())
         name = entry.get("file") if entry else None
+        restore_s = None
         if entry is None:
             worth, words = False, "incoming: no snapshot of this conversation in the index"
         elif incoming is not None and incoming[0] == name:
-            worth, words = incoming[1], incoming[2]
+            worth, words, restore_s = incoming[1], incoming[2], incoming[3]
         else:
-            worth, words = await self._kv_restore_estimate(folder, entry)
+            worth, words, restore_s = await self._kv_restore_estimate(folder, entry)
             words = f"incoming {words}"
         held = _KV_SWITCH_INCOMING.get()
         if not (held and held.get("said")):
@@ -4594,6 +4624,16 @@ class LlamaServerSupervisor:
             if why is not None:
                 self._kv_not_restored_at_a_switch(agent_id, conversation_id, f"{why}; {name} kept")
                 return
+        timeout = 2 * _kv.KV_SNAPSHOT_WRITE_CEILING_S
+        if save_by is not None:
+            left = save_by - _swap_clock() - _KV_SWITCH_DEADLINE_MARGIN_S
+            if left <= 0 or (restore_s is not None and restore_s > left):
+                self._kv_not_restored_at_a_switch(
+                    agent_id, conversation_id,
+                    f"restore ~{0.0 if restore_s is None else restore_s:.1f} s against {max(left, 0.0):.1f} s "
+                    f"left before the incoming request's deadline; {name} kept")
+                return
+            timeout = min(timeout, left)
         # Synchronous from here to the restore's request.
         if self._draining or self._in_flight > 1 or (_kv.engine_call_of(alias) or {}).get("sent") != (record or {}).get("sent"):
             self._kv_not_restored_at_a_switch(
@@ -4604,7 +4644,7 @@ class LlamaServerSupervisor:
         before = self._kv_restored_after_sent
         sent = record.get("sent") if record else 0
         self._kv_restored_after_sent = (sent, _KV_SLOT_UNKNOWN)  # a cancel leaves it unknown
-        answer = await self._restore_kv_snapshot(entry)
+        answer = await self._restore_kv_snapshot(entry, timeout=timeout)
         outcome = answer.get("outcome") if isinstance(answer, dict) else None
         if outcome == _KV_SKIPPED:
             self._kv_restored_after_sent = before  # never sent: slot 0 is as it was
