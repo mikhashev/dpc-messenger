@@ -4531,8 +4531,8 @@ class LlamaServerSupervisor:
                                        slot: int, tokens: Optional[int]) -> Optional[str]:
         """Why a restore into slot 0 may not go ahead while `slot` holds tokens: a conversation no
         snapshot holds, a peer's or gateway client's call, or tokens no call of this launch names.
-        Asked for any slot: whether a failed restore into slot 0 wipes another slot under
-        `--kv-unified` is not measured. None for a background call's prompt, which nothing
+        Asked for any slot: on b12110 a failed restore empties only its target slot under
+        `--kv-unified` (measured 2026-11-17, P5), kept as a guard for other builds. None for a background call's prompt, which nothing
         resumes, and for a slot the index already holds (count and prefix)."""
         kind = record.get("caller_kind") if record else None
         if record is None or self._kv_sent_before_this_launch(record):
