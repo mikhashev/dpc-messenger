@@ -182,6 +182,9 @@ async def test_a_background_call_between_a_and_b_saves_a_and_names_its_kind(tmp_
 
 @pytest.mark.asyncio
 async def test_a_peer_call_between_a_and_b_saves_nothing_under_an_owner_key_and_says_so(tmp_path, caplog):
+    """The slot queue, point 8: a peer's call no longer passes unseen; its switch runs the owner's
+    save. With no settings bound its deadline is its arrival, so the save has no time, nothing is
+    written, and the eviction line says so."""
     p, sup, engine, folder = await switching(tmp_path)
     await turn(p, "a1", "c1")
     with caplog.at_level(logging.INFO, logger=SUP_LOG):
@@ -189,9 +192,10 @@ async def test_a_peer_call_between_a_and_b_saves_nothing_under_an_owner_key_and_
             await p.generate_response("hello")
         await turn(p, "a2", "c2")
     assert "save" not in engine.events and entries(folder) == []
-    assert lines(caplog, "KV snapshot save not waited for at a switch from agent a1 conversation c1 to "
-                         "a peer's call (node dpc-node-peer): the incoming call is a peer's")
-    assert kv.status_of(ALIAS)["last_save"] is None  # nothing was saved or tried
+    assert not lines(caplog, "KV snapshot save not waited for")
+    assert lines(caplog, "KV snapshot of agent a1 conversation c1 evicted unsaved by peer dpc-node-peer: "
+                         "the save (no time left)")
+    assert kv.status_of(ALIAS)["last_save"]["reason"].startswith("no time left")
 
 
 @pytest.mark.asyncio
@@ -507,14 +511,17 @@ async def test_an_unsaved_outgoing_conversation_in_slot_0_is_not_replaced_by_a_r
 
 
 @pytest.mark.asyncio
-async def test_a_peer_at_a_switch_never_overwrites_the_last_save(tmp_path):
+async def test_a_peer_at_a_switch_runs_the_owners_save_and_writes_no_second_file(tmp_path):
+    """The slot queue, point 8: a peer's switch runs the save as an owner's does; a slot the index
+    already holds is skipped as already saved, not written again."""
     p, sup, engine, folder = await switching(tmp_path)
     await turn(p, "a1", "c1")
     await sup.kv_at_a_switch(caller_kind=None, agent_id=None, conversation_id=None, peer_id=None, messages=None)
     assert kv.status_of(ALIAS)["last_save"]["outcome"] == kv.SAVED
     await sup.kv_at_a_switch(caller_kind="peer", agent_id=None, conversation_id=None, peer_id="dpc-node-peer",
                              messages=None)
-    assert kv.status_of(ALIAS)["last_save"]["outcome"] == kv.SAVED
+    assert kv.status_of(ALIAS)["last_save"]["reason"].startswith("already saved")
+    assert len(entries(folder)) == 1 and engine.events.count("save") == 1
 
 
 @pytest.mark.asyncio

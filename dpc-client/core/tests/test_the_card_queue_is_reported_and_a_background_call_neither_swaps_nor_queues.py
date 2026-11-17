@@ -66,8 +66,8 @@ CONFIRMATION = "self_reflection_confirmation"
 # `"card_queue"` is also a word of another list, a turn's `wait_reason`: that line is not the status.
 WAIT_REASONS = re.compile(r"^TURN_WAIT_REASONS = .*$", re.M)
 STATUS_NAMES = (
-    r"\blocal_engine_status\b", r"\b_who_stands_on\b", r"\bcard_queue\(\)", r"\blast_background_skip\(\)",
-    r"""["']card_queue["']""", r"""["']last_background_skip["']""", r"""["']card_holders["']""",
+    r"\blocal_engine_status\b", r"\b_who_stands_on\b", r"\bcard_queue\(\)", r"\bslot_queue\(\)", r"\blast_background_skip\(\)",
+    r"""["']card_queue["']""", r"""["']slot_queue["']""", r"""["']last_background_skip["']""", r"""["']card_holders["']""",
 )
 
 

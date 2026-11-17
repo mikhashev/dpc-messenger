@@ -25,6 +25,7 @@ dictionary comes from the model's jinja file.
 
 import asyncio
 import contextvars
+import functools
 import logging
 import re
 import time
@@ -59,6 +60,20 @@ _ENGINE_CALL_SEQ: contextvars.ContextVar = contextvars.ContextVar("dpc_llama_eng
 # Reason words of a restore's deletions that `kv_snapshots` has no constant for.
 _PREFIX_MISMATCH = "prefix_mismatch"
 _NO_ROOM_IN_AN_EMPTY_ENGINE = "no_room_in_an_empty_engine"
+# How often a call that got the slot while its child went asks for the child again (the slot queue).
+_SLOT_ASKS_AT_MOST = 5
+
+
+def _in_one_slot_call(method):
+    """An entry point is one call for the slot queue (ADR-044, amendment 2026-11-17, point 4): its
+    one-call grant is minted before the first await and given back however the call ends."""
+
+    @functools.wraps(method)
+    async def entry_point(self, *args, **kwargs):
+        with _llama_server_supervisor_module._one_slot_call():
+            return await method(self, *args, **kwargs)
+
+    return entry_point
 
 # The template's own dictionary, measured 2026-08-19 on pin b10472 + qwen3.8:
 # thinking scales 6 492 / 14 989 / 33 966 chars across these three words (5.2×),
@@ -413,6 +428,7 @@ class LlamaServerProvider(DeepSeekProvider):
         snapshots, points 2 and 5). `messages` are the call's wire messages;
         None reads the ones `_ensure_for` set."""
         props = await self._ensure_running()
+        await self._wait_for_the_slot()
         if self._openai is None or self._port != self.supervisor.port:
             self._port = self.supervisor.port
             # The server ignores the key but the SDK insists on one.
@@ -424,6 +440,16 @@ class LlamaServerProvider(DeepSeekProvider):
             messages = _WIRE_MESSAGES.get()
         await self._note_engine_call(messages)
         return client
+
+    async def _wait_for_the_slot(self) -> None:
+        """The slot queue (ADR-044, amendment 2026-11-17, point 5): the card first, the slot second,
+        then the record and the switch. A call that got the slot while its child went asks
+        `ensure_running` again and keeps the slot (point 4), a few times at most."""
+        for _ in range(_SLOT_ASKS_AT_MOST):
+            sup = self.supervisor
+            if not isinstance(sup, LlamaServerSupervisor) or await sup._take_the_slot():
+                return
+            await self._ensure_running()
 
     # --- KV snapshots: the last-call record and the restore ----------------------
 
@@ -1302,6 +1328,7 @@ class LlamaServerProvider(DeepSeekProvider):
 
     # --- entry points ------------------------------------------------------------
 
+    @_in_one_slot_call
     async def generate_response(self, prompt: str, **kwargs) -> str:
         """Non-streaming text generation; the accounting lands on
         `get_last_usage()` like every other provider."""
@@ -1362,6 +1389,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 f"llamacpp_server provider '{self.alias}' failed: {type(e).__name__}: {e}"
             ) from e
 
+    @_in_one_slot_call
     async def generate_response_stream(
         self,
         prompt: str,
@@ -1500,6 +1528,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 f"{type(e).__name__}: {e}"
             ) from e
 
+    @_in_one_slot_call
     async def generate_with_tools(
         self,
         messages: List[Dict[str, Any]],
@@ -1728,6 +1757,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 f"{type(e).__name__}: {e}"
             ) from e
 
+    @_in_one_slot_call
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
         """Vision on the DPC-owned child: images ride as `image_url` content
         blocks on the same OpenAI-compatible call, the projector comes from

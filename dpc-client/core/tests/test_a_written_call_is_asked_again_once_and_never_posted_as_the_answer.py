@@ -36,6 +36,7 @@ from dpc_client_core.managers.agent_manager import DpcAgentManager
 from dpc_client_core.managers.llama_server_supervisor import (
     CardQueueRefusal,
     TakenOutOfTheCardQueue,
+    TakenOutOfTheSlotQueue,
     card_held_for,
     current_card_hold,
 )
@@ -1153,7 +1154,10 @@ class _RaisesOnTheRetry(_Script):
     (CallKilled(), "killed", "⚠️ Stopped by user: killed mid-call"),
     (PeerRefused("not today", code=REFUSAL_NOT_ALLOWED), "refused", None),
     (TakenOutOfTheCardQueue("out", "a", "strata"), "stopped", "⚠️ Stopped by user: taken out"),
-], ids=["killed", "refused", "taken-out"])
+    (TakenOutOfTheSlotQueue("out", "a", "strata"), "stopped",
+     "⚠️ Stopped by user in round 2 while waiting for the slot of 'a': "
+     "another conversation was using the model, so no model call was made."),
+], ids=["killed", "refused", "taken-out", "taken-out-of-the-slot-queue"])
 def test_the_words_stand_above_the_notice_when_the_retry_ends_without_a_failure(
         tmp_path, monkeypatch, error, turn_end, opening):
     text, _, trace = _loop(tmp_path, monkeypatch, _RaisesOnTheRetry(error))

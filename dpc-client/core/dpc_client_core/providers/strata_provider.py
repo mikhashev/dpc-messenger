@@ -589,6 +589,8 @@ async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
     `card_holders` is every holder, `card_queue` the line and `last_background_skip` each
     background call's last skip (the card queue, rule 10). These last two name the owner's
     agents and chats or aliases; this status goes to the owner's own UI and to no peer.
+    `slot_queue` maps each alias with a held slot to who holds it and who waits, by kind and
+    since (ADR-044, amendment 2026-11-17, the slot queue, point 9).
     `kv_snapshots` maps each active alias of either engine that has a KV snapshots folder
     (configured or registered at launch) to `kv_snapshots.status_of`: folder, files, bytes,
     cap_bytes, oldest_expiry, last_save, last_restore and off_reason (ADR-044, KV snapshots,
@@ -611,6 +613,7 @@ async def local_engine_status(metrics_timeout_s: float = 3.0) -> Dict[str, Any]:
     return {"card_holder": card_holder(), "strata": strata, "free_commit": read_free_commit_or_physical(),
             "engine_backends": backends, "pins": pins, "last_swap": _base.last_swap(),
             "card_holders": _base.card_holders(), "card_queue": _base.card_queue(),
+            "slot_queue": _base.slot_queue(),
             "last_background_skip": _base.last_background_skip(), "kv_snapshots": snapshots}
 
 

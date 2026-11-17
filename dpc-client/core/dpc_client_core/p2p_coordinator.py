@@ -1118,10 +1118,17 @@ class P2PCoordinator:
             queue = (
                 contextlib.nullcontext() if owner == "vendor" else self._peer_inference_lock
             )
-            from .managers.llama_server_supervisor import note_caller_call, runs_on_a_local_engine
+            from .managers.llama_server_supervisor import in_the_slot_queue, note_caller_call, runs_on_a_local_engine
             from .managers.strata_supervisor import serving_a_peer
 
-            async with queue:
+            # The peer's place in the slot queue comes before the semaphore, which the gateway shares:
+            # whoever sits on it holds its slot and waits for nothing behind it (ADR-044, amendment
+            # 2026-11-17, the slot queue, point 8). Its deadline counts from here.
+            slot_place = (
+                contextlib.nullcontext() if owner == "vendor"
+                else in_the_slot_queue(self._provider_for_alias(serving_alias), peer_id=peer_id)
+            )
+            async with slot_place, queue:
                 # The engine's own state, asked after the wait and right before
                 # the call, so what was true when the peer queued is not what
                 # decides (ADR-044 point 9). Refused before any row.

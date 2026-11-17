@@ -45,6 +45,7 @@ from .llm_adapter import (
 )
 from ..managers.llama_server_supervisor import (
     TakenOutOfTheCardQueue,
+    TakenOutOfTheSlotQueue,
     card_hold_follows,
     carrying_card_hold,
     current_card_hold,
@@ -2846,10 +2847,22 @@ async def run_llm_loop(
                     # A first Stop on a turn in the queue for the card (ADR-044, the card queue,
                     # rule 12). No model call was made and the card is not to be had, so no
                     # closing call is asked for either.
-                    log.info("Agent stopped by user in the queue for the card, round %d", round_idx)
                     llm_trace["stopped_by_user"] = True
                     llm_trace["turn_end"] = _user_stop_end(kill_event)
                     llm_trace["accumulated_tool_calls"] = list(_accumulated_tool_calls)
+                    if isinstance(engine_refusal, TakenOutOfTheSlotQueue):
+                        # The slot queue (ADR-044, the slot queue, point 4): the turn waited for
+                        # another conversation's slot on this alias, not for the card. This text
+                        # is the turn's answer, so the agent reads it back in its own history.
+                        log.info("Agent stopped by user in the slot queue, round %d", round_idx)
+                        _where = (f" of '{engine_refusal.holder_alias}'"
+                                  if engine_refusal.holder_alias else "")
+                        return _with_the_words((
+                            f"⚠️ Stopped by user in round {round_idx} while waiting for the slot{_where}: "
+                            f"another conversation was using the model, so no model call was made.",
+                            accumulated_usage, llm_trace,
+                        ))
+                    log.info("Agent stopped by user in the queue for the card, round %d", round_idx)
                     return _with_the_words((
                         f"⚠️ Stopped by user: taken out of the queue for the card in round {round_idx} "
                         f"(no model call was made).",

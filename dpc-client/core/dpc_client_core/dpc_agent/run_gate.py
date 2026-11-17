@@ -21,9 +21,11 @@ What the screen reads is the agent's snapshot, `agent_turn_snapshot`:
   `conversation_id`, `conversation_title`, `waiting_since`, `wait_reason` and
   `held_by`.
 
-`wait_reason` is a closed list of five. On a turn only `model_call` (waiting for
-the model), `approval` (waiting for a person's approval of a tool) or `card_queue`
-(the model call waiting in the queue for the card, ADR-044), or None.
+`wait_reason` is a closed list of six. On a turn only `model_call` (waiting for
+the model), `approval` (waiting for a person's approval of a tool), `card_queue`
+(the model call waiting in the queue for the card, ADR-044) or `slot_queue` (the
+model call waiting for its alias's slot behind another conversation's turn,
+ADR-044, amendment 2026-11-17), or None.
 On a waiting item only `other_chat` (the agent is in another chat's turn) or
 `room_busy` (the group's room lock is held by another agent's turn). `held_by`
 names the turn that holds the lock, one level and no further: its
@@ -56,7 +58,7 @@ from .utils import utc_now_iso
 log = logging.getLogger(__name__)
 
 #: The closed list. Which place carries which is in the module docstring.
-TURN_WAIT_REASONS = ("model_call", "approval", "card_queue")
+TURN_WAIT_REASONS = ("model_call", "approval", "card_queue", "slot_queue")
 WAITING_WAIT_REASONS = ("other_chat", "room_busy")
 
 # The fields of `turn` as the snapshot gives them; anything else on the record

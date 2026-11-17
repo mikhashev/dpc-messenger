@@ -132,6 +132,7 @@ from .managers.llama_server_supervisor import (
     CardQueueRefusal,
     card_held_for,
     card_queue_refusal_in,
+    in_the_slot_queue,
     note_caller_call,
     runs_on_a_local_engine,
     swap_policy,
@@ -1112,6 +1113,10 @@ class Gateway:
         async with card_held_for(local_alias, "accepted_request", caller=caller):
             if local_alias is not None and swap_policy()[0]:
                 await self._wait_for_the_card(alias, providers[alias])
+            if local_alias is not None:
+                # Its place in the slot queue after the card and before the semaphore (ADR-044,
+                # amendment 2026-11-17, the slot queue, point 8); held until its hold ends.
+                await self._wait_for_the_slot(alias, providers[alias])
             timeout = float(self._core.settings.get_remote_inference_timeout())
             try:
                 await asyncio.wait_for(self._inference_lock.acquire(), timeout=timeout)
@@ -1144,6 +1149,15 @@ class Gateway:
         except Exception as e:
             logger.warning("Gateway start of '%s' failed: %s", alias, e)
             raise GatewayError(502, f"provider '{alias}' failed: {e}", "upstream_error")
+
+    async def _wait_for_the_slot(self, alias: str, provider: Any) -> None:
+        """This call's place in the slot queue, by its hold: it waits behind another conversation's
+        turn within its card deadline, and the slot's refusal is the card queue's 503."""
+        try:
+            async with in_the_slot_queue(provider):
+                pass
+        except CardQueueRefusal as e:
+            raise self._provider_unavailable(alias, e)
 
     @staticmethod
     def _provider_unavailable(alias: str, refusal: CardQueueRefusal) -> GatewayError:

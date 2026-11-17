@@ -366,10 +366,21 @@ class TakenOutOfTheCardQueue(CardQueueRefusal):
     failed one."""
 
 
+class TakenOutOfTheSlotQueue(TakenOutOfTheCardQueue):
+    """A person's Stop took this turn out of the slot queue (ADR-044, the slot queue, point 4):
+    it waited for another conversation's slot, not for the card; `holder_alias` is the alias."""
+
+
 class BackgroundCallSkipped(CardQueueRefusal):
     """A background call found its alias not on the card, or a place waiting (rule 10). Nothing
     was started, marked or queued, and it is in `last_background_skip`. A `CardQueueRefusal` for
     its "never retried": it never stood in the queue, and nothing tries it again."""
+
+
+class SlotQueueRefusal(CardQueueRefusal):
+    """The slot queue let this call go without the slot (ADR-044, amendment 2026-11-17, the slot queue,
+    point 9): a gateway call's card deadline passed while it waited for the slot. `provider_unavailable`
+    at the door, as the card queue's refusal is; never retried."""
 
 
 class EngineDrainingError(LlamaServerError):
@@ -758,12 +769,14 @@ def _now_on_the_owner_loop(fn: Callable[..., None], *args: Any) -> None:
         fn(*args)
 
 
-def _off_the_alias(hold: _CardHold, alias: Optional[str]) -> None:
+def _off_the_alias(hold: _CardHold, alias: Optional[str], why: Optional[str] = None) -> None:
     holds = _CARD_HOLDS.get(alias, [])
     if hold in holds:
         holds.remove(hold)
         if not holds:
             del _CARD_HOLDS[alias]
+    # The slot queue's hold leaves with it (ADR-044, amendment 2026-11-17, the slot queue, point 4).
+    _slot_hold_left(hold, alias, why)
 
 
 def _hold_stands_down_from_the_borrow(hold: _CardHold) -> None:
@@ -802,13 +815,18 @@ def _hold_moves_to(hold: _CardHold, alias: Optional[str]) -> None:
     if not hold.live or hold.alias == alias:
         return
     _hold_borrow_ends(hold)
-    _off_the_alias(hold, hold.alias)
+    _off_the_alias(hold, hold.alias, f"moved to {alias or 'no local alias'}")
     hold.alias = alias
     if alias is not None:
         _CARD_HOLDS.setdefault(alias, []).append(hold)
 
 
-def _hold_ends(hold: _CardHold) -> None:
+def _hold_ends(hold: _CardHold, how: str = "ended") -> None:
+    """`how`: "ended", "failed" or "was stopped", what the slot queue's line says when the slot goes back."""
+    if hold.live:
+        _slot_hold_left(hold, hold.alias, how)
+        if hold.borrow is not None:
+            _slot_hold_left(hold, hold.borrow.alias, how)
     _hold_moves_to(hold, None)
     hold.live = False
 
@@ -831,11 +849,18 @@ async def card_held_for(alias: Optional[str], kind: str, *, agent_id: Optional[s
     hold = _CardHold(kind, agent_id, conversation_id, caller)
     _now_on_the_owner_loop(_hold_enters, hold, alias, caller)
     token = _CARD_HOLD.set(hold)
+    how = "ended"
     try:
         yield hold
+    except asyncio.CancelledError:
+        how = "was stopped"
+        raise
+    except BaseException:
+        how = "failed"
+        raise
     finally:
         # Letting go first: `reset` raises when a dying task is closed from another context.
-        _now_on_the_owner_loop(_hold_ends, hold)
+        _now_on_the_owner_loop(_hold_ends, hold, how)
         _CARD_HOLD.reset(token)
 
 
@@ -1203,6 +1228,7 @@ def leave_card_queue(conversation_id: str) -> None:
     Telegram `/stop` that reaches it runs on the loop its bridge was started on, so the line is
     changed on the owner loop, which is also why this answers nothing."""
     _now_on_the_owner_loop(_chat_leaves_the_line, conversation_id)
+    _now_on_the_owner_loop(_chat_leaves_the_slot_queue, conversation_id)
 
 
 def take_card_queue_place(alias: str) -> None:
@@ -1219,6 +1245,341 @@ def take_card_queue_place(alias: str) -> None:
                 alias, "",
             )
             request.leaves()
+
+
+# --- the slot queue (ADR-044, amendment 2026-11-17) ----------------------------------------------
+#
+# DPC's wait in front of one local alias's slot: who sends calls into the engine next (point 1). Not
+# the card queue, which decides which alias holds the card, and not the run gate. A call first waits
+# for its model to be on the card, then for the slot (point 5); llama-server only until Strata gets
+# its save at a switch (point 10). Keyed by alias as `_CARD_QUEUE` is, so a settings save that
+# replaces a supervisor keeps it; in memory, written only on the owner loop. A waiter takes the slot
+# itself when it asks at the card queue's rate, so a grant never lands on a waiter that has gone.
+
+# A peer goes in between two calls of a turn at its deadline less this (point 8): the write ceiling
+# plus the switch margin, so the save before its call has room.
+_PEER_SAVE_ALLOWANCE_S = _kv.KV_SNAPSHOT_WRITE_CEILING_S + _KV_SWITCH_DEADLINE_MARGIN_S
+_SLOT_ARRIVAL = itertools.count(1)
+
+
+class _SlotPlace:
+    """One holder or waiter of an alias's slot. `hold` is the live hold it stands for (an agent's
+    turn, the owner's chat, a gateway call), given back when the hold leaves the alias; None is a
+    one-call grant (a peer's call, a call with no hold), given back when its call ends (point 4).
+    `kind` is the last-call record's caller kind: "agent", "owner", "gateway", "peer", or None for a
+    call with no hold. `deadline` is a peer's, on `_swap_clock` (point 8)."""
+
+    __slots__ = ("kind", "hold", "peer_id", "alias", "arrival", "joined", "joined_at", "since", "since_at",
+                 "calls", "deadline", "out", "ended", "_turn_mark")
+
+    def __init__(self, kind: Optional[str], hold: Optional[_CardHold] = None, peer_id: Optional[str] = None,
+                 deadline: Optional[float] = None):
+        self.kind = kind
+        self.hold = hold
+        self.peer_id = peer_id
+        self.alias: Optional[str] = None
+        self.arrival = 0
+        self.joined: Optional[float] = None
+        self.joined_at: Optional[float] = None
+        self.since: Optional[float] = None
+        self.since_at: Optional[float] = None
+        self.calls = 0
+        self.deadline = deadline
+        self.out: Optional[BaseException] = None
+        self.ended = False
+        self._turn_mark: Any = None
+
+
+class _SlotLine:
+    """One alias's slot: its holder, the one call going in between two of a turn's calls (the
+    owner's chat or a due peer, point 6), who waits, and the calls that passed and have not ended."""
+
+    __slots__ = ("holder", "between", "waiting", "unended", "passing_from")
+
+    def __init__(self):
+        self.holder: Optional[_SlotPlace] = None
+        self.between: Optional[_SlotPlace] = None
+        self.waiting: List[_SlotPlace] = []
+        self.unended = 0
+        self.passing_from: Optional[Tuple[str, float, int]] = None
+
+
+_SLOT_QUEUE: Dict[str, _SlotLine] = {}
+
+
+class _SlotCall:
+    """One entry point's call: the line it passed into, as which place, when it passed, and whether it
+    waited there (behind another conversation, or for a call going in between)."""
+
+    __slots__ = ("line", "alias", "place", "passed_at", "waited")
+
+    def __init__(self):
+        self.line: Optional[_SlotLine] = None
+        self.alias: Optional[str] = None
+        self.place: Optional[_SlotPlace] = None
+        self.passed_at: Optional[float] = None
+        self.waited = False
+
+
+# The one-call grant of the call being made, minted by the provider's entry point or at the door for
+# a peer, and the entry point's call (point 4). ContextVars for the reason `_PEER_CALL` is one: every
+# attempt of the call re-runs `_ensure` and finds its own grant, so a retry never queues behind it.
+_SLOT_GRANT: contextvars.ContextVar = contextvars.ContextVar("dpc_slot_grant", default=None)
+_SLOT_CALL: contextvars.ContextVar = contextvars.ContextVar("dpc_slot_call", default=None)
+
+
+def _slot_kind_of(hold: Any) -> str:
+    if getattr(hold, "caller", None) is not None:
+        return "gateway"
+    return "agent" if getattr(hold, "agent_id", None) else _kv.OWNER_CHAT_KIND
+
+
+def _slot_who(place: Optional[_SlotPlace]) -> str:
+    """Who, in the slot queue's lines (point 11)."""
+    if place is None:
+        return "nobody"
+    hold = place.hold
+    if place.kind == "agent":
+        return _kv_key_words(hold.agent_id, hold.conversation_id)
+    if place.kind == _kv.OWNER_CHAT_KIND:
+        return f"the owner's chat {getattr(hold, 'conversation_id', None) or '-'}"
+    if place.kind == "gateway":
+        return f"gateway client {getattr(hold, 'caller', None) or '-'}"
+    if place.kind == "peer":
+        return f"peer {place.peer_id}"
+    return "a call with no hold"
+
+
+def _hold_stands_for_the_slot(hold: Any, alias: str) -> bool:
+    """A live hold standing on `alias`, its own or borrowed, as `_CARD_HOLDS` has it. A stand-in
+    that never entered stands on nothing, and its calls are calls with no hold."""
+    if hold is None or getattr(hold, "live", False) is not True:
+        return False
+    borrow = getattr(hold, "borrow", None)
+    on = getattr(hold, "alias", None) == alias or (borrow is not None and borrow.alias == alias)
+    return on and any(stand is hold for stand in _CARD_HOLDS.get(alias, ()))
+
+
+def _slot_line(alias: str) -> _SlotLine:
+    return _SLOT_QUEUE.setdefault(alias, _SlotLine())
+
+
+def _slot_is_free(line: _SlotLine) -> bool:
+    return line.holder is None and line.between is None and not line.waiting
+
+
+def _slot_line_drop_if_idle(alias: Optional[str]) -> None:
+    line = _SLOT_QUEUE.get(alias) if alias is not None else None
+    if line is not None and _slot_is_free(line) and line.unended <= 0:
+        del _SLOT_QUEUE[alias]
+
+
+def _slot_order(line: _SlotLine) -> List[_SlotPlace]:
+    """Who goes next, in order (point 6): the owner's own work by arrival, then peers by arrival."""
+    return ([place for place in line.waiting if place.kind != "peer"]
+            + [place for place in line.waiting if place.kind == "peer"])
+
+
+def _slot_goes_between(line: _SlotLine, place: _SlotPlace) -> bool:
+    """While a turn holds the slot, the owner's chat (in arrival order, point 6), and then a peer at
+    its deadline less the save's allowance (point 8), goes in between two of its calls."""
+    held = line.holder
+    if held is None or held.kind != "agent" or line.between is not None:
+        return False
+    chats = [waiter for waiter in line.waiting if waiter.kind == _kv.OWNER_CHAT_KIND]
+    if chats:
+        return chats[0] is place
+    now = _swap_clock()
+    due = [waiter for waiter in line.waiting if waiter.kind == "peer" and waiter.deadline is not None
+           and now >= waiter.deadline - _PEER_SAVE_ALLOWANCE_S]
+    return bool(due) and due[0] is place
+
+
+def _waits_for_the_slot_of(hold: Any, alias: str, holder_hold: Any) -> bool:
+    """Point 5: `hold` waits in `alias`'s slot queue behind the turn of `holder_hold`, which holds that
+    slot. It does not count against that turn's card-borrow: each would wait for the other."""
+    if holder_hold is None:
+        return False
+    line = _SLOT_QUEUE.get(alias)
+    return (line is not None and line.holder is not None and line.holder.hold is holder_hold
+            and any(waiter.hold is hold for waiter in line.waiting))
+
+
+def _slot_takes(line: _SlotLine, place: _SlotPlace, between: bool = False) -> None:
+    place.since, place.since_at = _swap_clock(), time.time()
+    if between:
+        line.between = place
+    else:
+        place.calls = 0
+        line.holder = place
+
+
+def _slot_stops_marking(place: _SlotPlace) -> None:
+    mark, place._turn_mark = place._turn_mark, None
+    if mark is not None:
+        mark.__exit__(None, None, None)
+
+
+def _slot_given_back(alias: str, line: _SlotLine, place: _SlotPlace, why: str) -> None:
+    if line.holder is not place:
+        return
+    line.holder = None
+    held = _swap_clock() - (place.since if place.since is not None else _swap_clock())
+    if line.waiting:
+        line.passing_from = (_slot_who(place), held, place.calls)  # said by the hand-over's line
+    else:
+        line.passing_from = None
+        logger.info("slot queue[%s]: the slot is given back by %s (held %.0f s, %d calls): %s",
+                    alias, _slot_who(place), held, place.calls, why)
+
+
+def _slot_hold_left(hold: Any, alias: Optional[str], why: Optional[str]) -> None:
+    """`hold` left `alias` (point 4): the slot it held goes back, and its turn in between ends."""
+    line = _SLOT_QUEUE.get(alias) if alias is not None else None
+    if line is None:
+        return
+    if line.between is not None and line.between.hold is hold:
+        line.between = None
+    held = line.holder
+    if held is not None and held.hold is hold:
+        why = why or f"moved to {getattr(hold, 'alias', None) or 'no local alias'}"
+        if held.kind != "agent":
+            words = "the call ended"
+        elif why.startswith("moved to"):
+            words = why
+        else:
+            words = f"the turn {why}"
+        _slot_given_back(alias, line, held, words)
+    _slot_line_drop_if_idle(alias)
+
+
+def _slot_grant_ends(place: _SlotPlace) -> None:
+    """A one-call grant goes back, however its call ended (point 4)."""
+    place.ended = True
+    alias = place.alias
+    line = _SLOT_QUEUE.get(alias) if alias is not None else None
+    if line is None:
+        return
+    if any(waiter is place for waiter in line.waiting):
+        line.waiting.remove(place)
+    if line.between is place:
+        line.between = None
+    _slot_given_back(alias, line, place, "the call ended")
+    _slot_line_drop_if_idle(alias)
+
+
+def _slot_call_ends(call: _SlotCall, minted: Optional[_SlotPlace]) -> None:
+    if call.line is not None:
+        call.line.unended = max(0, call.line.unended - 1)
+        if _SLOT_QUEUE.get(call.alias) is call.line:
+            _slot_line_drop_if_idle(call.alias)
+    if minted is not None:
+        _slot_grant_ends(minted)
+
+
+@contextlib.contextmanager
+def _one_slot_call():
+    """Around a provider's entry point: this call's grant, minted before its first await unless a door
+    minted one, given back on the owner loop however the call ends: an answer, an error, a
+    cancellation, the retries spent (point 4). The slot stays held through the backoff sleeps."""
+    minted = grant_token = None
+    if _SLOT_GRANT.get() is None:
+        minted = _SlotPlace(None)  # its kind and alias are read at the slot (`_take_the_slot`)
+        grant_token = _SLOT_GRANT.set(minted)
+    call = _SlotCall()
+    call_token = _SLOT_CALL.set(call)
+    try:
+        yield
+    finally:
+        _now_on_the_owner_loop(_slot_call_ends, call, minted)
+        with contextlib.suppress(ValueError):  # a dying task closed from another context
+            _SLOT_CALL.reset(call_token)
+        if grant_token is not None:
+            with contextlib.suppress(ValueError):
+                _SLOT_GRANT.reset(grant_token)
+
+
+def _a_peers_slot_wait_s() -> float:
+    """The smaller of `swap_wait_s` and `[connection] remote_inference_timeout` (point 8): DPTP carries
+    no deadline, and the guest gives up at its own timeout, which the host cannot read."""
+    wait = float(swap_policy()[1])
+    settings = _LOCAL_ENGINE_SETTINGS
+    try:
+        timeout = float(settings.get_remote_inference_timeout()) if settings is not None else None
+    except Exception:
+        timeout = None
+    return wait if timeout is None else min(wait, timeout)
+
+
+def _a_gateway_calls_slot_wait(hold: Any) -> Tuple[Optional[float], str]:
+    """(seconds from acceptance, what bounds it) of a gateway call's wait for the slot: its card
+    deadline (point 9). With the idle swap off there is no card queue and so no card deadline, and
+    the bound is the one the call already had at the semaphore, `remote_inference_timeout`; none
+    when no settings are bound."""
+    if swap_policy()[0]:
+        return float(hold.wait_s), "Settings: Wait for a busy holder"
+    settings = _LOCAL_ENGINE_SETTINGS
+    try:
+        timeout = float(settings.get_remote_inference_timeout()) if settings is not None else None
+    except Exception:
+        timeout = None
+    return timeout, "[connection] remote_inference_timeout"
+
+
+@contextlib.asynccontextmanager
+async def in_the_slot_queue(provider: Any, peer_id: Optional[str] = None):
+    """A peer's or a gateway call's place in the slot queue, taken at its door before the peer door's
+    semaphore (point 8): whoever sits on the semaphore then holds its slot and waits for nothing
+    behind it. A peer's place is a one-call grant whose deadline counts from here; a gateway call
+    stands by its hold. Nothing for an alias that is not llama-server's."""
+    sup = getattr(provider, "supervisor", None)
+    if not isinstance(sup, LlamaServerSupervisor) or sup.ENGINE != LlamaServerSupervisor.ENGINE:
+        yield
+        return
+    place = token = None
+    if peer_id is not None:
+        place = _SlotPlace("peer", peer_id=peer_id, deadline=_swap_clock() + _a_peers_slot_wait_s())
+        token = _SLOT_GRANT.set(place)
+    try:
+        await sup._take_the_slot()
+        yield
+    finally:
+        if place is not None:
+            _now_on_the_owner_loop(_slot_grant_ends, place)
+            with contextlib.suppress(ValueError):
+                _SLOT_GRANT.reset(token)
+
+
+def slot_queue() -> Dict[str, Dict[str, Any]]:
+    """Each alias's slot for `local_engine_status` (point 9): who holds it and who waits, in order
+    (the position is the order; there is no position field), each with its kind and `since`,
+    wall-clock seconds as `card_queue`'s `queued_at`. For the owner only, as `card_queue` is."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for alias, line in _SLOT_QUEUE.items():
+        if line.holder is None and not line.waiting:
+            continue
+        out[alias] = {
+            "holder": {"kind": line.holder.kind, "since": line.holder.since_at} if line.holder else None,
+            "waiting": [{"kind": place.kind, "since": place.joined_at} for place in _slot_order(line)],
+        }
+    return out
+
+
+def _chat_leaves_the_slot_queue(conversation_id: str) -> None:
+    """A person's Stop takes this chat's waiting turn out of the slot queue too (point 4)."""
+    taken = 0
+    for alias, line in list(_SLOT_QUEUE.items()):
+        for place in list(line.waiting):
+            hold = place.hold
+            if hold is None or not conversation_id or getattr(hold, "conversation_id", None) != conversation_id:
+                continue
+            hold.taken_out = True
+            place.out = TakenOutOfTheSlotQueue(
+                f"'{alias}': a person's Stop took this request out of the slot queue", alias, "")
+            line.waiting.remove(place)
+            taken += 1
+    if taken:
+        logger.info("Stop took %d request(s) out of the slot queue in %s", taken, conversation_id)
 
 
 def _first_cause_of(error: Optional[BaseException], kinds: Any) -> Optional[Any]:
@@ -2236,14 +2597,14 @@ class LlamaServerSupervisor:
             self.alias, self.ENGINE,
         )
 
-    def _background_call_skipped(self, what: str) -> "BackgroundCallSkipped":
+    def _background_call_skipped(self, what: str, reason: Optional[str] = None) -> "BackgroundCallSkipped":
         """Rule 10's named skip: into the record with its reader and the log, and the refusal
-        that ends the call. Nothing here starts, marks or queues."""
-        if _CARD_QUEUE:
+        that ends the call. Nothing here starts, marks or queues. `reason`: the slot queue's."""
+        if reason is None and _CARD_QUEUE:
             reason = f"a request is waiting in the queue for the card for '{_CARD_QUEUE[0].alias}'"
-        elif self._draining:
+        elif reason is None and self._draining:
             reason = f"'{self.alias}' is stopping"
-        else:
+        elif reason is None:
             reason = f"'{self.alias}' is not on the card"
         what_follows = _BACKGROUND_CALLS[what]
         logger.info("%s[%s]: background call %s skipped: %s. %s",
@@ -2310,6 +2671,7 @@ class LlamaServerSupervisor:
         the request giving it up, and any other stand on it still counts (rule 9)."""
         return (state == "starting" or self._in_flight > 0
                 or any(hold is not but_for and _stands_before_the_line(hold)
+                       and not _waits_for_the_slot_of(hold, self.alias, but_for)
                        for hold in _CARD_HOLDS.get(self.alias, ()))
                 or bool(_callers_in_their_window(self.alias)))
 
@@ -4016,6 +4378,7 @@ class LlamaServerSupervisor:
         if folder is None:
             return None
         alias = self.alias
+        self._kv_save_tokens = self._kv_save_estimate_s = None  # read by `_kv_say_evicted_unsaved`
         if self._kv_folder_off_this_launch():
             logger.info("%s[%s]: live conversation not saved%s: off this launch: %s",
                         self.ENGINE, alias, _kv_at_words(), _kv.off_reason(alias) or _kv.FOLDER_MISSING)
@@ -4023,7 +4386,7 @@ class LlamaServerSupervisor:
         if _procreg.get_registry().stopping:
             return self._kv_skip("the backend is stopping")
         if self._in_flight > own_slots:
-            return self._kv_skip(f"{self._in_flight - own_slots} call(s) still in flight")
+            return self._kv_skip(f"{self._in_flight - own_slots} call(s) still in flight{self._kv_in_the_engine()}")
         proc = self._proc
         if proc is None or proc.returncode is not None or not self.port:
             return None
@@ -4048,6 +4411,7 @@ class LlamaServerSupervisor:
         alias = self.alias
         at_a_switch = _KV_AT_A_SWITCH.get() is not None
         slot, tokens, why_not = await self._kv_slot_to_save()
+        self._kv_save_tokens = tokens
         if slot is None:
             if why_not is None and at_a_switch:
                 why_not = "no slot holds tokens"  # one line per switch
@@ -4092,6 +4456,7 @@ class LlamaServerSupervisor:
             skip = f"disk short: about {estimate} bytes needed"
         left = deadline - time.monotonic()
         est_s = _kv.estimate_save_s(estimate, rates)
+        self._kv_save_estimate_s = est_s
         if skip is None and est_s is not None and est_s > left:
             skip = f"estimate over the bound: ~{est_s:.1f} s against {left:.1f} s left"
         # How thin the threshold is: deep conversations may rest on a row or two. At a switch the
@@ -4108,7 +4473,7 @@ class LlamaServerSupervisor:
         if skip is not None:
             return self._kv_skip(skip)
         if self._in_flight > own_slots:
-            return self._kv_skip("another call reached the engine during the save's checks")
+            return self._kv_skip(f"another call reached the engine during the save's checks{self._kv_in_the_engine()}")
         if (_kv.engine_call_of(alias) or {}).get("sent") != record.get("sent"):
             return self._kv_skip("another call was sent during the save's checks")
         return await self._kv_write(folder, slot, tokens, record, max(left, 0.001))
@@ -4362,19 +4727,8 @@ class LlamaServerSupervisor:
         but a cancellation."""
         if self.ENGINE != LlamaServerSupervisor.ENGINE or self._kv_folder() is None:
             return
-        if caller_kind in ("peer", "gateway"):
-            record = _kv.engine_call_of(self.alias)
-            if self._kv_saves_at_a_switch(record, agent_id, conversation_id):
-                # Said, never noted as a save outcome: a switch save of that conversation may be
-                # running or have just landed.
-                token = _KV_AT_A_SWITCH.set(_kv_switch_words(record, caller_kind, agent_id, conversation_id, peer_id))
-                try:
-                    logger.info("%s[%s]: KV snapshot save not waited for%s: the incoming call is %s",
-                                self.ENGINE, self.alias, _kv_at_words(),
-                                "a peer's" if caller_kind == "peer" else "a gateway client's")
-                finally:
-                    _KV_AT_A_SWITCH.reset(token)
-            return
+        # A peer's or a gateway client's call saves the outgoing owner conversation as an owner's call
+        # does (ADR-044, amendment 2026-11-17, the slot queue, point 8): the slot queue handed it over.
         lock = self._kv_switch_lock
         await lock.acquire()
         slot_taken = False
@@ -4414,6 +4768,7 @@ class LlamaServerSupervisor:
             self.call_slot()
             slot_taken = True
             save_by = self._kv_switch_save_by()
+            left_s = save_by - _swap_clock() - _KV_SWITCH_DEADLINE_MARGIN_S  # for the peer's eviction line
             incoming = None
             if restores:
                 # Estimated before the save, so the switch's one decision line names both waits.
@@ -4441,6 +4796,13 @@ class LlamaServerSupervisor:
                     saved = _kv_outcome(_kv.FAILED, f"the save step failed: {exc}")
                     with contextlib.suppress(Exception):
                         _kv.note_save(self.alias, saved)
+                if caller_kind == "peer":
+                    try:
+                        await self._kv_say_evicted_unsaved(saved, peer_id, record, left_s)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.debug("the eviction line was not written", exc_info=True)
             if not restores:
                 return
             if saved is not None and saved.get("outcome") not in (_kv.SAVED, _KV_SKIPPED):
@@ -4471,6 +4833,12 @@ class LlamaServerSupervisor:
         hold on this alias is accepted now. A request with no time left gets the limit on waiting
         for a stop, as a late request does there."""
         now = _swap_clock()
+        call = _SLOT_CALL.get()
+        place = getattr(call, "place", None)
+        if place is not None and place.kind == "peer" and place.deadline is not None:
+            # A peer's own deadline, passed to the switch explicitly (the slot queue, point 8):
+            # `swap_wait_s` from the switch says nothing about the peer.
+            return place.deadline
         hold = _CARD_HOLD.get()
         accepted, wait_s = getattr(hold, "accepted_at", None), getattr(hold, "wait_s", None)
         if (hold is None or not getattr(hold, "live", False) or getattr(hold, "alias", None) != self.alias
@@ -4480,7 +4848,13 @@ class LlamaServerSupervisor:
         if limit is not None and limit[0] < wait_s:
             wait_s = limit[0]
         give_up_at = accepted + wait_s
-        return now + _STOP_WITH_NO_WAIT_LEFT_S if give_up_at <= now else give_up_at
+        save_by = now + _STOP_WITH_NO_WAIT_LEFT_S if give_up_at <= now else give_up_at
+        passed = getattr(call, "passed_at", None)
+        if getattr(call, "waited", False) is True and isinstance(passed, (int, float)):
+            # The wait for the slot does not eat the save (the slot queue, point 7): a call that waited
+            # gets, from its grant, at least what a late request gets. One that did not keeps its own.
+            save_by = max(save_by, passed + _STOP_WITH_NO_WAIT_LEFT_S)
+        return save_by
 
     def _kv_sent_before_this_launch(self, record: Optional[Dict[str, Any]]) -> Optional[str]:
         """The reason a record does not name what this launch's slot holds: its call went to an
@@ -4564,6 +4938,64 @@ class LlamaServerSupervisor:
             return True, f"{words}, threshold unknown, tried"
         cold_s = tokens / float(cold)
         return cold_s > restore_s, f"{words} against a cold read of the common part ~{cold_s:.1f} s"
+
+    def _kv_slot_guard_protects_nothing(self) -> bool:
+        """The slot queue, point 7: behind the slot queue the outgoing call's turn has ended, and with
+        one slot and no host cache the incoming call overwrites slot 0 whether a restore lands or fails,
+        so `_kv_why_the_slot_is_held` would only stop a return from restoring. Any other alias keeps it."""
+        call = _SLOT_CALL.get()
+        return (self.config.get("n_parallel") == 1 and self.config.get("cache_ram_mib") == 0
+                and call is not None and call.line is not None)
+
+    def _kv_in_the_engine(self) -> str:
+        """Which call an in-flight guard found in the engine, as the last call sent names it (the slot
+        queue, point 7): behind the slot queue a known case, not a defect."""
+        record = _kv.engine_call_of(self.alias)
+        if not record:
+            return ""
+        kind = record.get("caller_kind")
+        if kind == "peer":
+            who = f"a peer's call (node {record.get('peer_id')})"
+        elif kind == "gateway":
+            who = "a gateway client's call"
+        elif kind is None:
+            who = "a call with no conversation"
+        else:
+            owner = "an agent" if kind == "agent" else "the owner's chat"
+            who = f"{owner} call ({_kv_key_words(record.get('agent_id'), record.get('conversation_id'))})"
+        return f" (the last call sent: {who})"
+
+    async def _kv_say_evicted_unsaved(self, saved: Optional[Dict[str, Any]], peer_id: Optional[str],
+                                      record: Optional[Dict[str, Any]], left_s: float) -> None:
+        """The slot queue, point 8: the save of the owner's conversation did not fit the peer's deadline
+        ("estimate over the bound", "no time left", or cut at its bound), the peer's call goes out, and
+        the conversation's next turn re-reads it. Other skips are not evictions and keep their lines."""
+        reason = (saved or {}).get("reason") or ""
+        outcome = (saved or {}).get("outcome")
+        if outcome == _KV_SKIPPED and reason.startswith("estimate over the bound"):
+            est = getattr(self, "_kv_save_estimate_s", None)
+            what = f"~{est:.1f} s estimated" if isinstance(est, (int, float)) else "estimated over its bound"
+        elif outcome == _KV_SKIPPED and reason.startswith("no time left"):
+            what = "no time left"
+        elif outcome == _kv.FAILED and reason.startswith("the save ran past its bound"):
+            what = f"cut at {((saved or {}).get('ms') or 0) / 1000.0:.1f} s"
+        else:
+            return
+        tokens = getattr(self, "_kv_save_tokens", None)
+        if not tokens:
+            _slot, tokens, _why = await self._kv_slot_to_save()
+        rate = rows = None
+        if tokens:
+            got = await self._kv_cold_rate(tokens)
+            rate, rows = got if isinstance(got, tuple) else (got, None)
+        cold = (f"~{tokens / rate:.1f} s cold at {rate:.0f} tok/s" if tokens and rate and rate > 0
+                else "cold rate unknown")
+        logger.info(
+            "%s[%s]: KV snapshot of %s evicted unsaved by peer %s: the save (%s) does not fit the peer's "
+            "deadline (%.1f s left); re-reading it costs %s tokens (%s on %s ledger rows)",
+            self.ENGINE, self.alias, _kv_key_words((record or {}).get("agent_id"), (record or {}).get("conversation_id")),
+            peer_id, what, max(left_s, 0.0), tokens or "unknown", cold, "unknown" if rows is None else rows,
+        )
 
     def _kv_restore_since(self, record: Optional[Dict[str, Any]]) -> Optional[str]:
         """Why slot 0 no longer holds `record`'s call (a switch restore was tried after it), or None."""
@@ -4672,7 +5104,7 @@ class LlamaServerSupervisor:
             # Two occupied slots: slot 0 may hold a conversation nobody saved.
             self._kv_not_restored_at_a_switch(agent_id, conversation_id, f"{why_not}; {name} kept")
             return
-        if slot is not None and slot_holds_the_record:
+        if slot is not None and slot_holds_the_record and not self._kv_slot_guard_protects_nothing():
             why = await self._kv_why_the_slot_is_held(folder, record, slot, tokens)
             if why is not None:
                 self._kv_not_restored_at_a_switch(agent_id, conversation_id, f"{why}; {name} kept")
@@ -4691,8 +5123,8 @@ class LlamaServerSupervisor:
         if self._draining or self._in_flight > 1 or (_kv.engine_call_of(alias) or {}).get("sent") != (record or {}).get("sent"):
             self._kv_not_restored_at_a_switch(
                 agent_id, conversation_id,
-                f"{'the engine began to stop' if self._draining else 'another call reached the engine first'}; "
-                f"{name} kept")
+                f"{'the engine began to stop' if self._draining else 'another call reached the engine first'}"
+                f"{'' if self._draining else self._kv_in_the_engine()}; {name} kept")
             return
         before = self._kv_restored_after_sent
         sent = record.get("sent") if record else 0
@@ -4711,6 +5143,167 @@ class LlamaServerSupervisor:
         if now is not None and now != (record.get("sent") if record else None):
             # A call was sent while the restore was on its way: what its record's slot holds is unknown.
             self._kv_restored_after_sent = (now, _KV_SLOT_UNKNOWN)
+
+    # --- the slot queue (ADR-044, amendment 2026-11-17) -------------------------------------------
+
+    @on_the_owner_loop
+    async def _take_the_slot(self) -> bool:
+        """Wait in this alias's slot queue until this call may go into the engine (points 2 to 9), on
+        the owner loop, after the card and before the last-call record and the switch (point 5). True
+        when it may; False when it has the slot but the child went meanwhile: the caller asks
+        `ensure_running` again and keeps the slot (point 4). Strata passes as today (point 10)."""
+        if self.ENGINE != LlamaServerSupervisor.ENGINE:
+            return True
+        alias = self.alias
+        line = _slot_line(alias)
+        try:
+            place = self._slot_place_of_this_call(line)
+            if place is None:
+                return True
+            waited = False
+            if place is line.holder:
+                # The turn's next call waits for the one call going in between (points 6 and 8).
+                while line.between is not None and line.between is not place and line.holder is place:
+                    waited = True
+                    await asyncio.sleep(_SWAP_POLL_S)
+            elif place is line.between:
+                pass
+            elif not any(waiter is place for waiter in line.waiting) and _slot_is_free(line):
+                _slot_takes(line, place)  # the slot is free and nobody waits: it passes at once
+            else:
+                waited = True
+                await self._wait_in_the_slot_queue(line, place)
+            call = _SLOT_CALL.get()
+            if call is not None:
+                call.waited = call.waited or waited
+                if call.line is None:
+                    call.line, call.alias = line, alias
+                    line.unended += 1
+                    if place is line.holder:
+                        place.calls += 1
+                call.place, call.passed_at = place, _swap_clock()
+            return self._child_is_up()
+        finally:
+            _slot_line_drop_if_idle(alias)
+
+    def _slot_place_of_this_call(self, line: _SlotLine) -> Optional[_SlotPlace]:
+        """Which place this call goes as, read from the hold and not from the KV record's caller kind
+        (point 3): the turn's own calls pass as its hold, a description, a pre-analysis and a tool
+        thread carrying it included. Refuses a tool thread that outlived its turn and skips a named
+        background call, each only while the slot is not free (points 2 and 3). None: a call that does
+        not queue (made outside a provider's entry point, or with a grant for another alias)."""
+        alias = self.alias
+        hold = _CARD_HOLD.get()
+        if _hold_stands_for_the_slot(hold, alias):
+            for place in (line.holder, line.between, *line.waiting):
+                if place is not None and place.hold is hold:
+                    return place
+            return _SlotPlace(_slot_kind_of(hold), hold=hold)
+        place = _SLOT_GRANT.get()
+        if place is None or place.ended:
+            return None
+        if place.alias is None:
+            place.alias = alias
+            peer = peer_being_served()
+            if place.kind is None and peer is not None:
+                place.kind, place.peer_id = "peer", peer
+                place.deadline = _swap_clock() + _a_peers_slot_wait_s()
+        elif place.alias != alias:
+            return None
+        if place is line.holder or place is line.between or any(waiter is place for waiter in line.waiting):
+            return place
+        if _slot_is_free(line):
+            return place
+        if hold is not None and getattr(hold, "live", True) is False:
+            raise self._ended_request_refusal()  # it does not wait behind another conversation
+        what = _BACKGROUND_CALL.get()
+        if what is not None and place.kind is None:
+            held_by = line.holder or line.between or _slot_order(line)[0]
+            raise self._background_call_skipped(what, reason=f"the slot of '{alias}' is held by {_slot_who(held_by)}")
+        return place
+
+    async def _wait_in_the_slot_queue(self, line: _SlotLine, place: _SlotPlace) -> None:
+        """Wait for the slot, or for a place in between two calls of the turn holding it (the owner's
+        chat, a due peer), then for the calls already in the engine (point 7). Leaves on a person's
+        Stop, on a drain for a peer, at a gateway call's card deadline, and when its hold has ended."""
+        alias = self.alias
+        if not any(waiter is place for waiter in line.waiting):
+            place.arrival = next(_SLOT_ARRIVAL)
+            place.joined, place.joined_at = _swap_clock(), time.time()
+            line.waiting.append(place)
+        told = between = False
+        why = "its call was cancelled"
+        try:
+            while True:
+                if place.out is not None:
+                    why = "Stop"
+                    raise place.out
+                if place.hold is not None and not _hold_stands_for_the_slot(place.hold, alias):
+                    why = "its turn has ended"
+                    raise self._ended_request_refusal()
+                if place.kind == "peer" and self._draining:
+                    why = "the engine is draining"
+                    raise self._draining_error()
+                if place.kind == "gateway":
+                    # A client on the other end of a socket times out on its own (point 9).
+                    wait_s, bound = _a_gateway_calls_slot_wait(place.hold)
+                    if wait_s is not None and _swap_clock() >= place.hold.accepted_at + wait_s:
+                        why = "its card deadline passed"
+                        raise SlotQueueRefusal(
+                            f"{self.ENGINE}[{alias}] cannot serve this call now: it waited "
+                            f"{_swap_clock() - place.joined:.0f} s for the slot, held by "
+                            f"{_slot_who(line.holder or line.between)}, and this request waits at most "
+                            f"{wait_s:g} s ({bound})",
+                            alias, self.ENGINE,
+                        )
+                if line.holder is None and line.between is None and _slot_order(line)[0] is place:
+                    break
+                if _slot_goes_between(line, place):
+                    between = True
+                    break
+                if not told:
+                    told = True
+                    order = _slot_order(line)
+                    held = line.holder or line.between
+                    logger.info("slot queue[%s]: %s waits, %d ahead; the slot is held by %s for %.0f s",
+                                alias, _slot_who(place), order.index(place), _slot_who(held),
+                                0.0 if held is None or held.since is None else _swap_clock() - held.since)
+                    if place.kind == "agent" and place._turn_mark is None:
+                        from ..dpc_agent.run_gate import turn_waits_for
+
+                        place._turn_mark = turn_waits_for("slot_queue")
+                        place._turn_mark.__enter__()
+                await asyncio.sleep(_SWAP_POLL_S)
+        except BaseException:
+            if any(waiter is place for waiter in line.waiting):
+                line.waiting.remove(place)
+            _slot_stops_marking(place)
+            if why == "its call was cancelled" and place.hold is not None and not _hold_stands_for_the_slot(
+                    place.hold, alias):
+                why = "its turn has ended"
+            logger.info("slot queue[%s]: %s leaves the slot queue after %.0f s: %s",
+                        alias, _slot_who(place), _swap_clock() - place.joined, why)
+            raise
+        line.waiting.remove(place)
+        _slot_stops_marking(place)
+        _slot_takes(line, place, between=between)
+        # Point 7: the calls already in the engine end first; a call that arrives meanwhile queues.
+        seen = 0
+        while line.unended > 0 or self._in_flight > 0:
+            seen = max(seen, line.unended, self._in_flight)
+            await asyncio.sleep(_SWAP_POLL_S)
+        waited = _swap_clock() - place.joined
+        after = f"; it waited for {seen} call(s) in flight" if seen else ""
+        if between:
+            who = (f"peer {place.peer_id}, its deadline less the save's allowance reached,"
+                   if place.kind == "peer" else _slot_who(place))
+            logger.info("slot queue[%s]: %s goes in between two calls of %s after a wait of %.0f s%s",
+                        alias, who, _slot_who(line.holder), waited, after)
+        elif line.passing_from is not None:
+            frm, held_s, calls = line.passing_from
+            line.passing_from = None
+            logger.info("slot queue[%s]: the slot passes from %s (held %.0f s, %d calls) to %s after a wait "
+                        "of %.0f s%s", alias, frm, held_s, calls, _slot_who(place), waited, after)
 
     def call_slot(self):
         """Claim one in-flight call; refuses while draining, so drain can wait.
