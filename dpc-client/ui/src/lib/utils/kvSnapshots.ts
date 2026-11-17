@@ -118,7 +118,7 @@ const OUTCOME_WORDS: Record<string, string> = {
     missing: 'file missing',
 };
 
-/** "saved 4.0 GiB in 2.1 s", "skipped (below the size threshold)", "no room". */
+/** "saved 4.0 GiB in 2.1 s", "skipped (size unknown)", "no room". */
 export function describeEvent(ev: KvSnapshotEvent): string {
     const word = OUTCOME_WORDS[ev.outcome] ?? ev.outcome;
     const done = ev.outcome === 'saved' || ev.outcome === 'restored';

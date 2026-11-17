@@ -72,8 +72,8 @@ describe('describeEvent', () => {
   });
 
   it('says the reason when nothing was done, and a plain word without one', () => {
-    expect(describeEvent({ outcome: 'skipped', bytes: null, ms: null, reason: 'below the size threshold' }))
-      .toBe('skipped (below the size threshold)');
+    expect(describeEvent({ outcome: 'skipped', bytes: null, ms: null, reason: 'size unknown' }))
+      .toBe('skipped (size unknown)');
     expect(describeEvent({ outcome: 'no_room', bytes: null, ms: null, reason: null })).toBe('no room');
     expect(describeEvent({ outcome: 'engine_refuses', bytes: null, ms: null, reason: null })).toBe('the engine refuses saves');
   });
