@@ -597,7 +597,8 @@ def _live_saved_words(alias: str, live_saved: Optional[Dict[str, Any]]) -> str:
     if live_saved.get("outcome") == _kv.SAVED:
         secs = (live_saved.get("ms") or 0) / 1000.0
         return f"; {who} saved ({_size_words(live_saved.get('bytes'))}, {secs:.1f} s)"
-    return f"; {who} is lost, not saved: {live_saved.get('reason') or live_saved.get('outcome')}"
+    return (f"; {who}: history kept; its KV cache was not saved, so the next turn re-reads it: "
+            f"{live_saved.get('reason') or live_saved.get('outcome')}")
 
 
 # The last skip of each background call (ADR-044, the card queue, rule 10), in

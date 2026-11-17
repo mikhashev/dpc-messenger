@@ -65,7 +65,7 @@ async def test_a_saved_live_conversation_is_said_with_its_size_and_time(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_a_live_conversation_not_saved_is_said_to_be_lost_with_the_reason(tmp_path, caplog):
+async def test_a_live_conversation_not_saved_is_said_with_history_kept_and_the_reason(tmp_path, caplog):
     holder, new, fake, _folder = await saving_pair(tmp_path, status=415, body="Unsupported Media Type")
     note_call(conversation="chat-1")
 
@@ -75,7 +75,8 @@ async def test_a_live_conversation_not_saved_is_said_to_be_lost_with_the_reason(
     saved = base_mod.last_swap()["live_saved"]
     assert saved["outcome"] == kv_snapshots.TRANSPORT and saved["bytes"] is None
     assert _swap_lines(caplog) == [
-        f"swapped 'qwen27' out for 'flash'; the live conversation of agent 'a1' is lost, not saved: {saved['reason']}"
+        f"swapped 'qwen27' out for 'flash'; the live conversation of agent 'a1': history kept; "
+        f"its KV cache was not saved, so the next turn re-reads it: {saved['reason']}"
     ]
     assert "(415)" in saved["reason"]
 
@@ -89,8 +90,8 @@ async def test_a_skipped_save_is_said_in_the_skips_words(tmp_path, caplog):
         await new.ensure_running()
 
     assert _swap_lines(caplog) == [
-        "swapped 'qwen27' out for 'flash'; the live conversation is lost, not saved: "
-        "the last call was a gateway client's"
+        "swapped 'qwen27' out for 'flash'; the live conversation: history kept; its KV cache was not saved, "
+        "so the next turn re-reads it: the last call was a gateway client's"
     ]
     assert base_mod.last_swap()["live_saved"]["outcome"] == base_mod._KV_SKIPPED
 
