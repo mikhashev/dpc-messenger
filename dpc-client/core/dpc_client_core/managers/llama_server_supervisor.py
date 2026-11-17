@@ -130,7 +130,9 @@ DEFAULTS: Dict[str, Any] = {
     # shifting KV instead of re-reading it. None = the build's own 0, which is
     # off: today any divergence inside the prefix throws away everything behind
     # it. Ours sit early — the knowledge index and the scratchpad are rebuilt
-    # ahead of the whole history — so this is the one flag that survives them.
+    # ahead of the whole history — which is what this flag would survive, but the
+    # child disables it whenever --mmproj is passed (the 27B today; backlog
+    # CACHE-REUSE-HAS-NEVER-BEEN-ACTIVE-…), so there it does nothing.
     # 0 is expressible and means off, which is why the guard tests None.
     "cache_reuse": None,
     "cache_ram_mib": None,
