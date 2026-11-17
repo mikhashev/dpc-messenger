@@ -49,6 +49,47 @@
 
   const dispatch = createEventDispatcher();
 
+  // Provider cards fold to their header (alias, badges, type and model). Open cards are kept by
+  // index for this sitting, so typing a new alias does not fold the card, and remembered by alias
+  // in this browser; storage that throws only loses the memory.
+  const EXPANDED_KEY = 'dpc.providersEditor.expanded';
+  function readStoredExpanded(): Set<string> {
+    try {
+      const raw = JSON.parse(localStorage.getItem(EXPANDED_KEY) || '[]');
+      return new Set(Array.isArray(raw) ? raw.filter((a) => typeof a === 'string') : []);
+    } catch {
+      return new Set();
+    }
+  }
+  const storedExpanded: Set<string> = readStoredExpanded();
+  let expanded: Record<number, boolean> = {};
+  function writeStoredExpanded(): void {
+    try {
+      localStorage.setItem(EXPANDED_KEY, JSON.stringify([...storedExpanded]));
+    } catch {
+      // Not remembered; the cards still fold and unfold.
+    }
+  }
+  function isExpanded(i: number, alias: string, open: Record<number, boolean>): boolean {
+    return open[i] ?? storedExpanded.has(alias);
+  }
+  function setExpanded(i: number, alias: string, value: boolean): void {
+    expanded = { ...expanded, [i]: value };
+    if (value) storedExpanded.add(alias);
+    else storedExpanded.delete(alias);
+    writeStoredExpanded();
+  }
+  function setAllExpanded(providers: { alias: string }[], value: boolean): void {
+    const next: Record<number, boolean> = {};
+    providers.forEach((p, i) => {
+      next[i] = value;
+      if (value) storedExpanded.add(p.alias);
+      else storedExpanded.delete(p.alias);
+    });
+    expanded = next;
+    writeStoredExpanded();
+  }
+
   type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'deepseek' | 'neuraldeep' | 'llamacpp_server' | 'strata' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'gigachat';
 
   type Provider = {
@@ -1430,6 +1471,9 @@
     const confirmed = await confirmAsync(deleteProviderPrompt(provider.alias, agents), { kind: 'warning' });
     if (confirmed) {
       editedConfig.providers.splice(index, 1);
+      expanded = {}; // indexes moved; the cards fall back to what is remembered by alias
+      storedExpanded.delete(provider.alias);
+      writeStoredExpanded();
       // If deleted provider was default, reset default
       if (editedConfig.default_provider === provider.alias) {
         editedConfig.default_provider = editedConfig.providers[0]?.alias || '';
@@ -1717,6 +1761,7 @@
 
     editedConfig.providers.push(provider);
     editedConfig = editedConfig; // Trigger reactivity
+    setExpanded(editedConfig.providers.length - 1, provider.alias, true); // a new card opens
 
     // Reset form and switch to list tab
     resetNewProviderForm();
@@ -2342,23 +2387,40 @@
                 extraction prompt carries the whole transcript.
               </p>
             {/if}
+            <div class="fold-all">
+              <button type="button" class="btn-fold" on:click={() => setAllExpanded(displayConfig.providers, true)}>Expand all</button>
+              <button type="button" class="btn-fold" on:click={() => setAllExpanded(displayConfig.providers, false)}>Collapse all</button>
+            </div>
             {#each displayConfig.providers as provider, i (i)}
-              <div class="provider-card" class:default={provider.alias === displayConfig.default_provider}>
+              {@const cardOpen = isExpanded(i, provider.alias, expanded)}
+              <div class="provider-card" class:default={provider.alias === displayConfig.default_provider} class:collapsed={!cardOpen}>
                 <div class="provider-header">
-                  <h3>
-                    {provider.alias}
+                  <button
+                    type="button"
+                    class="provider-toggle"
+                    aria-expanded={cardOpen}
+                    title={cardOpen ? 'Collapse' : 'Expand'}
+                    on:click={() => setExpanded(i, provider.alias, !cardOpen)}
+                  >
+                    <span class="chevron" aria-hidden="true">{cardOpen ? '▾' : '▸'}</span>
+                  </button>
+                  <h3 class="provider-title">
+                    <button type="button" class="provider-title-button" on:click={() => setExpanded(i, provider.alias, !cardOpen)}>{provider.alias}</button>
                     {#if provider.alias === displayConfig.default_provider}<span class="default-badge">⭐ Text Default</span>{/if}
                     {#if provider.alias === displayConfig.vision_provider}<span class="default-badge vision-badge">👁️ Vision Default</span>{/if}
                     {#if provider.alias === displayConfig.voice_provider}<span class="default-badge voice-badge">🎤 Voice Default</span>{/if}
                     {#if provider.alias === displayConfig.agent_provider}<span class="default-badge agent-badge">🤖 Agent Default</span>{/if}
                     {#if provider.alias === displayConfig.knowledge_provider}<span class="default-badge">🧠 Knowledge Extraction</span>{/if}
+                    <span class="provider-summary">{provider.type}{#if provider.model} · {provider.model}{/if}</span>
                   </h3>
                   {#if editMode}
                     <button class="btn-delete" on:click={() => deleteProvider(i)}>Delete</button>
                   {/if}
                 </div>
 
-                {#if editMode && editedConfig}
+                {#if !cardOpen}
+                  <!-- Folded: the header alone. -->
+                {:else if editMode && editedConfig}
                   <!-- Edit Form -->
                   <div class="provider-form">
                     <div class="form-group">
@@ -5031,6 +5093,56 @@
     margin: 0;
     color: #fff;
     font-size: 1.1rem;
+  }
+
+  .provider-card.collapsed .provider-header {
+    margin-bottom: 0;
+  }
+
+  .provider-header .provider-title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .provider-toggle,
+  .provider-title-button {
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .provider-toggle {
+    width: 1.6em;
+    flex: none;
+    color: #aaa;
+  }
+
+  .provider-summary {
+    margin-left: 10px;
+    color: #9aa6ae;
+    font-size: 0.85rem;
+    font-weight: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .fold-all {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .btn-fold {
+    background: #333;
+    color: #ddd;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 0.85rem;
   }
 
   .default-badge {
