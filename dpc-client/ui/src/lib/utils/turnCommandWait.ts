@@ -9,7 +9,8 @@
 // `list_agents` rows, held in `agentTurns`), not from the send. The snapshot is
 // sent on every change and a turn in one long model call is a turn with
 // `wait_reason: model_call`, so a model call that emits nothing does not look idle;
-// nor does one waiting in the queue for the card, `wait_reason: card_queue`.
+// nor does one waiting in the queue for the card or for the slot, `wait_reason: card_queue`
+// or `slot_queue`.
 //
 // Pure: coreService holds the pending command and reads the clock.
 

@@ -81,7 +81,7 @@ export interface ProcessListing {
     shell_memory_limit_source?: string | null;
 }
 
-/** working (green), waiting for the model or an approval (amber), idle or ended (grey). */
+/** working (green), waiting for the model, an approval, the card or the slot (amber), idle or ended (grey). */
 export type MapDot = 'working' | 'waiting' | 'idle';
 
 export interface MapWaitingChat {
@@ -356,6 +356,14 @@ function turnWords(state: AgentTurnState | undefined, chatOf: (id: string | null
             stateLine: `${cap(phrase)} · ${chat} · ${forWait}`,
             nowLine: `${cap(phrase)} in ${chat}`,
             nowDetail: detail(turn.provider_alias ? `${turn.provider_alias} waits in the queue` : '', round, started, forWait),
+        };
+    }
+    if (phrase && turn.wait_reason === 'slot_queue') {
+        return {
+            dot: 'waiting',
+            stateLine: `${cap(phrase)} · ${chat} · ${forWait}`,
+            nowLine: `${cap(phrase)} in ${chat}`,
+            nowDetail: detail(turn.provider_alias ? `${turn.provider_alias} waits for the slot` : '', round, started, forWait),
         };
     }
     if (phrase) {

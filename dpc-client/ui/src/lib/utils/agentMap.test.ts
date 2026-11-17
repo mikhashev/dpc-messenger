@@ -468,6 +468,15 @@ describe('the line under an agent in the sidebar', () => {
         expect(ark.nowDetail).not.toContain('is answering');
     });
 
+    it('a turn waiting for the slot is amber, says the slot, and names the alias that waits', () => {
+        const snap = { agent_id: 'agent_ark', ts: 't1', waiting: [],
+                       turn: turn({ wait_reason: 'slot_queue', provider_alias: 'strata flash-next' }) };
+        expect(line(snap)).toMatchObject({ dot: 'waiting', line: 'Waiting for the slot · DPC Project · 48 s' });
+        const ark = build(states([snap], NOW - 48_000)).agents.find(a => a.agent_id === 'agent_ark')!;
+        expect(ark.nowDetail).toContain('strata flash-next waits for the slot');
+        expect(ark.nowDetail).not.toContain('is answering');
+    });
+
     it('counts the chats waiting beside the state', () => {
         const waiting = [
             { conversation_id: 'c1', conversation_title: 'x', waiting_since: iso(5), wait_reason: 'other_chat', held_by: null },

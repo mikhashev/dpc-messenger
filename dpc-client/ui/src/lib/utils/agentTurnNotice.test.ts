@@ -8,6 +8,7 @@ import {
     turnIsUnconfirmed,
     ordinal,
     formatWait,
+    turnWaitPhrase,
     type AgentTurn,
     type AgentTurnStates,
 } from './agentTurnNotice';
@@ -82,6 +83,13 @@ describe('words', () => {
     it('ordinals', () => {
         expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 23].map(ordinal))
             .toEqual(['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '23rd']);
+    });
+    it('a turn waiting says what it waits for', () => {
+        expect(turnWaitPhrase('model_call')).toBe('waiting for the model');
+        expect(turnWaitPhrase('approval')).toBe('waiting for an approval');
+        expect(turnWaitPhrase('card_queue')).toBe('waiting for the card');
+        expect(turnWaitPhrase('slot_queue')).toBe('waiting for the slot');
+        expect(turnWaitPhrase(null)).toBeNull();
     });
     it('durations', () => {
         expect(formatWait(5)).toBe('5 s');
