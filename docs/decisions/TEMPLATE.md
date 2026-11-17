@@ -91,6 +91,23 @@ Making these visible helps reviewers understand the reasoning without digging th
 > **Tip:** If drivers are simple and obvious from Context, you may skip this section.
 > For complex or controversial decisions, this section is strongly recommended.
 
+<!-- required, for every weight; also for an amendment -->
+## Prior art outside our engine
+
+Mike's call, 2026-11-17. Written in the plan, before the ADR or the amendment. It applies
+to an amendment as much as to a new record. Why: ADR-044 (KV snapshots) was designed
+without a look at LMCache, vLLM or SGLang, although an article under
+`ideas/dpc-research/articles` had cited LMCache and CacheBlend since 2026-08-18; ADR-040
+ruled those engines out, and their whole ecosystem dropped out of view with them.
+
+- **(a) The project's own reading:** `rg --no-ignore` over `ideas/dpc-research/articles`
+  (gitignored, so plain search tools miss it).
+- **(b) The topic, not tied to our engine** (llama.cpp / Strata): how other serving
+  systems, papers and projects solve the same problem.
+- **(c) One line per finding:** what we take, or why not, with the source address (URL or path).
+
+"Nothing found" must name where it was searched: the path or query, and the date.
+
 <!-- required -->
 ## Decision
 
