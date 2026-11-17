@@ -41,7 +41,9 @@ async def test_two_occupied_slots_save_nothing_and_say_why(tmp_path, caplog):
 @pytest.mark.asyncio
 async def test_the_one_occupied_slot_is_the_one_saved_whichever_it_is(tmp_path):
     holder, _new, fake, folder = await saving_pair(
-        tmp_path, slots=[{"id": 0, "n_prompt_tokens": 0}, {"id": 1, "n_prompt_tokens": 1200}])
+        # The fake engine answers n_saved 1500; the real engine's n_saved equals the slot's n_prompt_tokens
+        # (measured 8 of 8, 2026-11-17), and a save whose counts differ is now discarded.
+        tmp_path, slots=[{"id": 0, "n_prompt_tokens": 0}, {"id": 1, "n_prompt_tokens": 1500}])
     note_call()
 
     outcome = await stop_by_hand(holder)

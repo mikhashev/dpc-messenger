@@ -172,6 +172,7 @@ _FOLDER_LOCKS: Dict[str, threading.RLock] = {}
 _FOLDERS: Dict[str, Dict[str, Any]] = {}          # alias -> {"folder": Path, "cap_bytes": int|None}
 _RECORDS: Dict[str, Dict[str, Any]] = {}          # alias -> the last engine call
 _TURN_CALLS: Dict[Tuple[str, str, str], Tuple[str, int]] = {}   # (alias, agent, conversation) -> (prefix sha, calls)
+_LAST_SENT: Dict[Tuple[str, str, str], Tuple[int, float]] = {}   # (alias, agent, conversation) -> (sent, sent_mono)
 _SEQ = itertools.count(1)                         # sequence numbers of noted calls
 _SENT = itertools.count(1)                        # order in which calls went on the wire
 _PENDING: Dict[str, "OrderedDict[int, Dict[str, Any]]"] = {}   # alias -> noted, not yet sent
@@ -191,6 +192,7 @@ def reset_state() -> None:
         _FOLDERS.clear()
         _RECORDS.clear()
         _TURN_CALLS.clear()
+        _LAST_SENT.clear()
         _SEQ = itertools.count(1)
         _SENT = itertools.count(1)
         _PENDING.clear()
@@ -712,6 +714,10 @@ def new_entry(
         # The prefix's length in messages (a count), not the messages themselves.
         "prefix_messages": record.get("prefix_messages"),
     }
+    sent, sent_mono = record.get("sent"), record.get("sent_mono")
+    if isinstance(sent, int) and not isinstance(sent, bool) and _number(sent_mono):
+        # The saved call, by both: a restore compares them with the key's last sent call (`last_sent_of`).
+        entry["sent"], entry["sent_mono"] = sent, sent_mono
     entry.update(identity or {})
     return entry
 
@@ -1421,6 +1427,8 @@ def mark_sent(alias: str, seq: int) -> bool:
         _RECORDS[alias] = record
         if record["conversation_id"]:
             _CLEARED.discard(record["conversation_id"])
+            key = (alias, record.get("agent_id") or "", record["conversation_id"])
+            _LAST_SENT[key] = (record["sent"], record["sent_mono"])
         return True
 
 
@@ -1497,6 +1505,17 @@ def engine_call_of(alias: str) -> Optional[Dict[str, Any]]:
     with _STATE_LOCK:
         current = _RECORDS.get(alias)
         return dict(current) if current else None
+
+
+def last_sent_of(alias: str, agent_id: Optional[str],
+                 conversation_id: Optional[str]) -> Optional[Tuple[int, float]]:
+    """(sent, sent_mono) of this conversation key's last call on this alias; None when none has
+    since the backend started. Both, as one identity: `sent` restarts with the backend, and
+    `time.monotonic` ticks every ~16 ms on Windows, so two calls can share a `sent_mono`."""
+    if not conversation_id:
+        return None
+    with _STATE_LOCK:
+        return _LAST_SENT.get((alias, agent_id or "", conversation_id))
 
 
 def is_owner_kind(caller_kind: Optional[str]) -> bool:

@@ -486,7 +486,8 @@ class LlamaServerProvider(DeepSeekProvider):
 
     async def _note_engine_call(self, messages: Optional[List[Any]]) -> None:
         """Record this call as the alias's last, then restore its conversation's KV
-        snapshot when the engine is empty and the call is the owner's. Neither runs while
+        snapshot when the engine is empty and the call is the owner's; otherwise hand a
+        switch to the supervisor (`_kv_at_a_switch`). Neither runs while
         the supervisor drains. A failed restore never fails the call (the call runs cold);
         a cancellation is the exception: it is logged and re-raised, so the call is
         cancelled with the restore it was awaiting. Every end of a restore that was
@@ -496,6 +497,11 @@ class LlamaServerProvider(DeepSeekProvider):
             self._say_drain_skips_the_restore(sup, messages)
             return
         kind, agent_id, conversation_id, peer = self._caller_of_this_call()
+        try:
+            # What the slot holds now: the last call marked sent, read before this one is noted.
+            outgoing = kv_snapshots.engine_call_of(self.alias)
+        except Exception:
+            outgoing = None
         try:
             # The turn base, not the whole list: the next turn never replays this one's tool
             # rounds (ADR-044, amendment of 2026-11-16). No user message: the whole list.
@@ -512,6 +518,7 @@ class LlamaServerProvider(DeepSeekProvider):
         if isinstance(seq, int) and not isinstance(seq, bool):
             _ENGINE_CALL_SEQ.set((id(self), seq))
         if getattr(sup, "_kv_engine_fresh", False) is not True:
+            await self._kv_at_a_switch(sup, outgoing, kind, agent_id, conversation_id, peer, messages)
             return
         # Any call fills the empty engine; cleared before the await, so one call restores.
         sup._kv_engine_fresh = False
@@ -537,6 +544,37 @@ class LlamaServerProvider(DeepSeekProvider):
             raise
         except Exception:
             logger.warning("'%s': the KV snapshot restore failed; the call runs cold", self.alias, exc_info=True)
+
+    async def _kv_at_a_switch(self, sup: Any, outgoing: Optional[Dict[str, Any]], kind: Optional[str],
+                              agent_id: Optional[str], conversation_id: Optional[str], peer: Optional[str],
+                              messages: Optional[List[Any]]) -> None:
+        """A switch on llama-server (plan 2026-11-17, slice 1): the supervisor saves the outgoing
+        slot and restores the incoming conversation before this call goes out. A call that is no
+        switch passes only while a switch holds the alias, and a peer's or gateway client's never
+        waits. Strata is a later slice. A failure never fails the call; a cancellation does."""
+        at_a_switch = getattr(sup, "kv_at_a_switch", None)
+        if at_a_switch is None or getattr(sup, "ENGINE", None) != LlamaServerSupervisor.ENGINE:
+            return
+        if kv_snapshots.folder_of(self.alias) is None:
+            return
+        lock = getattr(sup, "_kv_switch_lock", None)
+        waits = kind not in ("peer", "gateway") and isinstance(lock, asyncio.Lock) and lock.locked()
+        # A switch restore since the record's call: slot 0 no longer holds it, so even that
+        # conversation's own next call is a restore candidate.
+        restore_since = getattr(sup, "_kv_restore_since", None)
+        lost = callable(restore_since) and restore_since(outgoing) is not None
+        if not (waits or LlamaServerSupervisor._kv_saves_at_a_switch(outgoing, agent_id, conversation_id)
+                or LlamaServerSupervisor._kv_restores_at_a_switch(None if lost else outgoing, kind, agent_id,
+                                                                  conversation_id, messages)):
+            return
+        try:
+            await at_a_switch(caller_kind=kind, agent_id=agent_id, conversation_id=conversation_id,
+                              peer_id=peer, messages=messages)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("'%s': the KV snapshot step at a switch failed; the call goes on", self.alias,
+                           exc_info=True)
 
     def _say_not_restored(self, agent_id: Optional[str], conversation_id: Optional[str], reason: str) -> None:
         """The one INFO line of a restore that did not run, so the log never ends silent."""
