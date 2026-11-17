@@ -765,7 +765,13 @@ def add_entry(folder: PathLike, entry: Dict[str, Any], *, cap_bytes: int, now: O
                     kept.append(old)
             else:
                 kept.append(old)
-        index["entries"] = [e for e in kept if e.get("file") != name] + [dict(entry)]
+        indexed = dict(entry)
+        if _number(checkpoint_bytes) and 0 <= checkpoint_bytes < nbytes:
+            # This conversation's own checkpoints, for its next save's estimate (`alias_sizes`).
+            indexed["checkpoint_bytes"] = checkpoint_bytes
+            if isinstance(checkpoint_count, int) and not isinstance(checkpoint_count, bool) and checkpoint_count >= 0:
+                indexed["checkpoint_count"] = checkpoint_count
+        index["entries"] = [e for e in kept if e.get("file") != name] + [indexed]
         _note_rates_locked(index, entry, checkpoint_count, checkpoint_bytes)
         _sweep_locked(folder, index, stale, alias=None, now=now, expected=None,
                       cap_bytes=cap_bytes, keep=name)
@@ -1004,13 +1010,14 @@ def worth_saving(
     alias_sizes: Dict[str, Any],
     cold_rate: Optional[float],
 ) -> Tuple[bool, str]:
-    """Whether the estimated restore beats the cold read at this length (point 4).
+    """Whether a save of this length goes ahead, and the words for the decision line.
 
-    The restore only (amendment of 2026-11-16): the save runs at a swap or a stop while
-    the GPU idles, the cold read holds it. The save still has to fit its bound, which the
-    caller checks. Tokens unknown: skip, "size unknown". No write rate yet: tried once,
-    which measures it. No cold rows: "threshold unknown", tried. No read rate yet: the
-    write rate stands in; a read rate is capped by `capped_read_rate`."""
+    Saved whatever the estimated restore against the cold read (amendment of 2026-11-17):
+    whether the file is still in the OS file cache at the return is unknown at save time,
+    so the comparison is only reported. The save still has to fit its bound, which the
+    caller checks. Tokens unknown: skip, "size unknown". No write rate yet: "write rate
+    unknown, tried once". No cold rows: "threshold unknown". No read rate yet: the write
+    rate stands in; a read rate is capped by `capped_read_rate`."""
     if tokens is None or isinstance(tokens, bool) or int(tokens) <= 0:
         return False, "size unknown"
     tokens = int(tokens)
@@ -1024,10 +1031,7 @@ def worth_saving(
     read = capped_read_rate(folder_rates) or write
     cost = nbytes / read
     cold = tokens / float(cold_rate)
-    words = f"restore ~{cost:.1f} s against a cold read ~{cold:.1f} s"
-    if cost < cold:
-        return True, words
-    return False, f"below the size threshold: {words}"
+    return True, f"restore ~{cost:.1f} s against a cold read ~{cold:.1f} s"
 
 
 def cold_rate_at(rows: Iterable[Dict[str, Any]], alias: str, n_tokens: int) -> Optional[float]:
@@ -1120,13 +1124,19 @@ def seed_sizes(engine: str) -> Dict[str, float]:
     return dict(SEED_SIZES.get(engine, SEED_SIZES["llamacpp_server"]))
 
 
-def alias_sizes(folder: PathLike, alias: str, engine: str) -> Dict[str, float]:
+def alias_sizes(folder: PathLike, alias: str, engine: str, *, agent_id: Optional[str] = None,
+                conversation_id: Optional[str] = None) -> Dict[str, float]:
     """The alias's floor and bytes per token: measured in the index, else the engine's seed;
-    plus `checkpoint_bytes` only when the last fit measured the checkpoints."""
+    plus `checkpoint_bytes` only when the last fit measured the checkpoints.
+
+    Given a conversation key, `checkpoint_bytes` is that conversation's own (amendment of
+    2026-11-17): what its entry recorded at its previous save; none, the median over the
+    alias's size samples that name them; none there either, the alias's last value."""
     try:
-        measured = read_index(folder)["sizes"].get(alias)
+        index = read_index(folder)
+        measured = index["sizes"].get(alias)
     except (OSError, ValueError, TypeError, KeyError):
-        measured = None
+        index, measured = None, None
     sizes = seed_sizes(engine)
     if isinstance(measured, dict):
         # A fitted floor may be zero; a part per token never.
@@ -1136,7 +1146,29 @@ def alias_sizes(folder: PathLike, alias: str, engine: str) -> Dict[str, float]:
             sizes["bytes_per_token"] = float(measured["bytes_per_token"])
         if _number(measured.get("checkpoint_bytes")) and measured["checkpoint_bytes"] >= 0:
             sizes["checkpoint_bytes"] = float(measured["checkpoint_bytes"])
+    # A whole-file fit holds no checkpoint bytes, and adds none: its files already counted theirs.
+    if conversation_id and "checkpoint_bytes" in sizes:
+        own = _own_checkpoint_bytes(index, alias, agent_id, conversation_id)
+        if own is None:
+            sampled = [ck for _, _, ck in _size_samples(measured) if ck is not None]
+            own = float(median(sampled)) if sampled else None
+        if own is not None:
+            sizes["checkpoint_bytes"] = own
     return sizes
+
+
+def _own_checkpoint_bytes(index: Optional[Dict[str, Any]], alias: str, agent_id: Optional[str],
+                          conversation_id: str) -> Optional[float]:
+    """The checkpoint bytes the key's entry recorded at its save; None when there is none, or an
+    entry written before the field."""
+    key = {"alias": alias, "agent_id": agent_id, "conversation_id": conversation_id}
+    for entry in (index or {}).get("entries") or ():
+        if entry.get("delete_pending") or not _same_key(entry, key):
+            continue
+        ck, nbytes = entry.get("checkpoint_bytes"), entry.get("bytes")
+        if _number(ck) and ck >= 0 and (not _number(nbytes) or ck < nbytes):
+            return float(ck)
+    return None
 
 
 def folder_rates(folder: PathLike) -> Dict[str, float]:

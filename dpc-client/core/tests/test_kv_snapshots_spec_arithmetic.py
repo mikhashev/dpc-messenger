@@ -1,8 +1,11 @@
 """Spec tests for the KV snapshot arithmetic: save bound, size threshold and the
 status-code classes. Written from ADR-044 (amendment 2026-11-13, points 4, 5, 8)
 and the slice-1 plan (section 2, P1) without sight of the implementation; the
-threshold follows the amendment of 2026-11-16 (the restore only).
+threshold follows the amendment of 2026-11-16 (the restore only), which since the
+amendment of 2026-11-17 is logged and no longer decides a save.
 """
+
+import re
 
 import pytest
 
@@ -86,13 +89,14 @@ def _sizes(floor=STRATA_FLOOR_BYTES, per_token=STRATA_BYTES_PER_TOKEN):
 
 
 @pytest.mark.parametrize("tokens, pays", [(10_000, False), (50_000, True), (250_000, True)])
-def test_strata_from_an_hdd_pays_at_a_stop_from_about_24k_tokens(tokens, pays):
-    # Amendment of 2026-11-16: only the restore counts (~0.16 s per 1K tokens plus a 2.5 s
-    # floor against ~0.27 s of cold read); save plus restore never paid.
+def test_strata_from_an_hdd_is_saved_at_any_length_and_its_words_say_whether_the_restore_pays(tokens, pays):
+    # The restore pays from about 24K tokens (~0.16 s per 1K tokens plus a 2.5 s floor against
+    # ~0.27 s of cold read); since 2026-11-17 that is logged and no longer decides the save.
     ok, reason = kv.worth_saving(tokens, _rates(HDD_WRITE_B_S, HDD_READ_B_S),
                                  _sizes(), STRATA_COLD_TOK_S)
-    assert ok is pays
-    assert reason  # the decision carries its words for the log line
+    assert ok is True
+    restore, cold = (float(s) for s in re.fullmatch(r"restore ~(\S+) s against a cold read ~(\S+) s", reason).groups())
+    assert (restore < cold) is pays
 
 
 @pytest.mark.parametrize("tokens", [5_000, 10_000, 50_000, 250_000])

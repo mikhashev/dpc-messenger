@@ -3300,10 +3300,12 @@ class LlamaServerSupervisor:
         `binary_path` reached the provider form, two builds side by side is an
         ordinary state rather than a laboratory one.
         """
-        _cache = c_ram if (c_ram := self.config.get("cache_ram_mib")) else (
-            f"{env.get('LLAMA_ARG_CACHE_RAM')} (from environment)"
-            if env.get("LLAMA_ARG_CACHE_RAM") else "build default"
-        )
+        # A configured value, 0 included, is what `--cache-ram` carries (`build_command`).
+        if (c_ram := self.config.get("cache_ram_mib")) is not None:
+            _cache = "0 (off)" if c_ram == 0 else c_ram
+        else:
+            _cache = (f"{env.get('LLAMA_ARG_CACHE_RAM')} (from environment)"
+                      if env.get("LLAMA_ARG_CACHE_RAM") else "build default")
         n_ctx = self.config["n_ctx"]
         window = self.config.get("context_window")
         logger.info(
@@ -4068,7 +4070,9 @@ class LlamaServerSupervisor:
                     and held.get("prefix_sha256") == record.get("prefix_sha256")):
                 return self._kv_skip(f"already saved: the index holds this slot ({tokens} tokens, "
                                      f"file {held.get('file')})")
-        sizes = await asyncio.to_thread(_kv.alias_sizes, folder, alias, self.PROCESS_LAUNCHER)
+        sizes = await asyncio.to_thread(_kv.alias_sizes, folder, alias, self.PROCESS_LAUNCHER,
+                                        agent_id=record.get("agent_id"),
+                                        conversation_id=record.get("conversation_id"))
         rates = await asyncio.to_thread(_kv.folder_rates, folder)
         estimate = _kv.estimate_bytes(tokens, sizes["floor_bytes"], sizes["bytes_per_token"],
                                       sizes.get("checkpoint_bytes", 0.0))
@@ -4500,8 +4504,8 @@ class LlamaServerSupervisor:
 
     async def _kv_restore_estimate(self, folder: Path,
                                    entry: Dict[str, Any]) -> Tuple[bool, str, Optional[float]]:
-        """Whether restoring `entry` beats a cold read of its `n_saved` tokens (the restore only,
-        as `worth_saving` decides a save); unknown rates try it."""
+        """Whether restoring `entry` beats a cold read of its `n_saved` tokens (the restore only;
+        a save no longer compares, amendment of 2026-11-17); unknown rates try it."""
         tokens, nbytes = entry.get("n_saved"), entry.get("bytes")
         rates = await asyncio.to_thread(_kv.folder_rates, folder)
         write = (rates or {}).get("write_bytes_per_s")

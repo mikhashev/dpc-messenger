@@ -103,6 +103,18 @@ def test_the_cache_size_still_reaches_the_line_from_the_environment(caplog):
     assert "cache_ram=24576 (from environment)" in "\n".join(_line(caplog, logging.INFO))
 
 
+@pytest.mark.parametrize("configured, shown", [(0, "0 (off)"), (8192, "8192")])
+def test_a_configured_cache_size_wins_over_the_environment_zero_included(caplog, configured, shown):
+    """The command line gets `--cache-ram` for any configured value, 0 included; on
+    2026-11-17 the line printed the environment's 24576 for a configured 0."""
+    with caplog.at_level(logging.INFO):
+        _sup(cache_ram_mib=configured).log_start(None, {"LLAMA_ARG_CACHE_RAM": "24576"})
+
+    line = "\n".join(_line(caplog, logging.INFO))
+    assert f"cache_ram={shown}," in line
+    assert "from environment" not in line
+
+
 # --- which executable wrote the line ----------------------------------------
 
 

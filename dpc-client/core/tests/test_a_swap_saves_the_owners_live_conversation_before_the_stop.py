@@ -368,6 +368,26 @@ async def test_a_stop_saves_when_the_restore_beats_the_cold_read_though_save_plu
 
 
 @pytest.mark.asyncio
+async def test_a_stop_saves_though_its_restore_is_slower_than_the_cold_read(tmp_path, caplog):
+    """Amendment of 2026-11-17: the comparison is logged and no longer decides the save."""
+    holder, _new, fake, folder = await saving_pair(tmp_path)
+    # 1500 tokens: save ~4.7 s inside the bound, restore ~5.9 s, cold read 1 s.
+    _measured(folder, 0.1e9, 0.08e9)
+    note_call()
+
+    async def cold(tokens):
+        return 1500.0, 3
+
+    holder._kv_cold_rate = cold
+    with caplog.at_level(logging.INFO, logger=base_mod.logger.name):
+        outcome = await stop_by_hand(holder)
+
+    assert outcome["outcome"] == kv_snapshots.SAVED and fake.events[:1] == ["save"]
+    line, = [r.getMessage() for r in caplog.records if "KV snapshot decision" in r.getMessage()]
+    assert "saving (restore ~5.9 s against a cold read ~1.0 s)" in line
+
+
+@pytest.mark.asyncio
 async def test_a_save_over_its_bound_is_still_skipped_though_its_restore_pays(tmp_path):
     holder, _new, fake, folder = await saving_pair(tmp_path)
     # The restore (~47 s) beats the cold read (50 s), but the save alone takes ~94 s of a 60 s ceiling.

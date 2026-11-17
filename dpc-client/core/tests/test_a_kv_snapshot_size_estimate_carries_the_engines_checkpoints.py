@@ -145,8 +145,9 @@ def test_worth_saving_counts_the_checkpoints_in_the_restore():
     plain = (0.47e9 + 18e3 * tokens) / 50e6
     assert kv.worth_saving(tokens, rates, sizes, cold) == (
         True, f"restore ~{plain:.1f} s against a cold read ~{tokens / cold:.1f} s")
+    # Slower than the cold read with the checkpoints, and saved all the same since 2026-11-17.
     ok, words = kv.worth_saving(tokens, rates, {**sizes, "checkpoint_bytes": float(LIVE_CK_BYTES)}, cold)
-    assert not ok and f"restore ~{plain + LIVE_CK_BYTES / 50e6:.1f} s" in words
+    assert ok and f"restore ~{plain + LIVE_CK_BYTES / 50e6:.1f} s" in words
 
 
 # ---- through the supervisor's save

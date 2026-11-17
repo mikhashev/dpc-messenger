@@ -51,11 +51,12 @@ def test_an_index_already_holding_a_cached_sample_is_read_at_the_cap(tmp_path):
     assert kv.read_index(folder)["rates"]["read_bytes_per_s"] == pytest.approx(CACHED)
 
 
-def test_a_capped_read_never_calls_a_short_conversation_worth_a_restore(tmp_path):
+def test_a_capped_read_shows_a_short_conversations_restore_at_the_cap(tmp_path):
     # At 2.3 GB/s 3K tokens would restore in ~0.12 s against a 0.8 s cold read; at the cap ~1.3 s.
+    # Since 2026-11-17 the comparison no longer decides the save, so it is saved with these words.
     folder = _folder(tmp_path, {"write_bytes_per_s": WRITE, "read_bytes_per_s": CACHED})
     ok, words = kv.worth_saving(3_000, kv.folder_rates(folder), STRATA, COLD)
-    assert not ok and words.startswith("below the size threshold: restore ~1.3 s")
+    assert ok and words == "restore ~1.3 s against a cold read ~0.8 s"
 
 
 def test_a_cached_sample_is_recorded_at_the_cap_with_one_line(tmp_path, caplog):
