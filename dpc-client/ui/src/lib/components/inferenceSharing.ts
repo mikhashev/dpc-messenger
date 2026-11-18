@@ -1401,6 +1401,7 @@ const PROVIDER_TYPE_LABELS: Record<string, string> = {
   ollama: 'Ollama',
   llamacpp_server: 'llama.cpp',
   local_whisper: 'Whisper',
+  remote_peer: 'Remote Peer',
 };
 
 export function providerTypeLabel(type: string | null | undefined): string {

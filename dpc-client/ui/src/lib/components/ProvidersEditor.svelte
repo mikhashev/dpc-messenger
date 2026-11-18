@@ -5,7 +5,11 @@
   import { createEventDispatcher, onDestroy } from 'svelte';
   import { nodeStatus, sendCommand, peerProviders, providerAccounts, getProviderBalances, modelDownloadCompleted, agentsList } from '$lib/coreService';
   import { get } from 'svelte/store';
-  import { deleteProviderPrompt } from './agentComputeHost';
+  import { agentHostDisplay, deleteProviderPrompt, NOT_AVAILABLE_NOW } from './agentComputeHost';
+  import {
+    peerChoices, peerModelChoices, remotePeerFields, remotePeerModelState,
+    REMOTE_PEER_TYPE_LABEL, type PeerModelChoice,
+  } from '$lib/utils/remotePeerProvider';
   import { voiceMemoryNote } from '$lib/utils/voiceMemoryExtra';
   import {
     blockedModelLine, formatQuotaLine, formatQuotaLineTitle, quotaHasWarning,
@@ -90,7 +94,7 @@
     writeStoredExpanded();
   }
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'deepseek' | 'neuraldeep' | 'llamacpp_server' | 'strata' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'gigachat';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'deepseek' | 'neuraldeep' | 'llamacpp_server' | 'strata' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'gigachat' | 'remote_peer';
 
   type Provider = {
     alias: string;
@@ -1744,6 +1748,14 @@
       provider.scope = 'GIGACHAT_API_PERS';
       provider.verify_ssl = true;
       provider.context_window = 128000;
+    } else if (newProvider.type === 'remote_peer') {
+      // Both come from the two pickers: peer_id from the connected peers, `provider`
+      // and `model` from the row the peer offered. No timeout: the provider's own
+      // default (1200 s) is the host's budget plus overhead.
+      provider.peer_id = newProvider.peer_id ?? '';
+      provider.provider = newProvider.provider || undefined;
+      if (newProvider.model) provider.model = newProvider.model;
+      else delete provider.model;
     }
 
     // Carry over user-entered optional settings (override type defaults where set)
@@ -1880,9 +1892,154 @@
     if (!peerId) return false;
     return loading === peerId;
   }
+
+  // The remote_peer form: what a peer offers, asked once per pick and again on the
+  // button. Keyed by peer id; the rows themselves live in the shared peerProviders
+  // store, so the dpc_agent block above and this one read one list.
+  let remotePeerFetches: Record<string, { loading: boolean; error: string }> = {};
+
+  async function loadRemotePeerModels(peerId: string) {
+    if (!peerId) return;
+    remotePeerFetches[peerId] = { loading: true, error: '' };
+    try {
+      const result = await sendCommand('query_remote_providers', { peer_id: peerId });
+      if (result === false) {
+        remotePeerFetches[peerId] = { loading: false, error: 'Backend not connected. Please check the service is running.' };
+      } else if (result && result.status === 'success') {
+        // The answer carries the rows even when it came from the cache, which sends
+        // no peer_providers_updated event; the store is written here as well.
+        if (Array.isArray(result.providers)) {
+          peerProviders.update((map) => new Map(map).set(peerId, result.providers));
+        }
+        remotePeerFetches[peerId] = { loading: false, error: '' };
+      } else {
+        remotePeerFetches[peerId] = { loading: false, error: result?.message || 'Failed to fetch providers' };
+      }
+    } catch (error) {
+      remotePeerFetches[peerId] = { loading: false, error: `Error: ${error}` };
+    }
+  }
+
+  // Picking a peer in the Add form: its models are not the previous peer's, so the
+  // model and the alias suggestion start again.
+  function pickNewRemotePeer(peerId: string) {
+    newProvider.peer_id = peerId;
+    newProvider.provider = undefined;
+    newProvider.model = '';
+    newProvider = newProvider;
+    if (peerId) loadRemotePeerModels(peerId);
+  }
+
+  function pickNewRemoteModel(choice: PeerModelChoice | null) {
+    if (!choice) {
+      newProvider.provider = undefined;
+      newProvider.model = '';
+    } else {
+      const f = remotePeerFields(newProvider.peer_id ?? '', choice);
+      newProvider.provider = f.provider;
+      newProvider.model = f.model ?? '';
+    }
+    newProvider = newProvider;
+  }
+
+  function pickEditedRemotePeer(i: number, peerId: string) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i];
+    p.peer_id = peerId;
+    p.provider = undefined;
+    p.model = undefined;
+    editedConfig = editedConfig;
+    if (peerId) loadRemotePeerModels(peerId);
+  }
+
+  function pickEditedRemoteModel(i: number, choice: PeerModelChoice | null) {
+    if (!editedConfig) return;
+    const p = editedConfig.providers[i];
+    if (!choice) {
+      p.provider = undefined;
+      p.model = undefined;
+    } else {
+      const f = remotePeerFields(p.peer_id ?? '', choice);
+      p.provider = f.provider;
+      p.model = f.model;
+    }
+    editedConfig = editedConfig;
+  }
+
+  // An alias opened for editing asks its peer once, like the NeuralDeep list does.
+  $: if (open && editMode && editedConfig) {
+    editedConfig.providers.forEach((p, i) => {
+      const key = `edit-peer-${i}`;
+      if (p.type === 'remote_peer' && p.peer_id && !autoLoadedModelLists.has(key)) {
+        autoLoadedModelLists.add(key);
+        loadRemotePeerModels(p.peer_id);
+      }
+    });
+  }
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
+
+<!-- The two pickers of a remote_peer alias: a peer from the connected ones, then a
+     model from what that peer offers. The same markup serves the Add form and an
+     alias being edited; the callers say where a pick is written. -->
+{#snippet remotePeerPickers(
+  idPrefix: string,
+  peerId: string,
+  providerAlias: string,
+  onPeer: (id: string) => void,
+  onModel: (choice: PeerModelChoice | null) => void,
+)}
+  {@const peers = peerChoices($nodeStatus?.peer_info, peerId)}
+  {@const choices = peerModelChoices($peerProviders.get(peerId))}
+  {@const fetchState = remotePeerFetches[peerId]}
+  {@const picker = remotePeerModelState(peers, peerId, fetchState, choices)}
+  <div class="form-group">
+    <label for="{idPrefix}-peer">Peer</label>
+    <select
+      id="{idPrefix}-peer"
+      value={peerId}
+      on:change={(e) => onPeer(e.currentTarget.value)}
+      disabled={peers.length === 0}
+    >
+      <option value="">{peers.length ? 'Pick a connected peer' : 'No peer connected'}</option>
+      {#each peers as peer}
+        <option value={peer.node_id}>{peer.label}</option>
+      {/each}
+    </select>
+  </div>
+  <div class="form-group">
+    <label for="{idPrefix}-model">Model</label>
+    <div class="input-with-button model-picker">
+      <select
+        id="{idPrefix}-model"
+        value={providerAlias}
+        on:change={(e) => onModel(choices.find((c) => c.alias === e.currentTarget.value) ?? null)}
+        disabled={!choices.length}
+      >
+        <option value="">{picker.kind === 'loading' ? 'Loading…' : choices.length ? 'Pick a model the peer offers' : 'Nothing to pick'}</option>
+        {#if providerAlias && !choices.some((c) => c.alias === providerAlias)}
+          <option value={providerAlias}>{providerAlias} ({NOT_AVAILABLE_NOW})</option>
+        {/if}
+        {#each choices as c}
+          <option value={c.alias}>{c.label}</option>
+        {/each}
+      </select>
+      <button
+        type="button"
+        class="btn-fetch"
+        on:click={() => loadRemotePeerModels(peerId)}
+        disabled={!peerId || fetchState?.loading || picker.kind === 'peer-offline'}
+        title="Ask the peer what it offers again"
+      >{fetchState?.loading ? '⏳' : 'Refresh'}</button>
+    </div>
+    {#if picker.text}
+      <p class="help-text" class:warn={picker.kind !== 'loading' && picker.kind !== 'no-peer-picked'}>{picker.text}</p>
+    {:else}
+      <p class="help-text">What this peer offers this node. The alias on the peer is saved as the provider, its model as the model.</p>
+    {/if}
+  </div>
+{/snippet}
 
 <!-- The read-only state of one strata alias (local_engine_status). -->
 {#snippet strataStatus(alias: string)}
@@ -2450,6 +2607,7 @@
                         <option value="strata">Strata (local, DPC-supervised)</option>
                         <option value="local_whisper">Local Whisper</option>
                         <option value="dpc_agent">DPC Agent</option>
+                        <option value="remote_peer">{REMOTE_PEER_TYPE_LABEL}</option>
                         <option value="gemini">Google Gemini</option>
                         {#if (editedConfig.providers[i].type as string) === 'github_models'}
                           <option value="github_models" disabled>GitHub Models (retired 2026-07-30; remove this alias)</option>
@@ -2458,7 +2616,15 @@
                       </select>
                     </div>
 
-                    {#if editedConfig.providers[i].type !== 'dpc_agent'}
+                    {#if editedConfig.providers[i].type === 'remote_peer'}
+                      {@render remotePeerPickers(
+                        `peer-edit-${i}`,
+                        editedConfig.providers[i].peer_id ?? '',
+                        editedConfig.providers[i].provider ?? '',
+                        (id) => pickEditedRemotePeer(i, id),
+                        (choice) => pickEditedRemoteModel(i, choice),
+                      )}
+                    {:else if editedConfig.providers[i].type !== 'dpc_agent'}
                       <div class="form-group">
                         <label for="model-{i}">Model</label>
                         <input
@@ -4153,7 +4319,8 @@
                       {/if}
                     </div>
 
-                    <!-- Temperature Setting -->
+                    <!-- Temperature Setting: a remote_peer alias runs at the host's settings -->
+                    {#if editedConfig.providers[i].type !== 'remote_peer'}
                     <div class="form-group">
                       <label for="temperature-{i}">Temperature (optional)</label>
                       <select
@@ -4195,6 +4362,7 @@
                         class="custom-context-input"
                       />
                     </div>
+                    {/if}
 
                     {#if editedConfig.providers[i].type === 'ollama'}
                       <div class="form-group">
@@ -4348,6 +4516,13 @@
                       {@render strataStatus(provider.alias)}
                     {/if}
 
+                    {#if provider.type === 'remote_peer'}
+                      <p><strong>Peer:</strong> {agentHostDisplay(provider.peer_id, $nodeStatus?.peer_info).label}</p>
+                      {#if provider.provider}
+                        <p><strong>Provider on the peer:</strong> {provider.provider}</p>
+                      {/if}
+                    {/if}
+
                     {#if provider.type === 'dpc_agent' && provider.peer_id}
                       <p><strong>Remote Peer ID:</strong> {provider.peer_id}</p>
                       {#if provider.remote_model}
@@ -4420,6 +4595,7 @@
                 <option value="strata">Strata (local, DPC-supervised)</option>
                 <option value="local_whisper">Local Whisper</option>
                 <option value="dpc_agent">DPC Agent</option>
+                <option value="remote_peer">{REMOTE_PEER_TYPE_LABEL}</option>
                 <option value="gemini">Google Gemini</option>
                 <option value="gigachat">GigaChat (Sberbank)</option>
               </select>
@@ -4432,7 +4608,15 @@
               {/if}
             {/if}
 
-            {#if newProvider.type !== 'dpc_agent'}
+            {#if newProvider.type === 'remote_peer'}
+              {@render remotePeerPickers(
+                'new-remote',
+                newProvider.peer_id ?? '',
+                newProvider.provider ?? '',
+                pickNewRemotePeer,
+                pickNewRemoteModel,
+              )}
+            {:else if newProvider.type !== 'dpc_agent'}
               <div class="form-group">
                 <label for="new-model">{newProvider.type === 'llamacpp_server' ? 'GGUF path' : 'Model'}</label>
                 <input
@@ -4662,7 +4846,7 @@
               </div>
             {/if}
 
-            {#if newProvider.type !== 'dpc_agent' && newProvider.type !== 'local_whisper'}
+            {#if newProvider.type !== 'dpc_agent' && newProvider.type !== 'local_whisper' && newProvider.type !== 'remote_peer'}
               <div class="form-group">
                 <label for="new-temperature">Temperature (optional)</label>
                 <!-- The placeholder used to read 0.7 for every provider type, and an
@@ -4697,6 +4881,10 @@
                 <p>API key env var: GIGACHAT_CREDENTIALS (from developers.sber.ru/studio)</p>
                 <p>Scope defaults to GIGACHAT_API_PERS (personal/free tier)</p>
                 <p>Install Russian CA cert before use (see edit mode for command)</p>
+              {:else if newProvider.type === 'remote_peer'}
+                <p>Runs on another node's model, at that node's settings.</p>
+                <p>The peer's firewall decides whether it serves this node (Inference Sharing on its side).</p>
+                <p>Not offered onward: a Remote Peer alias is never shared with other peers.</p>
               {:else if newProvider.type === 'dpc_agent'}
                 <p>Embedded autonomous AI agent for task automation</p>
                 <p>Uses your configured default AI provider</p>

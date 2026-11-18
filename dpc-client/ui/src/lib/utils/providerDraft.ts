@@ -22,6 +22,9 @@ export interface ProviderDraft {
   api_key?: string;
   api_key_env?: string;
   resident_budget_gib?: number;
+  /** `remote_peer` only: the peer picked from the connected ones, and the alias on it. */
+  peer_id?: string;
+  provider?: string;
 }
 
 const isBlank = (v: string | undefined | null): boolean => (v ?? '').trim() === '';
@@ -71,7 +74,15 @@ export function validateProviderDraftForAdd(
   if (isBlank(alias)) {
     return { valid: false, reason: 'Give the new provider an alias before adding it.' };
   }
-  if (draft.type !== 'dpc_agent' && isBlank(draft.model)) {
+  if (draft.type === 'remote_peer') {
+    // The model is the peer's row, picked after the peer; a node id is never typed.
+    if (isBlank(draft.peer_id)) {
+      return { valid: false, reason: 'Pick the peer whose model this provider uses before adding it.' };
+    }
+    if (isBlank(draft.provider) && isBlank(draft.model)) {
+      return { valid: false, reason: 'Pick one of the models the peer offers before adding it.' };
+    }
+  } else if (draft.type !== 'dpc_agent' && isBlank(draft.model)) {
     return { valid: false, reason: 'Give the new provider a model before adding it.' };
   }
   if (looksLikeKey(draft.api_key_env)) {
