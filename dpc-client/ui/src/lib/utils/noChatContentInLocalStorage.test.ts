@@ -10,6 +10,7 @@ const UI_PREFERENCE_KEYS = new Set([
     'enableMarkdown',           // +page: markdown rendering toggle
     'dpc-cmd-chat-map',         // +page: which chat an in-flight command answers
     'dpc.activeTransfersPanel', // FileTransferUI: panel collapsed / position
+    'dpc.providersEditor.expanded', // ProvidersEditor: which provider cards are unfolded (aliases)
     'notificationPermission',   // notificationService
     'notificationPreference',
     'permissionRequestedAt',
@@ -27,6 +28,7 @@ const UI_PREFERENCE_VALUES: Record<string, string[]> = {
     enableMarkdown: ['enableMarkdown.toString()'],
     'dpc-cmd-chat-map': ['JSON.stringify([...commandToChatMap.entries()])'],
     'dpc.activeTransfersPanel': ['JSON.stringify({collapsed:panelCollapsed,pos:panelPos})'],
+    'dpc.providersEditor.expanded': ['JSON.stringify([...storedExpanded])'],
     notificationPermission: ['permission'],
     notificationPreference: ["permissionGranted?'enabled':'disabled'"],
     permissionRequestedAt: ['newDate().toISOString()'],
