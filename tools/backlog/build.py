@@ -1199,7 +1199,12 @@ def _commit(src_text, arc_text, announcement, recovery=""):
     # newest copy, no new copy is made and the newest one is the state before this write.
     _before = _newest_snapshot(SRC.stem) if recovery else None
     _atomic_write(SRC, src_text)
-    _atomic_write(ARCHIVE, arc_text)
+    # Only a verb that changed the archive writes it (`close`, `rename`). Rewriting it
+    # unchanged was a second chance to fail after the board was already on disk:
+    # 2026-11-18 an `add` died on the replace of backlog_closed.md (WinError 5) with
+    # backlog.md written and the roadmap never rendered.
+    if arc_text != _ARC_TEXT:
+        _atomic_write(ARCHIVE, arc_text)
     # And after it. The copy above preserves the state this verb destroyed; this one
     # preserves the state the *next* accident destroys, so the newest copy is never older
     # than the last successful edit. The loss of 2026-09-09 was recovered from a copy five

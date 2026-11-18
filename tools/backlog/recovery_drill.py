@@ -196,6 +196,27 @@ def a_verb_works_against_a_protected_board(work):
     # stayed green. So the restoration gets a case where nothing can follow it — a `close`
     # whose second write dies, leaving the first write's own `finally` as the only thing
     # that could have put the bit back.
+    # 2026-11-18: an `add` died on `os.replace` of backlog_closed.md (WinError 5), after
+    # backlog.md was already written. An `add` does not change the archive, so it must not
+    # write it: whatever blocks the archive's replace (another process holding the file
+    # open on Windows, a read-only bit that cannot be cleared) is then not this verb's
+    # business. The archive's tmp path is blocked, as in the case below.
+    d = board_beside(work, "archive-blocked")
+    run(d, "--check")
+    (d / ("backlog_closed.md" + BLOCKED_SUFFIX)).mkdir()
+    arc_before = (d / "backlog_closed.md").read_bytes()
+    code, out = run(d, "add", "DRILL-ENTRY-ADDED-OVER-A-BLOCKED-ARCHIVE",
+                    "--desc=an add must not write an archive it does not change",
+                    "--priority=LOW", "--axis=honesty", "--origin=CC: recovery drill",
+                    "--observed=archive blocked", "--by=CC",
+                    env={"DPC_BACKLOG_TMP_SUFFIX": BLOCKED_SUFFIX})
+    check("an add whose archive cannot be replaced still succeeds, writing the board only",
+          code == 0 and "DRILL-ENTRY-ADDED-OVER-A-BLOCKED-ARCHIVE"
+          in (d / "backlog.md").read_text(encoding="utf-8"), f"exit {code}\n{out[-400:]}")
+    check("and leaves the archive byte-identical and read-only",
+          (d / "backlog_closed.md").read_bytes() == arc_before
+          and not writable(d / "backlog_closed.md") and not writable(d / "backlog.md"))
+
     d = board_beside(work, "half-written")
     run(d, "--check")
     board, arch = d / "backlog.md", d / "backlog_closed.md"
