@@ -153,13 +153,22 @@ def extraction_target(
     `host`); a local engine with no URL is at its default endpoint, this
     machine, while a vendor SDK's default URL is no place this node can name.
     """
-    from .dpc_agent.provider_facts import provider_facts_for, provider_kind, url_host_scope
+    from .dpc_agent.provider_facts import (
+        local_peer_route, provider_facts_for, provider_kind, url_host_scope)
 
     url = None  # a peer's URL is the peer's business
-    if compute_host:
-        facts = provider_facts_for(SimpleNamespace(providers=providers), alias,
-                                   compute_host, peer_metadata)
+    via_alias = None
+    # A local alias that is itself a route to another node (`remote_peer`, a
+    # `dpc_agent` with a peer) is a peer target: the conversation leaves for that
+    # node, so the owner is asked about the peer, its alias and its kind.
+    route = None if compute_host else local_peer_route(providers.get(alias), alias)
+    if compute_host or route:
+        peer_alias, peer = (alias, compute_host) if compute_host else route
+        facts = provider_facts_for(SimpleNamespace(providers=providers), peer_alias,
+                                   peer, peer_metadata)
         ptype, kind, scope = None, facts["provider_kind"], None
+        if route:
+            via_alias, alias, compute_host = alias, peer_alias, peer
     else:
         config = getattr(providers.get(alias), "config", None) or {}
         ptype = config.get("type")
@@ -177,6 +186,9 @@ def extraction_target(
         "compute_host": compute_host or None,
         "url": url,
         "model": model,
+        # Where the call really goes: the local alias that routes to the peer.
+        # Not one of CONSENT_TARGET_FIELDS; the pin sends through it, as before.
+        "via_alias": via_alias,
     }
 
 

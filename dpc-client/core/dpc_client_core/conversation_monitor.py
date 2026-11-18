@@ -944,6 +944,8 @@ class ConversationMonitor:
         """
         pinned = getattr(self, "extraction_target", None)
         if pinned:
+            if pinned.get("via_alias"):  # a peer route held by a local alias: the call stays on that alias
+                return (None, pinned.get("model"), pinned["via_alias"])
             return (pinned.get("compute_host"), pinned.get("model"), pinned.get("provider_alias"))
         chosen = knowledge_routing.chosen_provider(
             getattr(self.llm_manager, "knowledge_provider", None),
@@ -1072,11 +1074,12 @@ Conversation:
         # The prompt carries the conversation, so it goes to the extraction's own
         # target, never to the global default; a peer target is not asked here.
         pinned = getattr(self, "extraction_target", None)
-        if pinned and pinned.get("compute_host"):
+        if pinned and pinned.get("compute_host") and not pinned.get("via_alias"):
             logger.info("Monitor %s: extraction runs on a peer — self-reflection not confirmed, "
                         "classified general", self.conversation_id)
             return False
-        query_kwargs = {"provider_alias": pinned.get("provider_alias")} if pinned else {}
+        query_kwargs = ({"provider_alias": pinned.get("via_alias") or pinned.get("provider_alias")}
+                        if pinned else {})
         try:
             # A step of a person's extraction, with no hold: unmarked it
             # could stop a holder and drop parked conversations for a 10 s classification. With

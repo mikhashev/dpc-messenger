@@ -114,6 +114,23 @@ def _peer_facts(alias: Optional[str], node_id: str, peer_metadata) -> Dict[str, 
     }
 
 
+def local_peer_route(provider: Any, alias: Optional[str], ptype: Optional[str] = None):
+    """`(the peer's alias or None, the peer's node id)` of a local alias that is a peer route, else None.
+
+    A local `remote_peer` alias (its `provider` key names the alias on the peer) and a
+    `dpc_agent` provider with a `peer_id` (its `remote_provider`) are routes to another
+    node; every other alias runs here. `ptype` is the caller's own word for the type
+    when the provider's config carries none (a row of the providers list).
+    """
+    config = getattr(provider, "config", None) or {}
+    ptype = config.get("type") or ptype
+    if ptype == "remote_peer" and config.get("peer_id"):
+        return (config.get("provider") or alias, config["peer_id"])
+    if ptype == "dpc_agent" and getattr(provider, "peer_id", None):
+        return (getattr(provider, "remote_provider", None), provider.peer_id)
+    return None
+
+
 def _resolve_local_alias(llm_manager: Any, provider_alias: Optional[str]) -> Optional[str]:
     providers = getattr(llm_manager, "providers", None) or {}
     for candidate in (provider_alias,
@@ -211,10 +228,9 @@ def provider_row_facts(
         provider = (getattr(llm_manager, "providers", None) or {}).get(alias)
         config = getattr(provider, "config", None) or {}
         ptype = config.get("type") or row.get("type")
-        if ptype == "remote_peer" and config.get("peer_id"):
-            facts = _peer_facts(config.get("provider") or alias, config["peer_id"], peer_metadata)
-        elif ptype == "dpc_agent" and getattr(provider, "peer_id", None):
-            facts = _peer_facts(getattr(provider, "remote_provider", None), provider.peer_id, peer_metadata)
+        route = local_peer_route(provider, alias, row.get("type"))
+        if route is not None:
+            facts = _peer_facts(route[0], route[1], peer_metadata)
         else:
             facts = {"route": "local", "provider_kind": provider_kind(ptype, config.get("base_url"))}
             scope = url_host_scope(config.get("base_url") or config.get("host"), own_addresses)
