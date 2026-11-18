@@ -7,7 +7,7 @@
   import { get } from 'svelte/store';
   import { agentHostDisplay, deleteProviderPrompt, NOT_AVAILABLE_NOW } from './agentComputeHost';
   import {
-    peerChoices, peerModelChoices, remotePeerFields, remotePeerModelState,
+    peerChoices, peerDisplayName, peerModelChoices, remotePeerFields, remotePeerModelState,
     REMOTE_PEER_TYPE_LABEL, type PeerModelChoice,
   } from '$lib/utils/remotePeerProvider';
   import { voiceMemoryNote } from '$lib/utils/voiceMemoryExtra';
@@ -1158,7 +1158,10 @@
   // assignment made by a later one in the same tick, so a model picked from a
   // list (one change, no further keystroke) left the check on the empty alias.
   $: if (!aliasTouched) {
-    const suggested = suggestProviderAlias(newProvider.model, newProvider.type, existingProviderAliases);
+    const suggested = suggestProviderAlias(
+      newProvider.model, newProvider.type, existingProviderAliases,
+      newProvider.type === 'remote_peer' ? peerDisplayName($nodeStatus?.peer_info, newProvider.peer_id) : undefined,
+    );
     if (newProvider.alias !== suggested) newProvider.alias = suggested;
   }
   $: addProviderValidation = validateProviderDraftForAdd(newProvider, existingProviderAliases);

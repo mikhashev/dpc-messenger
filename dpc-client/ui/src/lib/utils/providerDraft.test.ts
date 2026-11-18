@@ -137,3 +137,13 @@ describe('a strata draft (ADR-044)', () => {
     expect(validateProviderDraftForAdd({ alias: 'flash', type: 'strata', model: 'flash', resident_budget_gib: 24 }, []).valid).toBe(true);
   });
 });
+
+describe('suggestProviderAlias label override', () => {
+  it('replaces the type label and keeps the collision suffix', () => {
+    expect(suggestProviderAlias('m', 'remote_peer', [], 'Alice')).toBe('m Alice');
+    expect(suggestProviderAlias('m', 'remote_peer', ['m Alice'], 'Alice')).toBe('m Alice 2');
+  });
+  it('a blank override is ignored', () => {
+    expect(suggestProviderAlias('m', 'ollama', [], '  ')).toBe('m Ollama');
+  });
+});

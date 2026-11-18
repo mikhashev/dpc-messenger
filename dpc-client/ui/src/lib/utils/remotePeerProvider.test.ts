@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  peerChoices, peerModelChoices, remotePeerFields, remotePeerModelState,
+  peerChoices, peerDisplayName, peerModelChoices, remotePeerFields, remotePeerModelState,
   NO_PEERS_TEXT, PEER_OFFLINE_TEXT, PEER_OFFERS_NOTHING_TEXT,
   REMOTE_PEER_TYPE, REMOTE_PEER_TYPE_LABEL,
 } from './remotePeerProvider';
@@ -162,9 +162,25 @@ describe('the draft rules for a remote_peer alias', () => {
     expect(v.reason).toContain('already exists');
   });
 
-  it('the alias follows the <model> <provider> convention, and a taken one gets a number', () => {
+  it('the alias is <model> <peer name>, and a taken one gets a number', () => {
+    const peers = [{ node_id: ALICE, name: 'Alice', is_connected: true }];
+    const label = peerDisplayName(peers, ALICE);
+    expect(label).toBe('Alice');
+    expect(suggestProviderAlias('qwen3.8-27b', 'remote_peer', [], label)).toBe('qwen3.8-27b Alice');
+    expect(suggestProviderAlias('qwen3.8-27b', 'remote_peer', ['qwen3.8-27b Alice'], label)).toBe('qwen3.8-27b Alice 2');
+  });
+
+  it('a peer without a name falls back to the first 20 characters of its id', () => {
+    const peers = [{ node_id: BOB, is_connected: true }];
+    expect(peerDisplayName(peers, BOB)).toBe(BOB.slice(0, 20));
+    expect(peerDisplayName([], BOB)).toBe(BOB.slice(0, 20));
+    expect(peerDisplayName(peers, '')).toBe('');
+    expect(suggestProviderAlias('m', 'remote_peer', [], peerDisplayName(peers, BOB))).toBe(`m ${BOB.slice(0, 20)}`);
+  });
+
+  it('without an override the type label is still used', () => {
     expect(suggestProviderAlias('qwen3.8-27b', 'remote_peer', [])).toBe('qwen3.8-27b Remote Peer');
-    expect(suggestProviderAlias('qwen3.8-27b', 'remote_peer', ['qwen3.8-27b Remote Peer'])).toBe('qwen3.8-27b Remote Peer 2');
+    expect(suggestProviderAlias('m', 'ollama', [], '')).toBe('m Ollama');
   });
 });
 

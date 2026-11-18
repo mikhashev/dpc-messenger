@@ -110,12 +110,14 @@ function ggufBaseName(path: string): string {
  * The alias suggested while the user has not typed one by hand:
  * `<model> <provider label>`, e.g. `qwen3.8-27b NeuralDeep`. Empty for no
  * type, `dpc_agent` (no model field), or a blank model. A taken suggestion
- * gets " 2", " 3", … appended.
+ * gets " 2", " 3", … appended. `labelOverride` replaces the type label
+ * (a remote_peer alias names the peer it was taken from).
  */
 export function suggestProviderAlias(
   model: string | undefined | null,
   type: string | undefined | null,
   existingAliases: readonly string[],
+  labelOverride?: string | null,
 ): string {
   if (!type || type === 'dpc_agent') return '';
   let modelPart = (model ?? '').trim();
@@ -125,7 +127,7 @@ export function suggestProviderAlias(
     if (isBlank(modelPart)) return '';
   }
 
-  const base = `${modelPart} ${providerTypeLabel(type)}`;
+  const base = `${modelPart} ${(labelOverride ?? '').trim() || providerTypeLabel(type)}`;
   const taken = new Set(existingAliases.map(normalizeAlias));
   if (!taken.has(normalizeAlias(base))) return base;
 

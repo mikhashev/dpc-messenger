@@ -51,6 +51,21 @@ export function peerChoices(
   return out;
 }
 
+/**
+ * The peer's name alone (no id), for the suggested alias `<model> <peer name>`:
+ * the name `peer_info` carries, else the first 20 characters of the node id
+ * (what the host pickers show without the dots). '' for no id.
+ */
+export function peerDisplayName(
+  peers: readonly HostPeer[] | null | undefined,
+  peerId: string | null | undefined,
+): string {
+  const id = (peerId ?? '').trim();
+  if (!id) return '';
+  const peer = (peers ?? []).find((p) => p.node_id === id);
+  return (peer?.display_name || peer?.name || '').trim() || id.slice(0, 20);
+}
+
 /** One option of the model picker: a row the peer offers. */
 export interface PeerModelChoice {
   /** The alias on the peer: what is saved as `provider`. */
