@@ -5,6 +5,7 @@ from dataclasses import asdict
 import hashlib
 import json
 import logging
+import math
 import re
 import uuid
 import websockets
@@ -426,6 +427,8 @@ _RECORDING_EXTENSIONS = {"mpeg": "mp3", "x-wav": "wav", "wave": "wav"}
 # The cap on a picked file when the rules name none: the default of
 # `file_transfer.max_size_mb`, the cap the P2P voice send applies (send_voice_message).
 AGENT_CHAT_FILE_DEFAULT_MAX_MB = 100
+# The fallback for `voice_messages.max_duration_seconds` when it is not a finite positive number.
+AGENT_CHAT_VOICE_DEFAULT_MAX_SECONDS = 300.0
 # How many bytes of a recording are read to tell its container (`sniff_audio_container`).
 _SNIFF_BYTES = 16
 
@@ -10053,11 +10056,18 @@ class CoreService(MusicCommandsMixin):
         voice_mime_types = [m.strip().lower() for m in self.settings.get(
             "voice_messages", "mime_types",
             "audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav").split(",") if m.strip()]
-        max_voice_seconds = float(self.settings.get("voice_messages", "max_duration_seconds", "300"))
+        try:
+            max_voice_seconds = float(self.settings.get("voice_messages", "max_duration_seconds", "300"))
+        except (TypeError, ValueError):
+            max_voice_seconds = AGENT_CHAT_VOICE_DEFAULT_MAX_SECONDS
+        if not math.isfinite(max_voice_seconds) or max_voice_seconds <= 0:
+            max_voice_seconds = AGENT_CHAT_VOICE_DEFAULT_MAX_SECONDS  # "nan"/"inf" would mean "no limit"
         max_file_mb = self.firewall.rules.get("file_transfer", {}).get(
             "max_size_mb", AGENT_CHAT_FILE_DEFAULT_MAX_MB)
-        if isinstance(max_file_mb, bool) or not isinstance(max_file_mb, (int, float)) or max_file_mb <= 0:
-            max_file_mb = AGENT_CHAT_FILE_DEFAULT_MAX_MB  # the editor refuses such a value; never "no cap"
+        if (isinstance(max_file_mb, bool) or not isinstance(max_file_mb, (int, float))
+                or not math.isfinite(max_file_mb) or max_file_mb <= 0):
+            # the editor refuses such a value; json.loads accepts NaN/Infinity; never "no cap"
+            max_file_mb = AGENT_CHAT_FILE_DEFAULT_MAX_MB
         return await asyncio.to_thread(
             keep_agent_chat_attachment, files_dir, attachment,
             voice_mime_types=voice_mime_types, max_voice_seconds=max_voice_seconds,

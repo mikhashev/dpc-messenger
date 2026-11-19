@@ -603,7 +603,7 @@ async def test_a_picked_file_within_the_cap_is_kept(tmp_path, signing_identity, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cap", [0, -5, "big", True, None])
+@pytest.mark.parametrize("cap", [0, -5, "big", True, None, float("nan"), float("inf")])
 async def test_a_cap_that_is_not_a_positive_number_falls_back_to_the_default_not_to_none(
     tmp_path, signing_identity, monkeypatch, cap,
 ):
@@ -619,6 +619,26 @@ async def test_a_cap_that_is_not_a_positive_number_falls_back_to_the_default_not
     await _send(w, attachment={"kind": "file", "file_path": str(_picked(w))})
 
     assert seen["max_file_mb"] == service_mod.AGENT_CHAT_FILE_DEFAULT_MAX_MB
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", ["nan", "inf", "-inf", "0", "-3", "long"])
+async def test_a_length_limit_that_is_not_a_finite_positive_number_falls_back_to_the_default(
+    tmp_path, signing_identity, monkeypatch, limit,
+):
+    # "nan" would make every `seconds > limit` false: no limit at all (Zcode, review of 3f2c6600).
+    w = _world(tmp_path, monkeypatch)
+    w.settings[("voice_messages", "max_duration_seconds")] = limit
+    seen = {}
+
+    def keeper(files_dir, attachment, **kwargs):
+        seen.update(kwargs)
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(service_mod, "keep_agent_chat_attachment", keeper)
+    await _send(w, attachment=_voice(_recording(w)))
+
+    assert seen["max_voice_seconds"] == service_mod.AGENT_CHAT_VOICE_DEFAULT_MAX_SECONDS
 
 
 @pytest.mark.asyncio
