@@ -32,11 +32,16 @@ export interface IncomingOffer {
     kind?: string;
     /** A group file's author as the offer claims it (unsigned); `node_id` is the hop. */
     sender_node_id?: string;
+    /** The file request of this node's user that the offer answers (FILE_REQUEST). */
+    request_id?: string;
 }
 
-/** An asked offer always opens the dialog; otherwise a group file only toasts. */
+/**
+ * An asked offer always opens the dialog; otherwise a group file only toasts, and
+ * so does a file this node's user requested ("Request file"): core accepted it.
+ */
 export function offerOpensDialog(offer: IncomingOffer): boolean {
-    return offer.awaiting_permission === true || !offer.group_id;
+    return offer.awaiting_permission === true || (!offer.group_id && !offer.request_id);
 }
 
 /** A node as the dialog names it: its name with a short id, or the short id alone. */

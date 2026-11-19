@@ -23,6 +23,7 @@ export type MessageAttachment = {
   mime_type?: string;
   transfer_id?: string;
   status?: string;
+  available?: boolean;         // false: the record names a file that is not on this node (synced from another)
   data_url?: string;           // Base64 data URL (used in ChatPanel image preview)
   duration_seconds?: number;   // An audio file's length when the record knows it; else the player measures it
   thumbnail?: string;          // Base64 thumbnail data URL

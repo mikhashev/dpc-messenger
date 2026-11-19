@@ -16,7 +16,10 @@
     groupMessageDeleted,
     aiResponseWithImage,
     coreMessages,
+    fileRequestStatus,
   } from '$lib/coreService';
+  import { patchAttachmentsById } from '$lib/utils/attachmentRequest';
+  import { get } from 'svelte/store';
   import { showNotificationIfBackground } from '$lib/notificationService';
 
   // ---------------------------------------------------------------------------
@@ -71,17 +74,43 @@
     });
   }
 
+  // A file event for a message already on screen completes that bubble (a file
+  // this node requested completes the record it was requested for). True when it
+  // did; the caller then appends nothing.
+  function completeBubbleInPlace(chatId: string, id: string | undefined, attachments: any[] | undefined): boolean {
+    const hist = get(chatHistories).get(chatId);
+    const next = hist ? patchAttachmentsById(hist, id, attachments) : null;
+    if (!next) return false;
+    chatHistories.update(h => {
+      const newMap = new Map(h);
+      newMap.set(chatId, next);
+      return newMap;
+    });
+    return true;
+  }
+
   // ---------------------------------------------------------------------------
   // Effects
   // ---------------------------------------------------------------------------
+
+  // "Request file": the requested file arrived; its record on screen gains the path.
+  $effect(() => {
+    const evt = $fileRequestStatus;
+    if (evt && evt.state === 'received' && evt.attachment) {
+      completeBubbleInPlace(evt.conversation_id, evt.message_id, [evt.attachment]);
+      fileRequestStatus.set(null);
+    }
+  });
 
   // P2P text/file message routing
   $effect(() => {
     if ($p2pMessages) {
       const msg = $p2pMessages;
       const messageId = msg.message_id || `${msg.sender_node_id}-${msg.text}`;
+      const completed = msg.sender_node_id !== "user" && msg.message_id
+        && completeBubbleInPlace(msg.sender_node_id, msg.message_id, msg.attachments);
 
-      if (!processedMessageIds.has(messageId)) {
+      if (!completed && !processedMessageIds.has(messageId)) {
         processedMessageIds.add(messageId);
 
         const wasNearBottom = isNearBottom(chatWindow);
@@ -205,8 +234,10 @@
     if ($groupFileReceived) {
       const msg = $groupFileReceived;
       const messageId = msg.message_id || `group-file-${msg.group_id}-${Date.now()}`;
+      const completed = !!msg.message_id
+        && completeBubbleInPlace(msg.group_id, msg.message_id, msg.attachments);
 
-      if (!processedMessageIds.has(messageId)) {
+      if (!completed && !processedMessageIds.has(messageId)) {
         processedMessageIds.add(messageId);
 
         const wasNearBottom = isNearBottom(chatWindow);

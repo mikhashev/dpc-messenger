@@ -2,6 +2,7 @@
 // File transfer stores and command functions.
 
 import { writable } from 'svelte/store';
+import type { AttachmentRequest } from '$lib/utils/attachmentRequest';
 import type {
     FileTransfer,
     FileTransferOfferEvent,
@@ -21,6 +22,12 @@ export const fileTransferCancelled = writable<FileTransferCancelledEvent | null>
 
 // Active transfers: transfer_id -> FileTransfer
 export const activeFileTransfers = writable<Map<string, FileTransfer>>(new Map());
+
+// Requests for files this node has a record of and not the bytes ("Request file"):
+// requestKey(conversation, message, filename) -> state, from `file_request_status`.
+export const attachmentRequests = writable<Map<string, AttachmentRequest>>(new Map());
+// The last `file_request_status` event, for the panel that completes the bubble.
+export const fileRequestStatus = writable<any | null>(null);
 
 // File preparation progress (hashing/chunking before send)
 export const filePreparationStarted = writable<FilePreparationStartedEvent | null>(null);

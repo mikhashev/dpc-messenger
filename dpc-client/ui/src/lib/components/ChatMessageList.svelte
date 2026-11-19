@@ -8,7 +8,10 @@
   import ThinkingBlock from './ThinkingBlock.svelte';
   import { showsThinkingBlock } from '$lib/utils/thinkingVisibility';
   import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
-  import { agentLiveTools, agentLiveAgentIds, blockedNodeIds } from '$lib/coreService';
+  import { agentLiveTools, agentLiveAgentIds, blockedNodeIds, attachmentRequests, activeFileTransfers, sendCommand } from '$lib/coreService';
+  import {
+    isMissingHere, showsRequestButton, requestKey, requestStatusText, requestFromAnswer,
+  } from '$lib/utils/attachmentRequest';
   import { foldBlockedRuns, isBlockedAuthor, blockedRunLabel } from '$lib/utils/blockedRuns';
   import { dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import type { Message, Mention } from '$lib/types.js';
@@ -28,6 +31,40 @@
     const failure = await revealInFolder(path, revealItemInDir);
     const { [path]: _cleared, ...rest } = revealErrors;
     revealErrors = failure ? { ...rest, [path]: failure } : rest;
+  }
+
+  // "Request file": an attachment whose file is not on this node (core marks it
+  // `available: false`) asks the peers online for it. A file that is here never
+  // shows the button or the label (Mike's call, 2026-11-19).
+  function requestOf(messageId: string | undefined, attachment: { filename?: string }) {
+    if (!messageId) return undefined;
+    return $attachmentRequests.get(requestKey(conversationId, messageId, attachment.filename ?? ''));
+  }
+
+  function requestPercent(messageId: string | undefined, attachment: { filename?: string }): number | undefined {
+    const transferId = requestOf(messageId, attachment)?.transferId;
+    const progress = transferId ? ($activeFileTransfers.get(transferId) as any)?.progress : undefined;
+    return typeof progress === 'number' ? progress : undefined;
+  }
+
+  async function requestFile(messageId: string | undefined, attachment: { filename?: string }) {
+    if (!messageId) return;
+    const key = requestKey(conversationId, messageId, attachment.filename ?? '');
+    const setState = (state: any) => attachmentRequests.update(map => new Map(map).set(key, state));
+    setState({ state: 'requesting' });
+    let answer: any;
+    try {
+      const sent = sendCommand('request_attachment', {
+        conversation_id: conversationId, message_id: messageId, filename: attachment.filename,
+      });
+      answer = typeof sent === 'boolean' ? { status: 'error', message: 'Not connected to the backend' } : await sent;
+    } catch (e) {
+      answer = { status: 'error', message: e instanceof Error ? e.message : String(e) };
+    }
+    const next = requestFromAnswer(answer);
+    // An event may already have moved the request on (receiving): keep that.
+    const now = $attachmentRequests.get(key);
+    if (next.state !== 'requesting' || !now || now.state === 'requesting') setState({ ...now, ...next });
   }
 
   // Whose agent ran these calls. A tool call carries its input, its full
@@ -322,6 +359,25 @@
 
 <svelte:window onkeydown={onWindowKey} />
 
+<!-- The row under an attachment whose file is not on this node: its state, and
+     "Request file" while no request is under way. Never drawn for a file that is here. -->
+{#snippet missingFileRow(messageId: string | undefined, attachment: any)}
+  {@const request = requestOf(messageId, attachment)}
+  <div class="file-missing-row">
+    <span class="file-missing-state" class:file-missing-failed={request && ['not_held', 'no_answer', 'no_peers', 'failed', 'error'].includes(request.state)}>
+      {requestStatusText(request, requestPercent(messageId, attachment))}
+    </span>
+    {#if showsRequestButton(attachment, request) && messageId}
+      <button
+        type="button"
+        class="file-reveal-btn"
+        title="Ask the members online to send this file"
+        onclick={() => requestFile(messageId, attachment)}
+      >Request file</button>
+    {/if}
+  </div>
+{/snippet}
+
 <div
   class="chat-window"
   bind:this={chatWindowElement}
@@ -419,13 +475,22 @@
         {#if msg.attachments && msg.attachments.length > 0}
           <div class="message-attachments">
             {#each msg.attachments as attachment}
-              {#if attachment.type === 'image'}
+              {#if attachment.type === 'image' && isMissingHere(attachment)}
+                <!-- An image whose file is not here: its thumbnail, if the record has one, and the request -->
+                <ImageMessage attachment={{ ...attachment, file_path: undefined }} {conversationId} />
+                {@render missingFileRow(msg.id, attachment)}
+              {:else if attachment.type === 'image'}
                 <!-- Image attachment (Phase 2.5: Screenshot + Vision) -->
                 <ImageMessage {attachment} {conversationId} />
               {:else if attachment.type === 'voice' && attachment.voice_metadata}
                 <!-- Voice attachment (v0.13.0: Voice Messages) -->
                 <div class="voice-attachment">
-                  {#if attachment.file_path}
+                  {#if isMissingHere(attachment)}
+                    <div class="voice-pending">
+                      <span>Voice message ({attachment.voice_metadata.duration_seconds}s)</span>
+                    </div>
+                    {@render missingFileRow(msg.id, attachment)}
+                  {:else if attachment.file_path}
                     {#key attachment.transfer_id || attachment.file_path}
                       <VoicePlayer
                         audioUrl={attachment.file_path}
@@ -447,7 +512,8 @@
                 </div>
               {:else}
                 <!-- Regular file attachment; an audio/* file also plays here (ADR-051 D19) -->
-                <div class="file-attachment" class:audio-file={playsInline(attachment)}>
+                {@const missingHere = isMissingHere(attachment)}
+                <div class="file-attachment" class:audio-file={!missingHere && playsInline(attachment)}>
                   <div class="file-details">
                     <div class="file-name">{attachment.filename}</div>
                     <div class="file-meta">
@@ -455,11 +521,13 @@
                       {#if attachment.mime_type}
                         • {attachment.mime_type}
                       {/if}
-                      {#if attachment.status}
+                      {#if attachment.status && !missingHere}
                         • {attachment.status}
                       {/if}
                     </div>
-                    {#if playsInline(attachment)}
+                    {#if missingHere}
+                      {@render missingFileRow(msg.id, attachment)}
+                    {:else if playsInline(attachment)}
                       <div class="file-audio-player">
                         {#key attachment.file_path}
                           <VoicePlayer
@@ -476,7 +544,7 @@
                       <div class="file-reveal-error">{revealErrors[attachment.file_path]}</div>
                     {/if}
                   </div>
-                  {#if attachment.file_path}
+                  {#if attachment.file_path && !missingHere}
                     {@const savedPath = attachment.file_path}
                     <button
                       type="button"
@@ -761,6 +829,23 @@
     color: #b3261e;
     font-size: 12px;
     margin-top: 4px;
+  }
+
+  .file-missing-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+    font-size: 12px;
+  }
+
+  .file-missing-state {
+    color: #666;
+  }
+
+  .file-missing-state.file-missing-failed {
+    color: #b3261e;
   }
 
   .voice-attachment {

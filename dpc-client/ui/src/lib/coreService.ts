@@ -136,7 +136,8 @@ import {
     TURN_COMMAND_CHECK_MS, chatHasTurnOrWaits, isTurnCommand, noteTurnCommandLook, turnCommandTimedOut,
     type TurnCommandWatch,
 } from './utils/turnCommandWait';
-import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
+import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted, attachmentRequests, fileRequestStatus } from './services/fileTransfer';
+import { applyRequestStatus } from './utils/attachmentRequest';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded } from './services/voice';
 import { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed, modelDownloadProgress } from './services/modelDownload';
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
@@ -152,7 +153,7 @@ export { connectionStatus, nodeStatus, coreMessages };
 export { p2pMessages, unreadMessageCounts };
 export { blockedNodeIds };
 export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated, providerBalance, providerBalances, providerAccounts, providerRetries, noticeToast };
-export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
+export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted, attachmentRequests, fileRequestStatus };
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded };
 export { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed, modelDownloadProgress };
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated };
@@ -682,6 +683,11 @@ export async function connectToCoreService() {
                             return newMap;
                         });
                     }, 3000);
+                }
+                else if (message.event === "file_request_status") {
+                    // A "Request file" request: requesting, receiving, received, not_held, ...
+                    attachmentRequests.update(map => applyRequestStatus(map, message.payload));
+                    fileRequestStatus.set(message.payload);
                 }
                 else if (message.event === "file_transfer_cancelled") {
                     console.log("File transfer cancelled:", message.payload);
