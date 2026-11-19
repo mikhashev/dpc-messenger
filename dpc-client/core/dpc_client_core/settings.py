@@ -314,7 +314,8 @@ class Settings:
         }
 
         self._config['music'] = {
-            'poll_interval_s': '60'  # How often the music library re-reads its watched folders, in seconds (ADR-051; polling, no OS file events)
+            'poll_interval_s': '60',  # How often the music library re-reads its watched folders, in seconds (ADR-051; polling, no OS file events)
+            'lrclib_enabled': 'true'  # Allow the explicit "Find on LRCLIB" lookup (sends artist, title, album and duration to lrclib.net); false hides it. The automatic lyrics chain never goes online
         }
 
         self._config['conversations'] = {
