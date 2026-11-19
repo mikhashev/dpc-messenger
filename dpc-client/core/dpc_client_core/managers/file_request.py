@@ -34,9 +34,10 @@ content `hash` when the record has one; otherwise it is refused with
 FILE_CANCEL `not_the_requested_file` and the next peer is asked. When the
 record has a hash, the bytes that arrive are hashed and compared with *that*
 hash, whatever `verify_hash` says and whatever the offer declared; a mismatch
-drops the file (`hash_mismatch`) and the next peer is asked. A record without
-a hash (a sender's own record of a group file carries none, see
-`attachment_matches`) can only be checked by its name and size: the file is
+drops the file (`hash_mismatch`) and the next peer is asked. A sender's own
+record of a group file gains its hash once the file is hashed
+(`service.note_record_hash`, 2026-11-19); a record without a hash (one written
+before that) can only be checked by its name and size: the file is
 taken when both match, its bytes are checked against the offer's own hash in
 transit, and the completed attachment is marked `content_verified: False`,
 because nothing ties those bytes to what the author sent. A record with

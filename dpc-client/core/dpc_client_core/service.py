@@ -74,6 +74,7 @@ from .conversation_monitor import TURN_END_VALUES, ConversationMonitor, Message 
 from .dpc_agent.context import FAILED_TURN_NOTICE
 from .conversation_monitor import history_status_for as conversation_monitor_history_status_for
 from .conversation_monitor import live_history_boundary_in
+from .conversation_monitor import note_attachment_hash
 from . import conversation_paths
 from . import ai_chats
 from .tool_detail import clip_tool_calls
@@ -147,7 +148,7 @@ from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
 )
 from .managers.file_transfer_manager import (
     FileTransferManager, MaxConcurrentTransfersExceeded, NotOfferedReport,
-    claim_free_name, group_file_ui_key, saves_screenshots_to_disk,
+    claim_free_name, group_file_ui_key, hash_file_in_one_pass, saves_screenshots_to_disk,
 )
 from .utils.image_utils import screenshot_attachment, screenshot_target
 from .voice_service import VoiceService
@@ -414,6 +415,56 @@ def keep_copy_under_a_free_name(source: Path, directory: Path, name: str) -> Pat
         target.unlink(missing_ok=True)
         raise
     return target
+
+
+# The record-hash passes still running (`hash_and_note_group_file`). Held here
+# because a task nothing references can be collected before it finishes.
+PENDING_RECORD_HASHES: Set[asyncio.Task] = set()
+
+
+def note_record_hash(monitor, message_id: str, filename: str, size_bytes: Optional[int],
+                     file_hash: Optional[str]) -> bool:
+    """Write `file_hash` on the sender's record `message_id` and save the history.
+
+    The attachment sits outside the signed preimage and the local chain, so
+    the record stays verifiable (`note_attachment_hash`). A failure here never
+    fails the send it follows: the record then keeps today's name-and-size
+    matching, as a record written before the hash was noted does.
+    """
+    try:
+        if not note_attachment_hash(monitor.message_history, message_id, filename,
+                                    size_bytes, file_hash):
+            return False
+        monitor._history_dirty = True
+        if monitor.save_history() is False:
+            logger.warning("Hash of %s noted on record %s but the history was not saved yet",
+                           filename, message_id)
+        return True
+    except Exception as e:  # noqa: BLE001 - the send already succeeded
+        logger.warning("Could not note the hash of %s on record %s: %s", filename, message_id, e)
+        return False
+
+
+async def hash_and_note_group_file(service, group_id: str, message_id: str, path: Path,
+                                   size_bytes: int) -> None:
+    """Hash a kept group file off the event loop and note the hash on its record.
+
+    For a send whose fan-out computed no SHA-256: nobody was offered the file
+    (a group of one node, or every other member offline), or `verify_hash` is
+    off. The send has answered already; a large file can take seconds here.
+    """
+    try:
+        file_hash, _ = await asyncio.to_thread(
+            hash_file_in_one_pass, path, service.file_transfer_manager.chunk_size,
+            with_sha256=True, with_chunk_crcs=False)
+        if service.group_manager.get_group(group_id) is None:
+            return  # left or deleted while hashing: no history to write into
+        monitor = service._get_or_create_conversation_monitor(group_id)
+        if monitor is None or getattr(monitor, "deleted", False):
+            return
+        note_record_hash(monitor, message_id, path.name, size_bytes, file_hash)
+    except Exception as e:  # noqa: BLE001 - nobody awaits this task; the record keeps name and size
+        logger.warning("Could not hash the kept group file %s: %s", path.name, e)
 
 
 class CoreService:
@@ -7957,7 +8008,9 @@ class CoreService:
         no copy, no record, nothing for the agents to see. The record written here
         is the sender's only one; the dedup key it seeds makes FileCompleteHandler
         skip its echo when a member finishes. Every member's copy carries the same
-        message id. The file is hashed once for the whole fan-out, not once per member.
+        message id. The file is hashed once for the whole fan-out, not once per member,
+        and that hash is then noted on the sender's record; with nobody offered the
+        file it is hashed in the background after the answer (`hash_and_note_group_file`).
 
         Args:
             group_id: Target group ID
@@ -8007,9 +8060,10 @@ class CoreService:
                 size_mb = round(size_bytes / (1024 * 1024), 2)
                 # The same guess send_file makes for the offer (_detect_mime_type).
                 mime_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
-                # No hash: hashing a large file is a pass of its own, done below only
-                # when a member is offered it. A sender's record is matched on name
-                # and size (conversation_monitor.attachment_matches).
+                # No hash yet: hashing a large file is a pass of its own and the
+                # record is written first. The hash is noted on it after the
+                # fan-out (note_record_hash), from the fan-out's own pass, or from
+                # one in the background when nobody was offered the file.
                 attachment = {
                     "type": "file",
                     "filename": final_filename,
@@ -8095,6 +8149,21 @@ class CoreService:
                 except Exception as e:
                     logger.warning("Failed to send file to %s: %s", node_id[:20], e)
                     not_offered.record(node_id, e)
+
+            # The record names the file's content hash once it is known, so a
+            # node that later requests the file (FILE_REQUEST, e.g. a member that
+            # synced this record while away) checks the bytes it gets against the
+            # hash, not only the name and size. The fan-out's pass is reused; with
+            # no SHA-256 from it (nobody offered, or verify_hash off) the file is
+            # hashed in the background, so the answer never waits on a large file.
+            if fingerprint is not None and fingerprint[0] not in (None, "", "none"):
+                note_record_hash(_group_monitor, message_id, final_filename, size_bytes,
+                                 fingerprint[0])
+            else:
+                task = asyncio.get_running_loop().create_task(hash_and_note_group_file(
+                    self, group_id, message_id, local_path, size_bytes))
+                PENDING_RECORD_HASHES.add(task)
+                task.add_done_callback(PENDING_RECORD_HASHES.discard)
 
             # The words written with the file reach the group's agents as a
             # screenshot's caption does (send_group_image): its @mentions decide
@@ -8266,6 +8335,11 @@ class CoreService:
                 {"width": width, "height": height},
                 file_path if keeps_file else None,
             )
+            # The bytes are in memory and capped by image_transfer.max_size_mb, so
+            # the record carries their content hash from the start: a node that
+            # requests the image later checks what it gets against it.
+            attachment["hash"] = await asyncio.to_thread(
+                lambda: hashlib.sha256(image_data).hexdigest())
             # Every member's copy and every relay of it carry this id, and a member
             # refuses an id it already holds: the on-disk name and the clock keep
             # a second paste under the same name a second message.
@@ -8492,6 +8566,9 @@ class CoreService:
                 "filename": final_filename,
                 "size_bytes": len(audio_data),
                 "size_mb": size_mb,
+                # In memory and capped by voice_messages.max_size_mb: the record
+                # carries the content hash a later FILE_REQUEST is checked against.
+                "hash": await asyncio.to_thread(lambda: hashlib.sha256(audio_data).hexdigest()),
                 "mime_type": mime_type,
                 "status": "completed",
                 "file_path": str(file_path),

@@ -769,14 +769,19 @@ class FileTransferManager:
         )
         return file_hash
 
-    async def compute_file_fingerprint(self, file_path: Path) -> Tuple[str, List[str]]:
+    async def compute_file_fingerprint(self, file_path: Path,
+                                       with_sha256: Optional[bool] = None) -> Tuple[str, List[str]]:
         """
         Compute (file hash, per-chunk CRC32 list) of a file to send, in ONE read of the file.
 
-        The hash is "none" when hash verification is off. Emits file_preparation_started /
-        file_preparation_progress / file_preparation_completed. A caller that sends the same
-        file to several peers calls this once and passes the pair to `send_file`.
+        The hash is "none" when hash verification is off, unless `with_sha256` asks for it
+        anyway (an answer to FILE_REQUEST: the requester refuses an offer whose hash is not
+        the record's). Emits file_preparation_started / file_preparation_progress /
+        file_preparation_completed. A caller that sends the same file to several peers calls
+        this once and passes the pair to `send_file`.
         """
+        if with_sha256 is None:
+            with_sha256 = self.verify_hash
         file_size = file_path.stat().st_size
         if self.local_api:
             await self.local_api.broadcast_event("file_preparation_started", {
@@ -789,8 +794,8 @@ class FileTransferManager:
         # chunk CRCs are computed ("hashing_chunks", which the UI shows as "Preparing file").
         file_hash, chunk_hashes = await self._hash_in_executor(
             file_path,
-            "hashing_file" if self.verify_hash else "hashing_chunks",
-            with_sha256=self.verify_hash,
+            "hashing_file" if with_sha256 else "hashing_chunks",
+            with_sha256=with_sha256,
             with_chunk_crcs=True,
         )
         if file_hash is None:
@@ -890,8 +895,11 @@ class FileTransferManager:
             )
             precomputed = False
         if not precomputed:
-            # One read of the file yields the SHA-256 and the per-chunk CRC32 (v0.11.1)
-            file_hash, chunk_hashes = await self.compute_file_fingerprint(file_path)
+            # One read of the file yields the SHA-256 and the per-chunk CRC32 (v0.11.1).
+            # An answer to FILE_REQUEST always carries the SHA-256, verify_hash or not:
+            # the requester refuses one whose hash is not its record's.
+            file_hash, chunk_hashes = await self.compute_file_fingerprint(
+                file_path, with_sha256=self.verify_hash or bool(request_id))
 
         # Detect MIME type (but override for voice messages to ensure audio/webm)
         if voice_metadata:

@@ -98,17 +98,18 @@ async def _outcome(net, node, request_id, limit_s=10.0):
 async def _setup(root, record_hash):
     """A sent notes.txt to B while C was away; C holds A's record without the file.
 
-    With `record_hash`, C's record carries the file's content hash (as a
-    member's record of a received file does); without, it is the author's own
-    record as synced, which carries none.
+    With `record_hash`, C's record carries the file's content hash (as the
+    author's record does since it notes the hash after the fan-out, 2026-11-19,
+    and as a member's record of a received file does); without, it is a record
+    written before that, which carries none.
     """
     net = _Network()
     a, b, c, _ = await _a_file_sent_while_c_was_away(net, root)
     (rec,) = records(c)
     if record_hash:
-        rec["attachments"][0]["hash"] = CONTENT_HASH
+        assert rec["attachments"][0].get("hash") == CONTENT_HASH, "synced from the author's record"
     else:
-        assert not rec["attachments"][0].get("hash"), "the author's record carries no hash"
+        rec["attachments"][0].pop("hash", None)
     return net, a, b, c, rec
 
 

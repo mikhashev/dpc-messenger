@@ -96,14 +96,56 @@ def rechain(messages: List[Dict[str, Any]]) -> None:
 def attachment_matches(att: Dict[str, Any], filename: Optional[str],
                        size_bytes: Optional[int], file_hash: Optional[str]) -> bool:
     """Same file: same name, then the hash when both sides have a real one,
-    else the size. A sender's own record carries neither hash nor transfer id
-    — only what it pasted — so the size is what it can be matched on."""
+    else the size. A sender's own record carries no transfer id, and no hash
+    until its file has been hashed (`note_attachment_hash`) or when it was
+    written before that existed, so then the size is what it is matched on."""
     if not filename or att.get("filename") != filename:
         return False
     mine = att.get("hash")
     if mine and mine != "none" and file_hash and file_hash != "none":
         return mine == file_hash
     return att.get("size_bytes") == size_bytes
+
+
+def note_attachment_hash(history: List[Dict[str, Any]], message_id: str, filename: str,
+                         size_bytes: Optional[int], file_hash: Optional[str]) -> bool:
+    """Write the file's content hash on the attachment of record `message_id`.
+
+    For the sender's own record of a file it sent (`send_group_file`), written
+    before the file was hashed: the hash is noted once it is known, so a node
+    that later requests the file (FILE_REQUEST) checks the bytes it gets
+    against the hash and not only against the name and size.
+
+    Safe for integrity: no attachment field is inside the signed preimage
+    (`message_content_hash`, specs/dptp_v1.md §4.1) or the local `chain_hash`
+    (`chain_hash_for`), so patching it after the record was signed and chained
+    leaves both verifying, as `attach_received_file` already relies on. It
+    follows that the attachment hash is not signed by the author either: like
+    the filename and size beside it, a node takes it from whoever synced the
+    record to it.
+
+    The attachment is the one of that name and size; a hash it already carries
+    is never replaced. Returns True when the hash was written.
+    """
+    if not file_hash or file_hash == "none":
+        return False
+    for record in history:
+        if record.get("id") != message_id:
+            continue
+        for att in record.get("attachments") or ():
+            if not isinstance(att, dict) or att.get("filename") != filename:
+                continue
+            if size_bytes is not None and att.get("size_bytes") != size_bytes:
+                continue
+            current = att.get("hash")
+            if current and current != "none":
+                if current != file_hash:
+                    logger.warning("Record %s already names another hash for %s; kept",
+                                   message_id, filename)
+                return False
+            att["hash"] = file_hash
+            return True
+    return False
 
 
 def merge_received_attachment(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:

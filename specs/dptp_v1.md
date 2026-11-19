@@ -1435,7 +1435,14 @@ Offers a file to the peer for transfer.
   `hash_mismatch`, and the next peer is asked. A record without a hash is completed on
   its name and size, the bytes checked only against the offer's own hash in transit, and
   the completed attachment carries `content_verified: false`; a record with neither a
-  hash nor a size is not requested. (Found by Zcode in review, 2026-11-19: the offer's
+  hash nor a size is not requested. The author's own record of a group file, screenshot
+  or voice message carries the content hash as `hash` on its attachment (a file's once
+  it has been hashed, which happens after the send's answer when nobody was offered it),
+  so a record synced from it is checked by hash; only records written before that remain
+  hashless. The attachment is outside the signed preimage (§4.1), so the hash is as
+  unsigned as the name and size beside it. A holder's offer that answers a request
+  always carries the SHA-256, whatever its own `verify_hash` says. (Found by Zcode in
+  review, 2026-11-19: the offer's
   name, size and hash were once never compared, so a peer that was asked could have any
   bytes completed a record.) The firewall's "who may send this node a file" still
   decides, after these checks. The holder adds no record of its own when the transfer
