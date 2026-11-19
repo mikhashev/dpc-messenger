@@ -39,26 +39,31 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                   Human-AI Collaborative Intelligence                   │
-│        P2P Encrypted Communication (Text • Voice • Files • Agent)       │
-└─────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                              Human-AI Collaborative Intelligence                               │
+│                   P2P Encrypted Communication (Text • Voice • Files • Agent)                   │
+└────────────────────────────────────────────────────────────────────────────────────────────────┘
 
-┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
+┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐           outside DPC
 │     Human A     │         │     Human B     │         │     Human C     │
 │ ┌─────────────┐ │         │ ┌─────────────┐ │         │ ┌─────────────┐ │
 │ │  Local AI   │ │ Compute │ │  Remote AI  │ │         │ │  Vendor AI  │ │
 │ │ (llama.cpp, │◄┼─────────┼─│  (Peer A)   │ │         │ │ (DeepSeek,  │ │
 │ │   Strata)   │ │ Sharing │ │             │ │         │ │ NeuralDeep) │ │
-│ └─────────────┘ │         │ └─────────────┘ │         │ └─────────────┘ │
-│ ┌─────────────┐ │         │                 │         │                 │
-│ │  DPC Agent  │◄┼─────────┼─ B uses A's     │         │   • Context     │
-│ │             │ │  Remote │   Agent/AI      │◄───────►│   • Messages    │
-│ └─────────────┘ │  Infer. │                 │  Group  │   • Privacy     │
-│   • Context     │         │   • Context     │  Chat   │     Rules       │
-│   • Messages    │         │   • Messages    │         │                 │
-│   • Privacy     │         │   • Privacy     │         │                 │
-│     Rules       │         │     Rules       │         │                 │
+│ └─────────────┘ │         │ └─────────────┘ │         │ └─────────────┘ │         ┌────────────┐
+│ ┌─────────────┐ │         │                 │ Internet│ ┌─────────────┐ │Internet │  Telegram  │
+│ │  DPC Agent  │◄┼─────────┼─ B uses A's     │  (P2P)  │ │  Telegram   │◄┼────────►│   chats    │
+│ │             │ │  Remote │   Agent/AI      │◄───────►│ │   bridge    │ │(bot API)└────────────┘
+│ └─────────────┘ │  Infer. │                 │  Group  │ └─────────────┘ │
+│ ┌─────────────┐ │         │                 │  Chat   │ ┌─────────────┐ │127.0.0.1┌────────────┐
+│ │   Whisper   │◄┼─────────┼─ B transcribes  │ +agents │ │   Gateway   │◄┼─────────┤ Local apps │
+│ │ voice→text  │ │  Voice  │  on A's Whisper │         │ │ OpenAI and  │ │ only    │IDE, scripts│
+│ │             │ │ Sharing │                 │         │ │Anthropic API│ │         └────────────┘
+│ └─────────────┘ │         │                 │         │ └─────────────┘ │
+│   • Context     │         │   • Context     │         │   • Context     │ agents  ┌────────────┐
+│   • Messages    │         │   • Messages    │         │   • Messages    ├────────►│  ComfyUI   │
+│   • Privacy     │         │   • Privacy     │         │   • Privacy     │  tools  │image, video│
+│     Rules       │         │     Rules       │         │     Rules       │         └────────────┘
 └────────┬────────┘         └────────┬────────┘         └────────┬────────┘
          │                           │                           │
          │                  ┌────────▼──────────┐                │
@@ -75,7 +80,7 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
    IPv6 → IPv4 → WebRTC → UDP Hole Punch (experimental) → Relay (experimental) → Gossip (experimental)
 ```
 
-**This is peer-to-peer software, not a messaging service.** Messages flow directly between users. The Hub is optional (discovery + signaling only, never sees content).
+**This is peer-to-peer software, not a messaging service.** Messages flow directly between users. The Hub is optional (discovery + signaling only, never sees content). Every node can run each piece shown: the diagram spreads them over A, B and C only to keep it readable.
 
 ---
 
