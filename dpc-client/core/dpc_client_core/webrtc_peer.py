@@ -387,6 +387,11 @@ class WebRTCPeerConnection:
         """Let up to `nbytes` stay queued in aiortc before `drain` waits; never less than WEBRTC_DRAIN_LOW_BYTES."""
         self._drain_low_bytes = max(WEBRTC_DRAIN_LOW_BYTES, int(nbytes))
 
+    def get_write_buffer_size(self) -> int:
+        """Bytes queued on the channel and not yet sent: aiortc's `bufferedAmount` (send_lanes.TransportReading)."""
+        channel = self.data_channel
+        return int(channel.bufferedAmount) if channel is not None else 0
+
     async def drain(self) -> None:
         """Wait until the channel's `bufferedAmount` is at most WEBRTC_DRAIN_LOW_BYTES (or the allowance).
 

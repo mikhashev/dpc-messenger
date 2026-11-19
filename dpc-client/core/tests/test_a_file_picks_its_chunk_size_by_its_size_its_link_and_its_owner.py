@@ -93,6 +93,30 @@ def test_the_rate_cap_never_lengthens_the_crc_list_past_its_bound():
     assert math.ceil(size / chunk) <= cw.MAX_CHUNKS_PER_OFFER
 
 
+@pytest.mark.parametrize("tier", ["relay", "gossip", "udp_dtls", None, "webrtc", "direct_tls"])
+def test_the_crc_floor_wins_over_the_tier_cap_with_or_without_a_pinned_size(tier):
+    """The review of 9f8538f0: a pinned size was raised to the floor over the tier cap,
+    but the adaptive size lost to it: 10 GiB through a relay went in 64 KiB chunks,
+    163 840 CRCs, over the 2^17 bound. One rule on both paths: the floor wins (the
+    receiver checks only the frame cap, so the bound is the sender's to keep)."""
+    size = 10 * GiB
+    for chunk in (choose_chunk_size(size, tier, None), choose_chunk_size(size, tier, 50e3),
+                  choose_chunk_size(size, tier, None, pinned=1 * KiB)):
+        assert chunk >= cw.crc_list_floor(size) == 128 * KiB
+        assert math.ceil(size / chunk) <= cw.MAX_CHUNKS_PER_OFFER
+    if tier not in ("webrtc", "direct_tls"):
+        assert choose_chunk_size(size, tier, None) == 128 * KiB
+        assert choose_chunk_size(size, tier, None, pinned=1 * KiB) == 128 * KiB
+    assert choose_chunk_size(47_039_860_096, "relay", 100e6) == 512 * KiB
+    assert choose_chunk_size(8 * GiB, "relay", None) == 64 * KiB  # at 2^17 entries exactly: the cap stands
+
+
+def test_a_fan_out_through_a_relay_keeps_the_crc_floor(tmp_path):
+    manager, _ = _manager(tmp_path, peers={
+        PEER: SimpleNamespace(connection_type="relay"), SLOW: SimpleNamespace(connection_type="direct_tls")})
+    assert manager.chunk_size_for(10 * GiB, [PEER, SLOW]) == 128 * KiB
+
+
 # --- the owner's setting ------------------------------------------------------------
 
 

@@ -1214,12 +1214,15 @@ class FileTransferManager:
                         break
 
                     count = min(window.window_chunks() if window else 1, total - chunk_index)
+                    # Shielded: a cancel here must not reach the worker's
+                    # future, which would read as done while its thread still
+                    # holds the file open; `finally` waits for it instead.
                     if prefetch is not None:
-                        ready.extend(await prefetch)
+                        ready.extend(await asyncio.shield(prefetch))
                         prefetch = None
                     if len(ready) < count:
                         read_ahead(count - len(ready))
-                        ready.extend(await prefetch)
+                        ready.extend(await asyncio.shield(prefetch))
                         prefetch = None
                     batch = [ready.popleft() for _ in range(count)]
                     read_ahead(count)  # the next window, while this one is on its way
@@ -1235,7 +1238,7 @@ class FileTransferManager:
                     batch = None  # the window's bytes are the transport's now
                     if window is not None:
                         window.on_window(sum(sizes), result.elapsed_s, result.loop_lag_s,
-                                         timed_out=result.timed_out)
+                                         timed_out=result.timed_out, reading=result.reading)
 
                     now = _monotonic()
                     for offset in range(sent):
@@ -1300,6 +1303,9 @@ class FileTransferManager:
             if prefetch is not None:
                 # A worker still reading the next window: let it finish its
                 # read before the file is released; its frames are not wanted.
+                # Never cancelled (the awaits above are shielded), so done()
+                # means its thread has closed the file — on Windows a file
+                # still open there could not be deleted by _release_upload.
                 if not prefetch.done():
                     await asyncio.wait({prefetch})
                 _discard_result(prefetch)
@@ -1364,11 +1370,13 @@ class FileTransferManager:
         moved = transfer.speed.done if transfer.speed else 0
         logger.info(
             "Upload %s to %s: %d bytes in %.1fs (%.2f MB/s), chunk %d, window up to %d chunks, "
-            "link rate %s, %d timeouts, %d errors, %d halvings, last link RTT %s (%s)",
+            "link rate %s, %d of %d windows loop-limited (%d of them found the link behind), "
+            "%d timeouts, %d errors, %d halvings, last link RTT %s (%s)",
             transfer.filename, node_id[:20], moved, elapsed_s,
             moved / elapsed_s / 1e6 if elapsed_s > 0 else 0.0,
             transfer.chunk_size, window.peak_chunks,
             f"{rate / 1e6:.2f} MB/s" if rate else "not measured",
+            window.loop_limited_windows, window.windows, window.link_behind_windows,
             window.timeouts, window.errors, window.halvings,
             f"{rtt:.3f}s" if isinstance(rtt, (int, float)) else "unknown",
             tier or "unknown tier",

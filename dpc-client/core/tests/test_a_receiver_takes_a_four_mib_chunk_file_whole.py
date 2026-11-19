@@ -123,3 +123,84 @@ async def test_a_tls_link_pushes_back_at_64_kib_and_a_busy_window_may_raise_it(t
         writer.close()
         s_writer.close()
         server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_tls_link_reports_the_bytes_in_both_of_its_layers(tmp_path):
+    """The data lane reads the transport's buffer a turn after a window the loop held up
+    (review of 9f8538f0). asyncio's TLS transport counts only its own backlog; the frame
+    it already encrypted sits in the socket transport beneath, so PeerConnection adds that.
+    (A peer that does not read cannot show it on Windows' loopback: the overlapped send
+    completes at once and the OS holds the bytes, which is why ChunkWindow never reads an
+    empty buffer as "on the wire".)"""
+    import ssl
+    from types import SimpleNamespace
+    cert, key = bench._self_signed(tmp_path)
+    server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    server_ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
+    client_ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    client_ctx.check_hostname = False
+    client_ctx.verify_mode = ssl.CERT_NONE
+    accepted = asyncio.get_running_loop().create_future()
+
+    async def on_connect(reader, writer):
+        accepted.set_result(writer)
+
+    server = await asyncio.start_server(on_connect, "127.0.0.1", 0, ssl=server_ctx)
+    port = server.sockets[0].getsockname()[1]
+    reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=client_ctx)
+    s_writer = await accepted
+    try:
+        peer = PeerConnection("dpc-node-" + "c" * 32, reader, writer, direction="out")
+        # The two attributes read, on this Python's real TLS transport
+        beneath = writer.transport._ssl_protocol._transport
+        assert beneath is not writer.transport and callable(beneath.get_write_buffer_size)
+        assert peer.get_write_buffer_size() == 0
+    finally:
+        writer.close()
+        s_writer.close()
+        server.close()
+
+    class _Layer:
+        def __init__(self, size, ssl_protocol=None):
+            self.size = size
+            if ssl_protocol is not None:
+                self._ssl_protocol = ssl_protocol
+
+        def get_write_buffer_size(self):
+            return self.size
+
+        def get_extra_info(self, name, default=None):
+            return default
+
+        def set_write_buffer_limits(self, high=None, low=None):
+            pass
+
+    tls = _Layer(70_000, SimpleNamespace(_transport=_Layer(1_400_000)))
+    stub = PeerConnection("dpc-node-" + "c" * 32, None, SimpleNamespace(
+        transport=tls, get_extra_info=lambda name, default=None: default))
+    assert stub.get_write_buffer_size() == 1_470_000
+    plain = PeerConnection("dpc-node-" + "c" * 32, None, SimpleNamespace(
+        transport=_Layer(5_000), get_extra_info=lambda name, default=None: default))
+    assert plain.get_write_buffer_size() == 5_000
+
+
+@pytest.mark.asyncio
+async def test_where_the_os_has_it_a_direct_link_caps_the_kernels_unsent_bytes():
+    """Linux and macOS: TCP_NOTSENT_LOWAT keeps file data in asyncio's buffer, where the
+    data lane sees it, rather than in a kernel buffer of several MB a chat frame queues
+    behind unseen. Windows has no such option; nothing is set there."""
+    from dpc_client_core.p2p_manager import NOTSENT_LOWAT_BYTES
+    server, (c_reader, c_writer), (s_reader, s_writer) = await _loopback_pair()
+    try:
+        for writer, direction in ((c_writer, "out"), (s_writer, "in")):
+            PeerConnection("dpc-node-" + "c" * 32, None, writer, direction=direction)
+            option = getattr(socket, "TCP_NOTSENT_LOWAT", None)
+            if option is None:
+                continue
+            sock = writer.get_extra_info("socket")
+            assert sock.getsockopt(socket.IPPROTO_TCP, option) == NOTSENT_LOWAT_BYTES, direction
+    finally:
+        c_writer.close()
+        s_writer.close()
+        server.close()

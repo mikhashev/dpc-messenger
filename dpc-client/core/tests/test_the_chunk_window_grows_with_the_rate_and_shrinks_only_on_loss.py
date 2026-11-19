@@ -369,3 +369,134 @@ def test_only_after_a_window_the_loop_held_back_may_the_transport_hold_more_than
     assert window.allowance_bytes() < cw.UNKNOWN_RATE_WINDOW_BYTES * 4 // 3 + 8 * 256
     window.on_window(8 * CHUNK, 1.0, loop_lag_s=0.0)  # the link held this one back
     assert window.chunks == 8 and window.allowance_bytes() == 0
+
+
+# --- the transport's reading (review of 9f8538f0, a fresh subagent and Zcode, 2026-11-20) ---
+
+
+def _reading(burst, after, at_end=None, turn_s=0.1, written=None):
+    from dpc_client_core.send_lanes import TransportReading
+    return TransportReading(at_end_bytes=burst if at_end is None else at_end, after_turn_bytes=after,
+                            turn_s=turn_s, burst_bytes=burst, written_bytes=burst if written is None else written)
+
+
+def test_a_busy_loop_on_a_link_that_keeps_up_grows_a_one_mib_chunk_window_and_learns_a_rate():
+    """A file over 100 MiB, no rate yet: 1 MiB chunks, so UNKNOWN_RATE_WINDOW_BYTES was one
+    chunk, K stayed 1, every window was loop-limited and none gave a sample: 2.44 MB/s on
+    loopback under load, and a 10 GB file in about 70 min. Now the transport says the link
+    took each window within a turn of the loop, so the budget doubles (to MAX_BYTES_IN_FLIGHT)
+    and the window's wall time is a lower bound on the rate."""
+    framed = cw.framed_chunk_bytes(MiB)
+    window = ChunkWindow(MiB)
+    for _ in range(12):
+        k = window.window_chunks()
+        window.on_window(k * MiB, 0.1, loop_lag_s=0.1, reading=_reading(k * framed, 0))
+    assert window.loop_limited and window.peak_chunks * MiB == cw.MAX_BYTES_IN_FLIGHT
+    assert window.allowance_bytes() == (window.window_chunks() - 1) * framed
+    assert window.rate.measured and window.rate.bytes_per_second() >= 8 * MiB / 0.1 * 0.99
+    assert not window.link_behind
+
+
+def test_without_a_reading_of_the_transport_a_busy_loop_still_stops_at_the_unknown_rate_bound():
+    """A connection that cannot say what its buffer holds (a relay, UDP): 9f8538f0's rule."""
+    window = ChunkWindow(MiB)
+    for _ in range(6):
+        window.on_window(MiB, 0.1, loop_lag_s=0.1)
+    assert window.chunks == 1 and window.allowance_bytes() == 0 and not window.rate.measured
+
+
+def test_a_busy_loop_on_a_link_that_falls_behind_keeps_one_frame_ahead_of_chat_and_measures_the_link():
+    """0.3 MB/s, the loop turning every 0.4 s, no rate known: the first window (one 64 KiB chunk)
+    is gone within a turn, so a second chunk may wait in the transport; the link leaves a third
+    of that two-chunk burst behind a turn later. From then on the link is the limit: the
+    allowance is 0 whatever K grew to, and what the link took in each such turn is its rate."""
+    link, turn = 300e3, 0.4
+    framed = cw.framed_chunk_bytes(CHUNK)
+    window = ChunkWindow(CHUNK)
+    window.on_window(CHUNK, turn, loop_lag_s=turn, reading=_reading(framed, 0, turn_s=turn))
+    assert window.chunks == 2 and window.allowance_bytes() == framed  # the cold start's one probe
+    allowances = []
+    for _ in range(30):
+        k = window.window_chunks()
+        allowance = window.allowance_bytes()
+        allowances.append(allowance)
+        burst = framed * (allowance // framed + 1) if allowance else framed  # frame by frame: the last
+        left = max(0.0, burst - link * turn)
+        elapsed = turn * (k + 1)
+        window.on_window(k * CHUNK, elapsed, loop_lag_s=elapsed,
+                         reading=_reading(burst, int(left), turn_s=turn, written=k * framed))
+    assert window.link_behind and window.link_behind_windows >= 1
+    assert allowances[0] == framed and set(allowances[1:]) == {0}
+    assert window.rate.measured and window.rate.bytes_per_second() <= link
+
+
+def test_a_turn_of_the_loop_that_left_the_transport_full_is_the_link_and_not_the_loop():
+    window = ChunkWindow(CHUNK)
+    framed = cw.framed_chunk_bytes(CHUNK)
+    for _ in range(6):
+        k = window.window_chunks()
+        window.on_window(k * CHUNK, 0.4, loop_lag_s=0.4,
+                         reading=_reading(k * framed, k * framed - 30_000, turn_s=0.1))
+    assert window.link_behind_windows == 6 and window.chunks == 1 and window.allowance_bytes() == 0
+    # 30 KB a 0.1 s turn: the samples after the first say so
+    assert window.rate.bytes_per_second() == pytest.approx(30_000 * CHUNK / framed / 0.1, rel=0.01)
+
+
+def test_an_app_limited_sample_only_ever_raises_the_rate():
+    rate = DeliveryRate()
+    rate.add(1, cw.RATE_SAMPLE_MIN_S)  # warm-up, dropped
+    rate.add(int(5e6 * 0.3), 0.3)
+    rate.add(int(1e6 * 0.3), 0.3, app_limited=True)  # a busy loop's lower bound: says nothing
+    assert rate.bytes_per_second() == pytest.approx(5e6) and rate.samples_taken == 1
+    rate.add(int(9e6 * 0.3), 0.3, app_limited=True)  # above what is known: the link moves at least this
+    assert rate.bytes_per_second() == pytest.approx(9e6)
+
+
+def test_the_allowance_is_cut_to_the_budget_when_the_budget_falls():
+    """K is never cut on a lower budget (only a loss halves it), so 9f8538f0's allowance, K-1
+    chunks, could exceed what the link was last measured to move in 0.1 s."""
+    window = ChunkWindow(CHUNK, link_rate=100e6)
+    for _ in range(5):
+        window.on_window(window.chunks * CHUNK, 1.0, loop_lag_s=0.9)
+    assert window.chunks == 32 and window.allowance_bytes() == 31 * cw.framed_chunk_bytes(CHUNK)
+    window.rate = DeliveryRate(seed=1e6)  # the link reads slower now: 100 KB in the budget
+    window.on_window(window.chunks * CHUNK, 1.0, loop_lag_s=0.9)
+    assert window.chunks == 32  # held, never cut
+    assert window.allowance_bytes() == (window.budget_bytes() // CHUNK - 1) * cw.framed_chunk_bytes(CHUNK) == 0
+    window.rate = DeliveryRate(seed=3e6)  # 300 KB: four chunks, three of them waiting
+    window.on_window(window.chunks * CHUNK, 1.0, loop_lag_s=0.9)
+    assert window.allowance_bytes() == 3 * cw.framed_chunk_bytes(CHUNK)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_upload_waits_for_its_reading_thread_before_the_file_is_released(tmp_path, monkeypatch):
+    """A cancel while the upload awaited the worker reading its next window reached the
+    worker's future, which then read as done while the thread still had the file open:
+    `finally` skipped its wait and `_release_upload` deleted an unsaved screenshot under an
+    open handle - on Windows a PermissionError, and the file stayed on disk."""
+    import asyncio
+    import threading
+
+    wire = _LanedWire()
+    manager, peer, transfer = _upload(tmp_path, wire, 8 * 1024)
+    started, go, finished = threading.Event(), threading.Event(), []
+    real_read = FileTransferManager._read_chunk_frames
+
+    def slow_read(t, first, count):
+        started.set()
+        go.wait(10)
+        try:
+            return real_read(t, first, count)
+        finally:
+            finished.append(True)
+
+    monkeypatch.setattr(manager, "_read_chunk_frames", slow_read)
+    released = []
+    monkeypatch.setattr(manager, "_release_upload", lambda t: released.append(bool(finished)))
+    upload = asyncio.get_running_loop().create_task(manager.handle_file_accept(peer, transfer.transfer_id))
+    assert await asyncio.to_thread(started.wait, 10)
+    upload.cancel()
+    asyncio.get_running_loop().call_later(0.2, go.set)
+    with pytest.raises(asyncio.CancelledError):
+        await upload
+    assert released == [True]  # released only once the thread had closed the file

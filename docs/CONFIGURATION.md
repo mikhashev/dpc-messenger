@@ -865,7 +865,7 @@ An empty default means the key is written blank and the feature stays off until 
 
 | Key | Default | Notes |
 |---|---|---|
-| `chunk_size` | `auto` | auto = per file, by size, tier and measured rate (64 KiB / 1 MiB / 4 MiB); a size (65537, 64KiB, 1MiB) fixes every file's, capped by the tier on every link but direct TLS and raised to keep the CRC list within 2^17; the legacy 65536 reads as auto (logged once) |
+| `chunk_size` | `auto` | auto = per file, by size, tier and measured rate (64 KiB / 1 MiB / 4 MiB); a size (65537, 64KiB, 1MiB) fixes every file's, capped by the tier on every link but direct TLS; either way raised to keep the CRC list within 2^17; the legacy 65536 reads as auto (logged once) |
 | `chunk_delay` | `0` | Pause after each window of chunks in seconds; 0 = none; the legacy 0.001 reads as 0 (logged once), any other value is honoured |
 | `background_threshold_mb` | `50` | Background transfer threshold in MB |
 | `direct_tls_only_threshold_mb` | `100` | Direct TLS preference threshold in MB |

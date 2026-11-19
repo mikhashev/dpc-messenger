@@ -132,9 +132,25 @@ class ThrottledLink:
             self._pump = asyncio.get_running_loop().create_task(self._run())
         return nbytes
 
+    def get_write_buffer_size(self) -> int:
+        """As PeerConnection's: the bytes handed over and not yet across, now.
+
+        By the virtual clock, so it drains byte by byte as a TCP transport's
+        buffer does when the kernel takes from it, not a whole frame at a
+        time when the pump next runs (`drain` keeps the frame-wise count).
+        """
+        if not self._queue:
+            return 0
+        left = (self._last_due - time.perf_counter()) * self.rate
+        return int(min(self._queued_bytes, max(0.0, left)))
+
     async def drain(self) -> None:
         if self._queued_bytes > self.HIGH_WATER:
             while self._queued_bytes > self.LOW_WATER:
+                # Cleared here: set_write_allowance may have lowered LOW_WATER
+                # after the pump set the event, and a set event's wait() never
+                # yields — the loop spun at 100 % CPU (found 2026-11-20).
+                self._low.clear()
                 await self._low.wait()
 
     async def send(self, message: dict) -> None:

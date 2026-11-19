@@ -1393,10 +1393,13 @@ Offers a file to the peer for transfer.
   connection tier (1 MiB on WebRTC, 64 KiB on a relay, gossip or UDP) and by the rate it last
   measured to this peer (one chunk crosses in about 0.2 s; 1 MiB while no rate is known), or
   takes the owner's fixed `[file_transfer] chunk_size` — which since 2026-11-20 is held to the
-  tier cap on every tier but direct TLS, and raised so `chunk_hashes` never exceeds 2^17
-  entries. A receiver must use this value and nothing else; every receiver since `cda6364f`
-  does. No wire change: any positive size is valid, and a frame stays under the §2 cap (a
-  16 MiB chunk is about 21.3 MiB framed)
+  tier cap on every tier but direct TLS. Either way the size is then raised, over every cap
+  (the tier's included), to the smallest power of two that keeps `chunk_hashes` within 2^17
+  entries, about 1.4 MB of JSON (a 10 GiB file through a relay goes in 128 KiB chunks); the
+  receiver enforces only the §2 frame cap on an offer, so this bound is the sender's to keep.
+  A receiver must use this value and nothing else; every receiver since `cda6364f` does. No
+  wire change: any positive size is valid, and a frame stays under the §2 cap (a 16 MiB chunk
+  is about 21.3 MiB framed)
 - `chunk_hashes` (array of strings, optional): CRC32 hashes per chunk (v0.11.1+, 8-char hex strings)
 - `image_metadata` (object, optional): Metadata for image transfers (v0.12.0)
   - `dimensions` (object, required): Image dimensions
@@ -1558,8 +1561,18 @@ Transfers a single chunk of file data.
   plus what the operating system's socket buffer already holds — which the sender does not
   control. The one exception is a sender whose event loop, not the link, held back its last
   window (a node busy with a model): it may leave the rest of the next window in the
-  transport, at most what the link was last measured to move in 0.1 s, or 1 MiB while no rate
-  is known. A window the connection does not take within its timeout (at least 10 s) halves
+  transport, at most what the link was last measured to move in 0.1 s, or what it was seen to
+  take from the transport within a turn of that event loop (at a cold start doubling from
+  one chunk while it keeps up, or 1 MiB on a connection whose buffer cannot be read; once a
+  window finds the link behind, what the link moved per turn, with no more doubling; never
+  past 8 MiB), and nothing after a window the link held back.
+  "Held back by the event loop" takes two signals: the loop's lag, counted for every
+  wait in the window, and the transport's write buffer read a turn or two of the loop after
+  the window's last chunk, compared with what the window handed over (not with zero: on
+  Windows an empty buffer means handed to the operating system). The rest of the window is
+  cut to that bound whenever it falls, and it is set only while the window holds the
+  connection, never by one transfer for another's window. A window the connection does not
+  take within its timeout (at least 10 s) halves
   the window and releases the connection; three such windows in a row that move nothing end
   the transfer with `send_error`. This is sender behaviour only; the frames are unchanged
 
@@ -3873,6 +3886,11 @@ DPTP is designed to be extensible. New commands can be added by:
 ## 9. Changelog
 
 ### v1.16 (November 2026)
+- **§3.11 FILE_OFFER `chunk_size`, FILE_CHUNK sending** (2026-11-20, sender behaviour only,
+  no wire change) — the 2^17 bound on `chunk_hashes` wins over the tier cap for an adaptive
+  size as it did for a pinned one; the exception that lets a busy sender leave more than one
+  chunk in the transport is decided by the loop's lag and the transport's buffer together, is
+  bounded by the current budget, and applies to the window that holds the connection only.
 - **§3.11 FILE_REQUEST, FILE_REQUEST_DECLINED** and the optional `request_id` on
   FILE_OFFER — a node that holds a record whose file is not on its disk (history sync
   carries records, never bytes) asks the peers online for the file, the author first; a

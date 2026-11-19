@@ -22,7 +22,12 @@ during the transfer (`choose_chunk_size`):
    moves in that time, never below `MIN_CHUNK_BYTES`; with no rate measured
    yet, at most 1 MiB, which also keeps an older receiver's 30 s stall watch
    (`RECEIVE_STALL_TIMEOUT_S`) out of reach above ~35 KB/s;
-4. the rate cap never makes the CRC list longer than `MAX_CHUNKS_PER_OFFER`.
+4. the chunk is raised, over every cap above (the tier's included), to the
+   size that keeps the CRC list within `MAX_CHUNKS_PER_OFFER` — 2^17 entries,
+   about 1.4 MB of JSON in the offer; a 10 GiB file through a relay goes in
+   128 KiB chunks, not 64 KiB. The receiver enforces only the frame cap on
+   the offer (dptp_v1.md §2), so the floor is the sender's rule, the same on
+   the adaptive and the pinned path (review of 9f8538f0, 2026-11-20).
 
 A `[file_transfer] chunk_size` the owner set fixes every file's size
 (`parse_chunk_size_setting`), with two limits applied per file
@@ -36,11 +41,12 @@ otherwise make an offer larger than a DPTP frame).
 connection before it lets the event loop turn at least once, and the unit it
 measures the link by. The data lane writes them frame by frame, with the
 connection's backpressure and the priority lane checked between frames
-(`P2PManager.send_data_window`): with K = 1 a chat frame waits behind at
-most the chunk already handed over, whatever K is, unless the window before
-was loop-limited: then the transport may hold the other K-1 too
-(`allowance_bytes`), what a node whose loop turns every 0.1-0.4 s needs. AIMD on K, with the signals Zcode asked
-for (review, 2026-11-19):
+(`P2PManager.send_data_window`): a chat frame waits behind at most the
+chunk already handed over, whatever K is, unless the window before was
+loop-limited: then the transport may hold the other K-1 too, cut to the
+current budget (`allowance_bytes`), what a node whose loop turns every
+0.1-0.4 s needs. AIMD on K, with the signals Zcode asked for (review,
+2026-11-19):
 
 - it grows by the measured delivery rate: only while K+1 chunks fit the
   budget, the rate times `WINDOW_SHARE_OF_SLO` x `CHAT_WAIT_SLO_S`, and never
@@ -50,15 +56,27 @@ for (review, 2026-11-19):
   could have (`GROWTH_GAIN` for a doubling, BBR's startup test; in proportion
   for a smaller step): past that plateau more chunks per window would only
   queue in front of chat;
-- a window the event loop held up rather than the link (`loop_lag_s`, from
-  `send_lanes.LoopLagProbe`, counted for the two turns of the loop a window
-  waits, at least half its time) is "loop-limited", as BBR calls a sample
-  app-limited: it gives no rate sample, so a node busy with a model never
-  reads as a slow link, and it may grow, since more chunks per turn of the
-  loop is what such a node needs — but only within the budget of the rate
-  last measured, or `UNKNOWN_RATE_WINDOW_BYTES` while none is: a busy loop on
-  a slow link must not pile megabytes up on it (review of 053157be,
-  2026-11-20);
+- a window the event loop held up rather than the link is "loop-limited",
+  as BBR calls a sample app-limited, when two signals agree (Zcode, review
+  of 9f8538f0, 2026-11-20): the loop's lag (`loop_lag_s`, from
+  `send_lanes.LoopLagProbe`, two turns for every wait of the window that
+  suspended, at least half its time), and the transport's write buffer
+  a turn or two of the loop after the window's last frame
+  (`send_lanes.TransportReading`), at most an eighth of what the window
+  handed over in one go (`DRAINED_BUFFER_SHARE`) or asyncio's 16 KiB low
+  mark: the link kept up. Such a window may grow, since more chunks per turn
+  of the loop is what a node busy with a model needs, within
+  `loop_budget_bytes`: the rate last measured, or twice the burst the link
+  was just seen to clear, so a 1 MiB chunk is not stuck at one per turn
+  (`UNKNOWN_RATE_WINDOW_BYTES` only on a connection whose buffer cannot be
+  read, as before); and its wall time is a lower
+  bound on the rate (kept only if it raises it), so a busy node still
+  learns one. A window the lag calls loop-limited but whose transport still
+  holds its burst a turn later found the link behind it: no allowance for
+  the next window, the rate is what the link took in that turn, and from
+  then on the budget is what the link moves in one turn of the loop, or the
+  measured rate's, with no more doubling — a busy loop on a slow link must
+  not pile megabytes up on it (review of 053157be);
 - it halves only on a loss event: a timeout (the transport did not take the
   window within `drain_timeout_s`: backpressure; the data lane stops waiting
   there and gives the lane up), a send error, or chunks the receiver asks
@@ -111,9 +129,11 @@ MIN_CHUNK_BYTES = 16 * KiB
 MAX_CHUNK_BYTES = 16 * MiB
 # The cap while no rate to this peer has been measured.
 UNKNOWN_RATE_CHUNK_BYTES = 1 * MiB
-# The most file bytes a loop-limited window grows to while no rate is known:
-# the same bound as the chunk, which the receiver's 30 s stall watch clears
-# on any link above ~35 KB/s.
+# The most file bytes a loop-limited window grows to while no rate is known,
+# on a connection whose write buffer cannot be read (a relay, UDP): the same
+# bound as the chunk, which the receiver's 30 s stall watch clears on any
+# link above ~35 KB/s. Where the buffer can be read, what it shows the link
+# clearing replaces it (`ChunkWindow.loop_budget_bytes`; review of 9f8538f0).
 UNKNOWN_RATE_WINDOW_BYTES = UNKNOWN_RATE_CHUNK_BYTES
 # A CRC list of 2^17 entries is about 1.4 MB of JSON in the offer.
 MAX_CHUNKS_PER_OFFER = 1 << 17
@@ -143,10 +163,19 @@ _UNIT = {"": 1, "k": KiB, "kib": KiB, "m": MiB, "mib": MiB}
 MAX_BYTES_IN_FLIGHT = 8 * MiB
 # A window is loop-limited when the loop lag took at least this share of it.
 LOOP_LIMITED_SHARE = 0.5
-# Turns of the loop one window waits for: the one the lag probe measures, and
-# the one that resumes the sender after its drain (measured 2026-11-19 on
-# Windows with a loop of 0.1 s turns: a window of 64 KiB took two turns).
-LOOP_TURNS_PER_WINDOW = 2.0
+# A loop-limited window found the link keeping up when, one turn of the loop
+# after its last frame, the transport holds at most this much of what the
+# window handed it in one go: asyncio's own low write mark, or an eighth of
+# that burst. Not zero: on Windows' Proactor an empty buffer means handed to
+# the operating system, not on the wire (Zcode, 2026-11-20). Not half: on a
+# 0.3 MB/s link with 0.4 s turns a window of two 64 KiB chunks leaves a third
+# of itself behind, and half would read that link as keeping up.
+DRAINED_BUFFER_BYTES = 16 * KiB
+DRAINED_BUFFER_SHARE = 1 / 8
+# Turns of the loop after which a reading of the transport counts as late
+# (`send_lanes.TransportReader` reads two hops on): what the link cleared by
+# then is scaled down to this many turns before it earns a larger window.
+LATE_READING_TURNS = 2.5
 # A doubling on link-limited windows is worth another while it raised the
 # rate by at least this factor (BBR leaves startup below 1.25 over three
 # rounds); a smaller step must buy the same share of what it could have:
@@ -263,8 +292,10 @@ def choose_chunk_size(file_size: int, connection_type: Optional[str] = None,
         return pinned_chunk_size(pinned, file_size, connection_type)
     by_size = chunk_size_by_file_size(file_size)
     by_tier = _tier_cap(connection_type)
-    by_rate = max(chunk_size_by_rate(link_rate), crc_list_floor(file_size))
-    return max(MIN_CHUNK_BYTES, min(by_size, by_tier, by_rate))
+    by_rate = chunk_size_by_rate(link_rate)
+    # The CRC floor wins over every cap, the tier's included, as it does for a
+    # pinned size: one rule on both paths (review of 9f8538f0).
+    return max(MIN_CHUNK_BYTES, min(by_size, by_tier, by_rate), crc_list_floor(file_size))
 
 
 def _tier_cap(connection_type: Optional[str]) -> int:
@@ -299,6 +330,10 @@ class DeliveryRate:
     kernel's send buffer fills at memory speed then. The rate is the max of
     the last RATE_FILTER_SAMPLES samples; with none yet, `seed` (the rate
     remembered from the last transfer to the same peer), or None.
+
+    A sample summed from a window the loop held up while the link kept up
+    (`app_limited`) is a lower bound on what the link can move: it is kept
+    only when it raises the rate, as BBR keeps an app-limited sample.
     """
 
     def __init__(self, seed: Optional[float] = None):
@@ -306,6 +341,7 @@ class DeliveryRate:
         self._samples: deque = deque(maxlen=RATE_FILTER_SAMPLES)
         self._acc_bytes = 0
         self._acc_s = 0.0
+        self._acc_app_limited = False
         self._warmed_up = False
         self.samples_taken = 0
 
@@ -331,18 +367,22 @@ class DeliveryRate:
 
     def restart_sample(self) -> None:
         """Drop the sample being summed: the windows after a halving are measured on their own."""
-        self._acc_bytes, self._acc_s = 0, 0.0
+        self._acc_bytes, self._acc_s, self._acc_app_limited = 0, 0.0, False
 
-    def add(self, nbytes: int, link_s: float) -> None:
+    def add(self, nbytes: int, link_s: float, app_limited: bool = False) -> None:
         self._acc_bytes += max(0, nbytes)
         self._acc_s += max(0.0, link_s)
+        self._acc_app_limited = self._acc_app_limited or app_limited
         if self._acc_s < RATE_SAMPLE_MIN_S:
             return
         sample = self._acc_bytes / self._acc_s
-        self._acc_bytes, self._acc_s = 0, 0.0
+        app_limited = self._acc_app_limited
+        self._acc_bytes, self._acc_s, self._acc_app_limited = 0, 0.0, False
         if not self._warmed_up:
             self._warmed_up = True
             return
+        if app_limited and self._samples and sample <= max(self._samples):
+            return  # a lower bound below what is known says nothing
         self._samples.append(sample)
         self.samples_taken += 1
 
@@ -373,6 +413,14 @@ class ChunkWindow:
         # Whether the last window was loop-limited: only then may the next one
         # leave more than the chunk being handed over in the transport.
         self.loop_limited = False
+        # What the transport's reading says (`on_window`, `reading`): the
+        # largest window, file bytes, the link was seen to clear within a turn
+        # of the loop (doubled while it keeps clearing), and whether a
+        # loop-limited window has found the link behind it yet.
+        self.cleared_bytes = 0
+        self.link_behind = False
+        self.link_behind_windows = 0
+        self.transport_read = False  # a reading came: growth on the loop's side is the reading's alone
 
     def budget_bytes(self) -> Optional[int]:
         """File bytes one window may put ahead of a chat frame; None while no rate is known."""
@@ -385,20 +433,43 @@ class ChunkWindow:
         """The chunks the next window hands over: K, within MAX_BYTES_IN_FLIGHT, one at least."""
         return max(1, min(self.chunks, MAX_BYTES_IN_FLIGHT // self.chunk_size))
 
+    def loop_budget_bytes(self) -> int:
+        """File bytes a window may put in the transport while the loop, not the link, holds it back.
+
+        The budget of the rate last measured, or UNKNOWN_RATE_WINDOW_BYTES while
+        none is (on a connection whose buffer cannot be read; where it can, the
+        reading is the only evidence: one chunk until it says more); or more,
+        the window the transport was seen to clear within a turn of the loop,
+        doubled each time it does (`cleared_bytes`). Once a
+        loop-limited window has found the link behind it (`link_behind`) the
+        unknown-rate bound no longer applies and nothing doubles: the measured
+        rate, or what the link was measured to move in one turn of the loop,
+        or seen to clear since. Never past MAX_BYTES_IN_FLIGHT.
+        """
+        budget = self.budget_bytes()
+        if self.link_behind or self.transport_read:
+            base = budget or self.chunk_size
+        else:
+            base = UNKNOWN_RATE_WINDOW_BYTES if budget is None else budget
+        return int(max(self.chunk_size, min(MAX_BYTES_IN_FLIGHT, max(base, self.cleared_bytes))))
+
     def allowance_bytes(self) -> int:
         """What the transport may hold in front of a chat frame during the next window, framed bytes.
 
         0 — the transport's own 64 KiB mark, so one chunk at a time — unless
-        the last window was loop-limited: then the K-1 chunks besides the one
-        being handed over, so a busy loop moves K per turn instead of one. K
-        is within the budget (the rate times half the SLO, or
-        UNKNOWN_RATE_WINDOW_BYTES with none). A window the link limits goes
-        back to one chunk ahead of chat at once; on such a link more in the
-        transport would only queue in front of it.
+        the last window was loop-limited and the link kept up with it: then
+        the K-1 chunks besides the one being handed over, so a busy loop moves
+        K per turn instead of one. K is cut here to the current budget
+        (`loop_budget_bytes`) whatever it grew to before the budget fell, so
+        the transport never holds more than the link was last measured to
+        move in half the SLO, or seen to clear in a turn of the loop. A window
+        the link limits goes back to one chunk ahead of chat at once; on such
+        a link more in the transport would only queue in front of it.
         """
         if not self.loop_limited:
             return 0
-        return (self.window_chunks() - 1) * framed_chunk_bytes(self.chunk_size)
+        within = max(1, min(self.window_chunks(), self.loop_budget_bytes() // self.chunk_size))
+        return (within - 1) * framed_chunk_bytes(self.chunk_size)
 
     def drain_timeout_s(self, nbytes: int) -> float:
         rate = self.rate.bytes_per_second()
@@ -460,31 +531,50 @@ class ChunkWindow:
             self._gain_needed = 1.0 + (GROWTH_GAIN - 1.0) * (self.chunks / before - 1.0)
 
     def on_window(self, nbytes: int, elapsed_s: float, loop_lag_s: float = 0.0,
-                  timed_out: bool = False) -> str:
+                  timed_out: bool = False, reading=None) -> str:
         """Account one window; returns `grew`, `held` or `shrank`.
 
-        `timed_out`: the data lane stopped waiting for the transport at
-        `drain_timeout_s` (`P2PManager.send_data_window`); a window that took
+        `loop_lag_s` is the loop's share of the window, summed by the data lane
+        over every wait in it (`P2PManager.send_data_window`): a window handed
+        over frame by frame may wait K times, and each wait costs turns of a
+        busy loop that are not the link's. `timed_out`: the data lane stopped
+        waiting for the transport at `drain_timeout_s`; a window that took
         longer than that on a lane that cannot stop waiting counts the same.
+
+        `reading` (`send_lanes.TransportReading`, or None on a connection that
+        cannot report its buffer) is the transport's write buffer read after
+        the window's last frame and again a turn of the loop later. It is the
+        second signal for a window the lag calls loop-limited (Zcode,
+        2026-11-20): if the link took what the window left in the transport
+        within that turn, the loop is what holds the transfer back, and the
+        budget grows (`cleared_bytes`), with a lower-bound rate sample; if not,
+        the link is the limit after all: no allowance for the next window, and
+        what the link took in that turn is a rate sample of its own.
         """
         before = self.chunks
         self.windows += 1
         elapsed_s = max(0.0, elapsed_s)
-        # The probe sees one turn of the loop; the window pays about two: the
-        # turn the probe waited, and the turn that wakes the sender once the
-        # drain is done. Both are the loop's, not the link's.
-        lag = min(LOOP_TURNS_PER_WINDOW * max(0.0, loop_lag_s), elapsed_s)
+        lag = min(max(0.0, loop_lag_s), elapsed_s)
         self.loop_limited = False
         if timed_out or elapsed_s > self.drain_timeout_s(nbytes):
             self.timeouts += 1
             self._halve()
         elif elapsed_s > 0 and lag >= elapsed_s * LOOP_LIMITED_SHARE:
-            self.loop_limited = True
-            # The loop, not the link, held this window: no sample; more per
-            # turn, but only within what the link is known (or assumed) to move.
             self.loop_limited_windows += 1
-            budget = self.budget_bytes()
-            self._grow(UNKNOWN_RATE_WINDOW_BYTES if budget is None else budget)
+            if reading is not None:
+                self.transport_read = True
+            verdict = None if reading is None else _link_verdict(reading)
+            if reading is None or verdict == "kept up":
+                self.loop_limited = True
+                if reading is not None:
+                    self._note_link_kept_up(nbytes, elapsed_s, reading)
+                # More per turn, within what the link is known (or seen) to move.
+                self._grow(self.loop_budget_bytes())
+            elif verdict == "behind":
+                self._note_link_behind(nbytes, reading)
+            # else: nothing visibly moved in that turn (a stalled link, or a
+            # reading the loop had not brought up to date): no allowance, no
+            # verdict, nothing learned.
         else:
             self.rate.add(nbytes, elapsed_s - lag)
             self._grow_if_it_pays()
@@ -492,10 +582,61 @@ class ChunkWindow:
             return "grew"
         return "shrank" if self.chunks < before else "held"
 
+    def _note_link_kept_up(self, nbytes: int, elapsed_s: float, reading) -> None:
+        """A loop-limited window whose burst the link cleared within a turn of the loop."""
+        cleared = _raw_bytes(reading.burst_bytes, nbytes, reading.written_bytes)
+        # The reading lands two turns or so after the window
+        # (`send_lanes.TransportReader`); one that came later says less.
+        late = LATE_READING_TURNS * reading.loop_turn_s
+        if 0 < late < reading.turn_s:
+            cleared = int(cleared * late / reading.turn_s)
+        if self.link_behind:
+            self.cleared_bytes = max(self.cleared_bytes, cleared)
+        else:
+            self.cleared_bytes = max(self.cleared_bytes, min(MAX_BYTES_IN_FLIGHT, 2 * cleared))
+        # The link moved the window in its wall time at least: a lower bound.
+        self.rate.add(nbytes, elapsed_s, app_limited=True)
+
+    def _note_link_behind(self, nbytes: int, reading) -> None:
+        """A window the loop held up, on a link that did not clear it within a turn: the link is the limit.
+
+        The transport never emptied while it was read, so what it gave up is
+        link time: a rate sample, and the budget from here is what the link
+        moves in one turn of the loop (or the measured rate's, if more), with
+        nothing doubled on the loop's evidence again (`loop_budget_bytes`).
+        """
+        self.link_behind = True
+        self.link_behind_windows += 1
+        moved = _raw_bytes(reading.at_end_bytes - reading.after_turn_bytes, nbytes, reading.written_bytes)
+        per_turn = moved
+        if 0 < reading.loop_turn_s < reading.turn_s:
+            per_turn = int(moved * reading.loop_turn_s / reading.turn_s)
+        self.cleared_bytes = per_turn
+        if reading.turn_s > 0:
+            self.rate.add(moved, reading.turn_s)
+
     def on_error(self) -> bool:
         """A send error, or a chunk the receiver asked again: a loss. True when K halved."""
         self.errors += 1
         return self._halve()
+
+
+def _link_verdict(reading) -> Optional[str]:
+    """`kept up` when, a turn of the loop after the window's last frame, the transport held little of its burst;
+    `behind` when it held more and the link visibly took some in that turn; None when nothing moved."""
+    drained = max(DRAINED_BUFFER_BYTES, reading.burst_bytes * DRAINED_BUFFER_SHARE)
+    if reading.after_turn_bytes <= drained:
+        return "kept up"
+    if reading.at_end_bytes - reading.after_turn_bytes >= DRAINED_BUFFER_BYTES:
+        return "behind"
+    return None
+
+
+def _raw_bytes(framed: int, nbytes: int, written: int) -> int:
+    """Framed bytes of a window as file bytes, in the window's own proportion (base64 and JSON taken out)."""
+    if written <= 0:
+        return 0
+    return int(max(0, framed) * nbytes / written)
 
 
 class PeerLinkRates:

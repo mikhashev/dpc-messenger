@@ -143,12 +143,16 @@ async def test_with_no_rate_known_and_a_busy_loop_a_slow_link_still_puts_one_fra
     turn Zcode measured on a node busy with a model (2026-11-19).
 
     053157be let windows the loop held up grow with no rate measured, toward
-    8 MiB. Now such a window grows only to the unknown-rate budget, and what
-    the transport may hold in front of chat is the window less the chunk
-    being handed over (`ChunkWindow.allowance_bytes`): one frame per frame of
-    window. A chat frame's wait is that, on the link, plus the turns of the
-    busy loop it needs to be sent and read — which it pays with or without a
-    file.
+    8 MiB; 9f8538f0 to the unknown-rate budget, 1 MiB: all fourteen chunks
+    of this file could wait in the transport in front of chat. Now the
+    transport's buffer is read after each such window (send_lanes.
+    TransportReader) and only what it shows the link clearing earns more. On
+    a loop this slow the reading lands two or three turns late, 0.8-1.2 s,
+    in which this link moves three or four chunks: that is as far as the
+    cold start can probe here (readings later than 2.5 turns are scaled
+    down, LATE_READING_TURNS). A chat frame's wait is what is ahead of it on
+    the link plus the turns of the busy loop it needs to be sent and read,
+    which it pays with or without a file.
     """
     rate = 300_000
     monkeypatch.setattr(bench, "LOAD_SLICE_S", 0.02)  # 20 tasks x 20 ms: a 0.4 s turn
@@ -156,12 +160,14 @@ async def test_with_no_rate_known_and_a_busy_loop_a_slow_link_still_puts_one_fra
                                             load=True)
     window = row["window"]
     print(f"ahead of chat {row['ahead_of_chat']}, waits {[round(w, 2) for w in row['chat_waits']]}, "
-          f"peak window {window.peak_chunks} chunks, {window.loop_limited_windows} loop-limited")
+          f"peak window {window.peak_chunks} chunks, {window.loop_limited_windows} loop-limited, "
+          f"{getattr(window, 'link_behind_windows', '-')} found the link behind, rate {window.rate.bytes_per_second()}")
     assert row["chunk_size"] == 64 * 1024
-    assert window.peak_chunks * 64 * 1024 <= cw.UNKNOWN_RATE_WINDOW_BYTES, window.peak_chunks
+    assert window.rate.measured and window.rate.bytes_per_second() <= rate  # 9f8538f0: none
     ahead = row["ahead_of_chat"]
-    assert len(ahead) >= 3, row
+    assert len(ahead) >= 6, row
     assert max(ahead) <= window.peak_chunks * ONE_FRAME_BYTES, (ahead, window.peak_chunks)
+    assert max(ahead) <= 4 * ONE_FRAME_BYTES, ahead  # 9f8538f0: up to 16 frames
     # The wait: that one frame's transmit time, and the turns of the busy loop
     # the probe needs to be sent, carried and read (four at the most here).
     one_frame_s = ONE_FRAME_BYTES / rate
@@ -169,6 +175,25 @@ async def test_with_no_rate_known_and_a_busy_loop_a_slow_link_still_puts_one_fra
     waits = row["chat_waits"]
     assert max(waits) <= window.peak_chunks * one_frame_s + 4 * turn_s + TIMER_MARGIN_S, (one_frame_s, waits)
     assert statistics.median(waits) <= one_frame_s + 2 * turn_s + TIMER_MARGIN_S, waits
+
+
+@pytest.mark.asyncio
+async def test_a_busy_loop_on_a_link_slower_than_its_turns_keeps_one_frame_ahead_of_chat(tmp_path, monkeypatch):
+    """0.3 MB/s, the loop held 0.1 s a turn (the benchmark's --load): one 64 KiB chunk takes
+    three turns of this link, so the first reading finds the link behind. The allowance
+    stays 0 — one frame ahead of chat — and the rate is what the link took, not the loop's
+    pace (74c2de84 remembered 0.12 MB/s for this link, the loop's pace)."""
+    rate = 300_000
+    row, sender = await _transfer_with_chat(tmp_path, rate, 400_000, probe_s=0.15, monkeypatch=monkeypatch,
+                                            load=True)
+    window = row["window"]
+    print(f"ahead of chat {row['ahead_of_chat']}, peak window {window.peak_chunks}, "
+          f"{getattr(window, 'link_behind_windows', '-')}/{window.windows} found the link behind, rate {window.rate.bytes_per_second()}")
+    measured = window.rate.bytes_per_second()
+    # File bytes of a 0.3 MB/s framed link: about 225 KB/s (74c2de84: 0.12 MB/s, the loop's pace)
+    assert measured and 0.8 * rate * 0.75 <= measured <= rate, measured
+    assert window.link_behind and window.peak_chunks == 1
+    assert max(row["ahead_of_chat"]) <= ONE_FRAME_BYTES, row["ahead_of_chat"]
 
 
 # --- the lanes ---------------------------------------------------------------------
@@ -445,3 +470,100 @@ def test_on_a_selector_loop_a_large_upload_lets_other_work_run(tmp_path):
     assert transfer.status.value == "transferring", transfer.status  # every chunk went, none failed
     assert len(gaps) >= 3, (gaps, took)
     assert max(gaps) <= 0.1, (max(gaps), took)
+
+
+# --- the review of 9f8538f0 (a fresh subagent and Zcode, 2026-11-20) --------------------
+
+
+class _MarkedPeer(_HeldPeer):
+    """A held connection that records the write mark each window sets."""
+
+    def set_write_allowance(self, nbytes):
+        self.got.append(("allow", nbytes))
+
+
+@pytest.mark.asyncio
+async def test_one_uploads_allowance_never_applies_to_another_uploads_window_or_a_resent_chunk():
+    """Two uploads to one peer: 9f8538f0 set the mark before taking the lane, so A's
+    loop-limited window raised it while B held the lane on a slow window, and chat waited
+    behind megabytes of B; a re-sent chunk's allow(0) cut into A's window the same way."""
+    peer = _MarkedPeer()
+    p2p = _p2p(peer)
+    b = asyncio.create_task(p2p.send_data_window("peer", [{"command": "B"}] * 2, allowance_bytes=0))
+    await asyncio.sleep(0.05)
+    assert lanes_of(peer)._data_turn.locked()  # B holds the lane, its link slow
+    a = asyncio.create_task(p2p.send_data_window("peer", [{"command": "A"}] * 2, allowance_bytes=4_000_000))
+    resend = asyncio.create_task(p2p.send_data_window("peer", [{"command": "RESEND"}], allowance_bytes=0))
+    await asyncio.sleep(0.05)
+    assert peer.got == [("allow", 0), ("write", "B")]  # neither A's mark nor the resend's yet
+    peer.release.set()
+    await asyncio.gather(b, a, resend)
+    kinds = [entry for entry in peer.got if entry[0] in ("allow", "write")]
+    assert kinds == [("allow", 0), ("write", "B"), ("write", "B"),
+                     ("allow", 4_000_000), ("write", "A"), ("write", "A"),
+                     ("allow", 0), ("write", "RESEND")]
+
+
+class _TurnPeer(_Peer):
+    """A connection that takes every frame at once, but whose drain costs a turn of the loop."""
+
+    async def drain(self):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_a_window_handed_over_frame_by_frame_charges_the_loop_for_every_wait():
+    """9f8538f0 counted two turns of the loop per window, but the data lane drains before
+    every frame: a window of 8 waits 9 times. On a busy loop the other seven turns read as
+    link time, the loop's pace became the link's rate, and it was remembered for 10 min.
+    The lag is now summed over every wait that suspended."""
+    stop = asyncio.Event()
+
+    async def busy():
+        while not stop.is_set():
+            time.sleep(0.01)
+            await asyncio.sleep(0)
+
+    loaders = [asyncio.get_running_loop().create_task(busy()) for _ in range(2)]  # a 20 ms turn
+    await asyncio.sleep(0)
+    window = cw.ChunkWindow(64 * 1024)
+    try:
+        p2p = _p2p(_TurnPeer())
+        for _ in range(6):
+            result = await p2p.send_data_window("peer", [{"command": "FILE_CHUNK"}] * 8)
+            window.on_window(8 * 64 * 1024, result.elapsed_s, result.loop_lag_s)
+    finally:
+        stop.set()
+        await asyncio.gather(*loaders)
+    assert result.loop_lag_s >= cw.LOOP_LIMITED_SHARE * result.elapsed_s, result
+    assert window.loop_limited_windows == 6
+    assert window.rate.bytes_per_second() is None  # the loop's pace never read as the link's
+
+
+@pytest.mark.asyncio
+async def test_a_window_hands_over_nothing_once_the_transfer_is_over():
+    """Even its first frame: a cancel that came while the window waited for the transport."""
+    peer = _Peer()
+    p2p = _p2p(peer)
+    result = await p2p.send_data_window("peer", [{"command": "FILE_CHUNK"}] * 3, still_sending=lambda: False)
+    assert result.frames == 0 and ("write", "FILE_CHUNK") not in peer.got
+
+
+@pytest.mark.asyncio
+async def test_a_busy_loop_on_a_fast_link_grows_the_window_past_one_chunk_and_learns_the_rate(
+        tmp_path, monkeypatch):
+    """1 MiB chunks (a file over 100 MiB, no rate yet; pinned here to keep the file small),
+    the sender's loop held 0.1 s a turn, a 40 MB/s link. At 9f8538f0 every window was one
+    chunk, loop-limited, and gave no sample: the reviewer's 200 MB ran at 2.44 MB/s with
+    "window up to 1 chunks, link rate not measured". The transport's buffer now says the
+    link took each window within a turn: the window grows and the link's rate is learned."""
+    row, sender = await _transfer_with_chat(tmp_path, 40 * MB, 30 * MB, settings={"chunk_size": "1MiB"},
+                                            monkeypatch=monkeypatch, load=True)
+    window = row["window"]
+    print(f"{row['mb_per_s']:.2f} MB/s, peak window {window.peak_chunks} chunks, "
+          f"{window.loop_limited_windows}/{window.windows} loop-limited, "
+          f"{getattr(window, 'link_behind_windows', '-')} found the link behind, rate {window.rate.bytes_per_second()}")
+    assert row["chunk_size"] == 1024 * 1024
+    assert window.peak_chunks > 1
+    assert window.rate.measured
+    assert sender.manager.link_rates.get(bench.RECEIVER, "direct_tls")

@@ -433,6 +433,11 @@ search is wanted first: a `hash` search is what phase 3 needs, a name search is 
   plus what the operating system's socket buffer holds; a sender whose event loop rather than
   the link held back its last window may leave up to 0.1 s of the measured rate, or 1 MiB with
   none measured, more in the transport (`send_lanes.py`; DPTP §3.11 FILE_CHUNK).
+  Second review (2026-11-20): with 1 MiB chunks and no rate that exception never applied and
+  no rate was ever learned (2.4 MB/s on a loaded loopback); "the loop held it back" is now read
+  from the loop's lag and the transport's write buffer together, the bound doubles past 1 MiB
+  while the link keeps up and drops to the measured rate once it does not
+  (`managers/chunk_window.py`).
 
 ## Confirmation
 

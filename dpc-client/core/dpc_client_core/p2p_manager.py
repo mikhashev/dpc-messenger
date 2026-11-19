@@ -33,7 +33,11 @@ from .peer_cache import (
     checked_local_addresses, local_addresses_to_advertise,
 )
 from .own_addresses import OwnAddresses, lan_addresses
-from .send_lanes import DataWindowResult, LoopLagProbe, lanes_of
+from .send_lanes import (
+    LOOP_TURNS_PER_WAIT, READING_WAIT_MAX_S, DataWindowResult, LoopLagProbe, TransportReader,
+    TransportReading, lanes_of,
+)
+from .managers.chunk_window import LOOP_LIMITED_SHARE
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -100,6 +104,35 @@ def set_tcp_nodelay(writer: Any) -> bool:
         return False
 
 
+# The most unsent bytes the kernel keeps for a direct connection where the
+# socket option exists (Linux, macOS): past it the socket reads as not
+# writable, so file data waits in asyncio's buffer, where the data lane sees
+# it (send_lanes.TransportReading), instead of in a kernel buffer of several
+# MB that a chat frame must queue behind unseen. Bytes sent and not yet
+# acknowledged do not count, so a fast link's throughput is untouched.
+NOTSENT_LOWAT_BYTES = 128 * 1024
+
+
+def set_notsent_lowat(writer: Any) -> bool:
+    """Cap the kernel's unsent bytes on a direct connection (TCP_NOTSENT_LOWAT); True when set.
+
+    Linux and macOS have the option; Windows has none, and there the
+    Proactor's buffer counts a send until the kernel took it. A socket or a
+    Python without it is left as it was.
+    """
+    option = getattr(_socket_module, "TCP_NOTSENT_LOWAT", None)
+    if option is None:
+        return False
+    try:
+        sock = writer.get_extra_info("socket")
+        if sock is None or sock.family not in (_socket_module.AF_INET, _socket_module.AF_INET6):
+            return False
+        sock.setsockopt(_socket_module.IPPROTO_TCP, option, NOTSENT_LOWAT_BYTES)
+        return True
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
 async def _within(awaitable, deadline: Optional[float]) -> bool:
     """Await `awaitable` until `deadline` (perf_counter); False when it ran out, the await cancelled."""
     if deadline is None:
@@ -152,6 +185,7 @@ class PeerConnection:
         # Kept apart from any throughput figure (managers/chunk_window.py).
         self.link_rtt_s: Optional[float] = None
         set_tcp_nodelay(writer)
+        set_notsent_lowat(writer)
         set_write_marks(writer)
 
     async def send(self, message: Dict[str, Any]):
@@ -183,6 +217,26 @@ class PeerConnection:
             self.writer.transport.set_write_buffer_limits(high=high, low=low)
         except (AttributeError, NotImplementedError, TypeError, ValueError):
             pass
+
+    def get_write_buffer_size(self) -> int:
+        """Bytes handed to the connection and not yet to the operating system (send_lanes.TransportReading).
+
+        asyncio's transport; on TLS the TLS layer's backlog plus the socket
+        transport beneath it, which holds the frame the TLS layer already
+        encrypted (the TLS transport counts only its own). On Windows'
+        Proactor the socket transport counts a send still in flight.
+        """
+        transport = self.writer.transport
+        size = transport.get_write_buffer_size()
+        # asyncio.sslproto keeps the socket transport on its protocol; the
+        # same pure-Python module on every OS. Absent (plain TCP): nothing more.
+        beneath = getattr(getattr(transport, "_ssl_protocol", None), "_transport", None)
+        if beneath is not None and beneath is not transport:
+            try:
+                size += beneath.get_write_buffer_size()
+            except (AttributeError, RuntimeError):
+                pass
+        return int(size)
 
     async def drain(self) -> None:
         """Wait while the transport is above its write mark (`set_write_marks`); at once when below.
@@ -2152,16 +2206,26 @@ class P2PManager:
         over. The mark is the transport's own (64 KiB), raised to
         `allowance_bytes` when the caller's window says the event loop, not
         the link, is what holds the transfer back (`set_write_allowance`;
-        managers/chunk_window.py). Every wait shares one deadline,
-        `drain_timeout_s` from the start of the window: past it the window
-        stops, the lane is released, and the result says `timed_out` (the caller halves its window and decides
-        whether the transfer goes on). A connection without those two is sent
-        frame by frame through `send`, yielding to the priority lane between
-        frames, with no deadline: such a send cannot be cut without cutting a
-        frame. Either way the window stops early when `still_sending()` says
-        the transfer is over, and ends with at least one turn of the event
-        loop. The result is what `ChunkWindow` needs: frames handed over, wall
-        time, the event loop's lag, and whether the wait timed out.
+        managers/chunk_window.py); it is set once the lane is this window's,
+        never while another upload's window or a re-sent chunk holds it.
+        Every wait shares one deadline, `drain_timeout_s` from the start of
+        the window: past it the window stops, the lane is released, and the
+        result says `timed_out` (the caller halves its window and decides
+        whether the transfer goes on). After the last frame the window reads
+        the transport's buffer (on a connection with `get_write_buffer_size`),
+        gives the loop one turn, waits for the mark once more, and — when the
+        loop's lag says the loop held the window up — waits for a second
+        reading a turn or two after the last frame (`TransportReader`,
+        `TransportReading`). A connection without `write_nowait`
+        and `drain` is sent frame by frame through `send`, yielding to the
+        priority lane between frames, with no deadline: such a send cannot be
+        cut without cutting a frame. Either way no frame is handed over once
+        `still_sending()` says the transfer is over, and the window ends with
+        at least one turn of the event loop. The result is what `ChunkWindow`
+        needs: frames handed over, wall time, the loop's share of it summed
+        over every wait that suspended (`LOOP_TURNS_PER_WAIT` turns each, as
+        its `LoopLagProbe` measured them), whether the wait timed out, and the
+        transport's reading.
         """
         peer = self.peers.get(node_id)
         if peer is None:
@@ -2171,50 +2235,108 @@ class P2PManager:
         drain = getattr(peer, "drain", None)
         windowed = callable(write_nowait) and inspect.iscoroutinefunction(drain)
         allow = getattr(peer, "set_write_allowance", None)
-        if windowed and callable(allow):
-            allow(allowance_bytes)
+        size_of = getattr(peer, "get_write_buffer_size", None)
+
+        def buffered() -> Optional[int]:
+            """The transport's write buffer now, or None when the connection cannot say."""
+            try:
+                size = size_of()
+            except Exception:  # noqa: BLE001 - a closing transport: no reading, the window goes on
+                return None
+            return size if isinstance(size, int) else None
+
+        if not callable(size_of):
+            buffered = None
         async with lanes.data_lane():
+            if windowed and callable(allow):
+                allow(allowance_bytes)  # inside the lane: this window's mark, no one else's
             started = time.perf_counter()
             deadline = started + drain_timeout_s if drain_timeout_s else None
             sent = 0
             timed_out = False
-            probe = None
+            lag = 0.0
+            suspended = turned = False
+
+            async def wait(awaitable, bounded: bool = True) -> bool:
+                """Await one wait of the window (within its deadline when `bounded`), charging the loop's turns if it suspended."""
+                nonlocal lag, suspended, turned
+                probe = LoopLagProbe()
+                done = await _within(awaitable, deadline if bounded else None)
+                if probe.ran:
+                    lag += LOOP_TURNS_PER_WAIT * probe.lag_s()
+                    suspended = turned = True
+                return done
+
+            async def closing_turn() -> float:
+                """One turn of the loop: chat, re-asks and LINK_PONG get in, and the probe measures the loop."""
+                nonlocal lag, turned
+                probe = LoopLagProbe()
+                await asyncio.sleep(0)
+                lag += probe.lag_s()
+                turned = True
+                return probe.lag_s()
+
+            reading = None
             if windowed:
+                written = burst = 0
                 for message in messages:
-                    if sent and still_sending is not None and not still_sending():
-                        break
                     # Chat first; then the transport below its mark; and chat
                     # again if a frame of it started while that waited.
-                    if lanes.priority_on_way and not await _within(lanes.wait_priority_idle(), deadline):
+                    suspended = False
+                    if lanes.priority_on_way and not await wait(lanes.wait_priority_idle()):
                         timed_out = True
                         break
-                    if not await _within(drain(), deadline):
+                    if not await wait(drain()):
                         timed_out = True
                         break
-                    if lanes.priority_on_way and not await _within(lanes.wait_priority_idle(), deadline):
+                    if lanes.priority_on_way and not await wait(lanes.wait_priority_idle()):
                         timed_out = True
                         break
-                    write_nowait(message)
+                    if still_sending is not None and not still_sending():
+                        break  # over while this frame waited: not even the first one goes
+                    if suspended:
+                        burst = 0
+                    nbytes = write_nowait(message)
+                    nbytes = nbytes if isinstance(nbytes, int) else 0
+                    written += nbytes
+                    burst += nbytes
                     sent += 1
-                probe = LoopLagProbe()
-                if not timed_out and not await _within(drain(), deadline):
-                    timed_out = True
+                if not timed_out:
+                    at_end = buffered() if buffered and sent else None
+                    at_end_time = time.perf_counter()
+                    reader = TransportReader(buffered) if at_end is not None else None
+                    try:
+                        loop_turn_s = await closing_turn()
+                        if not await wait(drain()):
+                            timed_out = True
+                        elif reader is not None and lag >= LOOP_LIMITED_SHARE * (time.perf_counter() - started):
+                            # The loop held this window up: what the link did
+                            # meanwhile is the second signal (ChunkWindow.on_window).
+                            waited_from = time.perf_counter()
+                            await _within(reader.taken.wait(), waited_from + READING_WAIT_MAX_S)
+                            lag += time.perf_counter() - waited_from  # the sender's own wait, not the link's
+                            if reader.after_bytes is not None:
+                                reading = TransportReading(
+                                    at_end_bytes=at_end, after_turn_bytes=reader.after_bytes,
+                                    turn_s=reader.taken_at - at_end_time,
+                                    burst_bytes=burst, written_bytes=written, loop_turn_s=loop_turn_s)
+                    finally:
+                        if reader is not None:
+                            reader.cancel()
             else:
-                probe = LoopLagProbe()
                 for message in messages:
                     if sent:
-                        await asyncio.sleep(0)  # a send that never suspends still lets chat in between frames
+                        await closing_turn()  # a send that never suspends still lets chat in between frames
                         if still_sending is not None and not still_sending():
                             break
-                    await lanes.wait_priority_idle()
-                    await peer.send(message)
+                    await wait(lanes.wait_priority_idle(), bounded=False)
+                    await wait(peer.send(message), bounded=False)
                     sent += 1
-            if not probe.ran:
+            if not turned:
                 # Nothing above suspended (a socket that keeps taking data
-                # never does on a selector loop): let chat, re-asks and
-                # LINK_PONG in now, and let the probe measure the loop.
-                await asyncio.sleep(0)
-            return DataWindowResult(sent, time.perf_counter() - started, probe.lag_s(), timed_out)
+                # never does on a selector loop): let the loop turn now.
+                await closing_turn()
+            return DataWindowResult(sent, time.perf_counter() - started, lag, timed_out, reading)
 
     async def _get_primary_local_ip(self) -> str:
         """
