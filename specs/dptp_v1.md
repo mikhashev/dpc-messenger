@@ -1562,12 +1562,11 @@ Transfers a single chunk of file data.
   control. The one exception is a sender whose event loop, not the link, held back its last
   window (a node busy with a model): it may leave the rest of the next window in the
   transport, at most what the link was last measured to move in 0.1 s, or what it was seen to
-  take from the transport within a turn of that event loop (at a cold start growing from
-  one chunk while it keeps up: doubling on a reading within a turn and a half, one chunk
-  more than the reading proved on a later one; or 1 MiB on a connection whose buffer cannot
-  be read; once a window finds the link behind, what the link moved per turn, with no more
-  doubling; never past 8 MiB), and nothing after a window the link held back, nor after one
-  whose second reading did not come within 1 s on a connection that can report its buffer.
+  take from the transport within a turn of that event loop (at a cold start doubling from
+  one chunk while it keeps up, or 1 MiB on a connection whose buffer cannot be read; once a
+  window finds the link behind, what the link moved per turn, with no more doubling; never
+  past 8 MiB), and nothing after a window the link held back, nor after one whose second
+  reading did not come within 1 s on a connection that can report its buffer.
   "Held back by the event loop" takes two signals: the loop's lag, counted for every
   wait in the window, and the transport's write buffer read a turn of the loop after
   the window's last chunk (two on Windows' Proactor, which sends a buffer one write per
@@ -3894,8 +3893,7 @@ DPTP is designed to be extensible. New commands can be added by:
   size as it did for a pinned one; the exception that lets a busy sender leave more than one
   chunk in the transport is decided by the loop's lag and the transport's buffer together, is
   bounded by the current budget, and applies to the window that holds the connection only.
-  After a second review the same day: a reading later than a turn and a half grows the bound
-  by one chunk rather than doubling it, a reading that did not come earns nothing (the 1 MiB
+  After a second review the same day: a reading that did not come earns nothing (the 1 MiB
   cold start stays with connections that cannot report their buffer), a selector loop reads
   one turn after the window rather than two, and no `TCP_NOTSENT_LOWAT` is set.
 - **§3.11 FILE_REQUEST, FILE_REQUEST_DECLINED** and the optional `request_id` on

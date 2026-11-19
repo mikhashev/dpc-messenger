@@ -150,11 +150,9 @@ async def test_with_no_rate_known_and_a_busy_loop_a_slow_link_still_puts_one_fra
     a loop this slow the reading lands two or three turns late, 0.8-1.2 s,
     in which this link moves three or four chunks: that is as far as the
     cold start can probe here (readings later than 2.5 turns are scaled
-    down, LATE_READING_TURNS), and a reading that late adds one chunk to
-    what it saw cleared rather than doubling it (EARLY_READING_TURNS). A chat
-    frame's wait is what is ahead of it on the link plus the turns of the
-    busy loop it needs to be sent and read, which it pays with or without a
-    file.
+    down, LATE_READING_TURNS). A chat frame's wait is what is ahead of it on
+    the link plus the turns of the busy loop it needs to be sent and read,
+    which it pays with or without a file.
 
     What this proves, and what it does not (review of 08493d5f, a fresh
     subagent, 2026-11-20): its bound on the bytes ahead of chat also holds at

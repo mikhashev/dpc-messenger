@@ -189,10 +189,9 @@ class TransportReader:
     turns: one hop read every window of four 1 MiB chunks as the link
     behind). On a loop of 0.4 s turns the reading lands up to three turns
     after the window's last frame, so a slow link can look as if it kept up
-    with more than it does; `ChunkWindow` grows on such a late reading by
-    one chunk, not by doubling, and caps the budget at what the link moved
-    per turn once it sees it behind. It costs the sender no wait unless it
-    asks for the reading (`taken`).
+    with one doubling more than it does; `ChunkWindow` caps the budget at
+    what the link moved per turn once it sees it behind. It costs the
+    sender no wait unless it asks for the reading (`taken`).
     """
 
     __slots__ = ("_size_of", "_handle", "_hops_left", "taken", "after_bytes", "taken_at")
