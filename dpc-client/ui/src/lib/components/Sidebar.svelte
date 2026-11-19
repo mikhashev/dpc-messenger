@@ -21,6 +21,7 @@
   import { BURST_QUIET_DEFAULT_SECONDS, BURST_QUIET_MAX_SECONDS, burstQuietFromAgent, burstQuietToSend } from '$lib/utils/burstQuiet';
   import { ownerUserIdFromAgent, ownerUserIdToSend } from '$lib/utils/telegramOwner';
   import { agentStatusLine, buttonSummary, chatNamer } from '$lib/utils/agentMap';
+  import { musicButtonSummary } from '$lib/services/music';
 
   // Account balance rows (one per DeepSeek/NeuralDeep/... account, 2026-09-28
   // — was a single hard-coded DeepSeek pill with no provider name). Level
@@ -427,6 +428,7 @@
     onOpenProvidersEditor,
     onOpenAgentBoard,
     onOpenAgentMap,
+    onOpenMusicPlayer,
     onConnectPeer,
     onResetUnreadCount,
     onGetPeerDisplayName,
@@ -465,6 +467,7 @@
     onOpenProvidersEditor: () => void;
     onOpenAgentBoard?: () => void;
     onOpenAgentMap?: () => void;
+    onOpenMusicPlayer?: () => void;
     onConnectPeer: () => void;
     onResetUnreadCount: (peerId: string) => void;
     onGetPeerDisplayName: (peerId: string) => string;
@@ -991,6 +994,13 @@
           <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="5" r="2.5"></circle><circle cx="19" cy="12" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><path d="M7.5 12 H16.5 M12 12 V5 H16.5 M12 12 V19 H16.5"></path></svg>
           <span class="agent-map-label">AGENTS MAP</span>
           {#if agentMapSummary}<span class="agent-map-summary">{agentMapSummary}</span>{/if}
+        </button>
+      {/if}
+      {#if onOpenMusicPlayer}
+        <button type="button" class="btn-agent-map btn-music-player" onclick={onOpenMusicPlayer} title="Listen to your music library; minimised, it keeps playing across chats">
+          <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
+          <span class="agent-map-label">MUSIC PLAYER</span>
+          {#if $musicButtonSummary}<span class="agent-map-summary music-player-summary" title={$musicButtonSummary}>{$musicButtonSummary}</span>{/if}
         </button>
       {/if}
       <ul>
@@ -2039,6 +2049,13 @@
     margin-left: auto;
     font-size: 13px;
     color: #4b5563;
+  }
+
+  .music-player-summary {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .btn-add-agent {

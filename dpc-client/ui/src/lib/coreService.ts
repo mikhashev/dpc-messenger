@@ -145,6 +145,7 @@ import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, ag
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionCancelled, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
+import { callMusic, type LibraryEntry, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
 
 // Re-export all service stores for backward compatibility.
 // NOTE: When adding new UI-reactive fields from privacy_rules.json, add the store in
@@ -1986,4 +1987,58 @@ export async function deleteAgent(agentId: string): Promise<any> {
  */
 export async function listAgentProfiles(): Promise<any> {
     return sendCommand('list_agent_profiles', {});
+}
+
+// --- Music library (ADR-051 D11; dpc_client_core/music/commands.py) ---
+// Each answers a MusicAnswer and never throws: `{ok: true, data}` for the core's
+// `{status: "ok", ...}`, or `{ok: false, unavailable, code, message}`. `unavailable`
+// is true while the backend does not have the music commands yet (not wired into
+// local_api), so the Music Player can say so instead of failing.
+
+export function listMusicFolders(): Promise<MusicAnswer<{ folders: MusicFolder[] }>> {
+    return callMusic(sendCommand, 'list_music_folders', {});
+}
+
+/** Add a watched folder; its first scan runs in the background on the core. */
+export function addMusicFolder(path: string, watch = true): Promise<MusicAnswer<{ folder: MusicFolder }>> {
+    return callMusic(sendCommand, 'add_music_folder', { path, watch });
+}
+
+/** Remove a watched folder and its entries; the files are never touched. */
+export function removeMusicFolder(folderId: string): Promise<MusicAnswer<{ removed_tracks: number }>> {
+    return callMusic(sendCommand, 'remove_music_folder', { folder_id: folderId });
+}
+
+/** Rescan one folder, or every folder without an id. */
+export function rescanMusicFolder(folderId?: string): Promise<MusicAnswer<{ folder?: MusicFolder; folders?: MusicFolder[] }>> {
+    return callMusic(sendCommand, 'rescan_music_folder', folderId ? { folder_id: folderId } : {});
+}
+
+export function listMusicLibrary(folderId?: string, includeMissing = true): Promise<MusicAnswer<{ entries: LibraryEntry[] }>> {
+    return callMusic(sendCommand, 'list_music_library', folderId ? { folder_id: folderId, include_missing: includeMissing } : { include_missing: includeMissing });
+}
+
+/** The library entry and its `mp.track/1` (null while the duration is unknown). */
+export function getMusicTrack(trackId: string): Promise<MusicAnswer<{ entry: LibraryEntry; track: Record<string, any> | null }>> {
+    return callMusic(sendCommand, 'get_music_track', { track_id: trackId });
+}
+
+/** The smart lists (All tracks, Generated), then the person's playlists. */
+export function listMusicPlaylists(): Promise<MusicAnswer<{ playlists: Playlist[] }>> {
+    return callMusic(sendCommand, 'list_music_playlists', {});
+}
+
+export function createMusicPlaylist(name: string, trackIds: string[] = []): Promise<MusicAnswer<{ playlist: Playlist }>> {
+    return callMusic(sendCommand, 'create_music_playlist', { name, track_ids: trackIds });
+}
+
+/** Rename and/or set the whole ordered `track_ids` (a reorder is one call). */
+export function updateMusicPlaylist(
+    playlistId: string, changes: { name?: string; track_ids?: string[] },
+): Promise<MusicAnswer<{ playlist: Playlist }>> {
+    return callMusic(sendCommand, 'update_music_playlist', { playlist_id: playlistId, ...changes });
+}
+
+export function deleteMusicPlaylist(playlistId: string): Promise<MusicAnswer<{ deleted: string }>> {
+    return callMusic(sendCommand, 'delete_music_playlist', { playlist_id: playlistId });
 }

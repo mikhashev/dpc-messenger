@@ -25,6 +25,7 @@
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
   import AgentMap from "$lib/components/AgentMap.svelte";
+  import MusicPlayer from "$lib/components/music/MusicPlayer.svelte";
   import ScheduleApprovalDialog from "$lib/components/ScheduleApprovalDialog.svelte";
   import ProviderSelector from "$lib/components/ProviderSelector.svelte";
   import Toast from "$lib/components/Toast.svelte";
@@ -176,6 +177,10 @@
   let showProvidersEditor = $state(false);
   let showAgentBoard = $state(false);
   let showAgentMap = $state(false);
+  // The Music Player window (ADR-051 D1); its audio lives in services/music.ts, so
+  // closing or minimising the window, or switching chats, does not stop playback.
+  let showMusicPlayer = $state(false);
+  let musicPlayerMinimised = $state(false);
   let showCommitDialog = $state(false);
   let commitVoteError = $state("");
   let extractingChats = $state(new Set<string>());
@@ -1094,6 +1099,7 @@
       onOpenProvidersEditor={openProvidersEditor}
       onOpenAgentBoard={openAgentBoard}
       onOpenAgentMap={() => showAgentMap = true}
+      onOpenMusicPlayer={() => { showMusicPlayer = true; musicPlayerMinimised = false; }}
       onConnectPeer={handleConnectPeer}
       onResetUnreadCount={resetUnreadCount}
       onGetPeerDisplayName={getPeerDisplayName}
@@ -1578,6 +1584,8 @@
 />
 
 <AgentMap bind:open={showAgentMap} />
+
+<MusicPlayer bind:open={showMusicPlayer} bind:minimised={musicPlayerMinimised} />
 
 <!-- Token Warning Toast (Phase 2) -->
 {#if showTokenWarning}
