@@ -15,6 +15,10 @@ Architecture:
   with the number of chunks, not with the file
 - Per-chunk CRC32 (re-asked through FILE_CHUNK_RETRY), SHA256 of the whole file
   read back from disk at the end
+- The author's signed `file_description` (ADR-047 phase 1, DPTP §4.4) rides the
+  offer, relays and holders copy it byte for byte, and the receiver checks it
+  (`offer_file_description`) and, at the end, binds the bytes to its hash and
+  `chunks_hash` whatever `verify_hash` says
 - A chunk that has not arrived is re-asked after a silence; after a bounded
   number of fruitless rounds the receiver gives up with `missing_chunks`
 - No resume: a transfer that ends (cancel, disconnect, restart, failure)
@@ -69,7 +73,7 @@ from ..p2p_manager import peer_proof
 from ..send_lanes import DataWindowResult
 from .chunk_window import (
     ChunkWindow, PeerLinkRates, choose_chunk_size, parse_chunk_delay_setting, parse_chunk_size_setting,
-    SMALL_FILE_CHUNK_BYTES,
+    MAX_CHUNKS_PER_OFFER, SMALL_FILE_CHUNK_BYTES, description_chunk_size,
 )
 from .transfer_speed import TransferSpeed
 
@@ -123,6 +127,11 @@ RECEIVE_ERROR_REASON = "receive_error"
 # same identity: received, still receiving, or sent it itself. The sender takes
 # it as a quiet success. Mike's word, 2026-10-25.
 ALREADY_RECEIVED_REASON = "already_received"
+# FILE_CANCEL reason for an offer whose author-signed `file_description`
+# (ADR-047 phase 1, specs/dptp_v1.md §4.4) does not hold: the signature fails
+# (another signer, another chat, an altered field) or the offer's name, size,
+# hash or MIME type is not the description's. Pending Mike as a name.
+FILE_SIGNATURE_REJECTED_REASON = "file_signature_rejected"
 # How long, and for how many ids, a receiver remembers a FILE_CANCEL it sent. A
 # sender that kept streaming (its loop had not seen the cancel yet) is answered
 # once more with the same reason per window, not once per chunk.
@@ -183,7 +192,8 @@ def hash_file_in_one_pass(
     with_chunk_crcs: bool = True,
     on_progress: Optional[Callable[[int, int], None]] = None,
     min_interval_s: float = PREPARATION_PROGRESS_MIN_INTERVAL_S,
-) -> Tuple[Optional[str], List[str]]:
+    description_chunk_size: Optional[int] = None,
+):
     """
     Read the file once and produce the SHA-256 and the per-chunk CRC32 list.
 
@@ -192,12 +202,25 @@ def hash_file_in_one_pass(
     separately: the block is a multiple of ``chunk_size`` so slice boundaries
     never move, and only the last slice may be short.
 
+    With ``description_chunk_size`` the same read also yields the
+    ``chunks_hash`` of a signed file description (ADR-047 phase 1): the SHA-256
+    of the 32-byte SHA-256 digests of every ``description_chunk_size`` slice,
+    in order, and the return value is the triple ``(sha256_hex or None, crcs,
+    chunks_hash_hex)``. The per-chunk digest rolls across read blocks, so it
+    holds for any wire ``chunk_size``, a pinned 65537 included, whose blocks
+    do not line up with the description's slices. An empty file has no
+    slices: its ``chunks_hash`` is the SHA-256 of nothing.
+
     ``on_progress(bytes_done, total_bytes)`` is called at most once per
     ``min_interval_s`` of wall time, plus once at the end (100%).
     """
     block_size = chunk_size * max(1, HASH_READ_BLOCK_BYTES // chunk_size)
     sha256 = hashlib.sha256() if with_sha256 else None
     chunk_hashes: List[str] = []
+    digest_size = int(description_chunk_size) if description_chunk_size else 0
+    chunks_digest = hashlib.sha256() if digest_size else None
+    slice_digest = hashlib.sha256()
+    slice_filled = 0
     total_size = file_path.stat().st_size
     bytes_done = 0
     last_emit_at = _monotonic()
@@ -212,6 +235,18 @@ def hash_file_in_one_pass(
                 for start in range(0, len(block), chunk_size):
                     crc = zlib.crc32(view[start:start + chunk_size]) & 0xffffffff
                     chunk_hashes.append(f"{crc:08x}")
+            if chunks_digest is not None:
+                view = memoryview(block)
+                pos = 0
+                while pos < len(block):
+                    take = min(digest_size - slice_filled, len(block) - pos)
+                    slice_digest.update(view[pos:pos + take])
+                    slice_filled += take
+                    pos += take
+                    if slice_filled == digest_size:
+                        chunks_digest.update(slice_digest.digest())
+                        slice_digest = hashlib.sha256()
+                        slice_filled = 0
             bytes_done += len(block)
 
             if on_progress is not None:
@@ -224,7 +259,12 @@ def hash_file_in_one_pass(
     if on_progress is not None and last_emit_bytes != bytes_done:
         on_progress(bytes_done, total_size)  # final 100% event
 
-    return (sha256.hexdigest() if sha256 is not None else None), chunk_hashes
+    file_hash = sha256.hexdigest() if sha256 is not None else None
+    if chunks_digest is None:
+        return file_hash, chunk_hashes
+    if slice_filled:
+        chunks_digest.update(slice_digest.digest())  # the short last slice
+    return file_hash, chunk_hashes, chunks_digest.hexdigest()
 
 
 class TransferStatus(Enum):
@@ -296,6 +336,36 @@ def group_file_keys(group_id: str, message_id: Optional[str],
     by_hash = (f"group_file_hash:{group_id}:{file_hash}"
                if file_hash and file_hash != "none" else None)
     return by_id, by_hash
+
+
+def wire_file_description(value: Any) -> Optional[Dict[str, Any]]:
+    """A `file_description` as it travels: exactly `signing.FILE_DESCRIPTION_FIELDS`, in order.
+
+    None when `value` is not a dict carrying all of them. What a hop added
+    beside the signed fields is dropped, so a relay or a holder re-serves the
+    author's description byte for byte and nothing unsigned rides along.
+    """
+    from ..signing import FILE_DESCRIPTION_FIELDS
+    if not isinstance(value, dict) or any(key not in value for key in FILE_DESCRIPTION_FIELDS):
+        return None
+    return {key: value[key] for key in FILE_DESCRIPTION_FIELDS}
+
+
+def description_offer_mismatch(desc: Dict[str, Any], payload: Dict[str, Any]) -> Optional[str]:
+    """Why an offer is not the file its description describes, or None.
+
+    The name, size, content hash and MIME type the receiver acts on are the
+    offer's, so each must be the signed one; a group offer's `message_id` and
+    `sender_node_id` too, since the receiver files the copy under them.
+    """
+    for key in ("filename", "size_bytes", "hash", "mime_type"):
+        if payload.get(key) != desc.get(key):
+            return f"offer {key} {str(payload.get(key))[:80]!r}, described {str(desc.get(key))[:80]!r}"
+    if payload.get("group_id"):
+        for key in ("message_id", "sender_node_id"):
+            if payload.get(key) != desc.get(key):
+                return f"offer {key} {str(payload.get(key))[:40]!r}, described {str(desc.get(key))[:40]!r}"
+    return None
 
 
 def offer_identity_field(value: Any) -> Optional[str]:
@@ -388,6 +458,13 @@ class FileTransfer:
     # A download whose sender no rule names (FILE_TRANSFER_ASK), until the user
     # answers "allow files from X?"; a decline meanwhile tells the sender why.
     awaiting_permission: bool = False
+    # ADR-047 phase 1: the author's signed description of the file
+    # (`wire_file_description`). On an upload the one the offer carries, which a
+    # relay or holder re-serves unchanged; on a download the offer's, with this
+    # node's verdict on it (signing.FILE_VERIFIED / _UNVERIFIED / _REJECTED;
+    # None when the offer carried none, a legacy offer).
+    file_description: Optional[Dict[str, Any]] = None
+    file_verdict: Optional[str] = None
 
     # Whether the file stays on disk. A download decides it at the first chunk
     # (a screenshot with save_screenshots_to_disk off is verified chunk by chunk
@@ -622,6 +699,10 @@ class FileTransferManager:
         # restart a copy may be taken again, and its record still lands once.
         self._group_files_held: Dict[str, None] = {}
         self._cancels_sent: Dict[str, tuple] = {}  # transfer_id -> (when, reason)
+        # ADR-047 phase 1: CERT_REQUESTs sent for a file description's author,
+        # (author, hop) -> when, and the waits for a certificate to arrive.
+        self._certificates_asked: Dict[tuple, float] = {}
+        self._certificate_arrivals: Dict[str, asyncio.Event] = {}
         self._stray_chunk_ids: Dict[str, float] = {}  # transfer_id -> when first met
         # FILE_REQUEST, both sides: files this node asked its peers for, and the
         # answers it gives when asked.
@@ -799,8 +880,8 @@ class FileTransferManager:
 
     async def _hash_in_executor(
         self, file_path: Path, phase: str, with_sha256: bool, with_chunk_crcs: bool,
-        chunk_size: Optional[int] = None,
-    ) -> Tuple[Optional[str], List[str]]:
+        chunk_size: Optional[int] = None, description_chunk_size: Optional[int] = None,
+    ):
         """Run `hash_file_in_one_pass` in the thread pool, relaying throttled progress to the UI."""
         loop = asyncio.get_running_loop()
 
@@ -820,7 +901,7 @@ class FileTransferManager:
             lambda: hash_file_in_one_pass(
                 file_path, chunk_size or self.chunk_size,
                 with_sha256=with_sha256, with_chunk_crcs=with_chunk_crcs,
-                on_progress=_relay_progress,
+                on_progress=_relay_progress, description_chunk_size=description_chunk_size,
             ),
         )
 
@@ -838,7 +919,8 @@ class FileTransferManager:
 
     async def compute_file_fingerprint(self, file_path: Path,
                                        with_sha256: Optional[bool] = None,
-                                       chunk_size: Optional[int] = None) -> Tuple[str, List[str]]:
+                                       chunk_size: Optional[int] = None,
+                                       description_chunk_size: Optional[int] = None):
         """
         Compute (file hash, per-chunk CRC32 list) of a file to send, in ONE read of the file.
 
@@ -848,6 +930,10 @@ class FileTransferManager:
         file_preparation_completed. A caller that sends the same file to several peers calls
         this once, with the size from `chunk_size_for`, and passes the pair and that same
         `chunk_size` to `send_file`. Without `chunk_size` the CRCs are per `self.chunk_size`.
+
+        With `description_chunk_size` (chunk_window.description_chunk_size) the same read
+        also yields the `chunks_hash` of the file's signed description, and the result is
+        the triple (file hash, chunk CRCs, chunks_hash).
         """
         if with_sha256 is None:
             with_sha256 = self.verify_hash
@@ -861,13 +947,15 @@ class FileTransferManager:
 
         # With the SHA-256 on, the one pass is reported as "hashing_file"; without it only the
         # chunk CRCs are computed ("hashing_chunks", which the UI shows as "Preparing file").
-        file_hash, chunk_hashes = await self._hash_in_executor(
+        hashed = await self._hash_in_executor(
             file_path,
             "hashing_file" if with_sha256 else "hashing_chunks",
             with_sha256=with_sha256,
             with_chunk_crcs=True,
             chunk_size=chunk_size,
+            description_chunk_size=description_chunk_size,
         )
+        file_hash, chunk_hashes = hashed[0], hashed[1]
         if file_hash is None:
             file_hash = "none"
 
@@ -877,6 +965,8 @@ class FileTransferManager:
                 "hash": file_hash,
                 "total_chunks": len(chunk_hashes)
             })
+        if description_chunk_size:
+            return file_hash, chunk_hashes, hashed[2]
         return file_hash, chunk_hashes
 
     async def send_file(
@@ -896,6 +986,8 @@ class FileTransferManager:
         filename: Optional[str] = None,
         request_id: Optional[str] = None,
         chunk_size: Optional[int] = None,
+        file_description: Optional[Dict[str, Any]] = None,
+        sign_description: bool = False,
     ) -> str:
         """
         Initiate file transfer to peer.
@@ -936,6 +1028,18 @@ class FileTransferManager:
             chunk_size: The size the precomputed pair was hashed with (a fan-out's
                 `chunk_size_for`). Without a pair it is decided here, per this peer;
                 a pair given without it is taken as hashed with `self.chunk_size`.
+            file_description: The author's signed description of the file (ADR-047
+                phase 1; `signing.sign_file_description`). The author passes the one it
+                signed; a relay or a holder passes the one it received, never signing it
+                again. It travels unchanged on the offer, and the offer's name, hash and
+                MIME type are the described ones, so the receiver can check them. One
+                whose size is not the file's, or whose hash is not the one computed
+                here, is left off with a warning: the receiver would refuse it.
+            sign_description: This node's own one-to-one send (`P2PCoordinator.send_file`):
+                sign the file's description here, for this recipient, in the same read
+                that makes the fingerprint, under the id the sender's record of the file
+                will carry (`FileCompleteHandler`). Nothing is signed without a key, for
+                a group, a relay or an answer to FILE_REQUEST, or when a description is given.
 
         Returns:
             transfer_id: Unique transfer identifier
@@ -960,7 +1064,19 @@ class FileTransferManager:
         # Compute file metadata
         file_size = file_path.stat().st_size
 
+        description = wire_file_description(file_description) if file_description else None
+        if description is not None and description["size_bytes"] != file_size:
+            logger.warning("The description of %s names %r bytes and the file has %d; "
+                           "sent without it", file_path.name, description["size_bytes"], file_size)
+            description = None
+
         precomputed = file_hash is not None and chunk_hashes is not None
+        signs_here = bool(sign_description and description is None and not precomputed
+                          and not group_id and not group_relay and not request_id)
+        if signs_here:
+            from .. import signing
+            signer = signing.node_signer()
+            signs_here = signer is not None and signer.node_id == self.p2p_manager.node_id
         # One size for the CRCs, the offer and the send loop (ADR-047 phase 0).
         if chunk_size is None:
             chunk_size = self.chunk_size if precomputed else self.chunk_size_for(file_size, [node_id])
@@ -972,12 +1088,19 @@ class FileTransferManager:
                 f"of {file_path.name}; hashing again"
             )
             precomputed = False
+        chunks_hash = None
+        slice_size = description_chunk_size(file_size)
         if not precomputed:
             # One read of the file yields the SHA-256 and the per-chunk CRC32 (v0.11.1).
             # An answer to FILE_REQUEST always carries the SHA-256, verify_hash or not:
-            # the requester refuses one whose hash is not its record's.
-            file_hash, chunk_hashes = await self.compute_file_fingerprint(
-                file_path, with_sha256=self.verify_hash or bool(request_id), chunk_size=chunk_size)
+            # the requester refuses one whose hash is not its record's. So does a file
+            # whose description is signed here, which also needs the chunks_hash.
+            fingerprint = await self.compute_file_fingerprint(
+                file_path, with_sha256=self.verify_hash or bool(request_id) or signs_here,
+                chunk_size=chunk_size, description_chunk_size=slice_size if signs_here else None)
+            file_hash, chunk_hashes = fingerprint[0], fingerprint[1]
+            if signs_here:
+                chunks_hash = fingerprint[2]
 
         # Detect MIME type (but override for voice messages to ensure audio/webm)
         if voice_metadata:
@@ -985,6 +1108,28 @@ class FileTransferManager:
             mime_type = "audio/webm"
         else:
             mime_type = self._detect_mime_type(file_path)
+        if signs_here and chunks_hash and file_hash not in (None, "", "none"):
+            from ..signing import sign_file_description
+            me = self.p2p_manager.node_id
+            name = filename or file_path.name
+            message_id = hashlib.sha256(
+                f"{me}:file-send:{node_id}:{name}:{int(time.time() * 1000)}".encode()
+            ).hexdigest()[:16]
+            description = wire_file_description(sign_file_description(
+                conversation_id=node_id, message_id=message_id, sender_node_id=me,
+                size_bytes=file_size, chunk_size=slice_size, hash=file_hash,
+                chunks_hash=chunks_hash, filename=name, mime_type=mime_type))
+        if description is not None and file_hash not in (None, "", "none", description["hash"]):
+            logger.warning("%s no longer hashes to its description's hash; sent without it",
+                           file_path.name)
+            description = None
+        if description is not None:
+            # The offer says what the description says: the receiver refuses an
+            # offer whose name, hash or MIME type is not the signed one. The hash
+            # is the author's SHA-256 even where this node's verify_hash is off.
+            file_hash = description["hash"]
+            mime_type = description["mime_type"]
+            filename = description["filename"]
         total_chunks = expected_chunks
 
         logger.info(
@@ -1015,6 +1160,7 @@ class FileTransferManager:
             group_relay=group_relay,
             text=text or None,
             request_id=request_id or None,
+            file_description=description,
         )
         if group_id and message_id:
             transfer.message_id = message_id
@@ -1058,6 +1204,11 @@ class FileTransferManager:
             if transfer.message_id:
                 payload["message_id"] = transfer.message_id
                 payload["sender_node_id"] = transfer.sender_node_id
+
+        # The author's signed description, as signed (ADR-047 phase 1); a
+        # receiver that predates it ignores it
+        if description is not None:
+            payload["file_description"] = description
 
         await self.p2p_manager.send_message_to_peer(node_id, {
             "command": "FILE_OFFER",
@@ -1133,6 +1284,103 @@ class FileTransferManager:
                     and key in group_file_keys(t.group_id, t.message_id, t.hash)):
                 return True
         return False
+
+    # --- ADR-047 phase 1: the author-signed file description ------------------
+
+    def offer_file_description(self, node_id: str, payload: Dict[str, Any]
+                               ) -> Tuple[Optional[Dict[str, Any]], str, Optional[str]]:
+        """(description, verdict, why) for an offer `node_id` handed over.
+
+        No `file_description`, or one of a `file_preimage_version` this node
+        does not implement: (None, legacy, None), taken as today. Otherwise the
+        description must be whole, the offer's name, size, hash and MIME type
+        (and a group offer's identity) must be the described ones, and the
+        signature must hold for the conversation this node works out itself:
+        any failure is `rejected`, with `why` for the log. A certificate this
+        node does not hold yet is `unverified`, not a refusal.
+        """
+        from dpc_protocol.message_signing import FILE_PREIMAGE_VERSION
+        from ..signing import FILE_LEGACY, FILE_REJECTED, file_conversation_id, file_description_verdict
+
+        raw = payload.get("file_description")
+        if not isinstance(raw, dict) or raw.get("file_preimage_version") != FILE_PREIMAGE_VERSION:
+            return None, FILE_LEGACY, None
+        desc = wire_file_description(raw)
+        if desc is None:
+            return None, FILE_REJECTED, "the description lacks a field"
+        why = description_offer_mismatch(desc, payload)
+        if why is not None:
+            return desc, FILE_REJECTED, why
+        size, slice_size = desc["size_bytes"], desc["chunk_size"]
+        if (isinstance(size, int) and isinstance(slice_size, int) and slice_size > 0
+                and (size + slice_size - 1) // slice_size > MAX_CHUNKS_PER_OFFER):
+            # Bounds the chunk list, and the digest loop at the end, even for a
+            # description no certificate here can check yet.
+            return desc, FILE_REJECTED, f"the description cuts the file into more than {MAX_CHUNKS_PER_OFFER} chunks"
+        conversation = file_conversation_id(
+            group_id=payload.get("group_id") or None, my_node_id=self.p2p_manager.node_id,
+            peer_node_id=node_id, author=desc["sender_node_id"])
+        verdict = file_description_verdict(desc, conversation)
+        if verdict == FILE_REJECTED:
+            return desc, verdict, "the signature does not hold for this chat and author"
+        return desc, verdict, None
+
+    def file_description_verdict_now(self, node_id: str, transfer: FileTransfer) -> str:
+        """The verdict on a download's description, checked again (a certificate may have come)."""
+        from ..signing import FILE_LEGACY, file_conversation_id, file_description_verdict
+
+        desc = transfer.file_description
+        if not desc:
+            return FILE_LEGACY
+        conversation = file_conversation_id(
+            group_id=transfer.group_id or None, my_node_id=self.p2p_manager.node_id,
+            peer_node_id=node_id, author=desc.get("sender_node_id"))
+        return file_description_verdict(desc, conversation)
+
+    async def ask_for_certificate(self, author: str, hop: str) -> None:
+        """Ask `hop` for `author`'s certificate (CERT_REQUEST), for an unverified description.
+
+        Not gated by `pending_certificate_requests` as the message path is: a
+        relay that withholds the certificate must not stop this node asking the
+        next holder (W2). At most once per (author, hop) per answer wait. The
+        answer needs no trust in the hop: a certificate whose key does not hash
+        to `author` is refused on arrival (certificate_handler.py).
+        """
+        if not author or not hop or author == self.p2p_manager.node_id:
+            return
+        now = _monotonic()
+        wait = getattr(self.file_requests, "answer_timeout_s", 10.0)
+        for key in [k for k, when in self._certificates_asked.items() if now - when >= wait]:
+            del self._certificates_asked[key]
+        if (author, hop) in self._certificates_asked:
+            return
+        self._certificates_asked[(author, hop)] = now
+        # Registered before the ask leaves, so an answer that beats the wait still wakes it.
+        self._certificate_arrivals.setdefault(author, asyncio.Event())
+        pending = getattr(self.service, "pending_certificate_requests", None)
+        if isinstance(pending, set):
+            pending.add(author)
+        try:
+            await self.p2p_manager.send_message_to_peer(
+                hop, {"command": "CERT_REQUEST", "payload": {"node_id": author}})
+            logger.info("Asked %s for the certificate of %s, author of a file", hop[:20], author[:20])
+        except Exception as e:  # noqa: BLE001 - the file goes on unverified
+            logger.debug("Could not ask %s for a certificate: %s", hop[:20], e)
+
+    def certificate_arrived(self, node_id: str) -> None:
+        """A certificate for `node_id` was cached: wake whatever waits for it."""
+        event = self._certificate_arrivals.pop(node_id, None)
+        if event is not None:
+            event.set()
+
+    async def wait_for_certificate(self, node_id: str, timeout_s: float) -> bool:
+        """Whether a certificate for `node_id` arrived within `timeout_s`."""
+        event = self._certificate_arrivals.setdefault(node_id, asyncio.Event())
+        try:
+            await asyncio.wait_for(event.wait(), timeout_s)
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     async def handle_file_accept(self, node_id: str, transfer_id: str):
         """
@@ -1963,9 +2211,30 @@ class FileTransferManager:
             # not the offer's own: a holder could declare the right hash and
             # send other bytes, or declare "none" to skip the check.
             expected_hash = transfer.requested_hash or transfer.hash
-            if transfer.requested_hash or (self.verify_hash and transfer.hash != "none"):
+            expected = set()
+            if transfer.requested_hash:
+                expected.add(transfer.requested_hash)
+            elif self.verify_hash and transfer.hash != "none":
+                expected.add(transfer.hash)
+            # A description that was not refused binds the bytes whatever
+            # verify_hash says (ADR-047 phase 1): its hash, and its chunks_hash,
+            # recomputed in the same read.
+            from ..signing import FILE_REJECTED, FILE_UNVERIFIED, FILE_VERIFIED
+            described = (transfer.file_description
+                         if transfer.file_verdict in (FILE_VERIFIED, FILE_UNVERIFIED) else None)
+            if described:
+                expected.add(described["hash"])
+                expected_hash = transfer.requested_hash or described["hash"]
+            if expected:
+                chunks_hash = None
                 try:
-                    computed_hash = await self._compute_file_hash_async(temp_path)
+                    if described:
+                        computed_hash, _, chunks_hash = await self._hash_in_executor(
+                            temp_path, "hashing_file", with_sha256=True, with_chunk_crcs=False,
+                            chunk_size=described["chunk_size"],
+                            description_chunk_size=described["chunk_size"])
+                    else:
+                        computed_hash = await self._compute_file_hash_async(temp_path)
                 except OSError as e:
                     if self.active_transfers.get(tid) is not transfer:
                         return  # cancelled while hashing; the release removed the file
@@ -1975,7 +2244,7 @@ class FileTransferManager:
                 if self.active_transfers.get(tid) is not transfer:
                     temp_path.unlink(missing_ok=True)  # cancelled while hashing
                     return
-                if computed_hash != expected_hash:
+                if any(computed_hash != value for value in expected):
                     logger.error(
                         f"Hash mismatch for {transfer.filename}: expected {expected_hash}, "
                         f"got {computed_hash}; every chunk passed its CRC, the whole file is dropped"
@@ -1985,6 +2254,31 @@ class FileTransferManager:
                         self.file_requests.wrong_bytes(transfer.request_id, tid, node_id)
                     await self._fail_download(node_id, transfer, "hash_mismatch")
                     return
+                if described and chunks_hash != described["chunks_hash"]:
+                    # The bytes are the author's; the chunk list it signed is not
+                    # theirs. The file is kept, the description is never re-served.
+                    logger.warning("%s matches its described hash but not its chunks_hash; "
+                                   "kept, its description rejected", transfer.filename)
+                    transfer.file_verdict = FILE_REJECTED
+                elif described and transfer.file_verdict == FILE_UNVERIFIED:
+                    # The certificate asked for at the offer may be here by now.
+                    verdict = self.file_description_verdict_now(node_id, transfer)
+                    if verdict == FILE_REJECTED and transfer.request_id:
+                        logger.warning("The description of requested %s from %s does not hold "
+                                       "now that its author's certificate is here; dropped",
+                                       transfer.filename, node_id[:20])
+                        self.file_requests.wrong_bytes(transfer.request_id, tid, node_id)
+                        await self._fail_download(node_id, transfer, FILE_SIGNATURE_REJECTED_REASON)
+                        return
+                    if verdict == FILE_REJECTED:
+                        logger.warning("The description of %s from %s does not hold now that its "
+                                       "author's certificate is here; the file is kept, its "
+                                       "description rejected", transfer.filename, node_id[:20])
+                    elif verdict == FILE_UNVERIFIED:
+                        logger.info("%s kept with its description unverified: no certificate for "
+                                    "%s arrived", transfer.filename,
+                                    str(described.get("sender_node_id"))[:20])
+                    transfer.file_verdict = verdict
             else:
                 computed_hash = "none"
 
@@ -2090,11 +2384,29 @@ class FileTransferManager:
                 "transfer_id": transfer.transfer_id,
                 "status": "completed"
             }
-            if transfer.request_id and not transfer.requested_hash:
+            from ..signing import FILE_REJECTED, FILE_UNVERIFIED, FILE_VERIFIED
+            # A group description verified against the author's key and naming
+            # the requested record ties the bytes to what its author sent.
+            described_record = bool(
+                transfer.file_verdict == FILE_VERIFIED and transfer.group_id
+                and transfer.file_description
+                and transfer.file_description.get("message_id") == transfer.message_id)
+            if transfer.request_id and (
+                    (not transfer.requested_hash and not described_record)
+                    or transfer.file_verdict == FILE_UNVERIFIED):
                 # Requested for a record with no content hash: the name and size
                 # matched and the bytes hash to what their sender declared, but
-                # nothing ties them to what the record's author sent.
+                # nothing ties them to what the record's author sent. A description
+                # still unverified does not either, whatever the record carried.
                 attachment["content_verified"] = False
+            if transfer.file_description and transfer.file_verdict in (FILE_VERIFIED, FILE_UNVERIFIED):
+                # The author's description, kept as it came so this node can
+                # re-serve it (ADR-047 phase 1), with this node's verdict beside
+                # it: a local field, dropped on import and computed again on use.
+                attachment["file_description"] = transfer.file_description
+                attachment["file_verdict"] = transfer.file_verdict
+            elif transfer.file_verdict == FILE_REJECTED:
+                attachment["file_verdict"] = FILE_REJECTED  # kept, never re-served
 
             # A plain file keeps the path it was saved under, so the chat can
             # show it in its folder. Image and voice take theirs below.
@@ -2274,6 +2586,7 @@ class FileTransferManager:
         peer) is logged here: raised, it surfaced only as "Task exception was
         never retrieved".
         """
+        from ..signing import FILE_UNVERIFIED, FILE_VERIFIED
         try:
             await self.send_file(
                 node_id=member_id,
@@ -2286,6 +2599,11 @@ class FileTransferManager:
                 group_relay=True,
                 text=received.text,
                 filename=received.filename,  # the copy here may be under `_N`
+                # The author's description, byte for byte; never signed again here.
+                # One this node rejected is not passed on.
+                file_description=(received.file_description
+                                  if received.file_verdict in (FILE_VERIFIED, FILE_UNVERIFIED)
+                                  else None),
             )
             logger.info("Relayed group %s %s to %s", kind, received.filename, member_id[:20])
         except Exception as e:  # noqa: BLE001 - one member's failure ends only its relay

@@ -138,3 +138,151 @@ def sign_vote(
         "vote_preimage_version": VOTE_PREIMAGE_VERSION,
         "timestamp": timestamp,
     }
+
+
+# --- ADR-047 phase 1: the author-signed file description ----------------------
+
+# The verdicts a file description gets on receipt (specs/dptp_v1.md §4.4), the
+# §4.2 words: checked against the author's cached certificate; signed but no
+# certificate here yet; no description this node can read (absent, or another
+# `file_preimage_version`); present and wrong.
+FILE_VERIFIED = "verified"
+FILE_UNVERIFIED = "unverified"
+FILE_LEGACY = "legacy"
+FILE_REJECTED = "rejected"
+
+# Every key of a description, in the order the author writes them. A relay or
+# holder re-serves exactly these, so an honest description crosses every hop
+# byte for byte, and nothing a hop added rides along unsigned.
+FILE_DESCRIPTION_FIELDS = (
+    "file_preimage_version", "message_id", "sender_node_id", "size_bytes", "chunk_size",
+    "hash", "chunks_hash", "filename", "mime_type", "file_signature",
+)
+
+_HEX = frozenset("0123456789abcdef")
+_MAX_ID_CHARS = 128
+
+
+def _is_digest(value) -> bool:
+    return isinstance(value, str) and len(value) == 64 and set(value) <= _HEX
+
+
+def _is_count(value, minimum: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+
+
+def file_conversation_id(*, group_id: Optional[str], my_node_id: Optional[str],
+                         peer_node_id: Optional[str], author: Optional[str]) -> Optional[str]:
+    """The `conversation_id` a file description must have been signed for, from this node's state.
+
+    A group file: the group. A one-to-one file was signed for its recipient,
+    so a node that receives it from its author checks it against its own id,
+    and an author that gets its own file back (FILE_REQUEST) against the
+    other party's. A one-to-one description whose author is neither party is
+    some other chat's: None, which no description verifies against.
+    """
+    if group_id:
+        return group_id
+    if author and author == my_node_id:
+        return peer_node_id or None
+    if author and author == peer_node_id:
+        return my_node_id or None
+    return None
+
+
+def file_description_verdict(desc, conversation_id: Optional[str]) -> str:
+    """FILE_VERIFIED / _UNVERIFIED / _LEGACY / _REJECTED for one description.
+
+    The signature is checked against `sender_node_id`'s certificate, so a
+    description signed by anyone else is rejected; the preimage is rebuilt
+    with the caller's `conversation_id`, so one replayed into another chat is
+    rejected. Whether the offer carrying it agrees with it is the caller's
+    check (`file_transfer_manager.offer_file_description`).
+    """
+    from dpc_protocol.commit_integrity import CommitSigner
+    from dpc_protocol.message_signing import FILE_PREIMAGE_VERSION, file_content_hash
+
+    if not isinstance(desc, dict) or desc.get("file_preimage_version") != FILE_PREIMAGE_VERSION:
+        return FILE_LEGACY
+    message_id = desc.get("message_id")
+    author = desc.get("sender_node_id")
+    filename = desc.get("filename")
+    mime_type = desc.get("mime_type")
+    signature = desc.get("file_signature")
+    if not (isinstance(message_id, str) and 0 < len(message_id) <= _MAX_ID_CHARS
+            and isinstance(author, str) and author.startswith("dpc-node-")
+            and len(author) <= _MAX_ID_CHARS
+            and _is_count(desc.get("size_bytes"), 0) and _is_count(desc.get("chunk_size"), 1)
+            and _is_digest(desc.get("hash")) and _is_digest(desc.get("chunks_hash"))
+            and isinstance(filename, str) and isinstance(mime_type, str)
+            and isinstance(signature, str) and signature):
+        return FILE_REJECTED
+    if not conversation_id:
+        return FILE_REJECTED
+    content_hash = file_content_hash(
+        conversation_id=conversation_id,
+        message_id=message_id,
+        sender_node_id=author,
+        size_bytes=desc["size_bytes"],
+        chunk_size=desc["chunk_size"],
+        hash=desc["hash"],
+        chunks_hash=desc["chunks_hash"],
+        filename=filename,
+        mime_type=mime_type,
+    )
+    try:
+        result = CommitSigner.verify_signature(author, content_hash, signature)
+    except Exception as e:  # noqa: BLE001 - bad base64, unreadable certificate
+        logger.warning("File description check failed for %s: %s", author[:20], e)
+        return FILE_REJECTED
+    if result is True:
+        return FILE_VERIFIED
+    if result is None:
+        return FILE_UNVERIFIED
+    return FILE_REJECTED
+
+
+def sign_file_description(
+    *,
+    conversation_id: str,
+    message_id: str,
+    sender_node_id: str,
+    size_bytes: int,
+    chunk_size: int,
+    hash: str,
+    chunks_hash: str,
+    filename: str,
+    mime_type: str,
+) -> dict:
+    """The author's `file_description` for one file, or {} when this node cannot sign.
+
+    Empty rather than partial, as `sign_vote`: an offer without a description
+    is read as legacy, which is safe; half of one would be rejected. Also
+    empty when the key on disk is not `sender_node_id`'s, so a node never
+    signs a description in another node's name.
+    """
+    from dpc_protocol.message_signing import FILE_PREIMAGE_VERSION, file_content_hash
+
+    signer = node_signer()
+    if signer is None:
+        return {}
+    if signer.node_id != sender_node_id:
+        logger.warning("The key on disk is %s's, not %s's: file %s sent without a description",
+                       str(signer.node_id)[:20], str(sender_node_id)[:20], filename)
+        return {}
+    fields = {
+        "message_id": message_id,
+        "sender_node_id": sender_node_id,
+        "size_bytes": size_bytes,
+        "chunk_size": chunk_size,
+        "hash": hash,
+        "chunks_hash": chunks_hash,
+        "filename": filename,
+        "mime_type": mime_type,
+    }
+    try:
+        signature = signer.sign_commit(file_content_hash(conversation_id=conversation_id, **fields))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not sign the description of %s: %s", filename, e)
+        return {}
+    return {"file_preimage_version": FILE_PREIMAGE_VERSION, **fields, "file_signature": signature}

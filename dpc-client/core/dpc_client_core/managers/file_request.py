@@ -43,6 +43,17 @@ transit, and the completed attachment is marked `content_verified: False`,
 because nothing ties those bytes to what the author sent. A record with
 neither a hash nor a size is not requested at all.
 
+ADR-047 phase 1 adds the author's signed `file_description`. A record that
+holds one (the author's own, or one synced from it) is answered only by an
+offer carrying the same description: an offer without it, or with another,
+is `not_the_requested_file`, so a stripped signature cannot downgrade the
+file. A holder re-serves the description its record holds, byte for byte. An
+offer whose description does not hold is refused (`file_signature_rejected`)
+and the next peer is asked. One whose author's certificate this node lacks is
+accepted only once the certificate has come (CERT_REQUEST to the holder), or,
+when it does not come within `answer_timeout_s`, given up for the next peer;
+the last peer's offer is taken single-source and checked again at the end.
+
 The automatic version (fetch after sync, on reconnect, on being added) is card
 A-NODE-THAT-SYNCS-A-RECORD-NEVER-FETCHES-THE-FILE-IT-LACKS, under the epic of
 ADR-047; it is meant to call `FileRequests.request` too.
@@ -73,6 +84,9 @@ NOT_THE_REQUESTED_FILE_REASON = "not_the_requested_file"
 # The requester's own note for a peer that offered another file, or sent bytes
 # that do not hash to the record's hash; never on the wire as a decline.
 _OFFERED_ANOTHER_FILE = "offered_another_file"
+# The requester's own note for a peer whose offer carried a description whose
+# author's certificate did not come within the answer wait; never on the wire.
+_CERTIFICATE_WITHHELD = "certificate_withheld"
 
 # The UI event and its states.
 FILE_REQUEST_STATUS_EVENT = "file_request_status"
@@ -149,6 +163,15 @@ def _real_hash(value: Any) -> Optional[str]:
     return value if value and value != "none" else None
 
 
+def _held_description(attachment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The author's description an attachment holds, or None (none, or one this node rejected)."""
+    from ..signing import FILE_REJECTED
+    from .file_transfer_manager import wire_file_description
+    if attachment.get("file_verdict") == FILE_REJECTED:
+        return None
+    return wire_file_description(attachment.get("file_description"))
+
+
 @dataclass
 class OpenRequest:
     """One request this node put to its peers, until its file arrives or it is forgotten."""
@@ -163,6 +186,9 @@ class OpenRequest:
     candidates: List[str]
     # Where the attachment is in the record, so the UI completes that one.
     attachment_index: Optional[int] = None
+    # The author's signed description the record holds (ADR-047 phase 1), or
+    # None: an answer must carry the same one.
+    file_description: Optional[Dict[str, Any]] = None
     created: float = field(default_factory=time.monotonic)
     declined: Dict[str, str] = field(default_factory=dict)  # node -> reason
     retry_after: Dict[str, float] = field(default_factory=dict)  # busy node -> seconds it named
@@ -295,6 +321,7 @@ class FileRequests:
         size = attachment.get("size_bytes")
         size = size if isinstance(size, int) and not isinstance(size, bool) else None
         file_hash = _real_hash(attachment.get("hash"))
+        description = _held_description(attachment)
         if size is None and file_hash is None:
             # Nothing but a name to check an answer against: any bytes under that
             # name would complete the record.
@@ -331,6 +358,7 @@ class FileRequests:
             file_hash=file_hash,
             candidates=candidates,
             attachment_index=index,
+            file_description=description,
         )
         self._open[request.request_id] = request
         await self._emit(request, STATE_REQUESTING, asking=list(candidates))
@@ -416,6 +444,9 @@ class FileRequests:
         elif _OFFERED_ANOTHER_FILE in reasons:
             await self._emit(request, STATE_FAILED,
                              reason="a peer sent a file other than the one requested")
+        elif _CERTIFICATE_WITHHELD in reasons:
+            await self._emit(request, STATE_FAILED,
+                             reason="no peer sent the certificate that checks the file's author")
         else:
             await self._emit(request, STATE_NOT_HELD)
         logger.info("FILE_REQUEST %s for %s: %s (%d declined, %d silent)",
@@ -470,7 +501,82 @@ class FileRequests:
             return f"size {size!r}, requested {request.size_bytes}"
         if request.file_hash and _real_hash(payload.get("hash")) != request.file_hash:
             return f"hash {str(payload.get('hash'))[:16]!r}, requested {request.file_hash[:16]!r}"
+        from .file_transfer_manager import wire_file_description
+        offered = wire_file_description(payload.get("file_description"))
+        if request.file_description is not None:
+            # Downgrade protection, under either legacy policy: the record holds
+            # the author's description, so the file comes with it or not at all.
+            if offered is None:
+                return "no file description, and the record holds the author's"
+            if offered != request.file_description:
+                return "another file description than the record's"
+        elif offered is not None and request.group_id and offered.get("message_id") != request.message_id:
+            return (f"a description of message {str(offered.get('message_id'))[:20]!r}, "
+                    f"requested {request.message_id[:20]!r}")
         return None
+
+    @staticmethod
+    def has_next_candidate(request: OpenRequest) -> bool:
+        """Whether the request still has a peer it has not asked."""
+        return request.next_candidate < len(request.candidates)
+
+    def accept_once_verified(self, request: OpenRequest, node_id: str, transfer) -> None:
+        """Hold an offer whose author's certificate is not here until it is (W2).
+
+        Runs as its own task: the offer handler has registered the transfer and
+        asked `node_id` for the certificate. Verified within `answer_timeout_s`:
+        FILE_ACCEPT, and the receive begins. Rejected once the certificate is
+        here: `file_signature_rejected`. Still unverified: the offer is given up
+        with `no_answer` (this node did not answer it in time) and the next
+        peer is asked, so a holder that withholds the certificate cannot keep
+        the file from being checked.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._accept_once_verified(request, node_id, transfer))
+
+    async def _accept_once_verified(self, request: OpenRequest, node_id: str, transfer) -> None:
+        from ..signing import FILE_REJECTED, FILE_VERIFIED
+        from .file_transfer_manager import (
+            FILE_SIGNATURE_REJECTED_REASON, NO_ANSWER_REASON, TransferStatus,
+        )
+        manager = self.manager
+        author = (transfer.file_description or {}).get("sender_node_id")
+        await manager.wait_for_certificate(author, self.answer_timeout_s)
+        tid = transfer.transfer_id
+        if manager.active_transfers.get(tid) is not transfer or request.transfer_id != tid:
+            return  # cancelled meanwhile
+        verdict = manager.file_description_verdict_now(node_id, transfer)
+        if verdict == FILE_VERIFIED:
+            transfer.file_verdict = verdict
+            await manager.p2p_manager.send_message_to_peer(node_id, {
+                "command": "FILE_ACCEPT", "payload": {"transfer_id": tid},
+            })
+            transfer.status = TransferStatus.TRANSFERRING
+            manager.begin_receiving(tid)
+            logger.info("FILE_REQUEST %s: the author's certificate came; offer %s accepted",
+                        request.request_id[:8], tid)
+            return
+        if verdict == FILE_REJECTED:
+            reason, note = FILE_SIGNATURE_REJECTED_REASON, _OFFERED_ANOTHER_FILE
+            logger.warning("FILE_REQUEST %s: the description %s offered does not hold; refused",
+                           request.request_id[:8], node_id[:20])
+        else:
+            reason, note = NO_ANSWER_REASON, _CERTIFICATE_WITHHELD
+            logger.warning("FILE_REQUEST %s: no certificate for %s came from %s within %.0fs; "
+                           "asking the next peer", request.request_id[:8], str(author)[:20],
+                           node_id[:20], self.answer_timeout_s)
+        # The request moves on before the transfer leaves the table, so the
+        # leaving reads as no failure of the request (`transfer_ended`).
+        request.transfer_id = None
+        request.holder = None
+        request.declined[node_id] = note
+        await manager._send_file_cancel(node_id, tid, reason)
+        manager.active_transfers.pop(tid, None)
+        if request.task is None or request.task.done():
+            request.task = asyncio.get_running_loop().create_task(self._ask_in_turn(request))
 
     async def offer_mismatched(self, request: OpenRequest, node_id: str, why: str) -> None:
         """The offer from `node_id` was refused as another file: ask the next peer."""
@@ -669,6 +775,8 @@ class FileRequests:
                 sender_node_id=record.get("sender_node_id") if group_id else None,
                 filename=att.get("filename"),
                 request_id=request_id,
+                # The author's description the record holds, byte for byte (ADR-047 phase 1)
+                file_description=_held_description(att),
             )
             self._served[(node_id, str(path))] = time.monotonic()
             logger.info("FILE_REQUEST %s from %s: offering %s", request_id[:8], node_id[:20],

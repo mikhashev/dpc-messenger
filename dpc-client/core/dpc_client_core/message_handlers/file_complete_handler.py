@@ -75,8 +75,13 @@ class FileCompleteHandler(MessageHandler):
             import hashlib
             import time
             # A group file carries the id it was offered under, so the record
-            # here and every member's copy of it share one id.
-            message_id = transfer.message_id or hashlib.sha256(
+            # here and every member's copy of it share one id. A one-to-one file
+            # with a signed description (ADR-047 phase 1) takes the id the
+            # description was signed under: it is this record's id.
+            own_description = (transfer.file_description
+                               if (transfer.file_description or {}).get("sender_node_id")
+                               == self.service.p2p_manager.node_id else None)
+            message_id = transfer.message_id or (own_description or {}).get("message_id") or hashlib.sha256(
                 f"{self.service.p2p_manager.node_id}:file-send:{transfer_id}:{int(time.time() * 1000)}".encode()
             ).hexdigest()[:16]
 
@@ -98,6 +103,9 @@ class FileCompleteHandler(MessageHandler):
                 "transfer_id": transfer_id,
                 "status": "completed"
             }
+            if own_description:
+                # The author's record keeps what it signed, to re-serve it
+                attachment["file_description"] = own_description
 
             # Add image-specific fields
             if is_image:
@@ -179,7 +187,13 @@ class FileCompleteHandler(MessageHandler):
                 if conversation_monitor:
                     file_type = 'screenshot' if is_image else ('voice message' if is_voice else 'file')
                     message_content = file_text or f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
-                    conversation_monitor.add_message("user", message_content, [attachment])
+                    if own_description:
+                        # The record carries the id the description names, the one
+                        # the broadcast above carried too.
+                        conversation_monitor.add_message("user", message_content, [attachment],
+                                                         message_id=message_id)
+                    else:
+                        conversation_monitor.add_message("user", message_content, [attachment])
                     self.logger.debug(f"Added sent {file_type} to conversation history: {transfer.filename}")
 
             # Auto-transcribe if sender_transcribes enabled (v0.13.2+)

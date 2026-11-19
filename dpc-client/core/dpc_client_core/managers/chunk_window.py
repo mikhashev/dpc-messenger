@@ -299,6 +299,19 @@ def choose_chunk_size(file_size: int, connection_type: Optional[str] = None,
     return max(MIN_CHUNK_BYTES, min(by_size, by_tier, by_rate), crc_list_floor(file_size))
 
 
+def description_chunk_size(file_size: int) -> int:
+    """The `chunk_size` of a file's signed description (ADR-047 phase 1): by its size alone.
+
+    The wire chunk (`choose_chunk_size`) follows the tier, the measured rate
+    and the owner's setting, so one file goes in different sizes to different
+    peers. The description's must be one value per file, or each holder would
+    sign a different `chunks_hash` and none could serve another's chunks. So it
+    is step 1 of the rule (the 64 KiB / 1 MiB / 4 MiB table), raised as step 4
+    raises a wire chunk, to keep the chunk list within MAX_CHUNKS_PER_OFFER.
+    """
+    return max(chunk_size_by_file_size(file_size), crc_list_floor(file_size))
+
+
 def _tier_cap(connection_type: Optional[str]) -> int:
     return TIER_CHUNK_CAP_BYTES.get(connection_type or "", OTHER_TIER_CHUNK_CAP_BYTES)
 

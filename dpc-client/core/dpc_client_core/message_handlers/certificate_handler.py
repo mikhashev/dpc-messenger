@@ -100,6 +100,12 @@ class CertificateResponseHandler(MessageHandler):
         self.logger.info(
             "Cached certificate for %s (via %s)", str(node_id)[:20], sender_node_id[:20]
         )
+        # A requested file held until its author's description can be checked
+        # (ADR-047 phase 1, managers/file_request.py) is accepted now.
+        arrived = getattr(getattr(self.service, "file_transfer_manager", None),
+                          "certificate_arrived", None)
+        if callable(arrived):
+            arrived(node_id)
 
         # ADR-036 listed this and it stayed Pending: messages parked as
         # `unverified` were never looked at again, so a missing certificate

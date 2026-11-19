@@ -1468,6 +1468,10 @@ class P2PCoordinator:
         `text` is what the person wrote with the file: it rides the FILE_OFFER and
         is the text of the one message each side records once the peer has the
         file (FileCompleteHandler here, the receive there).
+
+        The file goes with its author's signed description (ADR-047 phase 1),
+        made for this recipient (`sign_description`); a node without a key
+        sends the offer without one, as before.
         """
         from pathlib import Path
 
@@ -1476,7 +1480,7 @@ class P2PCoordinator:
             raise FileNotFoundError(f"File not found: {file_path}")
 
         transfer_id = await self.service.file_transfer_manager.send_file(
-            node_id, file, text=(text or "").strip() or None
+            node_id, file, text=(text or "").strip() or None, sign_description=True
         )
 
         size_bytes = file.stat().st_size

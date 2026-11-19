@@ -77,6 +77,8 @@ from .dpc_agent.context import FAILED_TURN_NOTICE
 from .conversation_monitor import history_status_for as conversation_monitor_history_status_for
 from .conversation_monitor import live_history_boundary_in
 from .conversation_monitor import note_attachment_hash
+from .managers.chunk_window import description_chunk_size
+from .signing import sign_file_description
 from . import conversation_paths
 from . import ai_chats
 from .tool_detail import clip_tool_calls
@@ -698,17 +700,22 @@ PENDING_RECORD_HASHES: Set[asyncio.Task] = set()
 
 
 def note_record_hash(monitor, message_id: str, filename: str, size_bytes: Optional[int],
-                     file_hash: Optional[str]) -> bool:
+                     file_hash: Optional[str],
+                     file_description: Optional[Dict[str, Any]] = None) -> bool:
     """Write `file_hash` on the sender's record `message_id` and save the history.
 
     The attachment sits outside the signed preimage and the local chain, so
     the record stays verifiable (`note_attachment_hash`). A failure here never
     fails the send it follows: the record then keeps today's name-and-size
     matching, as a record written before the hash was noted does.
+
+    `file_description`, the author's signed description of the same file
+    (ADR-047 phase 1), is written beside the hash: the author's record keeps
+    it and re-serves it to whoever asks for the file.
     """
     try:
         if not note_attachment_hash(monitor.message_history, message_id, filename,
-                                    size_bytes, file_hash):
+                                    size_bytes, file_hash, file_description or None):
             return False
         monitor._history_dirty = True
         if monitor.save_history() is False:
@@ -721,23 +728,32 @@ def note_record_hash(monitor, message_id: str, filename: str, size_bytes: Option
 
 
 async def hash_and_note_group_file(service, group_id: str, message_id: str, path: Path,
-                                   size_bytes: int) -> None:
+                                   size_bytes: int, mime_type: Optional[str] = None) -> None:
     """Hash a kept group file off the event loop and note the hash on its record.
 
     For a send whose fan-out computed no SHA-256: nobody was offered the file
-    (a group of one node, or every other member offline), or `verify_hash` is
-    off. The send has answered already; a large file can take seconds here.
+    (a group of one node, or every other member offline). The send has
+    answered already; a large file can take seconds here. The same read
+    yields the `chunks_hash`, so the author's signed description (ADR-047
+    phase 1) is noted too, for a member that asks for the file later.
     """
+    import mimetypes
     try:
-        file_hash, _ = await asyncio.to_thread(
+        slice_size = description_chunk_size(size_bytes)
+        file_hash, _, chunks_hash = await asyncio.to_thread(
             hash_file_in_one_pass, path, service.file_transfer_manager.chunk_size,
-            with_sha256=True, with_chunk_crcs=False)
+            with_sha256=True, with_chunk_crcs=False, description_chunk_size=slice_size)
         if service.group_manager.get_group(group_id) is None:
             return  # left or deleted while hashing: no history to write into
         monitor = service._get_or_create_conversation_monitor(group_id)
         if monitor is None or getattr(monitor, "deleted", False):
             return
-        note_record_hash(monitor, message_id, path.name, size_bytes, file_hash)
+        description = sign_file_description(
+            conversation_id=group_id, message_id=message_id,
+            sender_node_id=service.p2p_manager.node_id, size_bytes=size_bytes,
+            chunk_size=slice_size, hash=file_hash, chunks_hash=chunks_hash, filename=path.name,
+            mime_type=mime_type or mimetypes.guess_type(str(path))[0] or "application/octet-stream")
+        note_record_hash(monitor, message_id, path.name, size_bytes, file_hash, description)
     except Exception as e:  # noqa: BLE001 - nobody awaits this task; the record keeps name and size
         logger.warning("Could not hash the kept group file %s: %s", path.name, e)
 
@@ -8432,12 +8448,15 @@ class CoreService(MusicCommandsMixin):
             transfer_ids = []
             offline_members = []
             not_offered = NotOfferedReport(self.file_transfer_manager.peer_label)
-            fingerprint = None  # (file hash, chunk hashes), computed for the first member only
+            fingerprint = None  # (file hash, chunk hashes, chunks_hash), for the first member only
+            description = None  # the author's signed description, made once for every member
             # One chunk size for the whole fan-out, decided before the one hash
             # (ADR-047 phase 0): the smallest any connected member would get.
             fan_out_chunk = self.file_transfer_manager.chunk_size_for(size_bytes, [
                 m for m in group.members if m != self.p2p_manager.node_id and m in connected_peers
             ])
+            # The description's own chunk size, by the file's size alone (ADR-047 phase 1)
+            slice_size = description_chunk_size(size_bytes)
 
             for node_id in group.members:
                 if node_id == self.p2p_manager.node_id:
@@ -8449,8 +8468,19 @@ class CoreService(MusicCommandsMixin):
 
                 try:
                     if fingerprint is None:
+                        # Always with the SHA-256: the signed description and the
+                        # record need it, verify_hash or not.
                         fingerprint = await self.file_transfer_manager.compute_file_fingerprint(
-                            local_path, chunk_size=fan_out_chunk)
+                            local_path, with_sha256=True, chunk_size=fan_out_chunk,
+                            description_chunk_size=slice_size)
+                        # Signed once, after the fingerprint and before any offer:
+                        # one signature covers every member (ADR-047 phase 1).
+                        description = sign_file_description(
+                            conversation_id=group_id, message_id=message_id,
+                            sender_node_id=self.p2p_manager.node_id, size_bytes=size_bytes,
+                            chunk_size=slice_size, hash=fingerprint[0],
+                            chunks_hash=fingerprint[2], filename=final_filename,
+                            mime_type=mime_type) or None
                     tid = await self.file_transfer_manager.send_file(
                         node_id=node_id,
                         file_path=local_path,
@@ -8460,6 +8490,7 @@ class CoreService(MusicCommandsMixin):
                         chunk_size=fan_out_chunk,
                         message_id=message_id,
                         text=caption,
+                        file_description=description,
                     )
                     transfer_ids.append(tid)
                 except Exception as e:
@@ -8470,14 +8501,14 @@ class CoreService(MusicCommandsMixin):
             # node that later requests the file (FILE_REQUEST, e.g. a member that
             # synced this record while away) checks the bytes it gets against the
             # hash, not only the name and size. The fan-out's pass is reused; with
-            # no SHA-256 from it (nobody offered, or verify_hash off) the file is
+            # no SHA-256 from it (nobody was offered the file) the file is
             # hashed in the background, so the answer never waits on a large file.
             if fingerprint is not None and fingerprint[0] not in (None, "", "none"):
                 note_record_hash(_group_monitor, message_id, final_filename, size_bytes,
-                                 fingerprint[0])
+                                 fingerprint[0], description)
             else:
                 task = asyncio.get_running_loop().create_task(hash_and_note_group_file(
-                    self, group_id, message_id, local_path, size_bytes))
+                    self, group_id, message_id, local_path, size_bytes, mime_type))
                 PENDING_RECORD_HASHES.add(task)
                 task.add_done_callback(PENDING_RECORD_HASHES.discard)
 

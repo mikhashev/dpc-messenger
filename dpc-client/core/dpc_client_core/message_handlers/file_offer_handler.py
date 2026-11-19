@@ -67,6 +67,8 @@ class FileOfferHandler(MessageHandler):
                     - codec: str (e.g., "opus")
                     - recorded_at: str (ISO timestamp)
                 - text: str (optional) - what the sender wrote with a plain file
+                - file_description: dict (optional, ADR-047 phase 1) - the author's
+                    signed description; checked below after the firewall
         """
         transfer_id = payload.get("transfer_id")
         filename = payload.get("filename")
@@ -196,6 +198,25 @@ class FileOfferHandler(MessageHandler):
             )
             return None
 
+        # The author's signed description (ADR-047 phase 1), after the firewall
+        # and before any answer: a description that does not hold, or an offer
+        # that is not the file it describes, is refused; a requester asks its
+        # next peer. No description is legacy and goes on as today.
+        from ..signing import FILE_REJECTED, FILE_UNVERIFIED
+        description, file_verdict, why = file_transfer_manager.offer_file_description(
+            sender_node_id, payload)
+        if file_verdict == FILE_REJECTED:
+            from ..managers.file_transfer_manager import FILE_SIGNATURE_REJECTED_REASON
+            self.logger.warning(f"Offer {transfer_id} of {filename} from {sender_node_id}: "
+                                f"its file description is rejected ({why}); refused")
+            await file_transfer_manager._send_file_cancel(
+                sender_node_id, transfer_id, FILE_SIGNATURE_REJECTED_REASON
+            )
+            if open_request is not None:
+                await file_requests.offer_mismatched(
+                    open_request, sender_node_id, f"file description rejected: {why}")
+            return None
+
         # Deduplicate: Check for existing pending transfer
         for existing_transfer_id, existing_transfer in file_transfer_manager.active_transfers.items():
             if (existing_transfer.node_id == sender_node_id and
@@ -323,6 +344,8 @@ class FileOfferHandler(MessageHandler):
             sender_node_id=author_node_id,
             message_id=message_id,
             awaiting_permission=awaiting_permission,
+            file_description=description,
+            file_verdict=file_verdict if description else None,
         )
         if open_request is not None:
             # The record the file completes is the requested one, by its id.
@@ -334,6 +357,20 @@ class FileOfferHandler(MessageHandler):
         file_transfer_manager.active_transfers[transfer_id] = transfer
         if open_request is not None:
             await file_requests.offer_taken(open_request, sender_node_id, transfer_id)
+
+        if file_verdict == FILE_UNVERIFIED:
+            # No certificate for the author here yet: ask the hop for it (W2).
+            await file_transfer_manager.ask_for_certificate(
+                description["sender_node_id"], sender_node_id)
+            if (open_request is not None and not awaiting_permission
+                    and file_requests.has_next_candidate(open_request)):
+                # A requester with other peers to ask accepts only once the
+                # certificate is here: a holder that withholds it must not keep
+                # the file unverified when another holder can serve it checked.
+                file_requests.accept_once_verified(open_request, sender_node_id, transfer)
+                self.logger.info(f"Requested file {transfer_id} waits for its author's "
+                                 f"certificate before it is accepted")
+                return None
 
         # Every offer that is left waiting for a person below (the question, or the
         # accept button of an ordinary file) has a deadline: see begin_waiting_for_answer.

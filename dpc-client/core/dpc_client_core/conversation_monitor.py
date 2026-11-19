@@ -108,7 +108,8 @@ def attachment_matches(att: Dict[str, Any], filename: Optional[str],
 
 
 def note_attachment_hash(history: List[Dict[str, Any]], message_id: str, filename: str,
-                         size_bytes: Optional[int], file_hash: Optional[str]) -> bool:
+                         size_bytes: Optional[int], file_hash: Optional[str],
+                         file_description: Optional[Dict[str, Any]] = None) -> bool:
     """Write the file's content hash on the attachment of record `message_id`.
 
     For the sender's own record of a file it sent (`send_group_file`), written
@@ -126,9 +127,17 @@ def note_attachment_hash(history: List[Dict[str, Any]], message_id: str, filenam
 
     The attachment is the one of that name and size; a hash it already carries
     is never replaced. Returns True when the hash was written.
+
+    With `file_description` (the author's signed description, ADR-047 phase 1,
+    for this same hash) it is written beside the hash, unless the attachment
+    already holds one: the author's record then re-serves it to whoever asks
+    for the file. Unsigned by the record as the hash is, but signed by itself.
+    True also when only the description was written, beside a hash already there.
     """
     if not file_hash or file_hash == "none":
         return False
+    if file_description and file_description.get("hash") != file_hash:
+        file_description = None
     for record in history:
         if record.get("id") != message_id:
             continue
@@ -142,17 +151,47 @@ def note_attachment_hash(history: List[Dict[str, Any]], message_id: str, filenam
                 if current != file_hash:
                     logger.warning("Record %s already names another hash for %s; kept",
                                    message_id, filename)
+                    return False
+                if file_description and not att.get("file_description"):
+                    att["file_description"] = dict(file_description)
+                    return True
                 return False
             att["hash"] = file_hash
+            if file_description and not att.get("file_description"):
+                att["file_description"] = dict(file_description)
             return True
     return False
 
 
-def merge_received_attachment(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+def description_fits_record(description: Any, record: Optional[Dict[str, Any]]) -> bool:
+    """Whether an author's file description is the one of `record` (ADR-047 phase 1).
+
+    Its author is the record's author and its `message_id` the record's id, so
+    a description is never filed under another message. A one-to-one record
+    keeps an id of each side's own, so a one-to-one description fits no
+    record but the author's here: the receiver writes it on its own note of
+    the transfer, never by a merge (`ConversationMonitor._keeps_file_description`
+    compares the author alone there).
+    """
+    if not isinstance(description, dict) or not isinstance(record, dict):
+        return False
+    if description.get("sender_node_id") != record.get("sender_node_id"):
+        return False
+    return description.get("message_id") == record.get("id")
+
+
+def merge_received_attachment(target: Dict[str, Any], source: Dict[str, Any],
+                              record: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Fold what a completed transfer knows into the sender's attachment.
 
     Path, hash, transfer id and status are the transfer's; a thumbnail or
     dimensions the sender's copy already carries are kept.
+
+    The author's signed `file_description` and this node's `file_verdict` on
+    it (ADR-047 phase 1) are folded in only with `record`, the record the
+    attachment belongs to, when the description is that record's author's for
+    that record (`description_fits_record`), was not rejected here, and the
+    attachment holds none yet.
     """
     # `content_verified: False`: a file requested for a record with no content
     # hash, taken on its name and size alone (managers/file_request.py).
@@ -167,6 +206,14 @@ def merge_received_attachment(target: Dict[str, Any], source: Dict[str, Any]) ->
     for key in ("thumbnail", "dimensions"):
         if not target.get(key) and source.get(key):
             target[key] = source[key]
+    description = source.get("file_description")
+    if (record is not None and description and source.get("file_verdict") != "rejected"
+            and description_fits_record(description, record)):
+        if not target.get("file_description"):
+            target["file_description"] = description
+            target["file_verdict"] = source.get("file_verdict")
+        elif target.get("file_description") == description and source.get("file_verdict"):
+            target["file_verdict"] = source["file_verdict"]
     return target
 
 
@@ -3009,8 +3056,15 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         return archive_count
 
-    def _remap_attachment_paths(self, attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _remap_attachment_paths(self, attachments: List[Dict[str, Any]],
+                                record: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Remap file paths in attachments from peer's filesystem to local filesystem.
+
+        Also, for an attachment that arrives with a record (`record`), what
+        ADR-047 phase 1 keeps local: `file_verdict` is the sender's verdict, so
+        it is dropped and computed again on use; a `file_description` is kept
+        only when it is the record's (`description_fits_record`, the author
+        alone in a one-to-one chat) and its signature does not fail here.
 
         When importing chat history, voice/file attachments may have file_path
         that points to the peer's filesystem (e.g., C:\\Users\\...\\file.webm on Windows).
@@ -3034,6 +3088,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         remapped = []
         for attachment in attachments:
             att = dict(attachment)
+            att.pop("file_verdict", None)
+            if "file_description" in att and not self._keeps_file_description(
+                    att["file_description"], record):
+                logger.warning("Dropped a file description that is not record %s's",
+                               (record or {}).get("id"))
+                att.pop("file_description", None)
             peer_path = att.get("file_path") or ""
             if peer_path and Path(peer_path).exists():
                 remapped.append(att)  # already ours
@@ -3178,6 +3238,24 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             )
         return exported
 
+    def _keeps_file_description(self, description: Any, record: Optional[Dict[str, Any]]) -> bool:
+        """Whether an arriving record's attachment may keep this `file_description`."""
+        from .signing import FILE_REJECTED, file_conversation_id, file_description_verdict
+
+        if record is None or not isinstance(description, dict):
+            return False
+        group_id = self.conversation_id if str(self.conversation_id).startswith("group-") else None
+        if group_id:
+            if not description_fits_record(description, record):
+                return False
+        elif description.get("sender_node_id") != record.get("sender_node_id"):
+            return False
+        conversation = file_conversation_id(
+            group_id=group_id, my_node_id=self._local_node_id(),
+            peer_node_id=None if group_id else self.conversation_id,
+            author=description.get("sender_node_id"))
+        return file_description_verdict(description, conversation) != FILE_REJECTED
+
     def import_history(self, messages: List[Dict[str, Any]]):
         """Import conversation history received from peer
 
@@ -3261,7 +3339,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # msg_index and chain_hash are this node's, not the sender's.
             imported_msg = self._chain_locally(imported_msg)
             if "attachments" in msg:
-                imported_msg["attachments"] = self._remap_attachment_paths(msg["attachments"])
+                imported_msg["attachments"] = self._remap_attachment_paths(msg["attachments"], msg)
             self.message_history.append(imported_msg)
 
             # 2. Also create Message objects for extraction buffers
@@ -4043,7 +4121,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 for theirs in arriving.get("attachments") or ():
                     if attachment_matches(mine, theirs.get("filename"), theirs.get("size_bytes"),
                                           theirs.get("hash")):
-                        merge_received_attachment(theirs, mine)
+                        merge_received_attachment(theirs, mine, record=arriving)
             del self.message_history[i]
             self.message_ids.discard(record.get("id"))
             self._local_file_notes.discard(record.get("id"))
@@ -4063,7 +4141,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         for att in record.get("attachments") or ():
             if attachment_matches(att, attachment.get("filename"), attachment.get("size_bytes"),
                                   attachment.get("hash")):
-                merge_received_attachment(att, attachment)
+                merge_received_attachment(att, attachment, record=record)
                 self._history_dirty = True
                 self.save_history()
                 return att
@@ -4177,7 +4255,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         # not only in import_history: this is the path group sync takes, and
         # it used to store the foreign path as it came.
         if message.get("attachments") and message.get("sender_node_id") != self._local_node_id():
-            message = dict(message, attachments=self._remap_attachment_paths(message["attachments"]))
+            message = dict(message, attachments=self._remap_attachment_paths(message["attachments"], message))
 
         # Add to history, re-chained for this node. A foreign index and hash
         # appended verbatim broke the local chain permanently: the loader
