@@ -25,6 +25,7 @@ from dpc_client_core.message_handlers.session_handler import VoteNewSessionHandl
 ME = "dpc-node-" + "a" * 32
 BOB = "dpc-node-" + "b" * 32
 CAROL = "dpc-node-" + "c" * 32
+DAVE = "dpc-node-" + "d" * 32
 
 
 def _service(pending):
@@ -34,7 +35,8 @@ def _service(pending):
         sent.append((node_id, message["command"], message["payload"]))
 
     service = SimpleNamespace(
-        p2p_manager=SimpleNamespace(node_id=ME, peers={BOB: object()}, send_message_to_peer=_send),
+        p2p_manager=SimpleNamespace(node_id=ME, peers={BOB: object(), DAVE: object()},
+                                    send_message_to_peer=_send),
         pending_certificate_requests=pending,
     )
     service.sent = sent
@@ -92,3 +94,29 @@ def test_the_pending_asks_are_bounded_and_read_as_a_set():
     assert f"dpc-node-{4:032x}" not in pending
     clock[0] += CERT_REQUEST_TIMEOUT_S
     assert len(pending) == 0 and list(pending) == []
+
+
+@pytest.mark.asyncio
+async def test_a_withholding_neighbour_does_not_keep_an_honest_relays_message_from_asking():
+    """Keyed by (signer, neighbour): found in the second review by a fresh subagent, 2026-11-20.
+
+    Keyed by the signer alone, BOB could re-send CAROL's message just after
+    each expiry, be asked, and withhold again: DAVE's relay of CAROL's
+    message never asked DAVE.
+    """
+    clock = [100.0]
+    service = _service(PendingCertificateRequests(clock=lambda: clock[0]))
+    handler = VoteNewSessionHandler(service)
+
+    await handler._ask_for_certificate(CAROL, BOB)  # BOB withholds it
+    clock[0] += 1.0
+    await handler._ask_for_certificate(CAROL, DAVE)  # an honest relay, within BOB's wait
+    await handler._ask_for_certificate(CAROL, DAVE)
+    await handler._ask_for_certificate(CAROL, BOB)
+
+    assert _asks(service) == [(BOB, "CERT_REQUEST", {"node_id": CAROL}),
+                              (DAVE, "CERT_REQUEST", {"node_id": CAROL})], "one ask per neighbour"
+    assert CAROL in service.pending_certificate_requests
+
+    service.pending_certificate_requests.discard(CAROL)  # the certificate came, from either
+    assert len(service.pending_certificate_requests) == 0

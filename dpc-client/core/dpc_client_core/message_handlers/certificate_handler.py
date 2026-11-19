@@ -19,7 +19,7 @@ It answers a question the asker already knows how to check.
 
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Hashable, Iterator, Optional
 
 from . import MessageHandler
 
@@ -44,6 +44,12 @@ class PendingCertificateRequests:
     and every later message from it stayed `unverified` for good (found in
     review by a fresh subagent, 2026-11-20). An ask now expires after
     `timeout_s`, and the next message that needs the certificate asks again.
+
+    The message path keys an ask by `(signer, neighbour asked)`, so one
+    neighbour's withheld answer does not keep another's message from asking
+    (found in the second review by a fresh subagent, 2026-11-20). A signer id
+    alone reads as "any ask about it pending", and `discard(signer)` drops
+    every ask about it: the certificate is here, whoever sent it.
     """
 
     def __init__(self, timeout_s: float = CERT_REQUEST_TIMEOUT_S,
@@ -52,28 +58,38 @@ class PendingCertificateRequests:
         self.timeout_s = timeout_s
         self.max_entries = max_entries
         self._clock = clock
-        self._asked: Dict[str, float] = {}
+        self._asked: Dict[Hashable, float] = {}
 
     def _expire(self) -> None:
         now = self._clock()
         for node_id in [n for n, when in self._asked.items() if now - when >= self.timeout_s]:
             del self._asked[node_id]
 
-    def add(self, node_id: str) -> None:
+    @staticmethod
+    def _signer(key: object) -> object:
+        return key[0] if isinstance(key, tuple) and key else key
+
+    def add(self, key: Hashable) -> None:
         self._expire()
-        self._asked.pop(node_id, None)
-        self._asked[node_id] = self._clock()
+        self._asked.pop(key, None)
+        self._asked[key] = self._clock()
         while len(self._asked) > self.max_entries:
             del self._asked[next(iter(self._asked))]  # the oldest ask
 
-    def discard(self, node_id: str) -> None:
-        self._asked.pop(node_id, None)
+    def discard(self, key: Hashable) -> None:
+        """Forget `key`; a bare signer id forgets every ask about that signer."""
+        self._asked.pop(key, None)
+        if not isinstance(key, tuple):
+            for asked in [k for k in self._asked if self._signer(k) == key]:
+                del self._asked[asked]
 
-    def __contains__(self, node_id: object) -> bool:
+    def __contains__(self, key: object) -> bool:
         self._expire()
-        return node_id in self._asked
+        if key in self._asked:
+            return True
+        return not isinstance(key, tuple) and any(self._signer(k) == key for k in self._asked)
 
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self) -> Iterator[Hashable]:
         self._expire()
         return iter(list(self._asked))
 

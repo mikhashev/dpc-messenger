@@ -123,10 +123,14 @@ class MessageHandler(ABC):
         needs to trust them — an answer whose key does not hash to `node_id` is
         refused on arrival.
 
-        Asked once per node until it arrives or the ask expires
+        Asked once per (signer, neighbour) until it arrives or the ask expires
         (`certificate_handler.PendingCertificateRequests`, the answer wait), so
         a chatty group does not turn a missing certificate into a flood, and a
-        neighbour that withholds one does not silence every later ask.
+        neighbour that withholds one does not silence every later ask. Keyed by
+        the pair, as the file path's asks are: keyed by the signer alone, a
+        neighbour that re-sent just after each expiry was asked, withheld the
+        certificate, and kept an honest relay's message from asking its own
+        (found in the second review by a fresh subagent, 2026-11-20).
         """
         if not node_id or not ask_node_id or node_id == ask_node_id:
             return
@@ -135,12 +139,13 @@ class MessageHandler(ABC):
         pending = getattr(self.service, "pending_certificate_requests", None)
         if pending is None:
             return
-        if node_id in pending:
+        key = (node_id, ask_node_id)
+        if key in pending:
             return
         if ask_node_id not in self.service.p2p_manager.peers:
             return
 
-        pending.add(node_id)
+        pending.add(key)
         try:
             await self.service.p2p_manager.send_message_to_peer(
                 ask_node_id, {"command": "CERT_REQUEST", "payload": {"node_id": node_id}}
@@ -149,7 +154,7 @@ class MessageHandler(ABC):
                 "Asked %s for the certificate of %s", ask_node_id[:20], str(node_id)[:20]
             )
         except Exception as e:  # noqa: BLE001
-            pending.discard(node_id)
+            pending.discard(key)
             self.logger.debug("Could not ask %s for a certificate: %s", ask_node_id[:20], e)
 
     async def _relay_to_group(
