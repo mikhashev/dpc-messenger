@@ -427,6 +427,27 @@ _RECORDING_EXTENSIONS = {"mpeg": "mp3", "x-wav": "wav", "wave": "wav"}
 # The cap on a picked file when the rules name none: the default of
 # `file_transfer.max_size_mb`, the cap the P2P voice send applies (send_voice_message).
 AGENT_CHAT_FILE_DEFAULT_MAX_MB = 100
+
+
+def file_transfer_cap_mb(rules: Any) -> float:
+    """The rules' `file_transfer.max_size_mb`, the cap a file this node sends or
+    keeps from a picker is held to: the paperclip of a 1:1 agent chat. A bool, a non-number, NaN, an infinity or a value
+    of 0 or less falls back to AGENT_CHAT_FILE_DEFAULT_MAX_MB: the editor refuses
+    such a value, json.loads accepts NaN/Infinity, and none of them means "no cap"."""
+    section = rules.get("file_transfer", {}) if isinstance(rules, dict) else {}
+    cap = section.get("max_size_mb", AGENT_CHAT_FILE_DEFAULT_MAX_MB) if isinstance(section, dict) else None
+    if (isinstance(cap, bool) or not isinstance(cap, (int, float))
+            or not math.isfinite(cap) or cap <= 0):
+        return AGENT_CHAT_FILE_DEFAULT_MAX_MB
+    return cap
+
+
+def file_transfer_cap_refusal(size_bytes: int, max_file_mb: float) -> Optional[str]:
+    """The refusal of a file over `max_file_mb` (`file_transfer_cap_mb`), or None."""
+    size_mb = size_bytes / (1024 * 1024)
+    if size_mb > max_file_mb:
+        return f"File too large ({size_mb:.2f} MB > {max_file_mb:g} MB limit, file_transfer.max_size_mb)"
+    return None
 # The fallback for `voice_messages.max_duration_seconds` when it is not a finite positive number.
 AGENT_CHAT_VOICE_DEFAULT_MAX_SECONDS = 300.0
 # How many bytes of a recording are read to tell its container (`sniff_audio_container`).
@@ -558,10 +579,9 @@ def keep_agent_chat_attachment(
         source = Path(picked)
         if not picked or not source.is_file():
             raise ValueError(f"File not found: {picked}")
-        size_mb = source.stat().st_size / (1024 * 1024)
-        if size_mb > max_file_mb:
-            raise ValueError(
-                f"File too large ({size_mb:.2f} MB > {max_file_mb:g} MB limit, file_transfer.max_size_mb)")
+        refusal = file_transfer_cap_refusal(source.stat().st_size, max_file_mb)
+        if refusal:
+            raise ValueError(refusal)
         files_dir.mkdir(parents=True, exist_ok=True)
         kept = keep_copy_under_a_free_name(source, files_dir, source.name)
         mime_type = mimetypes.guess_type(str(kept))[0] or "application/octet-stream"
@@ -1436,6 +1456,16 @@ class CoreService(MusicCommandsMixin):
             logger.warning("Device context refresh failed, the previous collection stays: %s", e)
             return None
 
+    @staticmethod
+    async def _sweep_abandoned_recordings() -> None:
+        """Remove the recorder's WAVs older than a day from ~/.dpc/temp on a worker
+        thread (temp_sweeper). Never raises: a failure is one WARNING."""
+        from .temp_sweeper import sweep_abandoned_recordings
+        try:
+            await asyncio.to_thread(sweep_abandoned_recordings, DPC_HOME_DIR / "temp")
+        except Exception as e:
+            logger.warning("Sweeping abandoned recordings from the temp folder failed: %s", e)
+
     async def start(self):
         """Starts all background services and runs indefinitely."""
         if self._is_running:
@@ -1486,6 +1516,13 @@ class CoreService(MusicCommandsMixin):
         warm_task.set_name("warm_tokenizers")
         self._background_tasks.add(warm_task)
         warm_task.add_done_callback(self._background_tasks.discard)
+
+        # The recorder's abandoned WAVs in ~/.dpc/temp, older than a day; nothing
+        # waits on it (temp_sweeper).
+        sweep_task = asyncio.create_task(self._sweep_abandoned_recordings())
+        sweep_task.set_name("sweep_abandoned_recordings")
+        self._background_tasks.add(sweep_task)
+        sweep_task.add_done_callback(self._background_tasks.discard)
 
         # Start all background tasks
         listen_host = self.settings.get_p2p_listen_host()
@@ -10062,12 +10099,7 @@ class CoreService(MusicCommandsMixin):
             max_voice_seconds = AGENT_CHAT_VOICE_DEFAULT_MAX_SECONDS
         if not math.isfinite(max_voice_seconds) or max_voice_seconds <= 0:
             max_voice_seconds = AGENT_CHAT_VOICE_DEFAULT_MAX_SECONDS  # "nan"/"inf" would mean "no limit"
-        max_file_mb = self.firewall.rules.get("file_transfer", {}).get(
-            "max_size_mb", AGENT_CHAT_FILE_DEFAULT_MAX_MB)
-        if (isinstance(max_file_mb, bool) or not isinstance(max_file_mb, (int, float))
-                or not math.isfinite(max_file_mb) or max_file_mb <= 0):
-            # the editor refuses such a value; json.loads accepts NaN/Infinity; never "no cap"
-            max_file_mb = AGENT_CHAT_FILE_DEFAULT_MAX_MB
+        max_file_mb = file_transfer_cap_mb(self.firewall.rules)
         return await asyncio.to_thread(
             keep_agent_chat_attachment, files_dir, attachment,
             voice_mime_types=voice_mime_types, max_voice_seconds=max_voice_seconds,
