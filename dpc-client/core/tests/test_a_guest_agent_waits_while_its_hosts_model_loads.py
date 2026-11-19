@@ -28,7 +28,7 @@ from dpc_protocol.protocol import (
     PeerRefused,
     create_remote_inference_response,
 )
-from dpc_client_core.dpc_agent import llm_adapter as adapter_mod
+from dpc_client_core.providers import remote_peer_provider as wait_mod
 from dpc_client_core.dpc_agent.llm_adapter import (
     CALL_PROGRESS,
     PeerStillLoading,
@@ -69,8 +69,8 @@ def _held() -> PeerRefused:
 @pytest.fixture
 def fast_wait(monkeypatch):
     """The real schedule scaled down: a step of 0.01 s and a cap of 0.05 s."""
-    monkeypatch.setattr(adapter_mod, "PEER_LOADING_RETRY_EVERY_S", 0.01)
-    monkeypatch.setattr(adapter_mod, "PEER_LOADING_WAIT_CAP_S", 0.05)
+    monkeypatch.setattr(wait_mod, "PEER_LOADING_RETRY_EVERY_S", 0.01)
+    monkeypatch.setattr(wait_mod, "PEER_LOADING_WAIT_CAP_S", 0.05)
 
 
 class _Asks:
@@ -240,14 +240,14 @@ async def test_a_load_then_an_answer_is_one_answer_and_a_line_per_wait(fast_wait
     ask = _Asks(_loading(), _loading(), {"response": "the answer"})
     lines, token = _progress_lines()
     try:
-        with caplog.at_level(logging.INFO, logger=adapter_mod.__name__):
+        with caplog.at_level(logging.INFO, logger=wait_mod.__name__):
             result = await ask_peer_waiting_out_a_load(ask, "Linus")
     finally:
         CALL_PROGRESS.reset(token)
 
     assert result == {"response": "the answer"} and ask.calls == 3
     assert len(lines) == 2 and all("The model on Linus is loading, waiting" in l for l in lines)
-    records = [r for r in caplog.records if r.name == adapter_mod.__name__]
+    records = [r for r in caplog.records if r.name == wait_mod.__name__]
     assert [r.levelno for r in records] == [logging.INFO, logging.INFO]
     assert all(r.exc_info is None for r in records)
 
@@ -256,13 +256,13 @@ async def test_a_load_then_an_answer_is_one_answer_and_a_line_per_wait(fast_wait
 async def test_a_load_that_outlasts_the_cap_ends_in_still_loading(fast_wait, caplog):
     ask = _Asks(_loading())
 
-    with caplog.at_level(logging.INFO, logger=adapter_mod.__name__):
+    with caplog.at_level(logging.INFO, logger=wait_mod.__name__):
         with pytest.raises(PeerStillLoading) as raised:
             await ask_peer_waiting_out_a_load(ask, "Linus")
 
     assert 2 <= ask.calls <= 6, "asked every step until the cap, then stopped"
     assert raised.value.host_name == "Linus" and raised.value.code == "provider_loading"
-    last = [r for r in caplog.records if r.name == adapter_mod.__name__][-1]
+    last = [r for r in caplog.records if r.name == wait_mod.__name__][-1]
     assert last.levelno == logging.WARNING and last.exc_info is None
 
 
@@ -308,8 +308,8 @@ async def test_a_code_this_guest_has_no_word_for_is_read_as_absent_and_not_retri
 
 @pytest.mark.asyncio
 async def test_a_cancelled_task_asks_no_more(monkeypatch):
-    monkeypatch.setattr(adapter_mod, "PEER_LOADING_RETRY_EVERY_S", 0.05)
-    monkeypatch.setattr(adapter_mod, "PEER_LOADING_WAIT_CAP_S", 10.0)
+    monkeypatch.setattr(wait_mod, "PEER_LOADING_RETRY_EVERY_S", 0.05)
+    monkeypatch.setattr(wait_mod, "PEER_LOADING_WAIT_CAP_S", 10.0)
     ask = _Asks(_loading())
 
     task = asyncio.ensure_future(ask_peer_waiting_out_a_load(ask, "Linus"))

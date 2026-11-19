@@ -16,7 +16,6 @@ Key differences from Ouroboros's LLMClient:
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import inspect
 import json
 import logging
@@ -26,7 +25,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING, REFUSAL_TOOLS_UNSUPPORTED, PeerRefused
+from dpc_protocol.protocol import REFUSAL_TOOLS_UNSUPPORTED, PeerRefused
 
 from ..managers.llama_server_supervisor import (
     BackgroundCallSkipped,
@@ -51,6 +50,15 @@ from ..node_ledger import (
     usage_row,
 )
 from ..providers.base import image_pixel_limit_of
+# The wait for a host still loading its model is the remote-peer provider's
+# since 2026-11-19, so every caller of a remote-peer alias has it; the pinned
+# route below calls the same function, and the names stay importable here.
+from ..providers.remote_peer_provider import (  # noqa: F401
+    CALL_PROGRESS,
+    PeerStillLoading,
+    _host_name,
+    ask_peer_waiting_out_a_load,
+)
 from ..utils.image_utils import normalise_turn_images
 from .pricing import COST_FIELDS, get_billing_model, price_call, usd_figure
 from .run_gate import turn_waits_for
@@ -59,96 +67,6 @@ if TYPE_CHECKING:
     from ..llm_manager import LLMManager
 
 log = logging.getLogger(__name__)
-
-# How a guest agent waits for a model its host is still loading (Mike's call
-# 2026-10-20): a refusal coded `provider_loading` (DPTP v1.9) is asked
-# again every PEER_LOADING_RETRY_EVERY_S, up to PEER_LOADING_WAIT_CAP_S in all.
-# Ten seconds: each ask is one small frame and the host answers it at its door
-# before anything runs, so asking often costs neither node anything, and a
-# shorter step would only add progress lines the person reads as noise. Two
-# minutes: the person is watching the chat, and past that a wait reads as a
-# hang. It is shorter than a cold Strata start may take (the launcher allows
-# `start_timeout_s`, 600 s by default), so a long load ends in a notice and
-# the person sends the message again — the load the first request began goes
-# on without it.
-PEER_LOADING_RETRY_EVERY_S = 10.0
-PEER_LOADING_WAIT_CAP_S = 120.0
-
-#: The agent loop's progress line for the call in flight, or None outside one.
-#: Set by `run_llm_loop` around its model call, so a wait inside the adapter
-#: shows in the chat where the round's progress already shows, without a new
-#: argument on `chat()` that every test double of it would have to learn.
-CALL_PROGRESS: contextvars.ContextVar[Optional[Callable[[str], None]]] = contextvars.ContextVar(
-    "dpc_agent_call_progress", default=None,
-)
-
-
-class PeerStillLoading(PeerRefused):
-    """The host's model was still loading when the guest's wait ran out.
-
-    A `PeerRefused` (so a `RuntimeError`), carrying the last refusal's words
-    and code, plus who was waited for and for how long."""
-
-    def __init__(self, refusal: PeerRefused, host_name: str, waited_sec: float):
-        super().__init__(
-            str(refusal), code=refusal.code, retry_after_sec=refusal.retry_after_sec,
-        )
-        self.host_name = host_name
-        self.waited_sec = waited_sec
-
-
-def _host_name(service: Any, peer_id: str) -> str:
-    """The host's display name as this node knows it, else its node id."""
-    try:
-        cached = service.p2p_manager.peer_cache.get_peer(peer_id)
-        name = getattr(cached, "display_name", None)
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-    except Exception:
-        pass
-    return peer_id
-
-
-async def ask_peer_waiting_out_a_load(
-    ask: Callable[[], Any], host_name: str,
-) -> Any:
-    """`await ask()`; while the host refuses with `provider_loading`, say so
-    on the call's progress line, wait and ask again, up to
-    PEER_LOADING_WAIT_CAP_S. Any other refusal is raised at once, unretried -
-    `provider_unavailable` covers a card held by the host's other engine and
-    a launcher stopped after an engine failure, which no wait of ours ends, and a
-    host that predates the code says "loading" in prose only, which is never
-    read.
-
-    A cancelled task stops here: the sleep is where it is waiting, and the
-    cancellation propagates out of it."""
-    started = time.monotonic()
-    attempt = 0
-    while True:
-        try:
-            return await ask()
-        except PeerRefused as e:
-            if e.code != REFUSAL_PROVIDER_LOADING:
-                e.host_name = host_name
-                log.warning("Host %s did not serve the agent's call: %s (code %s)",
-                            host_name, e, e.code or "none")
-                raise
-            waited = time.monotonic() - started
-            if waited + PEER_LOADING_RETRY_EVERY_S > PEER_LOADING_WAIT_CAP_S:
-                log.warning("The model on %s was still loading after %.0f s; the agent stops waiting",
-                            host_name, waited)
-                raise PeerStillLoading(e, host_name, waited) from None
-            attempt += 1
-            log.info("The model on %s is loading; asking again in %.0f s (attempt %d, %.0f s waited)",
-                     host_name, PEER_LOADING_RETRY_EVERY_S, attempt, waited)
-            emit = CALL_PROGRESS.get()
-            if emit is not None:
-                try:
-                    emit(f"The model on {host_name} is loading, waiting… ({waited:.0f} s)")
-                except Exception as emit_err:
-                    log.debug("Progress line for the peer wait failed: %s", emit_err)
-        await asyncio.sleep(PEER_LOADING_RETRY_EVERY_S)
-
 
 # The first line of a get_dpc_context result that carries the context.
 _DPC_CONTEXT_HEADER = re.compile(r"^DPC (personal|device) context \(", re.MULTILINE)
