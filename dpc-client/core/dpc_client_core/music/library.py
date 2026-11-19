@@ -44,7 +44,12 @@ mount on Linux), `protected_folder` (a filesystem root, the home folder itself, 
 home or anything inside it except its own `music/` subtree, a folder that contains the
 DPC home), `too_many_folders` (more than `MAX_FOLDERS`). A network mount on macOS is not
 detected: reading a mount's filesystem type there needs a subprocess or `statfs`
-through ctypes.
+through ctypes. On Windows a drive whose type cannot be read is refused (`network_path`),
+not let through. The same checks run again before every scan, polling included: a
+folder that fails them now (its root replaced by a symlink into the DPC home, say) is
+marked `unavailable` with the code in `state_reason`, and is not walked. A
+`folders.json` edited by hand to hold more than `MAX_FOLDERS` folders keeps the first
+`MAX_FOLDERS` by `added_at` active; the rest stay, `unavailable` and unscanned.
 
 Known limits: a change to a file listed only in `alt_paths` (a duplicate) is not
 noticed until it becomes the primary path; folders may not nest.
@@ -59,6 +64,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import unicodedata
 from collections import deque
 from datetime import datetime, timezone
@@ -213,8 +219,11 @@ def _is_network_drive(path: Path) -> bool:
 
             drive_remote = 4  # GetDriveTypeW: DRIVE_REMOTE
             return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == drive_remote
-        except Exception:  # no ctypes or no windll: not detectable here
-            return False
+        except Exception as exc:
+            # Fail closed: a drive whose type cannot be read is refused, not watched.
+            raise MusicLibraryError(
+                "network_path", f"cannot tell whether {drive} is a network drive ({exc}), so it is not watched",
+            ) from exc
     fs_type = _mount_fs_type(str(path))
     return fs_type is not None and fs_type.lower() in NETWORK_FS_TYPES
 
@@ -277,6 +286,13 @@ class MusicLibrary:
         self._poller: Optional[asyncio.Task] = None
         self._save_task: Optional[asyncio.Task] = None
         self._write_lock: Optional[asyncio.Lock] = None
+        # The disk side of a save. `flush()` writes in a thread and `save_now()` on the
+        # caller's thread; both write under this lock, and a snapshot older than the
+        # one already on disk is not written, so the newest text always lands last.
+        self._disk_lock = threading.Lock()
+        self._snapshot_seq = 0
+        self._written_seq = 0
+        self._over_limit: Set[str] = set()
         self._background: Set[asyncio.Task] = set()
         self._dirty = False
 
@@ -305,7 +321,36 @@ class MusicLibrary:
         self._by_hash = {}
         for e in self._entries.values():
             self._index_add(e)
+        merged = 0
+        for key in list(self._by_hash):
+            merged += self._merge_missing_twins(key)
+        limited = self._apply_folder_limit()
+        if merged or limited:
+            self._dirty = True  # `open()` schedules the save
         self._loaded = True
+
+    def _apply_folder_limit(self) -> bool:
+        """Keep at most `MAX_FOLDERS` folders active: the first by `added_at`. The rest
+        (a hand-edited `folders.json`) stay in the file, `unavailable` with a reason,
+        and are not scanned; removing an active folder lets the next one in. Returns
+        whether a folder record changed."""
+        ordered = sorted(self._folders.values(), key=lambda f: (f.get("added_at") or "", f["id"]))
+        over = {f["id"] for f in ordered[MAX_FOLDERS:]}
+        changed = False
+        for f in ordered:
+            if f["id"] in over:
+                reason = (f"over the limit of {MAX_FOLDERS} watched folders, so it is not scanned; "
+                          f"remove another folder to let it in")
+                if f.get("watch_state") != "unavailable" or f.get("state_reason") != reason:
+                    f["watch_state"], f["state_reason"] = "unavailable", reason
+                    changed = True
+            elif f["id"] in self._over_limit:
+                # Let back in: scanned on the next poll or rescan.
+                f["watch_state"] = "polling" if f["watch"] else "off"
+                f["state_reason"] = None
+                changed = True
+        self._over_limit = over
+        return changed
 
     def _snapshot_texts(self) -> List[Tuple[Path, str]]:
         """The three files as JSON text, made on the loop so no coroutine changes a
@@ -322,11 +367,32 @@ class MusicLibrary:
             out.append((path, json.dumps(records, ensure_ascii=False, indent=1)))
         return out
 
+    def _take_snapshot(self) -> Tuple[int, List[Tuple[Path, str]]]:
+        texts = self._snapshot_texts()
+        self._snapshot_seq += 1
+        return self._snapshot_seq, texts
+
+    def _write_snapshot(self, seq: int, texts: List[Tuple[Path, str]]) -> None:
+        """Write one snapshot under the disk lock; skipped when a newer one is already
+        on disk (a `save_now()` that ran while a flush's thread waited)."""
+        with self._disk_lock:
+            if seq <= self._written_seq:
+                return
+            for path, text in texts:
+                atomic_write_text(path, text)
+            self._written_seq = seq
+
     def save_now(self) -> None:
-        """Write the three files now. Blocking; for tests and shutdown."""
+        """Write the three files now. Blocking; for tests and shutdown.
+
+        Takes the write lock: a flush whose thread is writing finishes first, and its
+        older snapshot can no longer land after this one."""
         self._dirty = False
-        for path, text in self._snapshot_texts():
-            atomic_write_text(path, text)
+        try:
+            self._write_snapshot(*self._take_snapshot())
+        except BaseException:
+            self._dirty = True
+            raise
 
     async def flush(self) -> None:
         """Write the three files now, off the loop.
@@ -339,9 +405,8 @@ class MusicLibrary:
         async with self._write_lock:
             self._dirty = False
             try:
-                texts = self._snapshot_texts()
-                write = asyncio.ensure_future(
-                    asyncio.to_thread(lambda: [atomic_write_text(p, t) for p, t in texts]))
+                seq, texts = self._take_snapshot()
+                write = asyncio.ensure_future(asyncio.to_thread(self._write_snapshot, seq, texts))
             except BaseException:
                 self._dirty = True
                 raise
@@ -399,6 +464,8 @@ class MusicLibrary:
             for e in self._entries.values():
                 if e.get("hash_state") == "pending" and not e.get("missing"):
                     self._enqueue(e["id"])
+            if self._dirty:
+                self._mark_dirty()
         if self._worker is None or self._worker.done():
             self._worker = asyncio.get_running_loop().create_task(self._hash_worker())
 
@@ -430,7 +497,8 @@ class MusicLibrary:
 
     async def _poll_loop(self) -> None:
         while True:
-            for folder_id in [f["id"] for f in self._folders.values() if f["watch"]]:
+            for folder_id in [f["id"] for f in self._folders.values()
+                              if f["watch"] and f["id"] not in self._over_limit]:
                 try:
                     await self.rescan_folder(folder_id)
                 except MusicLibraryError:
@@ -486,6 +554,27 @@ class MusicLibrary:
                 else:
                     pl["track_ids"] = [t for t in pl["track_ids"] if t != track_id]
                 pl["updated_at"] = _now()
+
+    def _merge_missing_twins(self, key: Optional[Tuple[str, str]]) -> int:
+        """When a present entry holds this hash, merge every missing entry with the same
+        hash into it (the oldest present one): their playlist positions move to it, or
+        are dropped where the playlist already holds it. One audio, one entry. Returns
+        how many were merged."""
+        if key is None:
+            return 0
+        twins = [self._entries[i] for i in self._by_hash.get(key, []) if i in self._entries]
+        present = sorted((t for t in twins if not t.get("missing")),
+                         key=lambda t: (t.get("added_at") or "", t["id"]))
+        if not present:
+            return 0
+        keeper = present[0]
+        merged = 0
+        for t in twins:
+            if t.get("missing"):
+                logger.info("music: merged missing %s into %s (same audio hash)", t["id"], keeper["id"])
+                self._delete_entry(t["id"], replaced_by=keeper["id"])
+                merged += 1
+        return merged
 
     # -- entries -----------------------------------------------------------------
 
@@ -675,6 +764,7 @@ class MusicLibrary:
             if path_key(e["path"]) not in {path_key(p) for p in [other["path"], *other.get("alt_paths", [])]}:
                 other.setdefault("alt_paths", []).append(e["path"])
             self._delete_entry(e["id"], replaced_by=other["id"])
+            self._merge_missing_twins(key)
             return
         e["hash_kind"], e["content_hash"] = key
         e["source_hash"] = ident.content_hash
@@ -790,6 +880,7 @@ class MusicLibrary:
                 continue
             self._delete_entry(e["id"])
             removed += 1
+        self._apply_folder_limit()
         await self.flush()
         return removed
 
@@ -801,6 +892,8 @@ class MusicLibrary:
             folder = self._folders.get(folder_id)
             if folder is None:
                 raise MusicLibraryError("unknown_folder", f"no watched folder {folder_id}")
+            if folder_id in self._over_limit:
+                return copy.deepcopy(folder)  # over MAX_FOLDERS: kept, not scanned
             root = folder["path"]
             fkey = path_key(root)
             outside_alts = [
@@ -808,9 +901,24 @@ class MusicLibrary:
                 if e.get("folder_id") == folder_id and not e.get("missing")
                 for a in e.get("alt_paths") or [] if not _is_inside(path_key(a), fkey)
             ]
+
+            def check_and_walk():
+                # The add-time checks again, right before the walk: the root may have
+                # been replaced since (a symlink into the DPC home, a network drive).
+                self._check_watchable(Path(root))
+                return walk_audio_files(Path(root)), _stat_paths(outside_alts)
+
             try:
-                (found, failed), alt_stats = await asyncio.to_thread(
-                    lambda: (walk_audio_files(Path(root)), _stat_paths(outside_alts)))
+                (found, failed), alt_stats = await asyncio.to_thread(check_and_walk)
+            except MusicLibraryError as exc:
+                if folder_id in self._folders:
+                    folder["watch_state"] = "unavailable"
+                    folder["state_reason"] = (
+                        f"refused on rescan ({exc.code}), so it was not scanned and no track "
+                        f"was marked missing: {exc.message}"
+                    )
+                    self._mark_dirty()
+                return copy.deepcopy(folder)
             except FolderUnavailable as exc:
                 if folder_id in self._folders:
                     folder["watch_state"] = "unavailable"
@@ -903,6 +1011,8 @@ class MusicLibrary:
             if e.get("hash_state") == "done":
                 e["missing"] = True
                 self._verify.pop(e["id"], None)
+                # A present twin elsewhere (another entry with this hash) takes it in.
+                self._merge_missing_twins(self._hash_key(e))
             else:
                 # Never hashed, so nothing can relink to it: no state to keep.
                 self._delete_entry(e["id"])
