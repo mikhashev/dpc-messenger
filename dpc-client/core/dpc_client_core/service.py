@@ -1078,8 +1078,10 @@ class CoreService(MusicCommandsMixin):
         self._processed_message_ids = ProcessedMessageIds(self._max_processed_ids)  # Track processed messages
         # Certificates we have asked a neighbour for and not yet received.
         # Without it a busy group turns one missing certificate into a
-        # request per message.
-        self.pending_certificate_requests = set()
+        # request per message. Each ask expires, so a neighbour that withholds
+        # one does not stop the next message from asking again.
+        from .message_handlers.certificate_handler import PendingCertificateRequests
+        self.pending_certificate_requests = PendingCertificateRequests()
         self._history_requested_peers = set()  # Track peers we've requested history from (prevents infinite loops)
         # (peer, group) pairs a peer has refused us this session. Our roster is
         # what makes us ask, and removal never reaches the node being removed,

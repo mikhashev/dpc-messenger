@@ -34,8 +34,9 @@ TOOL_SETTINGS_KEY = 'tool_settings'
 
 # A node id as dpc_protocol.crypto.generate_node_id writes it: the first 32 hex
 # of the SHA-256 of the public key. A reinstall makes a new key and a new id,
-# so a block by id does not outlive the peer's reinstall.
-NODE_ID_RE = re.compile(r"dpc-node-[0-9a-f]{32}")
+# so a block by id does not outlive the peer's reinstall. One pattern, the
+# protocol's (`is_valid_node_id` guards every certificate path with it).
+from dpc_protocol.crypto import NODE_ID_RE  # noqa: E402
 
 
 def is_blocked_by(firewall: Any, node_id: Any) -> bool:

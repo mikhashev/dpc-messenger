@@ -191,7 +191,11 @@ def merge_received_attachment(target: Dict[str, Any], source: Dict[str, Any],
     it (ADR-047 phase 1) are folded in only with `record`, the record the
     attachment belongs to, when the description is that record's author's for
     that record (`description_fits_record`), was not rejected here, and the
-    attachment holds none yet.
+    attachment holds none yet, or holds one this node has not verified while
+    `source`'s is verified: a description that came with a synced record may be
+    a stranger's junk under the author's name, and keeping it over the one
+    this node checked would have it re-served (found in review by a fresh
+    subagent, 2026-11-20).
     """
     # `content_verified: False`: a file requested for a record with no content
     # hash, taken on its name and size alone (managers/file_request.py).
@@ -214,6 +218,9 @@ def merge_received_attachment(target: Dict[str, Any], source: Dict[str, Any],
             target["file_verdict"] = source.get("file_verdict")
         elif target.get("file_description") == description and source.get("file_verdict"):
             target["file_verdict"] = source["file_verdict"]
+        elif source.get("file_verdict") == "verified" and target.get("file_verdict") != "verified":
+            target["file_description"] = description
+            target["file_verdict"] = "verified"
     return target
 
 
@@ -2500,6 +2507,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         from dpc_protocol.commit_integrity import CommitSigner
 
+        # The file descriptions by this author, kept `unverified` until now,
+        # are checked in the same pass (ADR-047 phase 1).
+        files_changed = self.reverify_file_descriptions(node_id)
+
         changed = 0
         for msg in self.message_history:
             if msg.get("signer_node_id") != node_id:
@@ -2519,13 +2530,50 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 msg["verification"] = verdict
                 changed += 1
 
-        if changed:
+        if changed or files_changed:
             self._history_dirty = True
             self.save_history()
+        if changed:
             logger.info(
                 "Monitor %s: re-verified %d message(s) from %s",
                 self.conversation_id, changed, str(node_id)[:20],
             )
+        return changed
+
+    def reverify_file_descriptions(self, node_id: str) -> int:
+        """Re-check the file descriptions this author signed, now that its certificate is here.
+
+        A description that arrived before its author's certificate was kept
+        `unverified`, and nothing looked at it again: one planted by a member
+        under the author's name stayed on the record for good (found in review
+        by a fresh subagent, 2026-11-20). Now one that verifies is marked so,
+        and one that does not is dropped from the attachment. Does not save:
+        `reverify_author` does. Returns how many attachments changed.
+        """
+        from .signing import FILE_REJECTED, FILE_UNVERIFIED, FILE_VERIFIED
+
+        changed = 0
+        for msg in self.message_history:
+            for att in msg.get("attachments") or ():
+                if not isinstance(att, dict):
+                    continue
+                description = att.get("file_description")
+                if not isinstance(description, dict) or description.get("sender_node_id") != node_id:
+                    continue
+                if att.get("file_verdict") == FILE_VERIFIED:
+                    continue
+                verdict = self._file_description_verdict(description)
+                if verdict == FILE_VERIFIED:
+                    att["file_verdict"] = FILE_VERIFIED
+                    changed += 1
+                elif verdict == FILE_REJECTED:
+                    att.pop("file_description", None)
+                    if att.get("file_verdict") == FILE_UNVERIFIED:
+                        att.pop("file_verdict", None)
+                    logger.warning("Monitor %s: dropped a file description of record %s that "
+                                   "does not hold now that %s's certificate is here",
+                                   self.conversation_id, msg.get("id"), str(node_id)[:20])
+                    changed += 1
         return changed
 
     def clear_before(self, boundary: str) -> int:
@@ -3184,7 +3232,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             if msg.get("timestamp"):
                 exported_msg["timestamp"] = msg["timestamp"]
             if "attachments" in msg:
-                exported_msg["attachments"] = msg["attachments"]
+                exported_msg["attachments"] = self._exported_attachments(msg["attachments"])
             # msg_index and chain_hash are the integrity pair. Dropping them
             # did more than hide the numbering: the receiver's loader mints a
             # hash for any message that arrives without one and then reports
@@ -3238,9 +3286,52 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             )
         return exported
 
+    def _file_description_verdict(self, description: Any) -> str:
+        """This node's verdict, now, on a file description held in this conversation."""
+        from .signing import file_conversation_id, file_description_verdict
+
+        group_id = self.conversation_id if str(self.conversation_id).startswith("group-") else None
+        author = description.get("sender_node_id") if isinstance(description, dict) else None
+        conversation = file_conversation_id(
+            group_id=group_id, my_node_id=self._local_node_id(),
+            peer_node_id=None if group_id else self.conversation_id, author=author)
+        return file_description_verdict(description, conversation)
+
+    def _exported_attachments(self, attachments: Any) -> Any:
+        """The attachments as they travel: a `file_description` only when it verifies here.
+
+        One kept `unverified` (it came before its author's certificate, or with
+        a synced record) may be junk under the author's name; exported, it
+        would spread to every member that syncs from this one (found in review
+        by a fresh subagent, 2026-11-20). A stored `verified` stands: a node id
+        is its key's hash. One found verified here is marked so on the record
+        (a local field, unsaved until the next save), so the next export does
+        not check it again; nothing else on the record changes.
+        """
+        from .signing import FILE_VERIFIED
+
+        if not isinstance(attachments, list):
+            return attachments
+        out = []
+        for att in attachments:
+            if (isinstance(att, dict) and "file_description" in att
+                    and att.get("file_verdict") != FILE_VERIFIED):
+                if self._file_description_verdict(att["file_description"]) == FILE_VERIFIED:
+                    att["file_verdict"] = FILE_VERIFIED
+                else:
+                    att = {k: v for k, v in att.items() if k != "file_description"}
+            out.append(att)
+        return out
+
     def _keeps_file_description(self, description: Any, record: Optional[Dict[str, Any]]) -> bool:
-        """Whether an arriving record's attachment may keep this `file_description`."""
-        from .signing import FILE_REJECTED, file_conversation_id, file_description_verdict
+        """Whether an arriving record's attachment may keep this `file_description`.
+
+        Kept when it is the record's and does not fail here, `unverified`
+        included: it binds nothing until it verifies (`FileRequests.offer_mismatch`),
+        it is not re-served or exported until then, and once the author's
+        certificate is here `reverify_file_descriptions` marks it or drops it.
+        """
+        from .signing import FILE_REJECTED
 
         if record is None or not isinstance(description, dict):
             return False
@@ -3250,11 +3341,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 return False
         elif description.get("sender_node_id") != record.get("sender_node_id"):
             return False
-        conversation = file_conversation_id(
-            group_id=group_id, my_node_id=self._local_node_id(),
-            peer_node_id=None if group_id else self.conversation_id,
-            author=description.get("sender_node_id"))
-        return file_description_verdict(description, conversation) != FILE_REJECTED
+        return self._file_description_verdict(description) != FILE_REJECTED
 
     def import_history(self, messages: List[Dict[str, Any]]):
         """Import conversation history received from peer

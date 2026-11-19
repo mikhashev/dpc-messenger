@@ -269,6 +269,8 @@ def load_persisted_peer_certificate(
     not hash to `peer_node_id` is refused. None when there is no file, it does not
     parse, or it is not this peer's.
     """
+    if not is_valid_node_id(peer_node_id):
+        return None  # the id names the file: nothing else is read under it
     if peers_dir is None:
         peers_dir = DPC_HOME_DIR / "peers"
     cert_path = peers_dir / f"{peer_node_id}.crt"
@@ -1618,6 +1620,12 @@ class P2PManager:
         Returns:
             True if the certificate is now stored, False if it was refused.
         """
+        if not is_valid_node_id(peer_node_id):
+            # Also refused below (no key hashes to it); refused first, so no
+            # file name is ever built from it.
+            logger.warning("Refusing to cache a certificate under a malformed node id %r",
+                           str(peer_node_id)[:80])
+            return False
         if peers_dir is None:
             peers_dir = DPC_HOME_DIR / "peers"
 

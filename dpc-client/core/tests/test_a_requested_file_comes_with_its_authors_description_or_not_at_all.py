@@ -73,6 +73,20 @@ async def _setup(identities, root, *, certificate_known=True):
     return net, a, b, c, synced
 
 
+def _holders_verify(*nodes):
+    """Each of `nodes` holds the certificate that checks the author's description.
+
+    A holder re-serves only a description that verifies on it. This harness
+    keeps one certificates folder for every node, so "C lacks the author's
+    certificate, A and B hold it" (A by its own key, B from its handshake with
+    A) is said here, per holder, rather than by the folder.
+    """
+    from dpc_client_core.managers.file_transfer_manager import wire_file_description
+    for node in nodes:
+        node.manager.file_requests._served_description = (
+            lambda att, group_id, requester: wire_file_description(att.get("file_description")))
+
+
 def _received(c, rec):
     (after,) = records(c)
     assert after["id"] == rec["id"]
@@ -160,6 +174,7 @@ async def test_a_holder_sends_the_authors_description_byte_for_byte(root, identi
 @pytest.mark.asyncio
 async def test_a_withheld_certificate_times_out_and_the_next_candidate_is_asked(root, identities):
     net, a, b, c, rec = await _setup(identities, root, certificate_known=False)
+    _holders_verify(a, b)
     c.manager.file_requests.answer_timeout_s = 0.3
     net.certificates_from[b.me] = (identities, {a.me})  # A withholds its own; B answers
 
@@ -181,6 +196,7 @@ async def test_a_withheld_certificate_times_out_and_the_next_candidate_is_asked(
 @pytest.mark.asyncio
 async def test_a_held_offer_is_accepted_as_soon_as_its_certificate_comes(root, identities):
     net, a, b, c, rec = await _setup(identities, root, certificate_known=False)
+    _holders_verify(a, b)
     c.manager.file_requests.answer_timeout_s = 5.0
     net.certificates_from[a.me] = (identities, {a.me})
 
@@ -195,6 +211,7 @@ async def test_a_held_offer_is_accepted_as_soon_as_its_certificate_comes(root, i
 @pytest.mark.asyncio
 async def test_when_no_holder_sends_the_certificate_the_last_one_serves_unverified(root, identities):
     net, a, b, c, rec = await _setup(identities, root, certificate_known=False)
+    _holders_verify(a, b)
     c.manager.file_requests.answer_timeout_s = 0.2
 
     answer = await CoreService.request_attachment(c.service, GROUP, rec["id"])

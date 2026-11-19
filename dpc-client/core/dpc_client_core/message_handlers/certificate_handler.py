@@ -17,16 +17,81 @@ The pair is deliberately dumb — no negotiation, no push, no gossip of its own.
 It answers a question the asker already knows how to check.
 """
 
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 from . import MessageHandler
 
 DPC_HOME_DIR = Path.home() / ".dpc"
 
+# How long a CERT_REQUEST is waited for before the same node may be asked about
+# again: the answer wait of a requested file (file_request.REQUEST_ANSWER_TIMEOUT_S),
+# which waits for the same certificate on the file path.
+CERT_REQUEST_TIMEOUT_S = 10.0
+# How many unanswered asks are remembered at once; a signer id is a peer's to
+# choose, so made-up ones must not grow the record without end.
+PENDING_CERTIFICATE_REQUESTS_MAX = 1024
+
+
+class PendingCertificateRequests:
+    """The certificates asked for and not yet received, each for a bounded time.
+
+    `CoreService.pending_certificate_requests`, read by the message path
+    (`MessageHandler._ask_for_certificate`) as a set: `in`, `add`, `discard`.
+    It was a plain set, emptied only by an arriving certificate, so a node
+    whose certificate one neighbour withheld was never asked about again,
+    and every later message from it stayed `unverified` for good (found in
+    review by a fresh subagent, 2026-11-20). An ask now expires after
+    `timeout_s`, and the next message that needs the certificate asks again.
+    """
+
+    def __init__(self, timeout_s: float = CERT_REQUEST_TIMEOUT_S,
+                 max_entries: int = PENDING_CERTIFICATE_REQUESTS_MAX,
+                 clock: Callable[[], float] = time.monotonic):
+        self.timeout_s = timeout_s
+        self.max_entries = max_entries
+        self._clock = clock
+        self._asked: Dict[str, float] = {}
+
+    def _expire(self) -> None:
+        now = self._clock()
+        for node_id in [n for n, when in self._asked.items() if now - when >= self.timeout_s]:
+            del self._asked[node_id]
+
+    def add(self, node_id: str) -> None:
+        self._expire()
+        self._asked.pop(node_id, None)
+        self._asked[node_id] = self._clock()
+        while len(self._asked) > self.max_entries:
+            del self._asked[next(iter(self._asked))]  # the oldest ask
+
+    def discard(self, node_id: str) -> None:
+        self._asked.pop(node_id, None)
+
+    def __contains__(self, node_id: object) -> bool:
+        self._expire()
+        return node_id in self._asked
+
+    def __iter__(self) -> Iterator[str]:
+        self._expire()
+        return iter(list(self._asked))
+
+    def __len__(self) -> int:
+        self._expire()
+        return len(self._asked)
+
 
 def _read_local_certificate(node_id: str, own_node_id: str) -> Optional[str]:
-    """Our own certificate, or a peer's if we happen to hold it."""
+    """Our own certificate, or a peer's if we happen to hold it.
+
+    `node_id` is the asker's to choose and names a file, so anything but a
+    node id as `generate_node_id` writes it (`../node`, a path, an upper-case
+    copy) is answered as not held, never read.
+    """
+    from dpc_protocol.crypto import is_valid_node_id
+    if not is_valid_node_id(node_id):
+        return None
     if node_id == own_node_id:
         own = DPC_HOME_DIR / "node.crt"
         if own.exists():

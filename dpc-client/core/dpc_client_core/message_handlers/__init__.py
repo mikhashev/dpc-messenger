@@ -123,8 +123,10 @@ class MessageHandler(ABC):
         needs to trust them — an answer whose key does not hash to `node_id` is
         refused on arrival.
 
-        Asked once per node until it arrives, so a chatty group does not turn a
-        missing certificate into a flood.
+        Asked once per node until it arrives or the ask expires
+        (`certificate_handler.PendingCertificateRequests`, the answer wait), so
+        a chatty group does not turn a missing certificate into a flood, and a
+        neighbour that withholds one does not silence every later ask.
         """
         if not node_id or not ask_node_id or node_id == ask_node_id:
             return

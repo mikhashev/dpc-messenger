@@ -1472,7 +1472,10 @@ Offers a file to the peer for transfer.
   (RSA-PSS over the hex SHA-256 of the §4.4 preimage). The author signs it once per
   message, after the fingerprint and before any offer (one signature for a whole group
   fan-out); a node without a key sends no description. A relay and a holder answering
-  FILE_REQUEST copy it **byte for byte** and never sign it again. When it is present
+  FILE_REQUEST copy it **byte for byte** and never sign it again, and pass on only one
+  that verifies on them: an `unverified` one is left off (it may be a stranger's junk
+  under the author's name). `sender_node_id` is exactly `dpc-node-` and 32 lowercase hex
+  characters, and `chunk_size` exactly the rule above for `size_bytes`. When it is present
   the offer's `filename`, `size_bytes`, `hash` and `mime_type`, and on a group offer
   `message_id` and `sender_node_id`, must equal the described ones, and the offer's
   `hash` is the author's SHA-256 whatever the sender's `verify_hash` says. The
@@ -1481,15 +1484,20 @@ Offers a file to the peer for transfer.
   the hop and takes the file from this one source, checked again at the end; `legacy`
   (no description, or another `file_preimage_version`) takes the offer as today;
   `rejected` (a field altered, a signer other than `sender_node_id`, a description of
-  another chat, more than 2^17 described chunks, or an offer that is not the described
-  file) is refused with FILE_CANCEL `file_signature_rejected`. With a description not
+  another chat, a `chunk_size` other than the rule's for `size_bytes`, a
+  `sender_node_id` that is not a node id, or an offer that is not the described file)
+  is refused with FILE_CANCEL `file_signature_rejected`. The receiver reads the file at
+  the end in blocks of at most 8 MiB, whatever chunk size it was handed. With a description not
   rejected, the received bytes must hash to its `hash` whatever the receiver's
   `verify_hash` says (`hash_mismatch` otherwise), and the receiver recomputes its
   `chunks_hash` in the same read; bytes that match `hash` but not `chunks_hash` are
   kept and the description is marked rejected and never re-served. The receiver keeps
   the description on its record's attachment as `file_description`, beside its own
-  verdict `file_verdict` (a local field, dropped when history is imported). A receiver
-  that predates the field ignores it.
+  verdict `file_verdict` (a local field, dropped when history is imported); a pushed
+  file without one is marked `file_verdict: legacy`. A stored description that is
+  still `unverified` is checked again when its author's certificate arrives: marked
+  `verified`, or dropped when it does not hold. History sync exports a description only
+  when it verifies on the exporting node. A receiver that predates the field ignores it.
 
 **Group file relay and its identity.** A member that receives a group file offers it on
 to every member it is connected to except itself, the hop it came from and the author
@@ -1830,12 +1838,17 @@ the longest `retry_after_sec` named) rather than as `not_held`.
 offered the file reports that a peer did not answer rather than that nobody holds it.
 
 **The author's description (v1.17).** A holder offers the record's
-`file_description` (FILE_OFFER) byte for byte when its attachment holds one it did not
-reject. A requester whose record holds a description takes only an offer carrying the
-same one: an offer without it, or with another, is `not_the_requested_file`, so a
-stripped signature cannot downgrade the file to legacy (under either legacy policy).
-A record without one takes a group offer's description only when it names the
-requested `message_id`. An offer whose description is `rejected` is refused with
+`file_description` (FILE_OFFER) byte for byte when its attachment holds one that
+verifies on the holder; one it cannot verify is left off. A requester whose record
+holds a description that verifies on it takes only an offer carrying the same one: an
+offer without it, or with another, is `not_the_requested_file`, so a stripped signature
+cannot downgrade the file to legacy (under either legacy policy). A description the
+requester cannot verify binds nothing (a member could have planted it in the history it
+exported): an offer without one is taken, and an offer with another one is taken when
+that one names the record's author, its `message_id` (on a group record), and its hash
+and size where the record has them; its signature is then judged as below. A record
+without one takes a group offer's description only when it names the requested
+`message_id`. An offer whose description is `rejected` is refused with
 `file_signature_rejected` and the next peer is asked. An `unverified` one (no
 certificate for the author here) is held without FILE_ACCEPT while the requester asks
 the holder for the certificate (CERT_REQUEST): verified within the answer wait (10 s),
@@ -3621,6 +3634,13 @@ Every arriving record leaves verification carrying exactly one verdict:
 | `legacy` | no signature this receiver can recompute — fields absent, or a `PREIMAGE_VERSION` it does not implement |
 | `rejected` | a signature is present and wrong: hash mismatch, signer ≠ sender, or a failed check |
 
+A `signer_node_id` (or a vote's, a commit's, a file description's author) that is not
+exactly `dpc-node-` and 32 lowercase hex characters, the shape `generate_node_id` writes,
+is `rejected` before any certificate is looked up (v1.17): the id names the certificate
+file, and `dpc-node-<victim>/../dpc-node-<attacker>` or an upper-case copy of an id
+would load another node's certificate on Windows and macOS. A CERT_REQUEST for such an
+id is not answered.
+
 **Rules that follow, and none of them is optional:**
 
 1. **The verdict is the receiver's.** A `verification` field arriving on the
@@ -3761,7 +3781,7 @@ author's key (`CommitSigner.sign_commit`), the §4.1 call.
 | `verified` | the signature checks against the cached certificate of `sender_node_id`, for the conversation the receiver works out itself, and the offer's name, size, hash, MIME type (and a group offer's identity) are the described ones |
 | `unverified` | all of that, except that no certificate for `sender_node_id` is cached: CERT_REQUEST to the hop; checked again when the file is complete |
 | `legacy` | no description, or a `file_preimage_version` the receiver does not implement |
-| `rejected` | anything else: FILE_CANCEL `file_signature_rejected` |
+| `rejected` | anything else, a `chunk_size` other than the rule's for `size_bytes` and an author that is not a node id included: FILE_CANCEL `file_signature_rejected` |
 
 **The conversation is the receiver's.** A group file is checked against the group the
 offer came for. A one-to-one file was signed for its recipient: a node that receives
@@ -4027,6 +4047,13 @@ DPTP is designed to be extensible. New commands can be added by:
   covers plain files, group and one-to-one; screenshots and voice messages are not
   signed yet. **Additive:** an older receiver ignores the field and an older sender
   sends none, which reads as legacy.
+- **§3.11, §4.2, §4.4, FILE_REQUEST: review fixes** (2026-11-20, found in review by a
+  fresh subagent) — a description's `chunk_size` must be the rule's for its size, and the
+  end-of-download read is bounded; a stored description binds a request only when it
+  verifies, is re-served, relayed and exported only then, and is checked again when its
+  author's certificate arrives; a signer id that is not a node id is `rejected` for every
+  signature (messages, votes, commits, file descriptions) and a CERT_REQUEST for one is
+  not answered; a pushed file without a description is marked `file_verdict: legacy`.
 
 ### v1.16 (November 2026)
 - **§3.11 FILE_OFFER `chunk_size`, FILE_CHUNK sending** (2026-11-20, sender behaviour only,

@@ -198,9 +198,20 @@ def file_description_verdict(desc, conversation_id: Optional[str]) -> str:
     with the caller's `conversation_id`, so one replayed into another chat is
     rejected. Whether the offer carrying it agrees with it is the caller's
     check (`file_transfer_manager.offer_file_description`).
+
+    `sender_node_id` must be a node id exactly as `generate_node_id` writes
+    it: it names the certificate file the signature is checked against, so
+    `dpc-node-<victim>/../dpc-node-<attacker>` or an upper-case copy would
+    load another node's certificate (`is_valid_node_id`). And `chunk_size`
+    must be `description_chunk_size(size_bytes)`, the one value per file the
+    author computes: a receiver reads the file in blocks of it at the end, so
+    a description that names 2^40 for a 4 GB file would have it read whole
+    into memory (found in review by a fresh subagent, 2026-11-20).
     """
     from dpc_protocol.commit_integrity import CommitSigner
+    from dpc_protocol.crypto import is_valid_node_id
     from dpc_protocol.message_signing import FILE_PREIMAGE_VERSION, file_content_hash
+    from .managers.chunk_window import description_chunk_size
 
     if not isinstance(desc, dict) or desc.get("file_preimage_version") != FILE_PREIMAGE_VERSION:
         return FILE_LEGACY
@@ -210,12 +221,13 @@ def file_description_verdict(desc, conversation_id: Optional[str]) -> str:
     mime_type = desc.get("mime_type")
     signature = desc.get("file_signature")
     if not (isinstance(message_id, str) and 0 < len(message_id) <= _MAX_ID_CHARS
-            and isinstance(author, str) and author.startswith("dpc-node-")
-            and len(author) <= _MAX_ID_CHARS
+            and is_valid_node_id(author)
             and _is_count(desc.get("size_bytes"), 0) and _is_count(desc.get("chunk_size"), 1)
             and _is_digest(desc.get("hash")) and _is_digest(desc.get("chunks_hash"))
             and isinstance(filename, str) and isinstance(mime_type, str)
             and isinstance(signature, str) and signature):
+        return FILE_REJECTED
+    if desc["chunk_size"] != description_chunk_size(desc["size_bytes"]):
         return FILE_REJECTED
     if not conversation_id:
         return FILE_REJECTED

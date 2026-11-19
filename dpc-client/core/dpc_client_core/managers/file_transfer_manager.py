@@ -132,6 +132,10 @@ ALREADY_RECEIVED_REASON = "already_received"
 # (another signer, another chat, an altered field) or the offer's name, size,
 # hash or MIME type is not the description's. Pending Mike as a name.
 FILE_SIGNATURE_REJECTED_REASON = "file_signature_rejected"
+# How many CERT_REQUESTs for file authors, and waits for their certificates, a
+# node keeps at once (each also expires after the answer wait): the author id
+# is the offer's to choose, so a peer naming made-up authors must not grow them.
+CERTIFICATE_WAITS_MAX = 256
 # How long, and for how many ids, a receiver remembers a FILE_CANCEL it sent. A
 # sender that kept streaming (its loop had not seen the cancel yet) is answered
 # once more with the same reason per window, not once per chunk.
@@ -199,8 +203,14 @@ def hash_file_in_one_pass(
 
     Returns ``(sha256_hex or None, [crc32 hex of each chunk_size slice])``. The
     values are the same as hashing the whole file and each ``chunk_size`` read
-    separately: the block is a multiple of ``chunk_size`` so slice boundaries
-    never move, and only the last slice may be short.
+    separately: the CRC of a slice rolls across read blocks, and only the last
+    slice may be short.
+
+    A read is never larger than ``HASH_READ_BLOCK_BYTES``, whatever
+    ``chunk_size`` or ``description_chunk_size`` says: at the end of a download
+    both come from the peer's offer, and a block of the chunk size let a
+    description naming 2^40 have a 4 GB file read into memory whole (found in
+    review by a fresh subagent, 2026-11-20).
 
     With ``description_chunk_size`` the same read also yields the
     ``chunks_hash`` of a signed file description (ADR-047 phase 1): the SHA-256
@@ -214,9 +224,17 @@ def hash_file_in_one_pass(
     ``on_progress(bytes_done, total_bytes)`` is called at most once per
     ``min_interval_s`` of wall time, plus once at the end (100%).
     """
-    block_size = chunk_size * max(1, HASH_READ_BLOCK_BYTES // chunk_size)
+    chunk_size = int(chunk_size)
+    if chunk_size < 1:
+        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+    # A whole number of chunks per read where a chunk fits in a block, so the
+    # usual case slices without carrying a CRC over; never more than the block.
+    block_size = (chunk_size * (HASH_READ_BLOCK_BYTES // chunk_size)
+                  if chunk_size <= HASH_READ_BLOCK_BYTES else HASH_READ_BLOCK_BYTES)
     sha256 = hashlib.sha256() if with_sha256 else None
     chunk_hashes: List[str] = []
+    crc_running = 0
+    crc_filled = 0
     digest_size = int(description_chunk_size) if description_chunk_size else 0
     chunks_digest = hashlib.sha256() if digest_size else None
     slice_digest = hashlib.sha256()
@@ -232,9 +250,16 @@ def hash_file_in_one_pass(
                 sha256.update(block)
             if with_chunk_crcs:
                 view = memoryview(block)
-                for start in range(0, len(block), chunk_size):
-                    crc = zlib.crc32(view[start:start + chunk_size]) & 0xffffffff
-                    chunk_hashes.append(f"{crc:08x}")
+                pos = 0
+                while pos < len(block):
+                    take = min(chunk_size - crc_filled, len(block) - pos)
+                    crc_running = zlib.crc32(view[pos:pos + take], crc_running)
+                    crc_filled += take
+                    pos += take
+                    if crc_filled == chunk_size:
+                        chunk_hashes.append(f"{crc_running & 0xffffffff:08x}")
+                        crc_running = 0
+                        crc_filled = 0
             if chunks_digest is not None:
                 view = memoryview(block)
                 pos = 0
@@ -259,6 +284,8 @@ def hash_file_in_one_pass(
     if on_progress is not None and last_emit_bytes != bytes_done:
         on_progress(bytes_done, total_size)  # final 100% event
 
+    if crc_filled:
+        chunk_hashes.append(f"{crc_running & 0xffffffff:08x}")  # the short last slice
     file_hash = sha256.hexdigest() if sha256 is not None else None
     if chunks_digest is None:
         return file_hash, chunk_hashes
@@ -701,8 +728,10 @@ class FileTransferManager:
         self._cancels_sent: Dict[str, tuple] = {}  # transfer_id -> (when, reason)
         # ADR-047 phase 1: CERT_REQUESTs sent for a file description's author,
         # (author, hop) -> when, and the waits for a certificate to arrive.
+        # Both expire after the answer wait and hold at most
+        # CERTIFICATE_WAITS_MAX entries: an author id is the offer's to choose.
         self._certificates_asked: Dict[tuple, float] = {}
-        self._certificate_arrivals: Dict[str, asyncio.Event] = {}
+        self._certificate_arrivals: Dict[str, Tuple[asyncio.Event, float]] = {}
         self._stray_chunk_ids: Dict[str, float] = {}  # transfer_id -> when first met
         # FILE_REQUEST, both sides: files this node asked its peers for, and the
         # answers it gives when asked.
@@ -1312,10 +1341,17 @@ class FileTransferManager:
         if why is not None:
             return desc, FILE_REJECTED, why
         size, slice_size = desc["size_bytes"], desc["chunk_size"]
-        if (isinstance(size, int) and isinstance(slice_size, int) and slice_size > 0
-                and (size + slice_size - 1) // slice_size > MAX_CHUNKS_PER_OFFER):
-            # Bounds the chunk list, and the digest loop at the end, even for a
-            # description no certificate here can check yet.
+        if (not isinstance(size, int) or isinstance(size, bool) or size < 0
+                or slice_size != description_chunk_size(size)):
+            # One chunk size per file, by its size alone: the author computes
+            # it so, and anything else is not an author's description. Checked
+            # here, before the signature, so a description no certificate here
+            # can check yet cannot name a read size either (the end of the
+            # download reads in bounded blocks regardless).
+            return desc, FILE_REJECTED, (f"the description's chunk_size {str(slice_size)[:24]!r} "
+                                         f"is not the one of a {str(size)[:24]}-byte file")
+        if (size + slice_size - 1) // slice_size > MAX_CHUNKS_PER_OFFER:
+            # Bounds the chunk list, and the digest loop at the end.
             return desc, FILE_REJECTED, f"the description cuts the file into more than {MAX_CHUNKS_PER_OFFER} chunks"
         conversation = file_conversation_id(
             group_id=payload.get("group_id") or None, my_node_id=self.p2p_manager.node_id,
@@ -1337,29 +1373,60 @@ class FileTransferManager:
             peer_node_id=node_id, author=desc.get("sender_node_id"))
         return file_description_verdict(desc, conversation)
 
+    def _certificate_wait_s(self) -> float:
+        return float(getattr(self.file_requests, "answer_timeout_s", 10.0) or 10.0)
+
+    def _prune_certificate_waits(self, now: float) -> None:
+        """Forget asks older than the answer wait and waits nobody can still be in.
+
+        A wait lives at most `_certificate_wait_s`; one kept twice that long
+        has no waiter left. Past CERTIFICATE_WAITS_MAX entries the oldest go
+        first, so offers naming made-up authors cannot grow either table.
+        """
+        wait = self._certificate_wait_s()
+        for key in [k for k, when in self._certificates_asked.items() if now - when >= wait]:
+            del self._certificates_asked[key]
+        for key in [k for k, (_, when) in self._certificate_arrivals.items() if now - when >= 2 * wait]:
+            del self._certificate_arrivals[key]
+        for table, when_of in ((self._certificates_asked, lambda v: v),
+                               (self._certificate_arrivals, lambda v: v[1])):
+            excess = len(table) - CERTIFICATE_WAITS_MAX
+            if excess > 0:
+                for key in sorted(table, key=lambda k: when_of(table[k]))[:excess]:
+                    del table[key]
+
+    def _certificate_event(self, node_id: str, now: float) -> asyncio.Event:
+        entry = self._certificate_arrivals.get(node_id)
+        if entry is None:
+            entry = (asyncio.Event(), now)
+        else:
+            entry = (entry[0], now)  # refreshed by a new ask or wait
+        self._certificate_arrivals[node_id] = entry
+        return entry[0]
+
     async def ask_for_certificate(self, author: str, hop: str) -> None:
         """Ask `hop` for `author`'s certificate (CERT_REQUEST), for an unverified description.
 
-        Not gated by `pending_certificate_requests` as the message path is: a
-        relay that withholds the certificate must not stop this node asking the
-        next holder (W2). At most once per (author, hop) per answer wait. The
-        answer needs no trust in the hop: a certificate whose key does not hash
-        to `author` is refused on arrival (certificate_handler.py).
+        Kept apart from the message path's `pending_certificate_requests`: an
+        author added there by a file offer stayed there until its certificate
+        came, and while it stayed, no message from it asked again, so a relay
+        that withheld one certificate silenced every later ask for it (found
+        in review by a fresh subagent, 2026-11-20). The asks here are their
+        own, at most once per (author, hop) per answer wait, and expire. The
+        answer needs no trust in the hop: a certificate whose key does not
+        hash to `author` is refused on arrival (certificate_handler.py).
         """
-        if not author or not hop or author == self.p2p_manager.node_id:
+        from dpc_protocol.crypto import is_valid_node_id
+        if not is_valid_node_id(author) or not hop or author == self.p2p_manager.node_id:
             return
         now = _monotonic()
-        wait = getattr(self.file_requests, "answer_timeout_s", 10.0)
-        for key in [k for k, when in self._certificates_asked.items() if now - when >= wait]:
-            del self._certificates_asked[key]
+        self._prune_certificate_waits(now)
         if (author, hop) in self._certificates_asked:
             return
         self._certificates_asked[(author, hop)] = now
         # Registered before the ask leaves, so an answer that beats the wait still wakes it.
-        self._certificate_arrivals.setdefault(author, asyncio.Event())
-        pending = getattr(self.service, "pending_certificate_requests", None)
-        if isinstance(pending, set):
-            pending.add(author)
+        self._certificate_event(author, now)
+        self._prune_certificate_waits(now)  # the cap, with this ask counted
         try:
             await self.p2p_manager.send_message_to_peer(
                 hop, {"command": "CERT_REQUEST", "payload": {"node_id": author}})
@@ -1369,18 +1436,27 @@ class FileTransferManager:
 
     def certificate_arrived(self, node_id: str) -> None:
         """A certificate for `node_id` was cached: wake whatever waits for it."""
-        event = self._certificate_arrivals.pop(node_id, None)
-        if event is not None:
-            event.set()
+        entry = self._certificate_arrivals.pop(node_id, None)
+        if entry is not None:
+            entry[0].set()
 
     async def wait_for_certificate(self, node_id: str, timeout_s: float) -> bool:
         """Whether a certificate for `node_id` arrived within `timeout_s`."""
-        event = self._certificate_arrivals.setdefault(node_id, asyncio.Event())
+        now = _monotonic()
+        self._prune_certificate_waits(now)
+        event = self._certificate_event(node_id, now)
+        self._prune_certificate_waits(now)  # the cap, with this wait counted
         try:
             await asyncio.wait_for(event.wait(), timeout_s)
             return True
         except asyncio.TimeoutError:
             return False
+        finally:
+            entry = self._certificate_arrivals.get(node_id)
+            if entry is not None and entry[0] is event and not event.is_set():
+                # Nobody else refreshed it meanwhile: this wait was the last use
+                if _monotonic() - entry[1] >= timeout_s:
+                    del self._certificate_arrivals[node_id]
 
     async def handle_file_accept(self, node_id: str, transfer_id: str):
         """
@@ -2384,7 +2460,7 @@ class FileTransferManager:
                 "transfer_id": transfer.transfer_id,
                 "status": "completed"
             }
-            from ..signing import FILE_REJECTED, FILE_UNVERIFIED, FILE_VERIFIED
+            from ..signing import FILE_LEGACY, FILE_REJECTED, FILE_UNVERIFIED, FILE_VERIFIED
             # A group description verified against the author's key and naming
             # the requested record ties the bytes to what its author sent.
             described_record = bool(
@@ -2407,6 +2483,11 @@ class FileTransferManager:
                 attachment["file_verdict"] = transfer.file_verdict
             elif transfer.file_verdict == FILE_REJECTED:
                 attachment["file_verdict"] = FILE_REJECTED  # kept, never re-served
+            elif not transfer.file_description and not transfer.request_id:
+                # A pushed file with no description (M2: accepted from one
+                # source and marked): the marker says so on the record. A
+                # requested one completes a record that may hold one already.
+                attachment["file_verdict"] = FILE_LEGACY
 
             # A plain file keeps the path it was saved under, so the chat can
             # show it in its folder. Image and voice take theirs below.
@@ -2586,7 +2667,17 @@ class FileTransferManager:
         peer) is logged here: raised, it surfaced only as "Task exception was
         never retrieved".
         """
-        from ..signing import FILE_UNVERIFIED, FILE_VERIFIED
+        from ..signing import FILE_VERIFIED
+        # The author's description, byte for byte, never signed again here, and
+        # only one that holds here: an unverified one may be a stranger's junk
+        # under the author's name, and passed on it would have the next member
+        # refuse this copy (found in review by a fresh subagent, 2026-11-20).
+        # Checked again, since the certificate may have come since the receive.
+        description = None
+        if received.file_description and (
+                received.file_verdict == FILE_VERIFIED
+                or self.file_description_verdict_now(received.node_id, received) == FILE_VERIFIED):
+            description = received.file_description
         try:
             await self.send_file(
                 node_id=member_id,
@@ -2599,11 +2690,7 @@ class FileTransferManager:
                 group_relay=True,
                 text=received.text,
                 filename=received.filename,  # the copy here may be under `_N`
-                # The author's description, byte for byte; never signed again here.
-                # One this node rejected is not passed on.
-                file_description=(received.file_description
-                                  if received.file_verdict in (FILE_VERIFIED, FILE_UNVERIFIED)
-                                  else None),
+                file_description=description,
             )
             logger.info("Relayed group %s %s to %s", kind, received.filename, member_id[:20])
         except Exception as e:  # noqa: BLE001 - one member's failure ends only its relay

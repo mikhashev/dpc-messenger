@@ -20,8 +20,8 @@ fields of the file preimage, and the description travels on the offer:
 - no certificate for the author: `unverified`, a CERT_REQUEST to the hop, and
   checked again at the end (`verified` once the certificate came, kept but
   marked `unverified` when it did not);
-- an offer without a description is legacy and accepted as today, with nothing
-  stored (M2's default);
+- an offer without a description is legacy and accepted as today, and the
+  record says so with `file_verdict: legacy` and nothing else (M2's default);
 - a history round trip keeps the description and drops the local verdict.
 
 Real FileTransferManager and handlers over the in-process network of
@@ -450,7 +450,7 @@ async def test_a_wire_chunk_of_65537_carries_a_file_whose_description_still_veri
 
 
 @pytest.mark.asyncio
-async def test_an_offer_without_a_description_is_legacy_accepted_and_nothing_is_stored(root, identities):
+async def test_an_offer_without_a_description_is_legacy_accepted_and_only_marked(root, identities):
     net = _Network()
     author, b = full_mesh(net, root, 2)  # identities.signing_as stays None: the author has no key
 
@@ -462,7 +462,8 @@ async def test_an_offer_without_a_description_is_legacy_accepted_and_nothing_is_
     (rec,) = records(b)
     att = rec["attachments"][0]
     assert Path(att["file_path"]).read_bytes() == CONTENT
-    assert "file_description" not in att and "file_verdict" not in att
+    assert "file_description" not in att
+    assert att["file_verdict"] == FILE_LEGACY, "M2: accepted from one source, and marked"
     assert "file_description" not in records(author)[0]["attachments"][0]
 
 

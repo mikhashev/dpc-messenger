@@ -44,10 +44,13 @@ because nothing ties those bytes to what the author sent. A record with
 neither a hash nor a size is not requested at all.
 
 ADR-047 phase 1 adds the author's signed `file_description`. A record that
-holds one (the author's own, or one synced from it) is answered only by an
-offer carrying the same description: an offer without it, or with another,
-is `not_the_requested_file`, so a stripped signature cannot downgrade the
-file. A holder re-serves the description its record holds, byte for byte. An
+holds one that verifies here (the author's own, or one synced from it) is
+answered only by an offer carrying the same description: an offer without it,
+or with another, is `not_the_requested_file`, so a stripped signature cannot
+downgrade the file. One this node cannot verify binds nothing, since a member
+could have planted it: an offer that fits the record replaces it. A holder
+re-serves the description its record holds, byte for byte, and only one that
+verifies on it. An
 offer whose description does not hold is refused (`file_signature_rejected`)
 and the next peer is asked. One whose author's certificate this node lacks is
 accepted only once the certificate has come (CERT_REQUEST to the holder), or,
@@ -68,7 +71,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -163,13 +166,36 @@ def _real_hash(value: Any) -> Optional[str]:
     return value if value and value != "none" else None
 
 
-def _held_description(attachment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The author's description an attachment holds, or None (none, or one this node rejected)."""
-    from ..signing import FILE_REJECTED
+def _held_description(attachment: Dict[str, Any], *, group_id: Optional[str],
+                      my_node_id: Optional[str], peer_node_id: Optional[str]
+                      ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """(description, verdict) of the author's description an attachment holds, checked now.
+
+    (None, None) when it holds none, or one this node rejected. Otherwise the
+    verdict is computed again, never read from the record: a description that
+    arrived with a synced record, or before its author's certificate, was
+    kept `unverified`, and only one that verifies here is the author's. A
+    stored `verified` is taken as it is: a node id is its key's hash, so a
+    certificate that verified once cannot change.
+    """
+    from ..signing import (
+        FILE_REJECTED, FILE_VERIFIED, file_conversation_id, file_description_verdict,
+    )
     from .file_transfer_manager import wire_file_description
     if attachment.get("file_verdict") == FILE_REJECTED:
-        return None
-    return wire_file_description(attachment.get("file_description"))
+        return None, None
+    description = wire_file_description(attachment.get("file_description"))
+    if description is None:
+        return None, None
+    if attachment.get("file_verdict") == FILE_VERIFIED:
+        return description, FILE_VERIFIED
+    conversation = file_conversation_id(
+        group_id=group_id, my_node_id=my_node_id, peer_node_id=peer_node_id,
+        author=description.get("sender_node_id"))
+    verdict = file_description_verdict(description, conversation)
+    if verdict == FILE_REJECTED:
+        return None, None
+    return description, verdict
 
 
 @dataclass
@@ -187,8 +213,14 @@ class OpenRequest:
     # Where the attachment is in the record, so the UI completes that one.
     attachment_index: Optional[int] = None
     # The author's signed description the record holds (ADR-047 phase 1), or
-    # None: an answer must carry the same one.
+    # None. Binding (`description_binding`) only when it verified here when the
+    # request was made: an answer must then carry the same one. One still
+    # unverified is a hint, which an offer that fits the record may replace.
     file_description: Optional[Dict[str, Any]] = None
+    description_binding: bool = False
+    # The record's author, which a description offered in place of a
+    # non-binding one must name.
+    record_sender: Optional[str] = None
     created: float = field(default_factory=time.monotonic)
     declined: Dict[str, str] = field(default_factory=dict)  # node -> reason
     retry_after: Dict[str, float] = field(default_factory=dict)  # busy node -> seconds it named
@@ -321,7 +353,10 @@ class FileRequests:
         size = attachment.get("size_bytes")
         size = size if isinstance(size, int) and not isinstance(size, bool) else None
         file_hash = _real_hash(attachment.get("hash"))
-        description = _held_description(attachment)
+        from ..signing import FILE_VERIFIED
+        description, description_verdict = _held_description(
+            attachment, group_id=conversation_id if is_group else None,
+            my_node_id=self._me, peer_node_id=None if is_group else conversation_id)
         if size is None and file_hash is None:
             # Nothing but a name to check an answer against: any bytes under that
             # name would complete the record.
@@ -359,6 +394,8 @@ class FileRequests:
             candidates=candidates,
             attachment_index=index,
             file_description=description,
+            description_binding=description_verdict == FILE_VERIFIED,
+            record_sender=record.get("sender_node_id") or None,
         )
         self._open[request.request_id] = request
         await self._emit(request, STATE_REQUESTING, asking=list(candidates))
@@ -503,16 +540,34 @@ class FileRequests:
             return f"hash {str(payload.get('hash'))[:16]!r}, requested {request.file_hash[:16]!r}"
         from .file_transfer_manager import wire_file_description
         offered = wire_file_description(payload.get("file_description"))
-        if request.file_description is not None:
+        if request.file_description is not None and request.description_binding:
             # Downgrade protection, under either legacy policy: the record holds
-            # the author's description, so the file comes with it or not at all.
+            # the author's description, verified here, so the file comes with
+            # it or not at all.
             if offered is None:
                 return "no file description, and the record holds the author's"
             if offered != request.file_description:
                 return "another file description than the record's"
-        elif offered is not None and request.group_id and offered.get("message_id") != request.message_id:
+            return None
+        if offered is None or offered == request.file_description:
+            return None
+        # No description here, or one this node could not verify, which binds
+        # nothing: a member could have planted junk under the author's name in
+        # the history it exported, and an exact match would then refuse every
+        # honest holder (found in review by a fresh subagent, 2026-11-20). An
+        # offered one must be this record's, by its author, of the record's
+        # file; its signature is the offer handler's to check (refused when it
+        # does not hold, held for the certificate when it cannot be checked).
+        if request.group_id and offered.get("message_id") != request.message_id:
             return (f"a description of message {str(offered.get('message_id'))[:20]!r}, "
                     f"requested {request.message_id[:20]!r}")
+        if request.record_sender and offered.get("sender_node_id") != request.record_sender:
+            return (f"a description by {str(offered.get('sender_node_id'))[:20]!r}, "
+                    f"the record's author is {request.record_sender[:20]!r}")
+        if request.file_hash and offered.get("hash") != request.file_hash:
+            return "a description of another hash than the record's"
+        if request.size_bytes is not None and offered.get("size_bytes") != request.size_bytes:
+            return "a description of another size than the record's"
         return None
 
     @staticmethod
@@ -538,14 +593,18 @@ class FileRequests:
         loop.create_task(self._accept_once_verified(request, node_id, transfer))
 
     async def _accept_once_verified(self, request: OpenRequest, node_id: str, transfer) -> None:
-        from ..signing import FILE_REJECTED, FILE_VERIFIED
+        from ..signing import FILE_REJECTED, FILE_UNVERIFIED, FILE_VERIFIED
         from .file_transfer_manager import (
             FILE_SIGNATURE_REJECTED_REASON, NO_ANSWER_REASON, TransferStatus,
         )
         manager = self.manager
         author = (transfer.file_description or {}).get("sender_node_id")
-        await manager.wait_for_certificate(author, self.answer_timeout_s)
         tid = transfer.transfer_id
+        # A certificate that came between the offer and this task (the answer
+        # can beat the wait) is not waited for again: checked first, and with
+        # no await between this check and the wait, none can slip in.
+        if manager.file_description_verdict_now(node_id, transfer) == FILE_UNVERIFIED:
+            await manager.wait_for_certificate(author, self.answer_timeout_s)
         if manager.active_transfers.get(tid) is not transfer or request.transfer_id != tid:
             return  # cancelled meanwhile
         verdict = manager.file_description_verdict_now(node_id, transfer)
@@ -730,6 +789,15 @@ class FileRequests:
         except Exception as e:  # noqa: BLE001 - the requester times out instead
             logger.debug("Could not answer FILE_REQUEST %s to %s: %s", request_id[:8], node_id[:20], e)
 
+    def _served_description(self, attachment: Dict[str, Any], group_id: Optional[str],
+                            requester: str) -> Optional[Dict[str, Any]]:
+        """The description a holder re-serves with `attachment`: the record's, if it verifies here."""
+        from ..signing import FILE_VERIFIED
+        description, verdict = _held_description(
+            attachment, group_id=group_id or None, my_node_id=self._me,
+            peer_node_id=None if group_id else requester)
+        return description if verdict == FILE_VERIFIED else None
+
     async def handle_request(self, node_id: str, payload: Dict[str, Any]) -> None:
         request_id = _short_field(payload.get("request_id"))
         if not request_id:
@@ -775,8 +843,13 @@ class FileRequests:
                 sender_node_id=record.get("sender_node_id") if group_id else None,
                 filename=att.get("filename"),
                 request_id=request_id,
-                # The author's description the record holds, byte for byte (ADR-047 phase 1)
-                file_description=_held_description(att),
+                # The author's description the record holds, byte for byte
+                # (ADR-047 phase 1), and only one that verifies here: an
+                # unverified one may be junk planted under the author's name,
+                # and re-served it would have every requester that can check
+                # it refuse this holder (found in review by a fresh subagent,
+                # 2026-11-20).
+                file_description=self._served_description(att, group_id, node_id),
             )
             self._served[(node_id, str(path))] = time.monotonic()
             logger.info("FILE_REQUEST %s from %s: offering %s", request_id[:8], node_id[:20],
