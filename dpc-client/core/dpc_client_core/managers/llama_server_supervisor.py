@@ -4211,6 +4211,12 @@ class LlamaServerSupervisor:
         """Saving is off this launch: the folder's parent is missing (an unplugged disk)."""
         return bool(getattr(self, "_kv_folder_off", False))
 
+    def _kv_ram_keeps_the_outgoing(self) -> bool:
+        """The engine's RAM keeps the outgoing conversation at a switch, so a switch save spares
+        nothing (ADR-044, amendments of 2026-11-18). llama-server: a host cache, on unless
+        `cache_ram_mib` is 0 (unset is the engine's own default, on)."""
+        return self.config.get("cache_ram_mib") != 0
+
     def _kv_expected_identity(self) -> Dict[str, Any]:
         """What a snapshot of this alias must match before the launch; a key left out is not
         compared. Cache types are known here only when configured: auto picks its rung at the
@@ -4725,8 +4731,9 @@ class LlamaServerSupervisor:
         sent call was another owner key's, then restore the incoming owner conversation's
         snapshot into slot 0. One switch at a time per alias (the lock); the save holds the
         hook's call slot to its end, the caller's cancellation included, so a drain waits for it.
-        A peer's or gateway client's call never waits: it is logged and goes on. Never raises
-        but a cancellation."""
+        A peer's or gateway client's call never waits: it is logged and goes on. Where the
+        engine's RAM keeps the outgoing conversation (`_kv_ram_keeps_the_outgoing`) nothing is
+        saved. Never raises but a cancellation."""
         if self.ENGINE != LlamaServerSupervisor.ENGINE or self._kv_folder() is None:
             return
         # A peer's or a gateway client's call saves the outgoing owner conversation as an owner's call
@@ -4754,7 +4761,11 @@ class LlamaServerSupervisor:
             # The record's own conversation while slot 0 holds something else: back from its file.
             returning = (lost is not None and not restores
                          and self._kv_restores_at_a_switch(None, caller_kind, agent_id, conversation_id, messages))
-            if not (saves or restores or returning):
+            # RAM keeps the outgoing conversation: no save, so the incoming call waits for no write.
+            in_ram = saves and self._kv_ram_keeps_the_outgoing()
+            if in_ram:
+                saves = False
+            if not (saves or restores or returning or in_ram):
                 return
             token = _KV_AT_A_SWITCH.set(_kv_switch_words(record, caller_kind, agent_id, conversation_id, peer_id))
             if lost is not None:
@@ -4767,6 +4778,15 @@ class LlamaServerSupervisor:
                 logger.info("%s[%s]: KV snapshot not saved or restored%s: the engine is draining",
                             self.ENGINE, self.alias, _kv_at_words())
                 return
+            ram_words = None
+            if in_ram:
+                cache_ram = self.config.get("cache_ram_mib")
+                ram_words = (f"the engine keeps it in RAM (host cache, cache_ram "
+                             f"{'default' if cache_ram is None else cache_ram}); a stop writes it")
+                if not (restores or returning):
+                    logger.info("%s[%s]: KV snapshot decision%s: not saved at the switch: %s",
+                                self.ENGINE, self.alias, _kv_at_words(), ram_words)
+                    return
             self.call_slot()
             slot_taken = True
             save_by = self._kv_switch_save_by()
@@ -4814,6 +4834,8 @@ class LlamaServerSupervisor:
                 return
             if lost is not None:
                 no_save = lost
+            elif ram_words is not None:
+                no_save = ram_words
             elif not saves:
                 no_save = "the last sent call was no other owner conversation's"
             else:

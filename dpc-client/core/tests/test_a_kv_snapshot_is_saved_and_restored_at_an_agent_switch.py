@@ -94,6 +94,9 @@ class SwitchEngine:
 
 
 async def switching(tmp_path, **cfg):
+    # The save mechanics run with no host cache: where the engine's RAM keeps the outgoing
+    # conversation the switch saves nothing (test_a_switch_saves_nothing_where_the_engines_ram_...).
+    cfg.setdefault("cache_ram_mib", 0)
     folder = tmp_path / "kv"
     sup = _llama(ALIAS, slot_save_path=str(folder), **cfg)
     await sup.ensure_running()
@@ -260,6 +263,14 @@ async def test_the_incoming_conversation_is_restored_into_slot_0_after_the_save(
     assert sup._in_flight == 0
 
 
+def host_cache_on(sup, engine):
+    """The switch saves above ran with no host cache; from here the engine has one, so the
+    restore's gate is the one under test. The slot is empty, as after a stop or an unload: a
+    restore beside an unsaved live slot is refused by the slot guard whatever the gate says."""
+    sup.config["cache_ram_mib"] = 24576
+    engine.slot_list[0]["n_prompt_tokens"] = 0
+
+
 def served_again(agent, conversation):
     """A call of the key sent after its snapshot, with no save after it (the next save skipped)."""
     seq = kv.note_engine_call(ALIAS, caller_kind="agent", agent_id=agent, conversation_id=conversation,
@@ -275,9 +286,9 @@ async def test_under_a_host_cache_a_snapshot_saved_after_the_keys_last_call_is_r
     p, sup, engine, folder = await switching(tmp_path)
     await turn(p, "a1", "c1")
     await turn(p, "a2", "c2")
+    host_cache_on(sup, engine)
     await turn(p, "a1", "c1", TURN_2)
-    assert engine.events == ["request:c1", "save", "save-end", "request:c2",
-                             "save", "save-end", "restore", "request:c1"]
+    assert engine.events == ["request:c1", "save", "save-end", "request:c2", "restore", "request:c1"]
     assert kv.status_of(ALIAS)["last_restore"]["outcome"] == kv.RESTORED
 
 
@@ -286,6 +297,7 @@ async def test_under_a_host_cache_a_key_served_again_after_its_save_is_not_resto
     p, sup, engine, folder = await switching(tmp_path)
     await turn(p, "a1", "c1")
     await turn(p, "a2", "c2")
+    host_cache_on(sup, engine)
     served_again("a1", "c1")
     with caplog.at_level(logging.INFO, logger=SUP_LOG):
         await turn(p, "a1", "c1", TURN_2)
@@ -309,6 +321,7 @@ async def test_under_a_host_cache_an_older_entry_without_its_call_falls_back_to_
         e.pop("sent", None)
         e.pop("sent_mono", None)
     kv.write_index(folder, index)
+    host_cache_on(sup, engine)
     with caplog.at_level(logging.INFO, logger=SUP_LOG):
         await turn(p, "a1", "c1", TURN_2)
     assert "restore" not in engine.events
