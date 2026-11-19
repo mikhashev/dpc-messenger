@@ -30,14 +30,26 @@ class FileServerHandler(SimpleHTTPRequestHandler):
 
         _, peer_id, filename = path_parts
 
+        # One folder name and one file name, nothing that is a path. The old
+        # check compared strings by prefix after `resolve()`, so on Windows
+        # `/files/<id>/..\history.json` read any conversation's history and
+        # `..\conversations_old` passed as being "under" conversations/; the
+        # server answers with `Access-Control-Allow-Origin: *`, so any web page
+        # open in a browser on this machine could ask.
+        from .conversation_paths import is_safe_conversation_id
+        if not is_safe_conversation_id(peer_id) or not is_safe_conversation_id(filename):
+            logger.warning("Refused file server path: %r", self.path)
+            self.send_error(403, "Access denied")
+            return
+
         # Construct file path
-        file_path = self.dpc_home_dir / "conversations" / peer_id / "files" / filename
+        files_dir = self.dpc_home_dir / "conversations" / peer_id / "files"
+        file_path = files_dir / filename
 
         # Security: Verify path is within allowed directory
         try:
             file_path = file_path.resolve()
-            conversations_dir = (self.dpc_home_dir / "conversations").resolve()
-            if not str(file_path).startswith(str(conversations_dir)):
+            if files_dir.resolve() not in file_path.parents:
                 logger.warning(f"Path traversal attempt blocked: {file_path}")
                 self.send_error(403, "Access denied")
                 return

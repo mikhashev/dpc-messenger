@@ -15,7 +15,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 import websockets
 
-from dpc_protocol.crypto import DPC_HOME_DIR, generate_node_id, load_identity, generate_identity
+from dpc_protocol.crypto import DPC_HOME_DIR, generate_node_id, is_valid_node_id, load_identity, generate_identity
 from dpc_protocol.protocol import (
     MAX_HELLO_FRAME_BYTES, encode_message, read_message, write_message, create_hello_message,
 )
@@ -1961,6 +1961,13 @@ class P2PManager:
             # Validate we have required fields
             if not from_node or not webrtc_signal_type:
                 logger.warning("Received invalid Hub signal (missing sender_node_id or payload.type): %s", signal)
+                return
+
+            # The only peer id no key proves (ADR-041 D2): the Hub states it, and
+            # it becomes the connection's id, which names folders such as
+            # conversations/<node_id>/. A key hash or nothing.
+            if not is_valid_node_id(from_node):
+                logger.warning("Ignoring Hub signal from %r: not a node id", from_node)
                 return
 
             logger.debug("Received WebRTC signal '%s' from %s", webrtc_signal_type, from_node)

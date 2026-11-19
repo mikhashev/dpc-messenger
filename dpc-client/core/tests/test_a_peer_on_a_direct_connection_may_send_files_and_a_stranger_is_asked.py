@@ -282,7 +282,7 @@ async def test_the_default_sends_a_direct_stranger_to_the_question(tmp_path):
 
 
 @pytest.mark.parametrize("kind,group_id", [
-    ("file", None), ("image", None), ("voice", None), ("file", "group-x"),
+    ("file", None), ("image", None), ("voice", None), ("file", "group-00000000000a"),
 ])
 @pytest.mark.asyncio
 async def test_an_old_rules_file_without_the_key_asks_a_direct_peer_of_any_kind(tmp_path, kind, group_id):
@@ -337,7 +337,7 @@ async def test_an_always_allow_on_a_direct_peers_question_writes_its_node_entry(
 
 
 @pytest.mark.parametrize("kind,group_id", [
-    ("file", None), ("image", None), ("voice", None), ("file", "group-x"),
+    ("file", None), ("image", None), ("voice", None), ("file", "group-00000000000a"),
 ])
 @pytest.mark.asyncio
 async def test_a_strangers_offer_of_any_kind_is_put_to_the_user(tmp_path, kind, group_id):

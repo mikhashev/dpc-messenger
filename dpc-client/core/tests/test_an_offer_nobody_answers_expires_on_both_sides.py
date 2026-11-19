@@ -106,7 +106,7 @@ def test_the_deadline_is_120_seconds_and_the_sender_waits_longer_than_the_receiv
 
 
 @pytest.mark.parametrize("kind,group_id", [
-    ("file", None), ("image", None), ("voice", None), ("file", "group-x"),
+    ("file", None), ("image", None), ("voice", None), ("file", "group-00000000000a"),
 ])
 @pytest.mark.asyncio
 async def test_an_asked_offer_of_any_kind_is_refused_with_no_answer_when_nobody_answers(clocks, tmp_path, kind, group_id):
@@ -139,7 +139,7 @@ async def test_an_ordinary_file_waiting_for_the_accept_click_has_the_deadline_to
     assert node.manager.active_transfers == {}
 
 
-@pytest.mark.parametrize("kind,group_id", [("image", None), ("voice", None), ("file", "group-x")])
+@pytest.mark.parametrize("kind,group_id", [("image", None), ("voice", None), ("file", "group-00000000000a")])
 @pytest.mark.asyncio
 async def test_an_offer_accepted_on_arrival_has_no_deadline(clocks, tmp_path, kind, group_id):
     rules = {"file_transfer": {"nodes": {PEER: {"file_transfer.allow": "allow"}}, "groups": {}}}
@@ -344,7 +344,7 @@ AUTHOR = "dpc-node-" + "c" * 32
 async def test_a_group_offer_put_to_the_user_names_the_author_beside_the_hop(clocks, tmp_path):
     """The dialog says "from X via Y": `node_id` is the hop, `sender_node_id` the unsigned author."""
     node = _Node(tmp_path, NO_ENTRIES)
-    payload = _offer(group_id="group-x")
+    payload = _offer(group_id="group-00000000000a")
     payload.update({"message_id": "m-1", "sender_node_id": AUTHOR})
 
     await node.handler.handle(PEER, payload)
@@ -352,14 +352,14 @@ async def test_a_group_offer_put_to_the_user_names_the_author_beside_the_hop(clo
     [event] = node.offered()
     assert event["node_id"] == PEER
     assert event["sender_node_id"] == AUTHOR
-    assert event["group_id"] == "group-x"
+    assert event["group_id"] == "group-00000000000a"
 
 
 @pytest.mark.asyncio
 async def test_an_offer_with_no_author_claim_carries_no_sender_node_id(clocks, tmp_path):
     node = _Node(tmp_path, NO_ENTRIES)
 
-    await node.handler.handle(PEER, _offer(group_id="group-x"))
+    await node.handler.handle(PEER, _offer(group_id="group-00000000000a"))
     await node.handler.handle(PEER, _offer("t2"))
 
     assert all("sender_node_id" not in e for e in node.offered())

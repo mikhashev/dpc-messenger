@@ -99,6 +99,17 @@ class FileOfferHandler(MessageHandler):
         else:
             self.logger.info(f"FILE_OFFER from {sender_node_id}: {filename} ({size_bytes} bytes)")
 
+        # A group file lands in the folder its group id names, and the sender
+        # chooses the id: `dpc-node-<another peer>`, `agent_001` or an upper-case
+        # copy of a real group's id would put it in another conversation's store.
+        # Not answered: no node that runs this code sends such an id.
+        from ..managers.group_manager import is_valid_group_id
+        if group_id and not is_valid_group_id(group_id):
+            self.logger.warning(
+                f"Ignoring offer {transfer_id} from {sender_node_id}: {group_id!r} is not a group id"
+            )
+            return None
+
         file_transfer_manager = self.service.file_transfer_manager
 
         # An offer that answers this node's own FILE_REQUEST (managers/file_request.py):

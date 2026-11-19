@@ -147,6 +147,16 @@ class GroupCreateHandler(MessageHandler):
             sender_node_id[:20], group_id, name
         )
 
+        # The id names folders from here on (the store, the history hash sent
+        # back below), and the inviting peer chooses it.
+        from ..managers.group_manager import is_valid_group_id
+        if not is_valid_group_id(group_id):
+            self.logger.warning(
+                "Refusing GROUP_CREATE from %s: %r is not a group id",
+                sender_node_id[:20], group_id,
+            )
+            return None
+
         # A deleted group stays deleted, whoever offers it back: the registry
         # is what this node knows, and no sender outranks it.
         if group_id and self.service.group_manager.is_group_deleted(group_id):

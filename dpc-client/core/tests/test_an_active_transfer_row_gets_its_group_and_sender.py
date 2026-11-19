@@ -23,7 +23,7 @@ from dpc_client_core.message_handlers.file_offer_handler import FileOfferHandler
 HOP = "dpc-node-" + "b" * 32
 AUTHOR = "dpc-node-" + "c" * 32
 US = "dpc-node-" + "a" * 32
-GROUP = "group-1234abcd"
+GROUP = "group-00001234abcd"
 
 
 class _Wire:

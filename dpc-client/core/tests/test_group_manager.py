@@ -31,7 +31,7 @@ def _received_from_alice(manager, name, members=()):
     by sync, or leaves, needs a group this node did not create.
     """
     record = GroupMetadata(
-        group_id=f"group-{name.lower()}0000", name=name, created_by=ALICE,
+        group_id="group-" + name.lower().encode().hex()[:12].ljust(12, "0"), name=name, created_by=ALICE,
         members=[ALICE, "dpc-node-self-abc", *members], version=1,
     ).to_dict()
     return manager.apply_sync(record, ALICE)
@@ -316,7 +316,7 @@ class TestGroupManagerSync:
 
     def test_apply_new_group_via_sync(self, manager):
         remote = {
-            "group_id": "group-remote-xyz",
+            "group_id": "group-0000000a2e5e",
             "name": "Remote Group",
             "topic": "",
             "created_by": "dpc-node-alice-123",
@@ -326,7 +326,7 @@ class TestGroupManagerSync:
         }
         result = manager.apply_sync(remote, ALICE)
         assert result is not None
-        assert manager.get_group("group-remote-xyz") is not None
+        assert manager.get_group("group-0000000a2e5e") is not None
 
     def test_handle_group_deleted(self, manager):
         group = manager.create_group("Doomed", "", [])
@@ -459,7 +459,7 @@ class TestEffortTransitionsAreAudible:
 
     def test_a_group_arriving_by_sync_with_no_local_copy_says_it_starts_empty(self, manager, caplog):
         remote = GroupMetadata(
-            group_id="group-fromelsewhere",
+            group_id="group-00000e15e0e0",
             name="Elsewhere",
             members=["dpc-node-other"],
             version=3,
@@ -472,7 +472,7 @@ class TestEffortTransitionsAreAudible:
             "a room that materialises from a sync keeps no effort — that is the moment "
             "worth naming, because afterwards nothing distinguishes it from a room that never had one"
         )
-        assert manager.get_group("group-fromelsewhere").reasoning_effort is None
+        assert manager.get_group("group-00000e15e0e0").reasoning_effort is None
         assert "-> high" not in said, (
             "the first version wrote `none -> high` here for a room that stayed empty, "
             "and this very test passed while asserting the opposite value two lines up"

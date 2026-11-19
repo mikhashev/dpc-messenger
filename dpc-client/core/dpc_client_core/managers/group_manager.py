@@ -9,6 +9,7 @@ Legacy location ~/.dpc/groups/ is supported for migration.
 import hashlib
 import json
 import logging
+import re
 import uuid
 import shutil
 from pathlib import Path
@@ -20,6 +21,25 @@ from dpc_client_core import conversation_paths
 from dpc_client_core.conversation_monitor import BOUNDARY_CLOCK_SKEW, parse_moment
 
 logger = logging.getLogger(__name__)
+
+# The shape `create_group` writes: `group-` and 12 lowercase hex characters.
+GROUP_ID_RE = re.compile(r"group-[0-9a-f]{12}")
+
+
+def is_valid_group_id(value) -> bool:
+    """Whether `value` is a group id as `create_group` writes it, and nothing more.
+
+    A group id names the group's folder under `conversations/`, and a peer
+    chooses the id it puts in GROUP_CREATE, GROUP_SYNC or a group FILE_OFFER.
+    Anything else could name another conversation's folder — `dpc-node-<peer>`,
+    `agent_001`, an upper-case copy of a real group's id (Windows and macOS fold
+    case, and the store lookup compares case-insensitively everywhere), or a
+    prefix that matches `<id>-<slug>` — which GROUP_DELETE from the same peer
+    then removed with `shutil.rmtree`; and a relative or absolute id let the
+    legacy `groups/<id>.json` clean-up unlink a file outside `groups/`.
+    `re.fullmatch`, so a trailing newline does not pass.
+    """
+    return isinstance(value, str) and GROUP_ID_RE.fullmatch(value) is not None
 
 
 def _note_effort(group_id: str, old: Optional[str], new: Optional[str], source: str) -> None:
@@ -297,6 +317,12 @@ class GroupManager:
                 logger.info(
                     "Deleted conversation folder %s for group %s", conv_dir.name, group_id
                 )
+
+            # The legacy names are `groups/<id>.json`: an id that is not one
+            # path component would unlink a file outside `groups/`.
+            if not conversation_paths.is_safe_conversation_id(group_id):
+                logger.warning("Not deleting legacy files for unsafe group id %r", group_id)
+                return
 
             # Also clean up legacy files if they still exist (shouldn't after migration)
             legacy_file = self._get_legacy_group_path(group_id)
@@ -854,6 +880,14 @@ class GroupManager:
         remote = GroupMetadata.from_dict(remote_group)
 
         local = self._groups.get(remote.group_id)
+        if local is None and not is_valid_group_id(remote.group_id):
+            # First sight is the only door a peer has into `_groups`; past it the
+            # id names folders. A group already held here was checked when it came.
+            logger.warning(
+                "Refusing a group record from %s: %r is not a group id",
+                str(sender_node_id)[:20], remote.group_id,
+            )
+            return None
         if not self._first_sight_from_its_creator(local, remote, sender_node_id):
             return None
         if not self._creator_pin_holds(local, remote, sender_node_id):

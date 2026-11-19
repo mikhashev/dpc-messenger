@@ -107,9 +107,9 @@ async def test_an_invitation_from_a_blocked_node_is_ignored(node, caplog):
 
 @pytest.mark.asyncio
 async def test_an_invitation_from_an_unblocked_node_is_taken(node):
-    invite = dict(node.group.to_dict(), group_id="group-from-third", created_by=THIRD)
+    invite = dict(node.group.to_dict(), group_id="group-0000000f3333", created_by=THIRD)
 
     await GroupCreateHandler(node.service).handle(THIRD, invite)
 
-    assert node.service.group_manager.get_group("group-from-third") is not None
+    assert node.service.group_manager.get_group("group-0000000f3333") is not None
     assert len(_events(node.service, "group_invite_received")) == 1
