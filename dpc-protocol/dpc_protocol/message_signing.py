@@ -64,6 +64,9 @@ __all__ = [
     "HELLO_PREIMAGE_VERSION",
     "hello_preimage",
     "hello_content_hash",
+    "FILE_PREIMAGE_VERSION",
+    "file_preimage",
+    "file_content_hash",
 ]
 
 
@@ -338,3 +341,72 @@ def hello_preimage(
 def hello_content_hash(**fields: Any) -> str:
     """SHA256 of the canonical HELLO preimage, hex — the value that gets signed."""
     return hashlib.sha256(hello_preimage(**fields)).hexdigest()
+
+
+FILE_PREIMAGE_VERSION = "dptp-file-v1"
+
+
+def _canonical_count(value: Any) -> str:
+    """A size in decimal; anything that is not a whole number is covered as written."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return "" if value is None else str(value)
+
+
+def file_preimage(
+    *,
+    conversation_id: Optional[str],
+    message_id: Optional[str],
+    sender_node_id: Optional[str],
+    size_bytes: Any,
+    chunk_size: Any,
+    hash: Optional[str],
+    chunks_hash: Optional[str],
+    filename: Optional[str],
+    mime_type: Optional[str],
+) -> bytes:
+    """The exact bytes a file description signature covers (ADR-047 §2, phase 1).
+
+    The author binds what a file is to its key: the bytes (`hash`, the
+    whole-file SHA-256, lowercase hex with no `sha256:` prefix), its chunks
+    (`chunks_hash`, the SHA-256 of the 32-byte SHA-256 digests of every
+    `chunk_size` slice, in order), and the name and MIME type the receiver
+    shows and opens it by. A second source or a relay that changes any of them
+    breaks the signature.
+
+    `conversation_id` (the group id, or for a one-to-one file the recipient's
+    node id) and `message_id` (the author's record id) are inside so a
+    description cannot be replayed into another chat. The conversation never
+    travels with the description: each verifier recomputes it from its own
+    state, as §4.2 rule 5 asks of a message.
+
+    `created_at` is left out on purpose: the record's own signed timestamp
+    dates the file, and the content never changes, so there is no freshness to
+    check (decision M1 of the phase 1 design, pending Mike).
+
+    `filename` is the author's string as carried on the offer, never re-read
+    from a disk: macOS NFD names, a trailing dot Windows drops and case-folding
+    volumes would otherwise change the bytes between platforms.
+
+    Own version tag, first: `node.key` also signs messages, votes, gossip,
+    commits and HELLOs, and the tag keeps a file signature from standing for
+    any of them.
+    """
+    fields = [
+        FILE_PREIMAGE_VERSION,
+        conversation_id or "",
+        message_id or "",
+        sender_node_id or "",
+        _canonical_count(size_bytes),
+        _canonical_count(chunk_size),
+        hash or "",
+        chunks_hash or "",
+        filename or "",
+        mime_type or "",
+    ]
+    return _length_prefixed(fields)
+
+
+def file_content_hash(**fields: Any) -> str:
+    """SHA256 of the canonical file preimage, hex — the value that gets signed."""
+    return hashlib.sha256(file_preimage(**fields)).hexdigest()
