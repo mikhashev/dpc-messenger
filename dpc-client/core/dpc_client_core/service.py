@@ -4452,7 +4452,12 @@ class CoreService(MusicCommandsMixin):
             raise ValueError(f"Failed to decode base64 audio data: {e}")
 
         # 3. Get voice settings
-        max_duration = float(self.settings.get("voice_messages", "max_duration_seconds", "300"))
+        try:
+            max_duration = float(self.settings.get("voice_messages", "max_duration_seconds", "300"))
+        except (TypeError, ValueError):
+            max_duration = AGENT_CHAT_VOICE_DEFAULT_MAX_SECONDS
+        if not math.isfinite(max_duration) or max_duration <= 0:
+            max_duration = AGENT_CHAT_VOICE_DEFAULT_MAX_SECONDS  # "nan"/"inf" would mean "no limit"
         max_size_mb = int(self.settings.get("voice_messages", "max_size_mb", "10"))
         supported_mime_types = self.settings.get("voice_messages", "mime_types", "audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav").split(",")
 
@@ -4471,10 +4476,11 @@ class CoreService(MusicCommandsMixin):
             raise ValueError(f"Unsupported audio format: {mime_type}. Supported: {', '.join(supported_mime_types)}")
 
         # 7. Check privacy rules (file_transfer rules apply)
-        rules = self.firewall.rules.get("file_transfer", {})
-        max_size_mb_rules = rules.get("max_size_mb", 100)
-        if size_mb > max_size_mb_rules:
-            raise ValueError(f"File too large by firewall rules ({size_mb:.2f} MB > {max_size_mb_rules} MB limit)")
+        # The same parsing as the paperclip (file_transfer_cap_mb): NaN, an
+        # infinity, a bool or a value of 0 or less is the default, never "no cap".
+        refusal = file_transfer_cap_refusal(len(audio_data), file_transfer_cap_mb(self.firewall.rules))
+        if refusal:
+            raise ValueError(refusal)
 
         # 8. Generate filename with timestamp
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
