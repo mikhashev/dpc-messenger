@@ -32,6 +32,12 @@ def _read_local_certificate(node_id: str, own_node_id: str) -> Optional[str]:
         if own.exists():
             return own.read_text(encoding="utf-8")
         return None
+    # A CERT_REQUEST names node_id: anything but a key hash (an absolute path,
+    # "../..", another case) would read whatever *.crt it points at and send it
+    # back to the asking peer.
+    from dpc_protocol.crypto import is_valid_node_id
+    if not isinstance(node_id, str) or not is_valid_node_id(node_id):
+        return None
     cached = DPC_HOME_DIR / "peers" / f"{node_id}.crt"
     if cached.exists():
         return cached.read_text(encoding="utf-8")
