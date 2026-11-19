@@ -308,6 +308,14 @@ def description_chunk_size(file_size: int) -> int:
     sign a different `chunks_hash` and none could serve another's chunks. So it
     is step 1 of the rule (the 64 KiB / 1 MiB / 4 MiB table), raised as step 4
     raises a wire chunk, to keep the chunk list within MAX_CHUNKS_PER_OFFER.
+
+    Frozen for `dptp-file-v1` (specs/dptp_v1.md section 4.4): a receiver
+    refuses a description whose `chunk_size` is not this function's for its
+    size (`FileTransferManager.offer_file_description`), so this is an
+    acceptance rule, not a tuning knob. A change to it, or to the table and
+    the floor beneath it (`chunk_size_by_file_size`, `crc_list_floor` and
+    their constants), needs a new file preimage version tag: otherwise every
+    older node rejects every description a newer one signs.
     """
     return max(chunk_size_by_file_size(file_size), crc_list_floor(file_size))
 

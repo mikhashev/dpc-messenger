@@ -64,7 +64,7 @@ def _junk(desc):
 @pytest.mark.asyncio
 async def test_a_description_planted_on_import_does_not_block_an_honest_verified_offer(root, identities, monkeypatch):
     net, a, b, c, rec = await _setup(identities, root, certificate_known=False)
-    _holders_verify(a, b)  # A and B hold A's certificate; C does not
+    _holders_verify(identities, a, b)  # A and B hold A's certificate; C does not
     net.certificates_from[a.me] = (identities, {a.me})
     c.manager.file_requests.answer_timeout_s = 5.0
     real = records(a)[0]["attachments"][0]["file_description"]
@@ -94,9 +94,9 @@ async def test_a_description_planted_on_import_does_not_block_an_honest_verified
 
 @pytest.mark.asyncio
 async def test_a_description_that_verifies_here_still_binds_the_request(root, identities):
-    """The fix lifts the binding from an unverified description only."""
+    """The fix lifts the binding from an unverified description only: another one is refused."""
     net, a, b, c, rec = await _setup(identities, root)
-    net.mutate[(a.me, c.me, "FILE_OFFER")] = lambda p: {k: v for k, v in p.items() if k != "file_description"}
+    net.mutate[(a.me, c.me, "FILE_OFFER")] = lambda p: dict(p, file_description=_junk(p["file_description"]))
 
     answer = await CoreService.request_attachment(c.service, GROUP, rec["id"])
     final = await _outcome(net, c, answer["request_id"])
@@ -109,7 +109,7 @@ async def test_a_description_that_verifies_here_still_binds_the_request(root, id
 async def test_an_offered_description_that_is_not_the_records_does_not_replace_an_unverified_one(root, identities):
     """Non-binding is not anything-goes: another author's or another message's is still refused."""
     net, a, b, c, rec = await _setup(identities, root, certificate_known=False)
-    _holders_verify(a, b)
+    _holders_verify(identities, a, b)
     real = records(a)[0]["attachments"][0]["file_description"]
     net.mutate[(a.me, c.me, "FILE_OFFER")] = lambda p: dict(
         p, file_description=dict(real, sender_node_id=B))
@@ -198,6 +198,59 @@ def test_a_merge_keeps_the_verified_description_over_an_unverified_one(identitie
                               record=record)
     assert kept["file_description"] == real and kept["file_verdict"] == FILE_VERIFIED, \
         "an unverified one never replaces a verified one"
+
+
+def _local_note(local, **attachment):
+    """This node's own "Received file" note for A's file: attributed to A, signed by `local`."""
+    return {"id": "note-1", "role": "user", "content": "Received file notes.txt",
+            "sender_node_id": A, "signer_node_id": local, "timestamp": "2026-11-20T01:00:00+00:00",
+            "attachments": [_attachment(**attachment)]}
+
+
+def test_a_planted_verdict_does_not_displace_the_description_this_node_verified(identities, monkeypatch):
+    """Found in the second review by a fresh subagent, 2026-11-20.
+
+    A member syncs A's real record carrying junk under A's name plus
+    `file_verdict: verified`. The merge into this node's own note read the
+    planted verdict as a checked one and kept the junk; the remap then dropped
+    it, and with it the description this node verified.
+    """
+    identities.know(A)
+    real = _signed(identities, message_id="m-1")
+    me = "dpc-node-" + "c" * 32
+    monitor = _monitor(monkeypatch, me)
+    monitor.message_history = [_local_note(me, file_description=real, file_verdict=FILE_VERIFIED,
+                                           file_path="/somewhere/notes.txt")]
+    monitor.rebuild_message_ids()
+    arriving = {"id": "m-1", "role": "user", "content": "", "sender_node_id": A,
+                "timestamp": "2026-11-20T00:59:00+00:00",
+                "attachments": [_attachment(file_description=_junk(real), file_verdict=FILE_VERIFIED)]}
+
+    monitor.merge_history([arriving])
+
+    (stored,) = monitor.message_history
+    assert stored["id"] == "m-1", "the author's record replaced the note"
+    assert stored["attachments"][0]["file_description"] == real, "the verified description stands"
+    assert arriving["attachments"][0]["file_verdict"] == FILE_VERIFIED, "the caller's dict is not changed"
+
+
+def test_a_record_claiming_this_nodes_id_keeps_no_planted_verdict(identities, monkeypatch):
+    """A legacy record under this node's own id skips the remap; its verdict is dropped all the same."""
+    identities.know(A)
+    real = _signed(identities, message_id="m-2")
+    me = "dpc-node-" + "c" * 32
+    monitor = _monitor(monkeypatch, me)
+    arriving = {"id": "m-2", "role": "user", "content": "", "sender_node_id": me,
+                "timestamp": "2026-11-20T00:59:00+00:00",
+                "attachments": [_attachment(file_description=_junk(real), file_verdict=FILE_VERIFIED)]}
+
+    assert monitor.merge_history([arriving]) == 1
+
+    (stored,) = monitor.message_history
+    assert "file_verdict" not in stored["attachments"][0], "a verdict is never imported"
+    from dpc_client_core.managers.file_request import _held_description
+    assert _held_description(stored["attachments"][0], group_id=GROUP, my_node_id=me,
+                             peer_node_id=None) == (None, None), "the junk binds nothing"
 
 
 # --- an unverified description travels nowhere --------------------------------------

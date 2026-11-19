@@ -1698,7 +1698,8 @@ Cancels an in-progress or pending file transfer.
     FILE_REQUEST, against the requested record's hash)
   - `not_the_requested_file` (v1.16) - The offer answers the receiver's FILE_REQUEST
     with another file: a name, a size or a hash the requested record does not have,
-    or (v1.17) no `file_description` or another one than the record holds.
+    or (v1.17) another `file_description` than the record holds, or none while the
+    offer's name, size, hash or MIME type is not the held description's.
     The receiver asks its next peer. An older sender takes it as any other cancel
   - `file_signature_rejected` (v1.17) - The offer's `file_description` does not hold
     (§4.4): a field altered, signed by a node other than its `sender_node_id`, made for
@@ -1840,9 +1841,13 @@ offered the file reports that a peer did not answer rather than that nobody hold
 **The author's description (v1.17).** A holder offers the record's
 `file_description` (FILE_OFFER) byte for byte when its attachment holds one that
 verifies on the holder; one it cannot verify is left off. A requester whose record
-holds a description that verifies on it takes only an offer carrying the same one: an
-offer without it, or with another, is `not_the_requested_file`, so a stripped signature
-cannot downgrade the file to legacy (under either legacy policy). A description the
+holds a description that verifies on it takes an offer carrying the same one, or an
+offer carrying none whose name, size, hash and MIME type are the described ones (a
+holder that lacks the author's certificate serves none): the download then carries the
+requester's own description, and the bytes are checked against its `hash` and
+`chunks_hash` at the end. An offer with another description, or with none and another
+file, is `not_the_requested_file`, so a stripped or swapped signature cannot downgrade
+the file to legacy (under either legacy policy). A description the
 requester cannot verify binds nothing (a member could have planted it in the history it
 exported): an offer without one is taken, and an offer with another one is taken when
 that one names the record's author, its `message_id` (on a group record), and its hash
@@ -3757,11 +3762,20 @@ HELLOs and files, and the tag keeps a file signature from standing for any of th
 | 3 | `message_id`: the author's record id |
 | 4 | `sender_node_id`: the author |
 | 5 | `size_bytes`, decimal |
-| 6 | `chunk_size` of the description, decimal |
+| 6 | `chunk_size` of the description, decimal (the frozen table below) |
 | 7 | `hash`: SHA-256 of the file, lowercase hex, no `sha256:` prefix |
 | 8 | `chunks_hash`: SHA-256 of the 32-byte SHA-256 digests of every `chunk_size` slice, in order |
 | 9 | `filename`: the author's name, as carried on the offer, never re-read from a disk |
 | 10 | `mime_type` |
+
+**The description chunk size is frozen for `dptp-file-v1`.** `chunk_size` is the
+file's size alone run through this table: 64 KiB up to 100 MiB, 1 MiB up to 1 GiB,
+4 MiB above, then raised to the smallest power of two that keeps the file within 2^17
+chunks. A receiver refuses a description whose `chunk_size` is not the table's for its
+`size_bytes`, so the table is part of the acceptance rule: changing it would have
+every node built before the change reject every description built after it. A
+different table needs a new version tag. The wire `chunk_size` of FILE_OFFER is not
+bound by it (§3.11).
 
 `created_at` is not covered: the record's own signed timestamp dates the file, and the
 content never changes, so there is no freshness to check; replay into another chat is
@@ -4054,6 +4068,12 @@ DPTP is designed to be extensible. New commands can be added by:
   author's certificate arrives; a signer id that is not a node id is `rejected` for every
   signature (messages, votes, commits, file descriptions) and a CERT_REQUEST for one is
   not answered; a pushed file without a description is marked `file_verdict: legacy`.
+- **§4.4, FILE_REQUEST: second review fixes** (2026-11-20, found in the second review by
+  a fresh subagent) — a `file_verdict` that arrives with a synced record is dropped before
+  any merge, a record claiming the receiver's own id included; a requester holding a
+  verified description takes an offer without one when it is the described file, and
+  keeps its own description for the end-of-download check; the description chunk-size
+  table is pinned to `dptp-file-v1`.
 
 ### v1.16 (November 2026)
 - **§3.11 FILE_OFFER `chunk_size`, FILE_CHUNK sending** (2026-11-20, sender behaviour only,

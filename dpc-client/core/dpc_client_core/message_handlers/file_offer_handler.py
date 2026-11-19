@@ -217,6 +217,18 @@ class FileOfferHandler(MessageHandler):
                     open_request, sender_node_id, f"file description rejected: {why}")
             return None
 
+        if description is None and open_request is not None:
+            # A binding request answered by a holder that served no description
+            # (it lacks the author's certificate): the offer is the described
+            # file (`offer_mismatch`), and the transfer carries this node's own
+            # verified description, so the bytes are checked against its hash
+            # and chunks_hash at the end (found in the second review by a fresh
+            # subagent, 2026-11-20).
+            held = file_requests.held_description_for_offer(open_request, payload)
+            if held is not None:
+                from ..signing import FILE_VERIFIED
+                description, file_verdict = dict(held), FILE_VERIFIED
+
         # Deduplicate: Check for existing pending transfer
         for existing_transfer_id, existing_transfer in file_transfer_manager.active_transfers.items():
             if (existing_transfer.node_id == sender_node_id and

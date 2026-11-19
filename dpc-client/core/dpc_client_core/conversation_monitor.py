@@ -180,6 +180,23 @@ def description_fits_record(description: Any, record: Optional[Dict[str, Any]]) 
     return description.get("message_id") == record.get("id")
 
 
+def without_file_verdicts(record: Dict[str, Any]) -> Dict[str, Any]:
+    """`record` with no `file_verdict` on its attachments; the record itself when none has one.
+
+    The verdict on an author's file description (ADR-047 phase 1) is this
+    node's own, computed on use: one that arrives with a record is whatever
+    the exporting node wrote, and is never trusted. A copy, so the arriving
+    dict is not changed under its caller.
+    """
+    attachments = record.get("attachments")
+    if not isinstance(attachments, list) or not any(
+            isinstance(att, dict) and "file_verdict" in att for att in attachments):
+        return record
+    return dict(record, attachments=[
+        {k: v for k, v in att.items() if k != "file_verdict"} if isinstance(att, dict) else att
+        for att in attachments])
+
+
 def merge_received_attachment(target: Dict[str, Any], source: Dict[str, Any],
                               record: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Fold what a completed transfer knows into the sender's attachment.
@@ -4343,6 +4360,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         # it used to store the foreign path as it came.
         if message.get("attachments") and message.get("sender_node_id") != self._local_node_id():
             message = dict(message, attachments=self._remap_attachment_paths(message["attachments"], message))
+        elif message.get("attachments"):
+            # A record claiming this node's id skips the remap, and a legacy one
+            # is stored unchecked: a `file_verdict` on it is whoever exported
+            # it, and a planted `verified` would be taken as this node's
+            # (`file_request._held_description`). The verdict is local only.
+            message = without_file_verdicts(message)
 
         # Add to history, re-chained for this node. A foreign index and hash
         # appended verbatim broke the local chain permanently: the loader
@@ -4395,6 +4418,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 continue
             # The strip is the storing node's own and unsigned: a peer's is not kept.
             checked.pop("speed_summary", None)
+            # So is a `file_verdict`, and it goes before anything reads it: the
+            # merge into our own note below (`_drop_local_file_note`) took a
+            # planted `verified` for a checked one and kept the peer's junk
+            # description over the one this node verified (found in the second
+            # review by a fresh subagent, 2026-11-20).
+            checked = without_file_verdicts(checked)
             # Verified first, so a record refused by signature is refused on
             # both routes.
             if boundary and is_before_boundary(checked, boundary):

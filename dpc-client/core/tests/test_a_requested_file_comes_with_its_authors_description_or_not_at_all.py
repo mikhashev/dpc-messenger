@@ -5,9 +5,10 @@ file most often comes from a node that is not its author:
 
 - a second source that changes the described hash is refused with
   `file_signature_rejected`, and the next holder is asked;
-- a record that holds the author's description takes no offer without it,
-  or with another (`not_the_requested_file`): a stripped signature cannot
-  downgrade the file to legacy;
+- a record that holds the author's description takes no offer with another
+  (`not_the_requested_file`), and one without it only when it is the very
+  file described, which then keeps the requester's own description: a
+  stripped signature cannot downgrade the file to legacy;
 - a holder re-serves the description its record holds, byte for byte;
 - W2: an offer whose author's certificate the requester lacks is accepted only
   once the certificate has come; a holder that withholds it is given up after
@@ -73,18 +74,35 @@ async def _setup(identities, root, *, certificate_known=True):
     return net, a, b, c, synced
 
 
-def _holders_verify(*nodes):
+def _holders_verify(identities, *nodes):
     """Each of `nodes` holds the certificate that checks the author's description.
 
     A holder re-serves only a description that verifies on it. This harness
     keeps one certificates folder for every node, so "C lacks the author's
     certificate, A and B hold it" (A by its own key, B from its handshake with
-    A) is said here, per holder, rather than by the folder.
+    A) is said here, per holder: while one of `nodes` decides what it serves,
+    the author's certificate is in the folder, and only then. The holder's own
+    check (`FileRequests._served_description`: the signature, the chat, the
+    fields) runs for real; it once was replaced outright, and the W2 flows
+    then exercised none of it (found in the second review by a fresh
+    subagent, 2026-11-20).
     """
-    from dpc_client_core.managers.file_transfer_manager import wire_file_description
     for node in nodes:
-        node.manager.file_requests._served_description = (
-            lambda att, group_id, requester: wire_file_description(att.get("file_description")))
+        requests = node.manager.file_requests
+        check = requests._served_description
+
+        def served(att, group_id, requester, _check=check):
+            author = (att.get("file_description") or {}).get("sender_node_id")
+            held = bool(author) and (identities.peers / f"{author}.crt").exists()
+            if author and not held:
+                identities.know(author)
+            try:
+                return _check(att, group_id, requester)
+            finally:
+                if author and not held:
+                    identities.forget(author)
+
+        requests._served_description = served
 
 
 def _received(c, rec):
@@ -121,13 +139,41 @@ async def test_a_second_source_cannot_forge_a_files_hash(root, identities):
 
 
 @pytest.mark.asyncio
-async def test_a_stripped_description_is_refused_as_not_the_requested_file(root, identities):
+async def test_an_offer_without_a_description_is_taken_as_the_file_the_held_one_describes(root, identities):
+    """A holder lacking the author's certificate serves no description; the requester's own binds.
+
+    Refusing such a holder protected nothing: the request pins the hash, and
+    the requester keeps its own verified description, which checks the bytes
+    at the end (found in the second review by a fresh subagent, 2026-11-20).
+    """
     net, a, b, c, rec = await _setup(identities, root)
+    held = rec["attachments"][0]["file_description"]
     net.mutate[(a.me, c.me, "FILE_OFFER")] = lambda p: {k: v for k, v in p.items() if k != "file_description"}
 
     answer = await CoreService.request_attachment(c.service, GROUP, rec["id"])
     final = await _outcome(net, c, answer["request_id"])
 
+    assert not net.errors, net.errors
+    assert final["state"] == "received", final
+    assert not net.cancels(NOT_THE_REQUESTED_FILE_REASON)
+    assert [f[0] for f in net.named(FILE_REQUEST)] == [a.me], "the first holder served it"
+    att = _received(c, rec)
+    assert att["file_verdict"] == FILE_VERIFIED
+    assert att["file_description"] == held, "the requester's own description, kept"
+
+
+@pytest.mark.asyncio
+async def test_an_offer_without_a_description_of_another_file_is_refused(root, identities):
+    """The held description pins the file even where the record names no hash."""
+    net, a, b, c, rec = await _setup(identities, root)
+    rec["attachments"][0].pop("hash")  # only the description says which bytes
+    net.mutate[(a.me, c.me, "FILE_OFFER")] = lambda p: dict(
+        {k: v for k, v in p.items() if k != "file_description"}, hash="0" * 64)
+
+    answer = await CoreService.request_attachment(c.service, GROUP, rec["id"])
+    final = await _outcome(net, c, answer["request_id"])
+
+    assert not net.errors, net.errors
     assert final["state"] == "received", final
     assert len(_cancels_to(net, a.me, NOT_THE_REQUESTED_FILE_REASON)) == 1
     assert [f[0] for f in net.named(FILE_REQUEST)] == [a.me, b.me]
@@ -174,7 +220,7 @@ async def test_a_holder_sends_the_authors_description_byte_for_byte(root, identi
 @pytest.mark.asyncio
 async def test_a_withheld_certificate_times_out_and_the_next_candidate_is_asked(root, identities):
     net, a, b, c, rec = await _setup(identities, root, certificate_known=False)
-    _holders_verify(a, b)
+    _holders_verify(identities, a, b)
     c.manager.file_requests.answer_timeout_s = 0.3
     net.certificates_from[b.me] = (identities, {a.me})  # A withholds its own; B answers
 
@@ -196,7 +242,7 @@ async def test_a_withheld_certificate_times_out_and_the_next_candidate_is_asked(
 @pytest.mark.asyncio
 async def test_a_held_offer_is_accepted_as_soon_as_its_certificate_comes(root, identities):
     net, a, b, c, rec = await _setup(identities, root, certificate_known=False)
-    _holders_verify(a, b)
+    _holders_verify(identities, a, b)
     c.manager.file_requests.answer_timeout_s = 5.0
     net.certificates_from[a.me] = (identities, {a.me})
 
@@ -211,7 +257,7 @@ async def test_a_held_offer_is_accepted_as_soon_as_its_certificate_comes(root, i
 @pytest.mark.asyncio
 async def test_when_no_holder_sends_the_certificate_the_last_one_serves_unverified(root, identities):
     net, a, b, c, rec = await _setup(identities, root, certificate_known=False)
-    _holders_verify(a, b)
+    _holders_verify(identities, a, b)
     c.manager.file_requests.answer_timeout_s = 0.2
 
     answer = await CoreService.request_attachment(c.service, GROUP, rec["id"])

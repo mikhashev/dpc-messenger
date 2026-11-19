@@ -45,13 +45,16 @@ neither a hash nor a size is not requested at all.
 
 ADR-047 phase 1 adds the author's signed `file_description`. A record that
 holds one that verifies here (the author's own, or one synced from it) is
-answered only by an offer carrying the same description: an offer without it,
-or with another, is `not_the_requested_file`, so a stripped signature cannot
-downgrade the file. One this node cannot verify binds nothing, since a member
-could have planted it: an offer that fits the record replaces it. A holder
-re-serves the description its record holds, byte for byte, and only one that
-verifies on it. An
-offer whose description does not hold is refused (`file_signature_rejected`)
+answered only by an offer carrying the same description, or by one carrying
+none whose name, size, hash and MIME type are the described ones (a holder
+without the author's certificate serves none): the transfer then carries this
+node's own description, which checks the bytes at the end. An offer with
+another description, or with none and another file, is `not_the_requested_file`,
+so a stripped or swapped signature cannot downgrade the file. One this node
+cannot verify binds nothing, since a member could have planted it: an offer
+that fits the record replaces it. A holder re-serves the description its
+record holds, byte for byte, and only one that verifies on it. An offer whose
+description does not hold is refused (`file_signature_rejected`)
 and the next peer is asked. One whose author's certificate this node lacks is
 accepted only once the certificate has come (CERT_REQUEST to the holder), or,
 when it does not come within `answer_timeout_s`, given up for the next peer;
@@ -543,9 +546,19 @@ class FileRequests:
         if request.file_description is not None and request.description_binding:
             # Downgrade protection, under either legacy policy: the record holds
             # the author's description, verified here, so the file comes with
-            # it or not at all.
+            # it or as the very file it describes.
             if offered is None:
-                return "no file description, and the record holds the author's"
+                # A holder that lacks the author's certificate serves no
+                # description (`_served_description`), and refusing it bought
+                # nothing: the file is pinned by what this node holds. Taken when
+                # its name, size, hash and MIME type are the held description's;
+                # the transfer then carries that description, and the end of the
+                # download checks the bytes against its hash and chunks_hash
+                # (`held_description_for_offer`; found in the second review by a
+                # fresh subagent, 2026-11-20).
+                if FileRequests.held_description_for_offer(request, payload) is not None:
+                    return None
+                return "no file description, and the offer is not the file the record's describes"
             if offered != request.file_description:
                 return "another file description than the record's"
             return None
@@ -569,6 +582,26 @@ class FileRequests:
         if request.size_bytes is not None and offered.get("size_bytes") != request.size_bytes:
             return "a description of another size than the record's"
         return None
+
+    @staticmethod
+    def held_description_for_offer(request: OpenRequest,
+                                   payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The request's own verified description, for an offer that carries none, or None.
+
+        Only for a binding request (its description verified here when it was
+        made) and an offer with no `file_description` at all whose filename,
+        size, content hash and MIME type are the described ones. An offer
+        carrying a description is never given this one: another description
+        is still refused, so a swap cannot downgrade the file.
+        """
+        if not request.description_binding or request.file_description is None:
+            return None
+        if payload.get("file_description") is not None:
+            return None
+        for key in ("filename", "size_bytes", "hash", "mime_type"):
+            if payload.get(key) != request.file_description.get(key):
+                return None
+        return request.file_description
 
     @staticmethod
     def has_next_candidate(request: OpenRequest) -> bool:
