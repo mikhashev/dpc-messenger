@@ -6,9 +6,13 @@ Files are split into chunks, transferred with hash verification, and support
 progress tracking and cancellation.
 
 Architecture:
-- Chunked transfer (64KB default). The receiver writes each verified chunk at
-  its offset (index * the offer's chunk_size) into a temporary file beside the
-  final one, so its memory grows with the number of chunks, not with the file
+- Chunked transfer. The sender picks the chunk size per file, before the
+  fingerprint, from the file's size, the connection tier and the rate measured
+  to that peer (chunk_window.py; ADR-047 phase 0), and streams the chunks in
+  windows on the connection's data lane, behind chat (send_lanes.py). The
+  receiver writes each verified chunk at its offset (index * the offer's
+  chunk_size) into a temporary file beside the final one, so its memory grows
+  with the number of chunks, not with the file
 - Per-chunk CRC32 (re-asked through FILE_CHUNK_RETRY), SHA256 of the whole file
   read back from disk at the end
 - A chunk that has not arrived is re-asked after a silence; after a bounded
@@ -61,6 +65,8 @@ from enum import Enum
 
 from ..firewall import FILE_TRANSFER_PROVED_CONNECTION_DEFAULT, FILE_TRANSFER_PROVED_CONNECTION_KEY, is_blocked_by
 from ..p2p_manager import peer_proof
+from ..send_lanes import DataWindowResult
+from .chunk_window import ChunkWindow, PeerLinkRates, choose_chunk_size, parse_chunk_size_setting, SMALL_FILE_CHUNK_BYTES
 from .transfer_speed import TransferSpeed
 
 if TYPE_CHECKING:
@@ -81,9 +87,11 @@ HASH_READ_BLOCK_BYTES = 8 * 1024 * 1024
 _monotonic = time.monotonic  # Indirection so a test can drive the clock
 _answer_sleep = asyncio.sleep  # Indirection so a test can hold the answer clocks
 
-# Receiving. The sender streams chunks back to back (chunk_delay apart), so a
-# silence means the stream has ended or lost something, not that it is slow:
-# 30 s of nothing is 64 KB at ~2 KB/s, slower than any relay we route through.
+# Receiving. The sender streams chunks back to back, so a silence means the
+# stream has ended or lost something, not that it is slow: 30 s of nothing is
+# 64 KB at ~2 KB/s, slower than any relay we route through. A sender of this
+# build keeps one chunk well inside it (chunk_window.py: at most 1 MiB until it
+# has measured the link, then what the link moves in CHAT_WAIT_SLO_S).
 RECEIVE_STALL_TIMEOUT_S = 30.0
 # Indices re-asked per round: 64 chunks (4 MB at the default size) keeps one
 # re-ask from flooding the sender, which answers each with its own file read.
@@ -385,6 +393,11 @@ class FileTransfer:
     answer_timer: Any = field(default=None, repr=False, compare=False)  # asyncio.Task
     # Bytes moved, speed and progress-event cadence; from the first chunk, either direction.
     speed: Optional[TransferSpeed] = field(default=None, repr=False, compare=False)
+    # Upload side only: the chunks in flight per window (chunk_window.py), and
+    # the lock that sends re-asked chunks one at a time instead of reading a
+    # whole re-ask batch into memory at once.
+    window: Optional[ChunkWindow] = field(default=None, repr=False, compare=False)
+    resend_lock: Any = field(default=None, repr=False, compare=False)
 
 
 class _TransferTable(dict):
@@ -536,8 +549,10 @@ class FileTransferManager:
         firewall: Firewall for permission checks
         settings: Settings for configuration
         active_transfers: Dict of active transfer sessions
-        chunk_size: Default chunk size in bytes (default: 65536 = 64KB)
-        chunk_delay: Delay between chunks in seconds (default: 0.001 = 1ms)
+        chunk_size: The owner's fixed chunk size when `chunk_size_pinned`, else 64 KiB
+            (the hash helpers' default unit); a file's own size is `chunk_size_for`
+        chunk_size_pinned: The owner's `[file_transfer] chunk_size`, or None (adaptive)
+        chunk_delay: Pause after each window of chunks in seconds (default: 0)
         background_threshold_mb: Threshold for background transfers
         direct_tls_threshold_mb: Threshold for direct TLS requirement
         max_concurrent_transfers: Maximum concurrent transfers
@@ -597,9 +612,16 @@ class FileTransferManager:
         from .file_request import FileRequests
         self.file_requests = FileRequests(self)
 
-        # Configuration (from settings)
-        self.chunk_size = int(settings.get("file_transfer", "chunk_size", "65536"))  # 64KB
-        self.chunk_delay = float(settings.get("file_transfer", "chunk_delay", "0.001"))  # 1ms (v0.11.1)
+        # Configuration (from settings). chunk_size: `auto` (and the legacy
+        # 65536 every older config.ini carries) is adaptive; another size is
+        # the owner's, used for every file (chunk_window.parse_chunk_size_setting).
+        self.chunk_size_pinned = parse_chunk_size_setting(settings.get("file_transfer", "chunk_size", "auto"))
+        self.chunk_size = self.chunk_size_pinned or SMALL_FILE_CHUNK_BYTES
+        # A pause after each window; 0 (the default since 2026-11-19) is none.
+        # The old 1 ms default became ~15.6 ms per chunk on Windows' timer.
+        self.chunk_delay = float(settings.get("file_transfer", "chunk_delay", "0"))
+        # The rate last measured to each peer, for the next file's chunk size.
+        self.link_rates = PeerLinkRates()
         self.background_threshold_mb = int(settings.get("file_transfer", "background_threshold_mb", "50"))
         self.direct_tls_threshold_mb = int(settings.get("file_transfer", "direct_tls_only_threshold_mb", "100"))
         self.max_concurrent_transfers = int(settings.get("file_transfer", "max_concurrent_transfers", "3"))
@@ -611,7 +633,30 @@ class FileTransferManager:
         self.storage_base_path = storage_base_path / "conversations"
         self.storage_base_path.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"FileTransferManager initialized (chunk_size={self.chunk_size}, chunk_delay={self.chunk_delay}s, max_concurrent={self.max_concurrent_transfers})")
+        logger.info(
+            f"FileTransferManager initialized (chunk_size="
+            f"{self.chunk_size_pinned if self.chunk_size_pinned else 'adaptive'}, "
+            f"chunk_delay={self.chunk_delay}s, max_concurrent={self.max_concurrent_transfers})"
+        )
+
+    def _connection_type(self, node_id: str) -> Optional[str]:
+        _proved, connection_type = peer_proof(getattr(self.p2p_manager, "peers", None), node_id)
+        return connection_type
+
+    def chunk_size_for(self, file_size: int, node_ids) -> int:
+        """The chunk size of one file sent to these peers (chunk_window.choose_chunk_size).
+
+        Decided before the fingerprint: the CRC list, the offer and the send
+        loop all use it. A fan-out hashes once, so it takes the smallest size
+        any of its peers would get.
+        """
+        if self.chunk_size_pinned:
+            return self.chunk_size_pinned
+        sizes = []
+        for node_id in node_ids:
+            tier = self._connection_type(node_id)
+            sizes.append(choose_chunk_size(file_size, tier, self.link_rates.get(node_id, tier)))
+        return min(sizes) if sizes else choose_chunk_size(file_size)
 
     def _get_peer_storage_path(self, node_id: str, subdir: str = "files") -> Path:
         """Get storage path for peer's files."""
@@ -732,7 +777,8 @@ class FileTransferManager:
             logger.debug(f"File prep progress: {filename} - {phase} {percent}%")
 
     async def _hash_in_executor(
-        self, file_path: Path, phase: str, with_sha256: bool, with_chunk_crcs: bool
+        self, file_path: Path, phase: str, with_sha256: bool, with_chunk_crcs: bool,
+        chunk_size: Optional[int] = None,
     ) -> Tuple[Optional[str], List[str]]:
         """Run `hash_file_in_one_pass` in the thread pool, relaying throttled progress to the UI."""
         loop = asyncio.get_running_loop()
@@ -751,7 +797,7 @@ class FileTransferManager:
         return await loop.run_in_executor(
             None,
             lambda: hash_file_in_one_pass(
-                file_path, self.chunk_size,
+                file_path, chunk_size or self.chunk_size,
                 with_sha256=with_sha256, with_chunk_crcs=with_chunk_crcs,
                 on_progress=_relay_progress,
             ),
@@ -770,7 +816,8 @@ class FileTransferManager:
         return file_hash
 
     async def compute_file_fingerprint(self, file_path: Path,
-                                       with_sha256: Optional[bool] = None) -> Tuple[str, List[str]]:
+                                       with_sha256: Optional[bool] = None,
+                                       chunk_size: Optional[int] = None) -> Tuple[str, List[str]]:
         """
         Compute (file hash, per-chunk CRC32 list) of a file to send, in ONE read of the file.
 
@@ -778,7 +825,8 @@ class FileTransferManager:
         anyway (an answer to FILE_REQUEST: the requester refuses an offer whose hash is not
         the record's). Emits file_preparation_started / file_preparation_progress /
         file_preparation_completed. A caller that sends the same file to several peers calls
-        this once and passes the pair to `send_file`.
+        this once, with the size from `chunk_size_for`, and passes the pair and that same
+        `chunk_size` to `send_file`. Without `chunk_size` the CRCs are per `self.chunk_size`.
         """
         if with_sha256 is None:
             with_sha256 = self.verify_hash
@@ -797,6 +845,7 @@ class FileTransferManager:
             "hashing_file" if with_sha256 else "hashing_chunks",
             with_sha256=with_sha256,
             with_chunk_crcs=True,
+            chunk_size=chunk_size,
         )
         if file_hash is None:
             file_hash = "none"
@@ -825,6 +874,7 @@ class FileTransferManager:
         text: Optional[str] = None,
         filename: Optional[str] = None,
         request_id: Optional[str] = None,
+        chunk_size: Optional[int] = None,
     ) -> str:
         """
         Initiate file transfer to peer.
@@ -862,6 +912,9 @@ class FileTransferManager:
                 the author's name.
             request_id: The FILE_REQUEST this offer answers; it travels on the
                 offer so the requester matches it to its own record.
+            chunk_size: The size the precomputed pair was hashed with (a fan-out's
+                `chunk_size_for`). Without a pair it is decided here, per this peer;
+                a pair given without it is taken as hashed with `self.chunk_size`.
 
         Returns:
             transfer_id: Unique transfer identifier
@@ -887,7 +940,11 @@ class FileTransferManager:
         file_size = file_path.stat().st_size
 
         precomputed = file_hash is not None and chunk_hashes is not None
-        expected_chunks = (file_size + self.chunk_size - 1) // self.chunk_size
+        # One size for the CRCs, the offer and the send loop (ADR-047 phase 0).
+        if chunk_size is None:
+            chunk_size = self.chunk_size if precomputed else self.chunk_size_for(file_size, [node_id])
+        chunk_size = max(1, int(chunk_size))
+        expected_chunks = (file_size + chunk_size - 1) // chunk_size
         if precomputed and len(chunk_hashes) != expected_chunks:
             logger.warning(
                 f"Precomputed chunk hashes ({len(chunk_hashes)}) do not match {expected_chunks} chunks "
@@ -899,7 +956,7 @@ class FileTransferManager:
             # An answer to FILE_REQUEST always carries the SHA-256, verify_hash or not:
             # the requester refuses one whose hash is not its record's.
             file_hash, chunk_hashes = await self.compute_file_fingerprint(
-                file_path, with_sha256=self.verify_hash or bool(request_id))
+                file_path, with_sha256=self.verify_hash or bool(request_id), chunk_size=chunk_size)
 
         # Detect MIME type (but override for voice messages to ensure audio/webm)
         if voice_metadata:
@@ -907,9 +964,12 @@ class FileTransferManager:
             mime_type = "audio/webm"
         else:
             mime_type = self._detect_mime_type(file_path)
-        total_chunks = (file_size + self.chunk_size - 1) // self.chunk_size
+        total_chunks = expected_chunks
 
-        logger.info(f"Computed {len(chunk_hashes)} chunk hashes ({len(chunk_hashes) * 8} bytes) for {file_path.name}")
+        logger.info(
+            f"Computed {len(chunk_hashes)} chunk hashes ({len(chunk_hashes) * 8} bytes) for {file_path.name}, "
+            f"chunk size {chunk_size}"
+        )
 
         # Create transfer session
         transfer_id = str(uuid.uuid4())
@@ -919,7 +979,7 @@ class FileTransferManager:
             size_bytes=file_size,
             hash=file_hash,
             mime_type=mime_type,
-            chunk_size=self.chunk_size,
+            chunk_size=chunk_size,
             node_id=node_id,
             direction="upload",
             status=TransferStatus.PENDING,
@@ -951,7 +1011,7 @@ class FileTransferManager:
             "size_bytes": file_size,
             "hash": file_hash,
             "mime_type": mime_type,
-            "chunk_size": self.chunk_size,
+            "chunk_size": chunk_size,  # this file's own, chosen above; the receiver writes by it
             "chunk_hashes": chunk_hashes  # v0.11.1: CRC32 per chunk for integrity
         }
 
@@ -1084,68 +1144,145 @@ class FileTransferManager:
                 started["group_id"] = transfer.group_id  # the row names the group it is sent in
             await self.local_api.broadcast_event("file_transfer_started", started)
 
-        # Send chunks. The file is held until it is closed: on Windows a
-        # FILE_COMPLETE that arrives during the last chunk's pause could not
-        # delete it, and the error took the sender's own message with it.
+        # Send chunks, a window at a time on the data lane (send_lanes.py),
+        # behind any chat or control frame. The file is held until it is
+        # closed: on Windows a FILE_COMPLETE that arrives during the last
+        # window's pause could not delete it, and the error took the sender's
+        # own message with it.
         speed = transfer.speed = TransferSpeed(_monotonic())
+        chunk_size = transfer.chunk_size
+        total = transfer.total_chunks
+        # A p2p stand-in without the data lane (the test wires) is sent one
+        # chunk per window, with a yield after each, as before windows.
+        laned = self._has_data_lane()
+        tier = self._connection_type(node_id)
+        window = None
+        if laned:
+            window = transfer.window = ChunkWindow(chunk_size, self.link_rates.get(node_id, tier))
+        started_at = time.perf_counter()
+
+        def still_sending() -> bool:
+            # A cancel (the peer's, or ours) ends the send; the peer knows already
+            return (self.active_transfers.get(transfer_id) is transfer
+                    and transfer.status not in (TransferStatus.CANCELLED, TransferStatus.FAILED))
+
         try:
             with self.using_file(transfer.file_path), open(transfer.file_path, 'rb') as f:
-                for chunk_index in range(transfer.total_chunks):
-                    # A cancel (the peer's, or ours) ends the send; the peer knows already
-                    if (self.active_transfers.get(transfer_id) is not transfer
-                            or transfer.status in (TransferStatus.CANCELLED, TransferStatus.FAILED)):
+                chunk_index = 0
+                while chunk_index < total:
+                    if not still_sending():
                         logger.info(
                             f"stopped sending {transfer.filename} at chunk "
-                            f"{chunk_index}/{transfer.total_chunks}: {transfer.status.value}"
+                            f"{chunk_index}/{total}: {transfer.status.value}"
                         )
                         break
 
-                    # Read chunk
-                    chunk_data = f.read(self.chunk_size)
-                    chunk_base64 = base64.b64encode(chunk_data).decode('utf-8')
+                    count = min(window.chunks if window else 1, total - chunk_index)
+                    frames, sizes = [], []
+                    for index in range(chunk_index, chunk_index + count):
+                        chunk_data = f.read(chunk_size)
+                        sizes.append(len(chunk_data))
+                        frames.append(self._chunk_frame(transfer, index, chunk_data))
+                    chunk_data = None
 
-                    # Send FILE_CHUNK
-                    await self.p2p_manager.send_message_to_peer(node_id, {
-                        "command": "FILE_CHUNK",
-                        "payload": {
-                            "transfer_id": transfer_id,
-                            "chunk_index": chunk_index,
-                            "total_chunks": transfer.total_chunks,
-                            "data": chunk_base64
-                        }
-                    })
+                    result = await self._send_data_window(node_id, frames, still_sending)
+                    sent = result.frames
+                    frames = None  # the window's bytes are the transport's now
+                    if window is not None:
+                        window.on_window(sum(sizes[:sent]), result.elapsed_s, result.loop_lag_s)
 
-                    # Progress callback
-                    if transfer.progress_callback:
-                        transfer.progress_callback(transfer_id, chunk_index + 1, transfer.total_chunks)
-
-                    # Progress to the UI on a time cadence (transfer_speed.py)
                     now = _monotonic()
-                    speed.add(len(chunk_data), now)
-                    if self.local_api and speed.event_due(now, chunk_index == transfer.total_chunks - 1):
-                        await self.local_api.broadcast_event("file_transfer_progress", {
-                            "transfer_id": transfer_id,
-                            "node_id": node_id,
-                            "filename": transfer.filename,
-                            "direction": "upload",
-                            "chunks_sent": chunk_index + 1,
-                            "total_chunks": transfer.total_chunks,
-                            "progress_percent": int(((chunk_index + 1) / transfer.total_chunks) * 100),
-                            **speed.fields(transfer.size_bytes),
-                        })
+                    for offset in range(sent):
+                        index = chunk_index + offset
+                        if transfer.progress_callback:
+                            transfer.progress_callback(transfer_id, index + 1, total)
+                        speed.add(sizes[offset], now)
+                        # Progress to the UI on a time cadence (transfer_speed.py)
+                        if self.local_api and speed.event_due(now, index == total - 1):
+                            await self.local_api.broadcast_event("file_transfer_progress", {
+                                "transfer_id": transfer_id,
+                                "node_id": node_id,
+                                "filename": transfer.filename,
+                                "direction": "upload",
+                                "chunks_sent": index + 1,
+                                "total_chunks": total,
+                                "progress_percent": int(((index + 1) / total) * 100),
+                                **speed.fields(transfer.size_bytes),
+                            })
+                    chunk_index += sent
+                    if sent < count:
+                        f.seek(chunk_index * chunk_size)
 
-                    # Configurable delay to control transfer speed (v0.11.1)
-                    await asyncio.sleep(self.chunk_delay)
+                    # The owner's pause (chunk_delay, 0 by default). Without
+                    # the lane, a yield per chunk as before; with it the
+                    # drain already yields when the transport is full.
+                    if self.chunk_delay > 0 or not laned:
+                        await asyncio.sleep(self.chunk_delay)
                 else:
                     logger.info(f"All chunks sent for {transfer.filename}")
 
         except Exception as e:
             logger.error(f"Error sending chunks: {e}", exc_info=True)
             transfer.status = TransferStatus.FAILED
+            if window is not None:
+                window.on_error()
             await self._send_file_cancel(node_id, transfer_id, "send_error")
         finally:
+            if window is not None:
+                self._note_window(node_id, tier, transfer, window, time.perf_counter() - started_at)
             # A completion that came while the file was open left the delete to us
             self._release_upload(transfer)
+
+    @staticmethod
+    def _chunk_frame(transfer: FileTransfer, chunk_index: int, chunk_data: bytes) -> Dict[str, Any]:
+        """One FILE_CHUNK: base64 inside JSON, as every receiver reads it (DPTP §3.11)."""
+        return {
+            "command": "FILE_CHUNK",
+            "payload": {
+                "transfer_id": transfer.transfer_id,
+                "chunk_index": chunk_index,
+                "total_chunks": transfer.total_chunks,
+                "data": base64.b64encode(chunk_data).decode('utf-8'),
+            },
+        }
+
+    def _has_data_lane(self) -> bool:
+        """Whether the p2p manager is the real one, with `send_data_window`."""
+        return getattr(type(self.p2p_manager), "send_data_window", None) is not None
+
+    async def _send_data_window(self, node_id: str, frames: List[Dict[str, Any]],
+                                still_sending: Callable[[], bool]) -> DataWindowResult:
+        """Hand a window of chunk frames to the peer's data lane (send_lanes.py)."""
+        if self._has_data_lane():
+            return await self.p2p_manager.send_data_window(node_id, frames, still_sending=still_sending)
+        started = time.perf_counter()
+        sent = 0
+        for frame in frames:
+            if sent and not still_sending():
+                break
+            await self.p2p_manager.send_message_to_peer(node_id, frame)
+            sent += 1
+        return DataWindowResult(sent, time.perf_counter() - started, 0.0)
+
+    def _note_window(self, node_id: str, tier: Optional[str], transfer: FileTransfer,
+                     window: ChunkWindow, elapsed_s: float) -> None:
+        """Remember the rate this upload measured, and say in one line how it went."""
+        rate = window.rate.bytes_per_second() if window.rate.measured else None
+        self.link_rates.remember(node_id, tier, rate)
+        peer = (getattr(self.p2p_manager, "peers", None) or {}).get(node_id)
+        rtt = getattr(peer, "link_rtt_s", None)
+        moved = transfer.speed.done if transfer.speed else 0
+        logger.info(
+            "Upload %s to %s: %d bytes in %.1fs (%.2f MB/s), chunk %d, window up to %d chunks, "
+            "link rate %s, %d timeouts, %d errors, last link RTT %s (%s)",
+            transfer.filename, node_id[:20], moved, elapsed_s,
+            moved / elapsed_s / 1e6 if elapsed_s > 0 else 0.0,
+            transfer.chunk_size, window.peak_chunks,
+            f"{rate / 1e6:.2f} MB/s" if rate else "not measured",
+            window.timeouts, window.errors,
+            f"{rtt:.3f}s" if isinstance(rtt, (int, float)) else "unknown",
+            tier or "unknown tier",
+        )
 
     # --- what stays on disk ------------------------------------------------
 
@@ -2167,31 +2304,32 @@ class FileTransferManager:
             return
 
         logger.info(f"Resending chunk {chunk_index} for transfer {transfer_id}")
+        # A chunk asked again is a loss: the window halves (chunk_window.py).
+        if transfer.window is not None:
+            transfer.window.on_error()
+        # One re-asked chunk at a time per transfer: a receiver re-asks up to
+        # RECEIVE_REASK_BATCH at once, and each handler used to read and
+        # encode its chunk before waiting to send it - 64 chunks of 4 MiB in
+        # memory together.
+        if transfer.resend_lock is None:
+            transfer.resend_lock = asyncio.Lock()
 
         try:
-            # Read and send the specific chunk
-            with self.using_file(transfer.file_path), open(transfer.file_path, 'rb') as f:
-                f.seek(chunk_index * transfer.chunk_size)
-                chunk = f.read(transfer.chunk_size)
+            async with transfer.resend_lock:
+                # Read and send the specific chunk
+                with self.using_file(transfer.file_path), open(transfer.file_path, 'rb') as f:
+                    f.seek(chunk_index * transfer.chunk_size)
+                    chunk = f.read(transfer.chunk_size)
 
-                if not chunk:
-                    logger.error(f"Failed to read chunk {chunk_index} from {transfer.file_path}")
-                    return
+                    if not chunk:
+                        logger.error(f"Failed to read chunk {chunk_index} from {transfer.file_path}")
+                        return
 
-                chunk_base64 = base64.b64encode(chunk).decode('utf-8')
+                    # On the data lane, behind chat, like the stream itself
+                    await self._send_data_window(
+                        node_id, [self._chunk_frame(transfer, chunk_index, chunk)], lambda: True)
 
-                # Send FILE_CHUNK
-                await self.p2p_manager.send_message_to_peer(node_id, {
-                    "command": "FILE_CHUNK",
-                    "payload": {
-                        "transfer_id": transfer_id,
-                        "chunk_index": chunk_index,
-                        "total_chunks": transfer.total_chunks,
-                        "data": chunk_base64
-                    }
-                })
-
-                logger.debug(f"Resent chunk {chunk_index}/{transfer.total_chunks} for {transfer.filename}")
+                    logger.debug(f"Resent chunk {chunk_index}/{transfer.total_chunks} for {transfer.filename}")
 
         except Exception as e:
             logger.error(f"Error resending chunk {chunk_index}: {e}", exc_info=True)

@@ -2,6 +2,7 @@
 # P2PManager with WebRTC support
 
 import asyncio
+import inspect
 import ssl
 import json
 import logging
@@ -16,7 +17,7 @@ import websockets
 
 from dpc_protocol.crypto import DPC_HOME_DIR, generate_node_id, load_identity, generate_identity
 from dpc_protocol.protocol import (
-    MAX_HELLO_FRAME_BYTES, read_message, write_message, create_hello_message,
+    MAX_HELLO_FRAME_BYTES, encode_message, read_message, write_message, create_hello_message,
 )
 from dpc_protocol.commit_integrity import CommitSigner
 from dpc_protocol.message_signing import HELLO_PREIMAGE_VERSION, hello_content_hash
@@ -32,6 +33,7 @@ from .peer_cache import (
     checked_local_addresses, local_addresses_to_advertise,
 )
 from .own_addresses import OwnAddresses, lan_addresses
+from .send_lanes import DataWindowResult, LoopLagProbe, lanes_of
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,27 @@ def peer_proof(peers: Any, peer_id: str) -> tuple[Optional[bool], Optional[str]]
 _FRAME_SLICE_BYTES = 64 * 1024
 
 
+def set_tcp_nodelay(writer: Any) -> bool:
+    """Turn Nagle off on a direct connection's socket; True when it is off.
+
+    asyncio does it only for a socket whose `proto` is IPPROTO_TCP, and on
+    Windows an accepted socket reports proto 0, so every inbound direct TLS
+    link kept Nagle on: a small frame (a chat line, a FILE_ACCEPT) behind a
+    large one could wait for the peer's delayed ACK. Checked on Windows 11,
+    Python 3.12, 2026-11-19: dialled socket proto 6 with TCP_NODELAY 1,
+    accepted socket proto 0 with TCP_NODELAY 0. TCP_NODELAY is the same
+    option on Windows, Linux and macOS; a socket that refuses it keeps Nagle.
+    """
+    try:
+        sock = writer.get_extra_info("socket")
+        if sock is None or sock.family not in (_socket_module.AF_INET, _socket_module.AF_INET6):
+            return False
+        sock.setsockopt(_socket_module.IPPROTO_TCP, _socket_module.TCP_NODELAY, 1)
+        return bool(sock.getsockopt(_socket_module.IPPROTO_TCP, _socket_module.TCP_NODELAY))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
 class PeerConnection:
     """A unified wrapper for a direct TLS P2P connection."""
     def __init__(self, node_id: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -91,10 +114,30 @@ class PeerConnection:
         # time.monotonic() of the last bytes read from the peer: the clock
         # `_watch_peer_silence` holds against link_silence_timeout.
         self.last_received = time.monotonic()
+        # The last LINK_PING round trip, seconds; None until one came back.
+        # Kept apart from any throughput figure (managers/chunk_window.py).
+        self.link_rtt_s: Optional[float] = None
+        set_tcp_nodelay(writer)
 
     async def send(self, message: Dict[str, Any]):
         """Sends a message over the TLS stream."""
         await write_message(self.writer, message)
+
+    def write_nowait(self, message: Dict[str, Any]) -> int:
+        """Hand one frame to the transport without draining; its length in bytes.
+
+        The data lane writes a window of frames this way and drains once
+        (`P2PManager.send_data_window`).
+        """
+        if self.writer.is_closing():
+            raise ConnectionError(f"Connection to {self.node_id} is closing")
+        frame = encode_message(message)
+        self.writer.write(frame)
+        return len(frame)
+
+    async def drain(self) -> None:
+        """Wait until the transport has taken what was written."""
+        await self.writer.drain()
 
     async def read(self) -> Dict[str, Any] | None:
         """Reads a message from the TLS stream, stamping `last_received` per slice of it."""
@@ -1548,7 +1591,10 @@ class P2PManager:
                     payload = message.get("payload")
                     sent_at = payload.get("sent_at") if isinstance(payload, dict) else None
                     if isinstance(sent_at, (int, float)):
-                        logger.debug("LINK_PONG from %s after %.3fs", peer.node_id, time.monotonic() - sent_at)
+                        rtt = time.monotonic() - sent_at
+                        if 0 <= rtt < 3600:
+                            peer.link_rtt_s = rtt
+                        logger.debug("LINK_PONG from %s after %.3fs", peer.node_id, rtt)
                     continue
 
                 if self.on_message_received:
@@ -2026,12 +2072,51 @@ class P2PManager:
     # --- Unified Connection Management ---
 
     async def send_message_to_peer(self, node_id: str, message: Dict[str, Any]):
-        """Sends a message to a specific connected peer (works for both TLS and WebRTC)."""
+        """Sends a message to a specific connected peer (works for both TLS and WebRTC).
+
+        The priority lane (send_lanes.py): written at once, and a window of
+        file data waits for it to be on its way before it starts.
+        """
         if node_id not in self.peers:
             raise ConnectionError(f"Not connected to peer {node_id}.")
-        
+
         peer = self.peers[node_id]
-        await peer.send(message)
+        with lanes_of(peer).priority_frame():
+            await peer.send(message)
+
+    async def send_data_window(self, node_id: str, messages, still_sending=None) -> DataWindowResult:
+        """Send a window of file frames on the data lane (send_lanes.py) and drain once.
+
+        A connection with `write_nowait` and `drain` (direct TLS, WebRTC) gets
+        every frame handed over and one drain; any other is sent frame by
+        frame, yielding to the priority lane between frames and stopping early
+        when `still_sending()` says the transfer is over. The result is what
+        `ChunkWindow` needs: frames sent, wall time, and the event loop's lag.
+        """
+        peer = self.peers.get(node_id)
+        if peer is None:
+            raise ConnectionError(f"Not connected to peer {node_id}.")
+        lanes = lanes_of(peer)
+        write_nowait = getattr(peer, "write_nowait", None)
+        drain = getattr(peer, "drain", None)
+        async with lanes.data_turn():
+            started = time.perf_counter()
+            sent = 0
+            if callable(write_nowait) and inspect.iscoroutinefunction(drain):
+                for message in messages:
+                    write_nowait(message)
+                    sent += 1
+                probe = LoopLagProbe()
+                await drain()
+            else:
+                probe = LoopLagProbe()
+                for message in messages:
+                    if sent and still_sending is not None and not still_sending():
+                        break
+                    await lanes.wait_priority_idle()
+                    await peer.send(message)
+                    sent += 1
+            return DataWindowResult(sent, time.perf_counter() - started, probe.lag_s())
 
     async def _get_primary_local_ip(self) -> str:
         """

@@ -865,8 +865,8 @@ An empty default means the key is written blank and the feature stays off until 
 
 | Key | Default | Notes |
 |---|---|---|
-| `chunk_size` | `65536` | Chunk size in bytes (64KB) |
-| `chunk_delay` | `0.001` | Pause between sent chunks in seconds (1 ms) |
+| `chunk_size` | `auto` | auto = per file, by size, tier and measured rate (64 KiB / 1 MiB / 4 MiB); a size (65537, 64KiB, 1MiB) fixes every file's; the legacy 65536 reads as auto |
+| `chunk_delay` | `0` | Pause after each window of chunks in seconds; 0 = none |
 | `background_threshold_mb` | `50` | Background transfer threshold in MB |
 | `direct_tls_only_threshold_mb` | `100` | Direct TLS preference threshold in MB |
 | `max_concurrent_transfers` | `3` | Max concurrent file transfers |

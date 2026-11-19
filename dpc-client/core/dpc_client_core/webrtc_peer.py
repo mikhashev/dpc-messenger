@@ -19,6 +19,11 @@ from .settings import Settings
 
 logger = logging.getLogger(__name__)
 
+# The data lane's drain on WebRTC (send_lanes.py): it waits until at most this
+# much is still queued in aiortc, which has no flow control of its own.
+WEBRTC_DRAIN_LOW_BYTES = 64 * 1024
+WEBRTC_DRAIN_RECHECK_S = 0.5
+
 
 class WebRTCPeerConnection:
     """
@@ -364,6 +369,47 @@ class WebRTCPeerConnection:
         
         json_str = json.dumps(message)
         self.data_channel.send(json_str)
+
+    def write_nowait(self, message: Dict[str, Any]) -> int:
+        """Queue one message on the channel without waiting; its length.
+
+        The data lane writes a window this way and then waits in `drain`
+        (`P2PManager.send_data_window`). `send` never looked at the buffer:
+        aiortc queues whatever it is given.
+        """
+        if not self.data_channel or self.data_channel.readyState != "open":
+            raise ConnectionError(f"Data channel not ready for {self.node_id}")
+        json_str = json.dumps(message)
+        self.data_channel.send(json_str)
+        return len(json_str)
+
+    async def drain(self) -> None:
+        """Wait until the channel's `bufferedAmount` is at most WEBRTC_DRAIN_LOW_BYTES.
+
+        Woken by aiortc's `bufferedamountlow` event, and re-checked every
+        WEBRTC_DRAIN_RECHECK_S in case it never comes (a channel that closed).
+        """
+        while True:
+            channel = self.data_channel
+            if not channel or channel.readyState != "open":
+                raise ConnectionError(f"Data channel to {self.node_id} closed while draining")
+            if channel.bufferedAmount <= WEBRTC_DRAIN_LOW_BYTES:
+                return
+            low = asyncio.Event()
+            channel.bufferedAmountLowThreshold = WEBRTC_DRAIN_LOW_BYTES
+            listening = hasattr(channel, "on") and hasattr(channel, "remove_listener")
+            if listening:
+                channel.on("bufferedamountlow", low.set)
+            try:
+                await asyncio.wait_for(low.wait(), WEBRTC_DRAIN_RECHECK_S)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                if listening:
+                    try:
+                        channel.remove_listener("bufferedamountlow", low.set)
+                    except Exception:  # noqa: BLE001 - pyee raises when it already fired and was dropped
+                        pass
     
     def _diagnose_connection_failure(self) -> str:
         """

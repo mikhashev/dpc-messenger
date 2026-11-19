@@ -8124,6 +8124,11 @@ class CoreService:
             offline_members = []
             not_offered = NotOfferedReport(self.file_transfer_manager.peer_label)
             fingerprint = None  # (file hash, chunk hashes), computed for the first member only
+            # One chunk size for the whole fan-out, decided before the one hash
+            # (ADR-047 phase 0): the smallest any connected member would get.
+            fan_out_chunk = self.file_transfer_manager.chunk_size_for(size_bytes, [
+                m for m in group.members if m != self.p2p_manager.node_id and m in connected_peers
+            ])
 
             for node_id in group.members:
                 if node_id == self.p2p_manager.node_id:
@@ -8135,13 +8140,15 @@ class CoreService:
 
                 try:
                     if fingerprint is None:
-                        fingerprint = await self.file_transfer_manager.compute_file_fingerprint(local_path)
+                        fingerprint = await self.file_transfer_manager.compute_file_fingerprint(
+                            local_path, chunk_size=fan_out_chunk)
                     tid = await self.file_transfer_manager.send_file(
                         node_id=node_id,
                         file_path=local_path,
                         group_id=group_id,
                         file_hash=fingerprint[0],
                         chunk_hashes=fingerprint[1],
+                        chunk_size=fan_out_chunk,
                         message_id=message_id,
                         text=caption,
                     )
@@ -8396,7 +8403,13 @@ class CoreService:
 
                     try:
                         if fingerprint is None:
-                            fingerprint = await self.file_transfer_manager.compute_file_fingerprint(file_path)
+                            # One chunk size for the fan-out, before its one hash
+                            fan_out_chunk = self.file_transfer_manager.chunk_size_for(
+                                file_path.stat().st_size,
+                                [m for m in group.members
+                                 if m != self.p2p_manager.node_id and m in connected_peers])
+                            fingerprint = await self.file_transfer_manager.compute_file_fingerprint(
+                                file_path, chunk_size=fan_out_chunk)
                         tid = await self.file_transfer_manager.send_file(
                             node_id=node_id,
                             file_path=file_path,
@@ -8404,6 +8417,7 @@ class CoreService:
                             group_id=group_id,
                             file_hash=fingerprint[0],
                             chunk_hashes=fingerprint[1],
+                            chunk_size=fan_out_chunk,
                             message_id=image_msg_id,
                         )
                         transfer_ids.append(tid)

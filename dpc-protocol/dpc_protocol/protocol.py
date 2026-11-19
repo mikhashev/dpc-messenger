@@ -712,23 +712,29 @@ async def read_message(
             logger.warning("Protocol error: invalid message format (%s)", e)
         return None
 
+def encode_message(data: dict, *, max_frame_bytes: int = MAX_FRAME_BYTES) -> bytes:
+    """One DPTP frame: the 10-digit length header and the JSON payload.
+
+    `write_message` frames with it; so does a writer that hands several frames
+    to the transport before one drain (the data lane of a peer connection).
+    """
+    payload = json.dumps(data).encode()
+    payload_length = len(payload)
+
+    # Loud here, at the origin, rather than a silent close at the far end.
+    if payload_length > max_frame_bytes:
+        raise ValueError(
+            f"Message of {payload_length} bytes exceeds the {max_frame_bytes}-byte frame cap"
+        )
+
+    return f"{payload_length:010d}".encode() + payload
+
+
 async def write_message(
     writer: asyncio.StreamWriter, data: dict, *, max_frame_bytes: int = MAX_FRAME_BYTES
 ):
     try:
-        payload = json.dumps(data).encode()
-        payload_length = len(payload)
-
-        # Loud here, at the origin, rather than a silent close at the far end.
-        if payload_length > max_frame_bytes:
-            raise ValueError(
-                f"Message of {payload_length} bytes exceeds the {max_frame_bytes}-byte frame cap"
-            )
-
-        header = f"{payload_length:010d}".encode()
-        
-        writer.write(header)
-        writer.write(payload)
+        writer.write(encode_message(data, max_frame_bytes=max_frame_bytes))
         await writer.drain()
     except (ConnectionResetError, BrokenPipeError) as e:
         logger.warning("Could not write message, connection closed: %s", e)

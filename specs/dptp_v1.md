@@ -1387,7 +1387,14 @@ Offers a file to the peer for transfer.
 - `size_bytes` (integer, required): Total file size in bytes
 - `hash` (string, required): SHA256 hash for integrity verification (format: `sha256:hex_string`)
 - `mime_type` (string, required): MIME type of the file
-- `chunk_size` (integer, required): Bytes per chunk (typically 65536 = 64KB)
+- `chunk_size` (integer, required): Bytes per chunk, chosen by the sender for this file
+  before it computes `chunk_hashes`. Since 2026-11-19 (ADR-047 phase 0) a sender picks it
+  per file: by size (64 KiB up to 100 MiB, 1 MiB up to 1 GiB, 4 MiB above), capped by the
+  connection tier (1 MiB on WebRTC, 64 KiB on a relay, gossip or UDP) and by the rate it last
+  measured to this peer (one chunk crosses in about 0.2 s; 1 MiB while no rate is known), or
+  takes the owner's fixed `[file_transfer] chunk_size`. A receiver must use this value and
+  nothing else; every receiver since `cda6364f` does. No wire change: any positive size is
+  valid, and a frame stays under the §2 cap (a 16 MiB chunk is about 21.3 MiB framed)
 - `chunk_hashes` (array of strings, optional): CRC32 hashes per chunk (v0.11.1+, 8-char hex strings)
 - `image_metadata` (object, optional): Metadata for image transfers (v0.12.0)
   - `dimensions` (object, required): Image dimensions
@@ -1530,7 +1537,7 @@ Transfers a single chunk of file data.
 - `transfer_id` (string, required): Transfer identifier
 - `chunk_index` (integer, required): Zero-based chunk index
 - `total_chunks` (integer, required): Total number of chunks in transfer
-- `data` (string, required): Base64-encoded chunk data (typically 64KB when decoded)
+- `data` (string, required): Base64-encoded chunk data, `chunk_size` bytes when decoded (the last chunk may be shorter)
 
 **Behavior:**
 - Receiver writes each verified chunk at `chunk_index × chunk_size` (the FILE_OFFER's
@@ -1539,6 +1546,10 @@ Transfers a single chunk of file data.
 - **Retry on failure (v0.11.1+):** If chunk verification fails, sends FILE_CHUNK_RETRY (max 3 retries per chunk)
 - Progress tracking: `(chunk_index + 1) / total_chunks * 100%`
 - Receiver sends FILE_COMPLETE after receiving all chunks
+- **Sending (2026-11-19, ADR-047 phases 0 and 2):** the sender writes a window of chunks and
+  drains the connection once per window, behind every other message on that connection (a
+  chat line is never queued behind more file data than the link moves in about 0.1 s). This is
+  sender behaviour only; the frames are unchanged
 
 ---
 
@@ -1804,7 +1815,7 @@ Client configuration (`~/.dpc/config.ini`):
 ```ini
 [file_transfer]
 enabled = true
-chunk_size = 65536
+chunk_size = auto        # or a fixed size: 65537, 64KiB, 1MiB; the legacy 65536 reads as auto
 background_threshold_mb = 50
 max_concurrent_transfers = 3
 verify_hash = true
