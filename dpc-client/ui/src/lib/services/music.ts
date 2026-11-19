@@ -49,6 +49,7 @@ import {
     VOLUME_SAVE_MS,
     callMusic,
     lrclibLookupPayload,
+    transcribeLyricsPayload,
     type LibraryEntry,
     type LyricsAnswer,
     type MusicAnswer,
@@ -596,6 +597,18 @@ export function lookupLyricsOnLrclib(
     opts: { replace?: boolean; overwriteManual?: boolean } = {},
 ): Promise<MusicAnswer<LyricsAnswer>> {
     return callMusic<LyricsAnswer>(sendCommand, 'lookup_music_lyrics_lrclib', lrclibLookupPayload(trackId, query, opts));
+}
+
+/** "Transcribe" (the lyrics chain's explicit step 4): the core runs DPC's transcription
+ *  on the track's file and stores the lines as `source: transcribe`. Over the person's
+ *  own lyrics the core also needs `overwriteManual`, which the Lyrics area passes only
+ *  after the person confirms. A long run can outlast this call's timeout; the core goes
+ *  on, and the Lyrics area follows it through get_music_lyrics (`runTranscribe`). */
+export function transcribeMusicLyrics(
+    trackId: string,
+    opts: { overwriteManual?: boolean } = {},
+): Promise<MusicAnswer<LyricsAnswer>> {
+    return callMusic<LyricsAnswer>(sendCommand, 'transcribe_music_lyrics', transcribeLyricsPayload(trackId, opts));
 }
 
 export function clearNotice(): void {

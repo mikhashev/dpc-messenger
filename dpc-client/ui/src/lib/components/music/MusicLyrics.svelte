@@ -1,10 +1,11 @@
 <!-- MusicLyrics.svelte — the Lyrics area of the Music Player's Listen view (ADR-051 D6). -->
 <!--
   Compact: the previous, current and next line of synced lyrics, the current one
-  highlighted, and a source badge (lrc / tags / lrclib / manual, plus "unsynced" and
-  "edited"). "Show all" opens the full lyrics: every line, click a synced line to seek,
-  the steps the chain tried, "Find on LRCLIB" with its egress note, and "Edit" (an LRC
-  textarea with "Stamp current time", Alt+L inside it, and Save).
+  highlighted, and a source badge (lrc / tags / lrclib / transcribed / manual, plus
+  "unsynced" and "edited"). "Show all" opens the full lyrics: every line, click a synced
+  line to seek, the steps the chain tried, "Find on LRCLIB" with its egress note,
+  "Transcribe", and "Edit" (an LRC textarea with "Stamp current time", Alt+L inside it,
+  and Save).
 
   The lyrics come from the core (dpc_client_core/music/lyrics.py) through
   getMusicLyrics / lookupLyricsOnLrclib / saveMusicLyrics. Opening a track runs only
@@ -14,16 +15,24 @@
   choice: an LRCLIB result over existing lyrics is offered with "Use LRCLIB lyrics
   (replaces current)", and over the person's own (manual or edited) lyrics that button
   asks first (confirmAsync) before it sends overwrite_manual.
+
+  "Transcribe" is the chain's explicit step 4: the core runs DPC's speech-to-text on the
+  track's file (transcribeMusicLyrics) and stores the lines with source "transcribe",
+  shown as "transcribed". Opening a track never runs it. Over the person's own lyrics it
+  asks first (confirmAsync) before it sends overwrite_manual. A run can outlast the
+  command's timeout; the panel then follows it through getMusicLyrics (runTranscribe).
 -->
 
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { getMusicLyrics, saveMusicLyrics } from '$lib/coreService';
-  import { lookupLyricsOnLrclib, seekTo } from '$lib/services/music';
+  import { lookupLyricsOnLrclib, seekTo, transcribeMusicLyrics } from '$lib/services/music';
   import { confirmAsync } from '$lib/utils/dialog';
   import {
     LRCLIB_EGRESS_TEXT,
     LYRICS_OVERWRITE_CONFIRM_TEXT,
+    TRANSCRIBE_NOTE_TEXT,
+    TRANSCRIBE_OVERWRITE_CONFIRM_TEXT,
     countUnstampedLines,
     formatLrc,
     formatTime,
@@ -33,12 +42,16 @@
     lyricsIsOwnEdit,
     lyricsSynced,
     lyricsWindow,
+    runTranscribe,
     stampLrcLine,
+    transcriptionText,
     type LibraryEntry,
     type LrclibOutcome,
     type Lyrics,
     type LyricsAnswer,
     type LyricsChainStep,
+    type TranscribeRun,
+    type TranscriptionInfo,
   } from '$lib/utils/musicPlayer';
 
   let {
@@ -63,7 +76,9 @@
   let draft = $state('');
   let draftEl = $state<HTMLTextAreaElement | null>(null);
   let editMessage = $state('');
-  let busy = $state<'' | 'lookup' | 'save' | 'refresh'>('');
+  let busy = $state<'' | 'lookup' | 'save' | 'refresh' | 'transcribe'>('');
+  let transcribeRun = $state<TranscribeRun | null>(null);
+  let transcribed = $state<TranscriptionInfo | null>(null);
   let qArtist = $state('');
   let qTitle = $state('');
   let token = 0;
@@ -73,6 +88,7 @@
     if (a.chain && a.chain.length) chain = a.chain;
     if (a.lrclib !== undefined) lrclib = a.lrclib ?? null;
     if (typeof a.lrclib_enabled === 'boolean') lrclibEnabled = a.lrclib_enabled;
+    if (a.transcribe !== undefined) transcribeRun = a.transcribe ?? null;
     candidate = a.candidate && a.candidate.source === 'lrclib' ? a.candidate : null;
     note = a.kept && a.candidate ? `Your edited lyrics are kept; the chain also found lyrics (${a.candidate.source}). Edit to change them.` : '';
     if (a.lrclib?.query) {
@@ -108,6 +124,8 @@
       chain = [];
       lrclib = null;
       candidate = null;
+      transcribeRun = null;
+      transcribed = null;
       editing = false;
       editMessage = '';
       message = '';
@@ -239,6 +257,46 @@
     editMessage = '';
   }
 
+  async function transcribe() {
+    const id = trackId;
+    if (!id || busy) return;
+    // The person's own lyrics are replaced only after they say so; the core refuses
+    // over them without overwrite_manual.
+    let overwriteManual = false;
+    if (lyricsIsOwnEdit(lyrics)) {
+      busy = 'transcribe';
+      const yes = await confirmAsync(TRANSCRIBE_OVERWRITE_CONFIRM_TEXT, { title: 'Replace lyrics', kind: 'warning' });
+      busy = '';
+      if (!yes || trackId !== id) return;
+      overwriteManual = true;
+    }
+    busy = 'transcribe';
+    message = '';
+    note = '';
+    transcribed = null;
+    const r = await runTranscribe(
+      () => transcribeMusicLyrics(id, { overwriteManual }),
+      () => getMusicLyrics(id),
+      { cancelled: () => trackId !== id },
+    );
+    busy = '';
+    if (!r || trackId !== id) return;
+    if (!r.ok) {
+      message = r.unavailable
+        ? 'Transcribe is not available on this backend yet.'
+        : r.code === 'overwrite_manual_required'
+          ? 'Your own lyrics were kept: replacing them needs your confirmation.'
+          : `Transcribe: ${r.message}`;
+      return;
+    }
+    lyrics = r.lyrics;
+    candidate = null;
+    transcribed = r.info;
+    transcribeRun = null;
+    if (r.kept) note = `Your own lyrics are kept: ${r.kept}. Transcribe again to replace them.`;
+    status = 'ready';
+  }
+
   function stepText(s: LyricsChainStep): string {
     const names: Record<string, string> = { lrc: '.lrc sidecar', tags: 'File tags', lrclib: 'LRCLIB', transcribe: 'Transcribe', manual: 'Manual edit' };
     const state = s.state.replace(/_/g, ' ');
@@ -250,7 +308,7 @@
       ? lrclibOutcomeText(lrclib)
       : !lrclibEnabled
         ? 'No lyrics in a sidecar or the file tags. Online lookup is off.'
-        : 'No lyrics found. Find them on LRCLIB or write them in Edit.',
+        : 'No lyrics found. Find them on LRCLIB, transcribe the track, or write them in Edit.',
   );
 </script>
 
@@ -291,6 +349,10 @@
 
   {#if entry && message && status !== 'error'}<p class="error small" role="alert">{message}</p>{/if}
   {#if entry && note}<p class="muted tiny" role="status">{note}</p>{/if}
+  {#if entry && transcribed}<p class="muted tiny" role="status">{transcriptionText(transcribed)}</p>{/if}
+  {#if entry && busy !== 'transcribe' && transcribeRun?.state === 'running'}
+    <p class="muted tiny" role="status">This track is being transcribed; Look again when it ends.</p>
+  {/if}
 
   {#if entry && candidate}
     <div class="candidate" role="status">
@@ -356,8 +418,18 @@
         disabled={!!busy || !lrclibEnabled}
         title={lrclibEnabled ? LRCLIB_EGRESS_TEXT : 'Online lookup is off ([music] lrclib_enabled)'}
       >{busy === 'lookup' ? 'Searching…' : 'Find on LRCLIB'}</button>
+      <button
+        type="button"
+        class="small-btn"
+        onclick={transcribe}
+        disabled={!!busy}
+        aria-busy={busy === 'transcribe'}
+        title={TRANSCRIBE_NOTE_TEXT}
+      >{busy === 'transcribe' ? 'Transcribing…' : 'Transcribe'}</button>
     </div>
+    {#if busy === 'transcribe'}<p class="muted tiny" role="status">Transcribing this track; a song can take a minute or more (longer the first time, while the model loads).</p>{/if}
     <p class="muted tiny egress">{lrclibEnabled ? `${LRCLIB_EGRESS_TEXT}, an external service, only when you click Find on LRCLIB (no audio, no file path).` : 'Online lookup is off ([music] lrclib_enabled = false): nothing is sent to lrclib.net.'}</p>
+    <p class="muted tiny">Transcribe: {TRANSCRIBE_NOTE_TEXT}</p>
     {#if lrclib && expanded}<p class="muted tiny" role="status">{lrclibOutcomeText(lrclib)}</p>{/if}
   {/if}
 

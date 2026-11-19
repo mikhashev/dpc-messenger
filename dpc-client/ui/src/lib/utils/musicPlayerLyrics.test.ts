@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
     LRCLIB_EGRESS_TEXT,
     LYRICS_OVERWRITE_CONFIRM_TEXT,
+    TRANSCRIBE_NOTE_TEXT,
+    TRANSCRIBE_OVERWRITE_CONFIRM_TEXT,
     countUnstampedLines,
     currentLyricIndex,
     formatLrc,
@@ -13,10 +15,16 @@ import {
     lyricsIsOwnEdit,
     lyricsSynced,
     lyricsWindow,
+    isCommandTimeout,
+    runTranscribe,
     stampLrcLine,
+    transcribeLyricsPayload,
+    transcriptionText,
     type LibraryEntry,
     type Lyrics,
+    type LyricsAnswer,
     type LyricsLine,
+    type MusicAnswer,
 } from './musicPlayer';
 import lyricsPanel from '../components/music/MusicLyrics.svelte?raw';
 import player from '../components/music/MusicPlayer.svelte?raw';
@@ -225,5 +233,112 @@ describe('replacing the lyrics the person wrote or edited', () => {
         expect(guard).toBeGreaterThan(ask);
         expect(send).toBeGreaterThan(guard);
         expect(fn).toContain("a.code === 'overwrite_manual_required'");
+    });
+});
+
+describe('Transcribe (the explicit step 4 of the chain)', () => {
+    const transcribed: Lyrics = { track_hash: 'h', source: 'transcribe', lines: [{ t_start: 12.5, t_end: 15, text: 'First line' }] };
+    const info = { provider: 'local_whisper', model: 'openai/whisper-large-v3-turbo', language: 'en', duration_s: 215, segments: 3, synced: true };
+    const timeout: MusicAnswer<LyricsAnswer> = { ok: false, unavailable: false, code: 'failed', message: "Command 'transcribe_music_lyrics' timed out after 60 seconds" };
+    const polled = (transcribe: any, lyrics: Lyrics | null = null): MusicAnswer<LyricsAnswer> => ({ ok: true, data: { lyrics, transcribe } });
+    const noSleep = async () => {};
+
+    it('the badge reads "transcribed", with unsynced when the lines have no times', () => {
+        expect(lyricsBadge(transcribed)).toBe('transcribed');
+        expect(lyricsBadge({ ...transcribed, synced: false, lines: [{ t_start: null, text: 'a' }] })).toBe('transcribed · unsynced');
+    });
+
+    it('overwrite_manual is sent only when the person confirmed', () => {
+        expect(transcribeLyricsPayload('trk_1')).toEqual({ track_id: 'trk_1' });
+        expect(transcribeLyricsPayload('trk_1', { overwriteManual: false })).toEqual({ track_id: 'trk_1' });
+        expect(transcribeLyricsPayload('trk_1', { overwriteManual: true })).toEqual({ track_id: 'trk_1', overwrite_manual: true });
+    });
+
+    it('names the provider and model and claims no alignment quality', () => {
+        const timed = transcriptionText(info);
+        expect(timed).toContain('local_whisper (openai/whisper-large-v3-turbo)');
+        expect(timed).toContain('3 lines timed from its segments');
+        expect(timed).toContain('may be wrong');
+        const plain = transcriptionText({ ...info, provider: 'openai', model: null, segments: 0, synced: false });
+        expect(plain).toBe('Transcribed by openai: text only, no times (unsynced). Machine transcription: words and times may be wrong.');
+        expect(transcriptionText({ ...info, provider: null, model: null })).toContain('an unnamed provider');
+        expect(transcriptionText(null)).toBe('');
+        for (const text of [timed, plain, TRANSCRIBE_NOTE_TEXT]) expect(text).not.toMatch(/accurate|aligned|precise|perfect/i);
+        expect(TRANSCRIBE_NOTE_TEXT).toContain('misheard');
+    });
+
+    it('a direct answer is taken as it is', async () => {
+        const r = await runTranscribe(async () => ({ ok: true, data: { lyrics: transcribed, applied: true, candidate: null, transcription: info } }),
+            async () => { throw new Error('no poll on a direct answer'); });
+        expect(r).toEqual({ ok: true, lyrics: transcribed, candidate: null, applied: true, info, kept: undefined });
+    });
+
+    it('a refusal or an error is surfaced without polling', async () => {
+        let polls = 0;
+        const poll = async () => { polls++; return polled(null); };
+        const refused = await runTranscribe(async () => ({ ok: false, unavailable: false, code: 'overwrite_manual_required', message: 'needs confirmation' }), poll);
+        expect(refused).toMatchObject({ ok: false, code: 'overwrite_manual_required' });
+        const failed = await runTranscribe(async () => ({ ok: false, unavailable: false, code: 'transcription_failed', message: 'local Whisper (w): CUDA out of memory' }), poll);
+        expect(failed).toMatchObject({ ok: false, code: 'transcription_failed', message: 'local Whisper (w): CUDA out of memory' });
+        expect(polls).toBe(0);
+    });
+
+    it('past the command timeout it follows the run until it is done', async () => {
+        expect(isCommandTimeout(timeout)).toBe(true);
+        expect(isCommandTimeout({ ok: false, unavailable: false, code: 'failed', message: 'boom' })).toBe(false);
+        const answers = [polled({ state: 'running' }), polled({ state: 'running' }),
+                         polled({ state: 'done', applied: true, transcription: info }, transcribed)];
+        const r = await runTranscribe(async () => timeout, async () => answers.shift()!, { sleep: noSleep });
+        expect(answers).toEqual([]);
+        expect(r).toEqual({ ok: true, lyrics: transcribed, candidate: null, applied: true, info, kept: undefined });
+    });
+
+    it('past the command timeout an error of the run is surfaced', async () => {
+        const answers = [polled({ state: 'running' }), polled({ state: 'error', code: 'transcription_failed', message: 'GPU VRAM' })];
+        const r = await runTranscribe(async () => timeout, async () => answers.shift()!, { sleep: noSleep });
+        expect(r).toEqual({ ok: false, unavailable: false, code: 'transcription_failed', message: 'GPU VRAM' });
+    });
+
+    it('stops following when another track is opened, a run is lost, or it waits too long', async () => {
+        let open = true;
+        const cancelled = await runTranscribe(async () => timeout, async () => { open = false; return polled({ state: 'running' }); },
+            { sleep: noSleep, cancelled: () => !open });
+        expect(cancelled).toBeNull();
+        const lost = await runTranscribe(async () => timeout, async () => polled(null), { sleep: noSleep });
+        expect(lost).toMatchObject({ ok: false, code: 'lost' });
+        let t = 0;
+        const long = await runTranscribe(async () => timeout, async () => polled({ state: 'running' }),
+            { sleep: async (ms) => { t += ms; }, now: () => t, intervalMs: 1000, maxWaitMs: 5000 });
+        expect(long).toMatchObject({ ok: false, code: 'still_running' });
+    });
+
+    it('the panel asks with the confirm dialog before it sends overwrite_manual', () => {
+        expect(TRANSCRIBE_OVERWRITE_CONFIRM_TEXT).toContain('Replace your own lyrics');
+        const fn = lyricsPanel.slice(lyricsPanel.indexOf('async function transcribe('), lyricsPanel.indexOf('function stepText('));
+        const guard = fn.indexOf('if (lyricsIsOwnEdit(lyrics))');
+        const ask = fn.indexOf('confirmAsync(TRANSCRIBE_OVERWRITE_CONFIRM_TEXT');
+        const stop = fn.indexOf('if (!yes || trackId !== id) return;');
+        const yes = fn.indexOf('overwriteManual = true;');
+        const send = fn.indexOf('transcribeMusicLyrics(id, { overwriteManual })');
+        expect(guard).toBeGreaterThan(0);
+        expect(ask).toBeGreaterThan(guard);
+        expect(stop).toBeGreaterThan(ask);
+        expect(yes).toBeGreaterThan(stop);
+        expect(send).toBeGreaterThan(yes);
+        expect(fn).toContain("r.code === 'overwrite_manual_required'");
+        expect(fn).toContain('message = ');
+    });
+
+    it('a button next to Find on LRCLIB runs it, with a busy state; opening a track never does', () => {
+        const start = lyricsPanel.indexOf('<div class="lookup">');
+        const lookup = lyricsPanel.slice(start, lyricsPanel.indexOf('</div>', start));
+        expect(lookup.indexOf('Find on LRCLIB')).toBeGreaterThan(0);
+        expect(lookup.indexOf('onclick={transcribe}')).toBeGreaterThan(lookup.indexOf('Find on LRCLIB'));
+        expect(lookup).toContain("busy === 'transcribe' ? 'Transcribing…' : 'Transcribe'");
+        const effect = lyricsPanel.slice(lyricsPanel.indexOf('// Another track: start over'), lyricsPanel.indexOf('let synced = $derived'));
+        const load = lyricsPanel.slice(lyricsPanel.indexOf('async function load('), lyricsPanel.indexOf('// Another track: start over'));
+        for (const part of [effect, load]) expect(part).not.toMatch(/transcribe\(|transcribeMusicLyrics|transcribe_music_lyrics/);
+        expect([...lyricsPanel.matchAll(/onclick=\{transcribe\}/g)].length).toBe(1);
+        expect(musicService).toContain("'transcribe_music_lyrics'");
     });
 });

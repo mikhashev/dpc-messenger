@@ -23,10 +23,29 @@
    match the track's duration within ±2 s, compared with the unrounded duration (the
    request carries whole seconds); `syncedLyrics` is preferred, `plainLyrics` gives
    unsynced lines, and `instrumental` stops the chain with no lyrics.
-4. `transcribe`: not run here. It is a later explicit action (a `transcribe` job); the
-   chain reports it as `not_run`.
+4. `transcribe`: **never run by the chain.** It is the explicit `transcribe` action (the
+   person's "Transcribe" click): DPC's existing speech-to-text runs on the track's file
+   and its segments become timed lines. The chain reports the step as `not_run` with
+   that hint, `running` while a transcription of the track is under way, or `done` when
+   the stored lyrics came from it.
 5. `manual`: always possible. `save_manual` stores the person's LRC with
    `source: "manual"`.
+
+**Transcribe.** `transcribe` hands the track's file to a `transcriber` (injected by the
+command layer, which picks the provider exactly as DPC's voice transcription does; this
+module never loads a model). Each `{start, end, text}` segment of the result becomes one
+line `[mm:ss.xx] text`; a result with text but no segments (a cloud or peer provider
+answers text only) becomes unsynced lines with `synced: false`. The record is stored
+with `source: "transcribe"`, the word SPEC §4 and `schemas.LYRICS_SOURCES` already have
+for it (the player's badge reads "transcribed"). The answer carries `transcription`:
+the provider and model the result names, the language, the segment count and whether
+the lines are timed. Sung vocals over music are often misheard and segment times are
+Whisper's chunk times, not an alignment to the words: nothing here claims more.
+`mp.lyrics/1` has no key for the provider or model (its keys are closed), so they are
+in the answer and the log, not in the stored record. Over manual or edited lyrics the
+action is refused (`overwrite_manual_required`, before anything runs) unless the caller
+passes `overwrite_manual`; if the person saves their own lyrics while a transcription
+runs, the result comes back as `candidate` and theirs are kept.
 
 **Storage.** Lyrics live at `<DPC home>/music/lyrics/<track_id>.json` as `mp.lyrics/1`,
 written atomically. Nothing is ever written next to the person's audio: the sidecar and
@@ -75,7 +94,7 @@ import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -107,6 +126,14 @@ LRC_TEXT_MAX_CHARS = 512 * 1024
 FOUND_RESULTS = ("synced", "plain")
 NEGATIVE_RESULTS = ("not_found", "instrumental", "mismatch", "empty")
 CACHEABLE_RESULTS = FOUND_RESULTS + NEGATIVE_RESULTS
+
+# The stored source of transcribed lyrics: SPEC §4's word, already in schemas.LYRICS_SOURCES.
+TRANSCRIBE_SOURCE = "transcribe"
+
+# What the transcribe action is handed: the track's file in, a result out shaped like
+# `LocalWhisperProvider.transcribe`'s: `text`, `language`, `duration`, `provider`,
+# optionally `model` and `segments: [{start, end, text}]`. It raises on failure.
+Transcriber = Callable[[Path], Awaitable[Dict[str, Any]]]
 
 # Tag names that hold lyrics, compared case-folded; `lyrics-*` is matched by prefix.
 _LYRICS_TAG_NAMES = ("lyrics", "syncedlyrics", "unsyncedlyrics", "unsynced lyrics")
@@ -266,6 +293,69 @@ def make_lyrics(track_hash: str, source: str, lines: List[dict], *, synced: bool
         record["lrclib"] = dict(lrclib)
     schemas.validate_lyrics(record)
     return record
+
+
+# -- a transcription result → lyrics -------------------------------------------------
+
+def _finite(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    v = float(value)
+    return v if math.isfinite(v) else None
+
+
+def lines_from_segments(segments: Any) -> List[dict]:
+    """Timed `mp.lyrics/1` lines from `[{start, end, text}]` segments: one line per
+    segment with text, whitespace collapsed, sorted by start; `t_end` kept when it is
+    after the start. A segment without a usable start is dropped."""
+    out: List[Tuple[float, Optional[float], str, int]] = []
+    for n, seg in enumerate(segments or []):
+        if not isinstance(seg, dict):
+            continue
+        text = _SPACES.sub(" ", str(seg.get("text") or "")).strip()
+        start = _finite(seg.get("start"))
+        if not text or start is None:
+            continue
+        end = _finite(seg.get("end"))
+        out.append((max(0.0, round(start, 3)), None if end is None else round(end, 3), text, n))
+    out.sort(key=lambda r: (r[0], r[3]))
+    lines: List[dict] = []
+    for start, end, text, _ in out:
+        line: Dict[str, Any] = {"t_start": start, "text": text}
+        if end is not None and end > start:
+            line["t_end"] = end
+        lines.append(line)
+    return lines
+
+
+def transcript_lyrics(track_hash: str, result: Any) -> Tuple[dict, Dict[str, Any]]:
+    """`(record, info)` for a transcription result. Segments give timed lines; text
+    without segments gives unsynced lines (`synced: false`). No words at all raises
+    `MusicLibraryError("no_speech")`. `info` is what the answer reports about the run."""
+    if not isinstance(result, dict):
+        raise MusicLibraryError("transcription_failed", "the transcription gave no result")
+    text = str(result.get("text") or "")
+    lines = lines_from_segments(result.get("segments"))
+    synced = bool(lines)
+    if not synced:
+        lines = plain_lines(text)
+    if not lines:
+        raise MusicLibraryError(
+            "no_speech", "the transcription found no words in this track (it may be instrumental)")
+    language = result.get("language")
+    language = language.strip() if isinstance(language, str) and language.strip() not in ("", "unknown") else None
+    record = make_lyrics(track_hash, TRANSCRIBE_SOURCE, lines, synced=synced, language=language)
+    info: Dict[str, Any] = {
+        "provider": str(result["provider"]) if result.get("provider") else None,
+        "model": str(result["model"]) if result.get("model") else None,
+        "language": language,
+        "duration_s": _finite(result.get("duration")),
+        "segments": len(lines) if synced else 0,
+        "synced": synced,
+    }
+    if result.get("fallback_reason"):
+        info["fallback_reason"] = str(result["fallback_reason"])
+    return record, info
 
 
 # -- reading the person's files (never writing) --------------------------------------
@@ -638,7 +728,8 @@ class MusicLyrics:
                  lrclib_enabled: Callable[[], bool] = lambda: True,
                  tools: Optional[MediaTools] = None,
                  client: Optional[LrclibClient] = None,
-                 cache: Optional[LrclibCache] = None):
+                 cache: Optional[LrclibCache] = None,
+                 transcriber: Optional[Transcriber] = None):
         self.library = library
         music_root = music_dir_of(dpc_home_dir)
         self.root = music_root / LYRICS_DIR
@@ -646,6 +737,11 @@ class MusicLyrics:
         self.client = client or LrclibClient()
         self._lrclib_enabled = lrclib_enabled
         self._tools = tools
+        self.transcriber = transcriber
+        # The last transcribe run per track in this process: {"state": "running" | "done"
+        # | "error", ...}. `get` reports it, so a player that stopped waiting (its command
+        # timed out) or was reopened sees the run and its error.
+        self._transcribe_runs: Dict[str, Dict[str, Any]] = {}
         # One lock per track while someone holds or waits on it: a holder and every
         # waiter keep a strong reference, so an entry vanishes only when nobody needs it.
         self._locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
@@ -788,12 +884,13 @@ class MusicLyrics:
             entry = self.library.get_entry(track_id)
             stored = await asyncio.to_thread(self._read_stored, lyrics_file)
             enabled = self.lrclib_enabled()
+            run = self.transcribe_run(track_id)
             if stored is not None and not refresh:
                 return {"lyrics": stored, "from_store": True, "chain": [], "lrclib": None,
-                        "lrclib_enabled": enabled}
-            found, chain, lrclib = await self._run_chain(entry, enabled)
+                        "lrclib_enabled": enabled, "transcribe": run}
+            found, chain, lrclib = await self._run_chain(entry, enabled, stored=stored, run=run)
             answer: Dict[str, Any] = {"lyrics": stored, "from_store": False, "chain": chain,
-                                      "lrclib": lrclib, "lrclib_enabled": enabled}
+                                      "lrclib": lrclib, "lrclib_enabled": enabled, "transcribe": run}
             if found is None:
                 return answer
             if stored is not None and (stored.get("source") == "manual" or stored.get("edited")):
@@ -804,7 +901,8 @@ class MusicLyrics:
             answer["lyrics"] = found
             return answer
 
-    async def _run_chain(self, entry: dict, lrclib_enabled: bool) -> Tuple[Optional[dict], List[dict], Optional[dict]]:
+    async def _run_chain(self, entry: dict, lrclib_enabled: bool, *, stored: Optional[dict] = None,
+                         run: Optional[Dict[str, Any]] = None) -> Tuple[Optional[dict], List[dict], Optional[dict]]:
         track_hash = entry["source_hash"]
         path = self.library.get_track_path(entry["id"])
         chain: List[dict] = []
@@ -891,13 +989,22 @@ class MusicLyrics:
                         chain.append(_step("lrclib", "none",
                                            f"{result.replace('_', ' ')} (from the local cache)"))
 
-        # (d) transcribe and (e) manual
-        if found is not None:
+        # (d) transcribe: never run here, only reported. The run is the explicit
+        # `transcribe` (the Transcribe click). (e) manual.
+        transcribed = stored is not None and stored.get("source") == TRANSCRIBE_SOURCE
+        if run is not None and run.get("state") == "running":
+            chain.append(_step("transcribe", "running", "a transcription of this track is under way"))
+        elif transcribed and (found is None or stored.get("edited")):
+            chain.append(_step("transcribe", "done", "the stored lyrics were transcribed (machine transcription, may be wrong)"))
+        elif found is not None:
             chain.append(_step("transcribe", "not_needed"))
         elif instrumental:
-            chain.append(_step("transcribe", "not_run", "LRCLIB marks the track instrumental"))
+            chain.append(_step("transcribe", "not_run",
+                               "LRCLIB marks the track instrumental; Transcribe can still be run (an explicit action)"))
         else:
-            chain.append(_step("transcribe", "not_run", "an explicit action, not part of the automatic chain (not built yet)"))
+            chain.append(_step("transcribe", "not_run",
+                               "Transcribe runs DPC's speech-to-text on this track (an explicit action, "
+                               "never part of the automatic chain)"))
         chain.append(_step("manual", "available", "Edit is always possible"))
         return found, chain, lrclib
 
@@ -944,6 +1051,89 @@ class MusicLyrics:
             else:
                 answer["candidate"] = new
             return answer
+
+    def transcribe_run(self, track_id: str) -> Optional[Dict[str, Any]]:
+        """The last transcribe run of the track in this process, or None."""
+        run = self._transcribe_runs.get(track_id)
+        return copy.deepcopy(run) if run is not None else None
+
+    @staticmethod
+    def _own_edit(stored: Optional[dict]) -> bool:
+        return stored is not None and (stored.get("source") == "manual" or bool(stored.get("edited")))
+
+    async def transcribe(self, track_id: str, *, overwrite_manual: bool = False) -> Dict[str, Any]:
+        """The explicit "Transcribe": the track's file through the `transcriber`, its
+        segments as timed lines, stored as `source: "transcribe"`. Never called by `get`.
+
+        Over manual or edited lyrics it is refused with `overwrite_manual_required`
+        before anything runs, unless `overwrite_manual`. One run per track at a time
+        (`transcribe_running`). The track's lock is not held while the transcription
+        runs, so the player can read the track's lyrics meanwhile; it is taken again to
+        store, and if the person saved their own lyrics in between (and did not pass
+        `overwrite_manual`), the result is returned as `candidate` and theirs are kept."""
+        lyrics_file = self.lyrics_path(track_id)
+        async with self._lock(track_id):
+            entry = self.library.get_entry(track_id)
+            stored = await asyncio.to_thread(self._read_stored, lyrics_file)
+            if not overwrite_manual and self._own_edit(stored):
+                raise MusicLibraryError(
+                    "overwrite_manual_required",
+                    "the stored lyrics are your own edit; replacing them with a transcription needs "
+                    "an explicit confirmation (overwrite_manual)",
+                )
+            if self.transcriber is None:
+                raise MusicLibraryError("transcription_unavailable",
+                                        "transcription is not available in this build of the core")
+            path = self.library.get_track_path(track_id)
+            if path is None:
+                raise MusicLibraryError(
+                    "no_file", "the track has no local file now (missing, or a web track); "
+                               "Transcribe needs the audio on this machine")
+            current = self._transcribe_runs.get(track_id)
+            if current is not None and current.get("state") == "running":
+                raise MusicLibraryError("transcribe_running", "this track is already being transcribed")
+            self._transcribe_runs[track_id] = {"state": "running", "started_at": _now_iso()}
+
+        try:
+            try:
+                result = await self.transcriber(Path(path))
+            except MusicLibraryError:
+                raise
+            except Exception as exc:
+                logger.warning("music: transcribing %s failed: %s", track_id, exc)
+                raise MusicLibraryError("transcription_failed", f"transcription failed: {exc}") from exc
+            record, info = transcript_lyrics(entry["source_hash"], result)
+            logger.info("music: transcribed %s with %s (%s): %d %s lines", track_id,
+                        info.get("provider") or "an unnamed provider", info.get("model") or "model not named",
+                        len(record["lines"]), "timed" if info["synced"] else "unsynced")
+
+            async with self._lock(track_id):
+                now_entry = self.library.get_entry(track_id)
+                if now_entry.get("source_hash") != entry["source_hash"]:
+                    raise MusicLibraryError(
+                        "track_changed", "the track's file changed while it was transcribed; transcribe it again")
+                stored = await asyncio.to_thread(self._read_stored, lyrics_file)
+                answer: Dict[str, Any] = {"lyrics": stored, "applied": False, "candidate": None,
+                                          "transcription": info, "lrc": format_lrc(record)}
+                if not overwrite_manual and self._own_edit(stored):
+                    answer["candidate"] = record
+                    answer["kept"] = "you saved your own lyrics while the transcription ran, so they are kept"
+                else:
+                    await self._store(track_id, record)
+                    answer["lyrics"], answer["applied"] = record, True
+        except MusicLibraryError as exc:
+            self._transcribe_runs[track_id] = {"state": "error", "code": exc.code, "message": exc.message,
+                                               "finished_at": _now_iso()}
+            raise
+        except BaseException as exc:
+            # Includes a cancel: the run is over either way, so it never stays "running".
+            self._transcribe_runs[track_id] = {"state": "error", "code": "internal",
+                                               "message": str(exc) or type(exc).__name__,
+                                               "finished_at": _now_iso()}
+            raise
+        self._transcribe_runs[track_id] = {"state": "done", "applied": answer["applied"],
+                                           "transcription": copy.deepcopy(info), "finished_at": _now_iso()}
+        return answer
 
     async def save_manual(self, track_id: str, lrc_text: str) -> Dict[str, Any]:
         """Store the person's LRC as `source: "manual"`. Refused while a line has no

@@ -633,7 +633,31 @@ export interface LyricsChainStep {
     detail: string;
 }
 
-/** The answer of get_music_lyrics, lookup_music_lyrics_lrclib and save_music_lyrics. */
+/** What one Transcribe run reports (core: `transcript_lyrics`): the provider and model the
+ *  result named (null when it named none), and whether the lines carry times. */
+export interface TranscriptionInfo {
+    provider: string | null;
+    model: string | null;
+    language: string | null;
+    duration_s: number | null;
+    segments: number;
+    synced: boolean;
+    fallback_reason?: string;
+}
+
+/** The track's last Transcribe run in the core process (`get_music_lyrics` → `transcribe`). */
+export interface TranscribeRun {
+    state: 'running' | 'done' | 'error' | string;
+    code?: string;
+    message?: string;
+    applied?: boolean;
+    transcription?: TranscriptionInfo;
+    started_at?: string;
+    finished_at?: string;
+}
+
+/** The answer of get_music_lyrics, lookup_music_lyrics_lrclib, save_music_lyrics and
+ *  transcribe_music_lyrics. */
 export interface LyricsAnswer {
     lyrics: Lyrics | null;
     from_store?: boolean;
@@ -644,6 +668,11 @@ export interface LyricsAnswer {
     candidate?: Lyrics | null;
     applied?: boolean;
     kept?: string;
+    /** get_music_lyrics: the track's last Transcribe run, null when there was none. */
+    transcribe?: TranscribeRun | null;
+    /** transcribe_music_lyrics: what the run reports, and its lines as LRC text. */
+    transcription?: TranscriptionInfo;
+    lrc?: string;
 }
 
 /** The note shown next to "Find on LRCLIB" (SPEC §6 "Egress/privacy"). Only that click
@@ -670,6 +699,115 @@ export function lrclibLookupPayload(
     const payload: Record<string, any> = { track_id: trackId, ...query, replace: opts.replace === true };
     if (opts.replace === true && opts.overwriteManual === true) payload.overwrite_manual = true;
     return payload;
+}
+
+// -- Transcribe (the lyrics chain's explicit step 4) ------------------------------
+
+/** The question asked before a transcription replaces the person's own lyrics. */
+export const TRANSCRIBE_OVERWRITE_CONFIRM_TEXT =
+    'Replace your own lyrics with a machine transcription of this track? Your edited lyrics will be lost.';
+
+/** The note on the Transcribe button: what runs, where the audio goes, and that sung
+ *  words come out imperfect. */
+export const TRANSCRIBE_NOTE_TEXT =
+    "Runs DPC's speech-to-text (your voice transcription provider) on this track's file. "
+    + 'With local Whisper the audio stays on this machine; a cloud or peer provider receives it. '
+    + 'Sung words over music are often misheard: check the lines.';
+
+/** The payload of `transcribe_music_lyrics`: `overwrite_manual` only when the person
+ *  confirmed replacing their own lyrics. */
+export function transcribeLyricsPayload(trackId: string, opts: { overwriteManual?: boolean } = {}): Record<string, any> {
+    const payload: Record<string, any> = { track_id: trackId };
+    if (opts.overwriteManual === true) payload.overwrite_manual = true;
+    return payload;
+}
+
+/** One sentence on a finished Transcribe: who transcribed it and whether the lines
+ *  are timed. It claims nothing about how well the times fit the words. */
+export function transcriptionText(info: TranscriptionInfo | null | undefined): string {
+    if (!info) return '';
+    const who = info.provider
+        ? `${info.provider}${info.model ? ` (${info.model})` : ''}`
+        : 'an unnamed provider';
+    const what = info.synced
+        ? `${info.segments} line${info.segments === 1 ? '' : 's'} timed from its segments`
+        : 'text only, no times (unsynced)';
+    return `Transcribed by ${who}: ${what}. Machine transcription: words and times may be wrong.`;
+}
+
+/** True when a music command's answer is the webview giving up waiting (sendCommand's
+ *  timeout); the core goes on with the command. */
+export function isCommandTimeout(a: MusicAnswer<unknown>): boolean {
+    return !a.ok && a.code === 'failed' && /timed out/i.test(a.message);
+}
+
+export type TranscribeOutcome =
+    | { ok: true; lyrics: Lyrics | null; candidate: Lyrics | null; applied: boolean; info: TranscriptionInfo | null; kept?: string }
+    | { ok: false; unavailable: boolean; code: string; message: string };
+
+export const TRANSCRIBE_POLL_MS = 3000;
+export const TRANSCRIBE_MAX_WAIT_MS = 30 * 60 * 1000;
+
+/** One Transcribe click: `call` is transcribe_music_lyrics. A transcription can outlast
+ *  the webview's command timeout; the core keeps going, so on a timeout this follows the
+ *  run through `poll` (get_music_lyrics, whose `transcribe` says running/done/error)
+ *  until it ends. Null when `cancelled()` turns true (another track was opened). */
+export async function runTranscribe(
+    call: () => Promise<MusicAnswer<LyricsAnswer>>,
+    poll: () => Promise<MusicAnswer<LyricsAnswer>>,
+    opts: {
+        intervalMs?: number;
+        maxWaitMs?: number;
+        cancelled?: () => boolean;
+        sleep?: (ms: number) => Promise<void>;
+        now?: () => number;
+    } = {},
+): Promise<TranscribeOutcome | null> {
+    const a = await call();
+    if (a.ok) {
+        return {
+            ok: true,
+            lyrics: a.data.lyrics ?? null,
+            candidate: a.data.candidate ?? null,
+            applied: a.data.applied === true,
+            info: a.data.transcription ?? null,
+            kept: a.data.kept,
+        };
+    }
+    if (!isCommandTimeout(a)) return a;
+    const interval = opts.intervalMs ?? TRANSCRIBE_POLL_MS;
+    const maxWait = opts.maxWaitMs ?? TRANSCRIBE_MAX_WAIT_MS;
+    const sleep = opts.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
+    const now = opts.now ?? (() => Date.now());
+    const cancelled = opts.cancelled ?? (() => false);
+    const start = now();
+    for (;;) {
+        await sleep(interval);
+        if (cancelled()) return null;
+        const p = await poll();
+        if (cancelled()) return null;
+        if (!p.ok) return p;
+        const run = p.data.transcribe ?? null;
+        if (run?.state === 'done') {
+            return {
+                ok: true,
+                lyrics: p.data.lyrics ?? null,
+                candidate: null,
+                applied: run.applied === true,
+                info: run.transcription ?? null,
+                kept: run.applied === false ? 'your own lyrics were saved while the transcription ran, so they are kept' : undefined,
+            };
+        }
+        if (run?.state === 'error') {
+            return { ok: false, unavailable: false, code: run.code || 'transcription_failed', message: run.message || 'the transcription failed' };
+        }
+        if (run?.state !== 'running') {
+            return { ok: false, unavailable: false, code: 'lost', message: 'the core no longer reports this transcription (was it restarted?); Look again to check' };
+        }
+        if (now() - start >= maxWait) {
+            return { ok: false, unavailable: false, code: 'still_running', message: 'still running; its lyrics will show when it ends (Look again)' };
+        }
+    }
 }
 
 export function lyricsSynced(lyrics: Lyrics | null | undefined): boolean {
@@ -765,10 +903,14 @@ export function stampLrcLine(text: string, cursor: number, t: number): { text: s
     return { text: out, cursor: lineEnd < out.length ? lineEnd + 1 : lineEnd };
 }
 
-/** The source badge: "lrclib · unsynced", "manual · edited", or "none". */
+/** How a stored source reads on the badge: the core stores SPEC §4's `transcribe`, the
+ *  badge says what happened to the lyrics. */
+const LYRICS_SOURCE_LABELS: Record<string, string> = { transcribe: 'transcribed' };
+
+/** The source badge: "lrclib · unsynced", "manual · edited", "transcribed", or "none". */
 export function lyricsBadge(lyrics: Lyrics | null | undefined): string {
     if (!lyrics) return 'none';
-    const parts = [lyrics.source];
+    const parts = [LYRICS_SOURCE_LABELS[lyrics.source] ?? lyrics.source];
     if (lyrics.synced === false) parts.push('unsynced');
     if (lyrics.edited) parts.push('edited');
     return parts.join(' · ');
