@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 
-from .crypto import DPC_HOME_DIR
+from .crypto import DPC_HOME_DIR, is_valid_node_id
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +250,16 @@ class CommitSigner:
             True  — signature is cryptographically valid
             False — signature is invalid (possible tampering)
             None  — peer certificate not cached locally; cannot verify
+
+        A `node_id` that is not one `generate_node_id` could have written is
+        False before any file is looked at: the id is the certificate's file
+        name, and a peer that chose `dpc-node-<victim>/../dpc-node-<attacker>`
+        or an upper-case copy of its own id would have its own certificate
+        loaded and come back verified under a name that is not its own.
         """
+        if not is_valid_node_id(node_id):
+            logger.warning("Signature claims a malformed node id %r; refused", str(node_id)[:80])
+            return False
         if peers_dir is None:
             peers_dir = DPC_HOME_DIR / "peers"
 

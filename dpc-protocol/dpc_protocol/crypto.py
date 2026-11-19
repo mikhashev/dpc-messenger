@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import os
+import re
 import stat
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,24 @@ DPC_HOME_DIR = Path.home() / ".dpc"
 KEY_FILE = DPC_HOME_DIR / "node.key"
 CERT_FILE = DPC_HOME_DIR / "node.crt"
 NODE_ID_FILE = DPC_HOME_DIR / "node.id"
+
+# A node id exactly as `generate_node_id` writes it: `dpc-node-` and the first
+# 32 lowercase hex characters of the SHA-256 of the public key, nothing else.
+NODE_ID_RE = re.compile(r"dpc-node-[0-9a-f]{32}")
+
+
+def is_valid_node_id(value) -> bool:
+    """Whether `value` is a node id as `generate_node_id` writes it, and nothing more.
+
+    Every place that turns a peer's id into a file name (`peers/<node_id>.crt`)
+    asks this first. A peer chooses the ids it puts in a payload, and an id
+    such as `dpc-node-<victim>/../dpc-node-<attacker>` or an upper-case copy of
+    a real one would otherwise name another node's certificate: Windows
+    collapses `..` before it looks at the disk, and Windows and macOS volumes
+    fold case. `re.fullmatch`, so a trailing newline does not pass as `$` lets it.
+    """
+    return isinstance(value, str) and NODE_ID_RE.fullmatch(value) is not None
+
 
 def generate_node_id(public_key: rsa.RSAPublicKey) -> str:
     """
