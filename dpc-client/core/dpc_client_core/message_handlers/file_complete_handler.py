@@ -115,10 +115,16 @@ class FileCompleteHandler(MessageHandler):
                 if transfer.voice_metadata:
                     attachment["voice_metadata"] = transfer.voice_metadata
 
-            # Extract text caption from image_metadata if available
+            # Extract text caption from image_metadata if available; a plain
+            # file carries what was written with it on the transfer.
             caption_text = ""
             if is_image and transfer.image_metadata:
                 caption_text = transfer.image_metadata.get("text", "")
+            elif not is_image and not is_voice and transfer.text:
+                caption_text = transfer.text
+            # A plain file's words are its record's text, one message with the
+            # file; a screenshot's record keeps its "Sent screenshot" line.
+            file_text = caption_text if not is_image and not is_voice else ""
 
             # Route to group chat or P2P chat based on group_id
             message_event = {
@@ -148,7 +154,7 @@ class FileCompleteHandler(MessageHandler):
                     conversation_monitor = self.service._get_or_create_conversation_monitor(monitor_key)
                     if conversation_monitor:
                         file_type = 'screenshot' if is_image else ('voice message' if is_voice else 'file')
-                        message_content = f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
+                        message_content = file_text or f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
                         # We sent it, so we are the author of this note. Stamped
                         # here rather than left to the default so the record
                         # reads the same as any other message we wrote.
@@ -168,7 +174,7 @@ class FileCompleteHandler(MessageHandler):
                 conversation_monitor = self.service._get_or_create_conversation_monitor(sender_node_id)
                 if conversation_monitor:
                     file_type = 'screenshot' if is_image else ('voice message' if is_voice else 'file')
-                    message_content = f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
+                    message_content = file_text or f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
                     conversation_monitor.add_message("user", message_content, [attachment])
                     self.logger.debug(f"Added sent {file_type} to conversation history: {transfer.filename}")
 

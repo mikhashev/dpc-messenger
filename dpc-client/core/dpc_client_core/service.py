@@ -7880,7 +7880,7 @@ class CoreService:
             return {"status": "error", "message": str(e)}
 
     async def send_group_file(
-        self, group_id: str, file_path: str, file_size_bytes: int = None
+        self, group_id: str, file_path: str, file_size_bytes: int = None, text: str = ""
     ) -> Dict[str, Any]:
         """Send a file to a group: keep it here first, then offer it to the connected members.
 
@@ -7898,6 +7898,11 @@ class CoreService:
             group_id: Target group ID
             file_path: Path to file to send
             file_size_bytes: Size the UI measured; it only sizes the UI's command timeout
+            text: What the person wrote with the file. It is the text of the one
+                message the file is (the sender's record, the broadcast, every
+                member's copy through the offer's `text`), and its @mentions wake
+                the group's agents as a screenshot's caption does. Empty keeps
+                "Sent file: <name> (<MB> MB)" as the record's text.
 
         Returns:
             On success: `saved_locally` (the copy and the record exist), `file_path`
@@ -7954,6 +7959,8 @@ class CoreService:
                 "file_path": str(local_path),
             }
 
+            caption = (text or "").strip()
+
             # One id for the record, the broadcast and the whole fan-out: every
             # member's copy, and every relay of it, is this one message. The clock
             # keeps a second send of the same file a second message.
@@ -7971,7 +7978,7 @@ class CoreService:
                 # Store, then read the index, then announce (as send_group_image).
                 if _group_monitor:
                     _group_monitor.add_message(
-                        "user", f"Sent file: {final_filename} ({size_mb} MB)", [attachment],
+                        "user", caption or f"Sent file: {final_filename} ({size_mb} MB)", [attachment],
                         sender_node_id=self.p2p_manager.node_id,
                         sender_name=(self.p2p_manager.get_display_name() or "User"),
                         message_id=message_id,
@@ -7982,7 +7989,7 @@ class CoreService:
                 await self.local_api.broadcast_event("group_file_received", {
                     "sender_node_id": "user",
                     "sender_name": "You",
-                    "text": "",
+                    "text": caption,
                     "message_id": message_id,
                     "msg_index": msg_index,
                     "attachments": [attachment],
@@ -8013,11 +8020,23 @@ class CoreService:
                         file_hash=fingerprint[0],
                         chunk_hashes=fingerprint[1],
                         message_id=message_id,
+                        text=caption,
                     )
                     transfer_ids.append(tid)
                 except Exception as e:
                     logger.warning("Failed to send file to %s: %s", node_id[:20], e)
                     not_offered.record(node_id, e)
+
+            # The words written with the file reach the group's agents as a
+            # screenshot's caption does (send_group_image): its @mentions decide
+            # who answers. The record is already stored, so the woken agent reads
+            # the file's marker beside the words.
+            if caption:
+                try:
+                    sender_display = self.p2p_manager.get_display_name() or "User"
+                    await self._handle_group_agent_mentions(group_id, caption, sender_display)
+                except Exception as e:
+                    logger.warning("routing group file text to group agents failed: %s", e)
 
             logger.info(
                 "Group file %s kept in %s; offered to %d member(s), %d offline",
@@ -8852,9 +8871,9 @@ class CoreService:
         except Exception as e:
             logger.error("Error tracking outgoing message in conversation monitor: %s", e, exc_info=True)
 
-    async def send_file(self, node_id: str, file_path: str, file_size_bytes: int = None):
-        """Delegated to P2PCoordinator."""
-        return await self.p2p_coordinator.send_file(node_id, file_path, file_size_bytes)
+    async def send_file(self, node_id: str, file_path: str, file_size_bytes: int = None, text: str = ""):
+        """Delegated to P2PCoordinator. `text`: what the person wrote with the file, one message with it."""
+        return await self.p2p_coordinator.send_file(node_id, file_path, file_size_bytes, text=text)
 
     @slow_command
     async def send_image(self, conversation_id: str, image_base64: str, filename: str, caption: str = "", provider_alias: str = None, compute_host: str = None, chat_provider: str = None):

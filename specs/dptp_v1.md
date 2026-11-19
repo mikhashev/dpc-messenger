@@ -1402,6 +1402,12 @@ Offers a file to the peer for transfer.
   - `channels` (integer, required): Number of audio channels (1 = mono, 2 = stereo)
   - `codec` (string, required): Audio codec used (e.g., "opus", "aac")
   - `recorded_at` (string, required): ISO 8601 timestamp when voice was recorded
+- `text` (string, optional): what the sender wrote with a plain file (no `image_metadata`,
+  no `voice_metadata`). The file and the text are one message: the receiver uses it as
+  the text of its record of the file instead of "Received file: …", as the sender does
+  for its own. A relay copies it unchanged. Anything but a non-empty string is read as
+  absent; a peer that predates the field ignores it and records the file alone. An
+  image's caption travels in `image_metadata.text` instead.
 - `group_id` (string, optional): Group ID for group file transfers (v0.21.0)
   - If present, indicates this file was sent in a group chat context
   - Receiver stores file in group's conversation folder (`~/.dpc/conversations/{group_id}/files/`)

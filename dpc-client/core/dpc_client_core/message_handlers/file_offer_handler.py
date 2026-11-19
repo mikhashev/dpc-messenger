@@ -66,6 +66,7 @@ class FileOfferHandler(MessageHandler):
                     - channels: int
                     - codec: str (e.g., "opus")
                     - recorded_at: str (ISO timestamp)
+                - text: str (optional) - what the sender wrote with a plain file
         """
         transfer_id = payload.get("transfer_id")
         filename = payload.get("filename")
@@ -76,6 +77,10 @@ class FileOfferHandler(MessageHandler):
         chunk_hashes = payload.get("chunk_hashes")
         image_metadata = payload.get("image_metadata")
         voice_metadata = payload.get("voice_metadata")
+        # What the sender wrote with a plain file: the text of the one message
+        # recorded for it. Anything but a non-empty string is read as absent.
+        text = payload.get("text")
+        text = text if isinstance(text, str) and text.strip() else None
         group_id = payload.get("group_id")  # v0.19.0+: Group file transfers
         # A group file's identity, kept by every relay. Unsigned: it decides
         # whether this node takes the copy, never who the file is credited to.
@@ -238,6 +243,8 @@ class FileOfferHandler(MessageHandler):
                 "mime_type": mime_type,
                 "hash": hash_value
             }
+            if text:
+                event_data["text"] = text  # shown in the accept dialog
             add_group_fields(event_data)
             await self.service.local_api.broadcast_event("file_transfer_offered", event_data)
 
@@ -262,7 +269,8 @@ class FileOfferHandler(MessageHandler):
             retry_count={},  # v0.11.1: Track retry attempts per chunk
             image_metadata=image_metadata,  # Store image metadata for chat display (v0.12.0+)
             voice_metadata=voice_metadata,  # Store voice metadata for chat display (v0.13.0+)
-            group_id=group_id,             # Group ID for group file transfers (v0.19.0+)
+            text=text,
+            group_id=group_id,            # Group ID for group file transfers (v0.19.0+)
             sender_node_id=author_node_id,
             message_id=message_id,
             awaiting_permission=awaiting_permission,

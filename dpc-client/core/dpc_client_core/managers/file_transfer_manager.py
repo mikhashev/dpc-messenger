@@ -301,6 +301,9 @@ class FileTransfer:
     max_retries: int = 3                 # Max retries per chunk
     image_metadata: Optional[dict] = None  # Image metadata (dimensions, thumbnail, etc.) v0.12.0+
     voice_metadata: Optional[dict] = None  # Voice metadata (duration, sample_rate, codec) v0.13.0+
+    # The words the sender wrote with a plain file, one message with it (the
+    # offer's `text`). An image carries its caption in image_metadata["text"].
+    text: Optional[str] = None
     group_id: Optional[str] = None  # Group ID for group file transfers (v0.19.0+)
     # A group file's identity, the GROUP_TEXT words: the member who wrote it and
     # its id there. Every relay carries both unchanged. On a download they are
@@ -732,6 +735,7 @@ class FileTransferManager:
         message_id: Optional[str] = None,
         sender_node_id: Optional[str] = None,
         group_relay: bool = False,
+        text: Optional[str] = None,
     ) -> str:
         """
         Initiate file transfer to peer.
@@ -759,6 +763,9 @@ class FileTransferManager:
                 The author passes its own message_id and leaves sender_node_id to
                 default to itself; a relay passes both as it received them.
             group_relay: This upload passes on a group file received from someone else.
+            text: What the sender wrote with a plain file. It travels on the offer
+                and becomes the text of the one message both sides record for the
+                file; empty or None leaves the "Sent/Received file: ..." line.
 
         Returns:
             transfer_id: Unique transfer identifier
@@ -826,6 +833,7 @@ class FileTransferManager:
             voice_metadata=voice_metadata,  # Store voice metadata for voice messages (v0.13.0+)
             group_id=group_id,             # Group ID for group file transfers (v0.19.0+)
             group_relay=group_relay,
+            text=text or None,
         )
         if group_id and message_id:
             transfer.message_id = message_id
@@ -854,6 +862,10 @@ class FileTransferManager:
         # Add voice metadata if provided (v0.13.0+: Voice Messages)
         if voice_metadata:
             payload["voice_metadata"] = voice_metadata
+
+        # The words written with the file; a peer that predates the field ignores it
+        if transfer.text:
+            payload["text"] = transfer.text
 
         # Add group_id if provided (v0.19.0+: Group file transfers)
         if group_id:
@@ -1685,10 +1697,13 @@ class FileTransferManager:
                 if transfer.voice_metadata:
                     attachment["voice_metadata"] = transfer.voice_metadata
 
-            # Extract text caption from image_metadata if available
+            # Extract text caption from image_metadata if available; a plain
+            # file brings what was written with it on the offer.
             caption_text = ""
             if is_image and transfer.image_metadata:
                 caption_text = transfer.image_metadata.get("text", "")
+            elif not is_image and not is_voice and transfer.text:
+                caption_text = transfer.text
 
             if existing_record is not None:
                 # Patched in place: the signature covers no attachment field.
@@ -1737,6 +1752,10 @@ class FileTransferManager:
                     message_content = f"Received voice message: {transfer.filename} ({size_mb} MB)"
                 elif is_image:
                     message_content = f"Received screenshot: {transfer.filename} ({size_mb} MB)"
+                elif caption_text:
+                    # One message: the file and the words sent with it, as the
+                    # sender's own record reads.
+                    message_content = caption_text
                 else:
                     message_content = f"Received file: {transfer.filename} ({size_mb} MB)"
 
@@ -1831,6 +1850,7 @@ class FileTransferManager:
                 message_id=received.message_id,
                 sender_node_id=received.sender_node_id,
                 group_relay=True,
+                text=received.text,
             )
             logger.info("Relayed group %s %s to %s", kind, received.filename, member_id[:20])
         except Exception as e:  # noqa: BLE001 - one member's failure ends only its relay

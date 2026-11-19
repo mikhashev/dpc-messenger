@@ -1462,15 +1462,22 @@ class P2PCoordinator:
     # File transfer coordination (Phase C Step 5 Batch 2)
     # ─────────────────────────────────────────────────────────────
 
-    async def send_file(self, node_id: str, file_path: str, file_size_bytes: int = None):
-        """Send a file to a peer via P2P file transfer."""
+    async def send_file(self, node_id: str, file_path: str, file_size_bytes: int = None, text: str = ""):
+        """Send a file to a peer via P2P file transfer.
+
+        `text` is what the person wrote with the file: it rides the FILE_OFFER and
+        is the text of the one message each side records once the peer has the
+        file (FileCompleteHandler here, the receive there).
+        """
         from pathlib import Path
 
         file = Path(file_path)
         if not file.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        transfer_id = await self.service.file_transfer_manager.send_file(node_id, file)
+        transfer_id = await self.service.file_transfer_manager.send_file(
+            node_id, file, text=(text or "").strip() or None
+        )
 
         size_bytes = file.stat().st_size
         return {
