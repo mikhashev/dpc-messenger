@@ -929,14 +929,48 @@ def image_attachment_markers(record: Dict[str, Any]) -> List[str]:
     return out
 
 
+# The longest name one path segment can have (NTFS, ext4, APFS): a kept-at path
+# is cut only past it, never at the display length of `_MARKER_NAME_CHARS`.
+_PATH_SEGMENT_CHARS = 255
+# What a kept-at path cannot carry and stay one bracketed line: control characters
+# (C0, DEL, C1, among them every line break `str.splitlines` knows) and the
+# marker's own brackets.
+_PATH_UNSAFE = re.compile(r"[\x00-\x1f\x7f-\x9f  \[\]]")
+_NOT_EXACT = (" (not exact: the name on disk is longer or holds characters this line "
+              "cannot carry; list that folder to find it)")
+
+
+def _path_segment(part: str) -> Tuple[str, bool]:
+    """One segment of a kept-at path, verbatim, and whether it had to be changed.
+
+    Not `_marker_text`: that one collapses runs of spaces and cuts at 80
+    characters for display, and a path changed that way names no file (a song
+    called "a   b.mp3" was printed "a b.mp3", and the agent that followed it
+    got "file not found"). Here only what could end the marker or start a line
+    of its own is replaced, with "?", and the segment is cut only past the
+    filesystem's own limit; either change is reported, so the marker can say
+    the path is not exact instead of printing a wrong one as if it were right.
+    """
+    safe = _PATH_UNSAFE.sub("?", part)
+    cut = safe[:_PATH_SEGMENT_CHARS]
+    return cut, cut != part
+
+
 def _kept_at(file_path: Any, name: str) -> str:
-    """Where an attachment is kept, as a path under the DPC home, never the absolute one."""
+    """Where an attachment is kept, as a path under the DPC home, never the absolute one.
+
+    The path is the one on disk, character for character (`_path_segment`), so
+    a file tool opens it as printed; when it cannot be, the marker says so.
+    """
     found = _CONVERSATION_FILE.search(str(file_path))
     if found:
-        return "conversations/{}/files/{}".format(
-            _marker_text(found.group(1)),
-            "/".join(_marker_text(part) for part in re.split(r"[\\/]", found.group(2))))
-    return f"this chat's files folder, as {name}"
+        parts = [found.group(1)] + re.split(r"[\\/]", found.group(2))
+        segments = [_path_segment(part) for part in parts]
+        path = "conversations/{}/files/{}".format(
+            segments[0][0], "/".join(text for text, _ in segments[1:]))
+        return path + (_NOT_EXACT if any(changed for _, changed in segments) else "")
+    base, changed = _path_segment(re.split(r"[\\/]", str(file_path))[-1] or name)
+    return f"this chat's files folder, as {base}" + (_NOT_EXACT if changed else "")
 
 
 # The attachment types `file_attachment_markers` names, and the word each is named with.

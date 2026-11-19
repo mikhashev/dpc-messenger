@@ -387,6 +387,35 @@ def _only_remembered_targets_changed(before: Dict[str, Any], after: Dict[str, An
     return before != after and rest(before) == rest(after)
 
 
+def keep_copy_under_a_free_name(source: Path, directory: Path, name: str) -> Path:
+    """Copy `source` into `directory` as `name`, or as `<stem>_N<suffix>` when taken.
+
+    The name is reserved by creating the file exclusively (`open(..., "xb")`),
+    so two sends of one name at once get two files: a check with `exists()`
+    followed by a copy let both pass the check and the second overwrite the
+    first, whose record then named the other's bytes. Blocking; run it in a
+    thread. A copy that fails part way removes the file it reserved.
+    """
+    import shutil
+
+    stem, suffix = Path(name).stem, Path(name).suffix
+    counter = 0
+    while True:
+        target = directory / (name if counter == 0 else f"{stem}_{counter}{suffix}")
+        try:
+            out = open(target, "xb")
+        except FileExistsError:
+            counter += 1
+            continue
+        try:
+            with out, open(source, "rb") as src:
+                shutil.copyfileobj(src, out)
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
+        return target
+
+
 class CoreService:
     """
     The main orchestrating class for the D-PC client's backend.
@@ -7914,7 +7943,6 @@ class CoreService:
             a member has the file when its FILE_COMPLETE arrives.
         """
         import mimetypes
-        import shutil
 
         try:
             group = self.group_manager.get_group(group_id)
@@ -7928,73 +7956,78 @@ class CoreService:
             # Keep the file in the group's own folder, where a member's copy of a
             # group file lands too (FileTransferManager._incoming_destination), so
             # the record's path outlives the place it was picked from. A name
-            # already taken there gets a `_N` suffix, as voice does.
+            # already taken there gets a `_N` suffix, reserved atomically, so two
+            # sends of one name at once are two files.
             _group_monitor = self._get_or_create_conversation_monitor(group_id)
             group_files_dir = _group_monitor._get_conversation_dir() / "files"
             group_files_dir.mkdir(parents=True, exist_ok=True)
-            local_path = group_files_dir / path.name
-            if local_path.exists():
-                stem, suffix = local_path.stem, local_path.suffix
-                counter = 1
-                while local_path.exists():
-                    local_path = group_files_dir / f"{stem}_{counter}{suffix}"
-                    counter += 1
-            await asyncio.to_thread(shutil.copyfile, str(path), str(local_path))
-
-            final_filename = local_path.name
-            size_bytes = local_path.stat().st_size
-            size_mb = round(size_bytes / (1024 * 1024), 2)
-            # The same guess send_file makes for the offer (_detect_mime_type).
-            mime_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
-            # No hash: hashing a large file is a pass of its own, done below only
-            # when a member is offered it. A sender's record is matched on name
-            # and size (conversation_monitor.attachment_matches).
-            attachment = {
-                "type": "file",
-                "filename": final_filename,
-                "size_bytes": size_bytes,
-                "size_mb": size_mb,
-                "mime_type": mime_type,
-                "status": "completed",
-                "file_path": str(local_path),
-            }
+            local_path = await asyncio.to_thread(
+                keep_copy_under_a_free_name, path, group_files_dir, path.name)
 
             caption = (text or "").strip()
+            try:
+                final_filename = local_path.name
+                size_bytes = local_path.stat().st_size
+                size_mb = round(size_bytes / (1024 * 1024), 2)
+                # The same guess send_file makes for the offer (_detect_mime_type).
+                mime_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
+                # No hash: hashing a large file is a pass of its own, done below only
+                # when a member is offered it. A sender's record is matched on name
+                # and size (conversation_monitor.attachment_matches).
+                attachment = {
+                    "type": "file",
+                    "filename": final_filename,
+                    "size_bytes": size_bytes,
+                    "size_mb": size_mb,
+                    "mime_type": mime_type,
+                    "status": "completed",
+                    "file_path": str(local_path),
+                }
 
-            # One id for the record, the broadcast and the whole fan-out: every
-            # member's copy, and every relay of it, is this one message. The clock
-            # keeps a second send of the same file a second message.
-            message_id = hashlib.sha256(
-                f"{self.p2p_manager.node_id}:group-file-send:{group_id}:{final_filename}:"
-                f"{int(time.time() * 1000)}".encode()
-            ).hexdigest()[:16]
+                # One id for the record, the broadcast and the whole fan-out: every
+                # member's copy, and every relay of it, is this one message. The clock
+                # keeps a second send of the same file a second message.
+                message_id = hashlib.sha256(
+                    f"{self.p2p_manager.node_id}:group-file-send:{group_id}:{final_filename}:"
+                    f"{int(time.time() * 1000)}".encode()
+                ).hexdigest()[:16]
 
-            # Keyed on the on-disk name, which is what FileCompleteHandler sees as
-            # transfer.filename: the offers below send this copy.
-            ui_dedup_key = group_file_ui_key(group_id, final_filename)
-            msg_index = None
-            if ui_dedup_key not in self._processed_message_ids:
-                self._processed_message_ids.add(ui_dedup_key)
+                # Keyed on the on-disk name, which is what FileCompleteHandler sees
+                # as transfer.filename: the offers below send this copy. The name
+                # was reserved just now, so this send is a new message whatever the
+                # window holds: a key already there is left by an earlier file of
+                # this name, since removed, and used to drop the record and answer
+                # `saved_locally` with no `msg_index`. Seeded, never consulted.
+                self._processed_message_ids.add(group_file_ui_key(group_id, final_filename))
                 # Store, then read the index, then announce (as send_group_image).
-                if _group_monitor:
-                    _group_monitor.add_message(
-                        "user", caption or f"Sent file: {final_filename} ({size_mb} MB)", [attachment],
-                        sender_node_id=self.p2p_manager.node_id,
-                        sender_name=(self.p2p_manager.get_display_name() or "User"),
-                        message_id=message_id,
-                        sender_type="human",
-                    )
-                    _group_monitor.save_history()
-                    msg_index = _group_monitor.get_last_msg_index()
-                await self.local_api.broadcast_event("group_file_received", {
-                    "sender_node_id": "user",
-                    "sender_name": "You",
-                    "text": caption,
-                    "message_id": message_id,
-                    "msg_index": msg_index,
-                    "attachments": [attachment],
-                    "group_id": group_id,
-                })
+                _group_monitor.add_message(
+                    "user", caption or f"Sent file: {final_filename} ({size_mb} MB)", [attachment],
+                    sender_node_id=self.p2p_manager.node_id,
+                    sender_name=(self.p2p_manager.get_display_name() or "User"),
+                    message_id=message_id,
+                    sender_type="human",
+                )
+            except BaseException:
+                # No record names the copy yet: it would be a file nothing points at.
+                local_path.unlink(missing_ok=True)
+                raise
+            # save_history does not raise: on a write error it logs and answers
+            # False, and the record stays in memory, unsaved, naming the copy, so
+            # the next save writes it. Removing the copy here would leave that
+            # record pointing at nothing.
+            if _group_monitor.save_history() is False:
+                logger.warning("Group file %s recorded in %s but the history was not saved yet",
+                               final_filename, group_id)
+            msg_index = _group_monitor.get_last_msg_index()
+            await self.local_api.broadcast_event("group_file_received", {
+                "sender_node_id": "user",
+                "sender_name": "You",
+                "text": caption,
+                "message_id": message_id,
+                "msg_index": msg_index,
+                "attachments": [attachment],
+                "group_id": group_id,
+            })
 
             connected_peers = self.p2p_coordinator.get_connected_peers()
             transfer_ids = []
