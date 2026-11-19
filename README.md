@@ -39,21 +39,22 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                  Human-AI Collaborative Intelligence                     │
-│       P2P Encrypted Communication (Text • Voice • Files • Agent)         │
-└──────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   Human-AI Collaborative Intelligence                   │
+│        P2P Encrypted Communication (Text • Voice • Files • Agent)       │
+└─────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
-│    Human A      │         │    Human B      │         │    Human C      │
-│  ┌───────────┐  │         │  ┌───────────┐  │         │  ┌───────────┐  │
-│  │ Local AI  │  │ Compute │  │ Remote AI │  │         │  │ Vendor AI │  │
-│  │ (Ollama)  │◄─┼─────────┼──│  (Peer A) │  │         │  │(Anthropic)│  │
-│  └───────────┘  │ Sharing │  └───────────┘  │         │  └───────────┘  │
-│  ┌───────────┐  │         │                 │         │                 │
-│  │ DPC Agent │◄─┼─────────┼─ B uses A's     │         │   • Context     │
-│  │           │  │  Remote │   Agent/AI      │◄───────►│   • Messages    │
-│  └───────────┘  │  Infer. │                 │  Group  │   • Privacy     │
+│     Human A     │         │     Human B     │         │     Human C     │
+│ ┌─────────────┐ │         │ ┌─────────────┐ │         │ ┌─────────────┐ │
+│ │  Local AI   │ │ Compute │ │  Remote AI  │ │         │ │  Vendor AI  │ │
+│ │ (llama.cpp, │◄┼─────────┼─│  (Peer A)   │ │         │ │ (DeepSeek,  │ │
+│ │   Strata)   │ │ Sharing │ │             │ │         │ │ NeuralDeep) │ │
+│ └─────────────┘ │         │ └─────────────┘ │         │ └─────────────┘ │
+│ ┌─────────────┐ │         │                 │         │                 │
+│ │  DPC Agent  │◄┼─────────┼─ B uses A's     │         │   • Context     │
+│ │             │ │  Remote │   Agent/AI      │◄───────►│   • Messages    │
+│ └─────────────┘ │  Infer. │                 │  Group  │   • Privacy     │
 │   • Context     │         │   • Context     │  Chat   │     Rules       │
 │   • Messages    │         │   • Messages    │         │                 │
 │   • Privacy     │         │   • Privacy     │         │                 │
