@@ -1256,6 +1256,8 @@
       </div>
     {/if}
 
+    <!-- The microphone, the file and Send sit inside the input's frame, which still resizes. -->
+    <div class="input-box">
     <textarea
       id="message-input"
       name="message-input"
@@ -1281,6 +1283,7 @@
       onpaste={handlePaste}
     ></textarea>
 
+    <div class="input-actions">
     <VoiceRecorder
       disabled={$connectionStatus !== 'connected' || isLoading || (autoTranscribeEnabled && whisperModelLoading)}
       maxDuration={300}
@@ -1295,12 +1298,15 @@
     >📎</button>
 
     <button
+      class="send-button"
       onclick={handleSendMessage}
       disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || (!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_') && activeChatId !== 'default')}
       title={!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_') && activeChatId !== 'default' ? 'Peer disconnected' : ''}
     >
       {#if isLoading}Sending...{:else}Send{/if}
     </button>
+    </div>
+    </div>
   </div>
 </div>
 
