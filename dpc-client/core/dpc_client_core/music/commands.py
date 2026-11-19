@@ -10,8 +10,9 @@ Every answer is `{"status": "ok", ...}` or `{"status": "error", "code", "message
 The mixin needs `self.settings` (a `Settings`); the library lives under
 `settings.dpc_home_dir / "music"`. The poll interval is `[music] poll_interval_s`
 (`DPC_MUSIC_POLL_INTERVAL_S`), read with a default so `settings.py` is unchanged.
-Likewise the LRCLIB step of the lyrics chain is `[music] lrclib_enabled`
-(`DPC_MUSIC_LRCLIB_ENABLED`, default `true`), read on every lookup.
+Likewise the LRCLIB lookup of the lyrics chain is `[music] lrclib_enabled`
+(`DPC_MUSIC_LRCLIB_ENABLED`, default `true`), read on every lookup; even when on, only
+the explicit `lookup_music_lyrics_lrclib` sends a request.
 """
 
 from __future__ import annotations
@@ -177,8 +178,9 @@ class MusicCommandsMixin:
     @slow_command
     async def get_music_lyrics(self, track_id: str, refresh: bool = False) -> Dict[str, Any]:
         """The track's lyrics. Stored ones come back as they are; without them (or with
-        `refresh`) the chain runs: .lrc sidecar, embedded tags, LRCLIB. `chain` says
-        what each step found; `lrclib` the lookup's result when it ran."""
+        `refresh`) the chain runs: .lrc sidecar, embedded tags, the local LRCLIB cache.
+        It never sends a request (the player calls it on every track change); `chain`
+        says what each step found, `lrclib` a cached LRCLIB outcome when there is one."""
         try:
             return {"status": "ok", **(await (await self._music_lyrics()).get(track_id, refresh=bool(refresh)))}
         except Exception as exc:
@@ -194,14 +196,18 @@ class MusicCommandsMixin:
     @slow_command
     async def lookup_music_lyrics_lrclib(self, track_id: str, artist: Optional[str] = None,
                                          title: Optional[str] = None, album: Optional[str] = None,
-                                         replace: bool = False) -> Dict[str, Any]:
-        """The explicit "Find on LRCLIB": sends artist, title, album and duration to
-        lrclib.net. Stores the result when nothing is stored or `replace`; otherwise it
-        comes back as `candidate`."""
+                                         replace: bool = False,
+                                         overwrite_manual: bool = False) -> Dict[str, Any]:
+        """The explicit "Find on LRCLIB", the only command that sends anything to
+        lrclib.net (artist, title, album and duration). Stores the result when nothing
+        is stored or `replace`; otherwise it comes back as `candidate`. Over manual or
+        edited lyrics `replace` answers `overwrite_manual_required` unless
+        `overwrite_manual` is passed too (the player asks the person first)."""
         try:
             lyrics = await self._music_lyrics()
             answer = await lyrics.lookup_lrclib(track_id, artist=artist, title=title, album=album,
-                                                replace=bool(replace))
+                                                replace=bool(replace),
+                                                overwrite_manual=overwrite_manual is True)
             return {"status": "ok", **answer}
         except Exception as exc:
             return _error(exc)

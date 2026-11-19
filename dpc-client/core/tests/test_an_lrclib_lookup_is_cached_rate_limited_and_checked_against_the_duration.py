@@ -89,6 +89,28 @@ async def test_a_record_more_than_two_seconds_off_is_not_used(duration, result):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("record_duration,result", [(217.0, "mismatch"), (216.5, "synced"),
+                                                    (212.7, "synced"), (212.5, "mismatch")])
+async def test_the_match_is_checked_against_the_unrounded_duration(record_duration, result):
+    """214.6 s goes out as 215, but 217.0 is 2.4 s off the real length, so it is not used;
+    rounding first would have let it through (±2.5 s in effect)."""
+    q = LrclibQuery(artist="Band", title="Song", album=None, duration=215, duration_exact=214.6)
+    client, seen = client_for(lambda r: httpx.Response(200, json=rec(duration=record_duration)))
+    assert (await client.get(q))["result"] == result
+    assert seen[0].url.params["duration"] == "215"
+
+
+def test_build_query_sends_whole_seconds_and_keeps_the_exact_length():
+    from dpc_client_core.music.lyrics import MusicLyrics
+
+    q = MusicLyrics.build_query({"artist": "Band", "title": "Song"}, 214.6)
+    assert q.duration == 215 and q.duration_exact == 214.6
+    assert q.params()["duration"] == "215" and q.as_dict()["duration"] == 215
+    assert q.key().endswith("|215")
+    assert MusicLyrics.build_query({"artist": "Band", "title": "Song"}, 0.2).duration_exact is None
+
+
+@pytest.mark.asyncio
 async def test_429_blocks_until_retry_after_passes():
     now = [100.0]
     client, seen = client_for(lambda r: httpx.Response(429, headers={"Retry-After": "30"}),
@@ -220,7 +242,7 @@ async def test_a_second_lookup_is_served_from_the_cache_with_the_network_off(tmp
 
 
 @pytest.mark.asyncio
-async def test_a_cached_not_found_is_asked_again_after_its_ttl(tmp_path):
+async def test_a_cached_not_found_shows_in_the_chain_until_its_ttl_and_the_chain_never_asks(tmp_path):
     from dpc_client_core.music.identity import MediaTools
     from dpc_client_core.music.lyrics import MusicLyrics
 
@@ -231,10 +253,13 @@ async def test_a_cached_not_found_is_asked_again_after_its_ttl(tmp_path):
     client, seen = client_for(lambda r: httpx.Response(404))
     cache = LrclibCache(tmp_path / "dpc" / "music" / "lyrics_cache.json", clock=lambda: now[0])
     svc = MusicLyrics(tmp_path / "dpc", _Library(audio), tools=MediaTools(), client=client, cache=cache)
-    assert (await svc.get(track))["lrclib"]["result"] == "not_found"
+    assert (await svc.lookup_lrclib(track))["lrclib"]["result"] == "not_found"
     second = await svc.get(track)
     assert second["lrclib"] == {**second["lrclib"], "result": "not_found", "cached": True}
     assert len(seen) == 1
     now[0] += lyrics_mod.LRCLIB_NEGATIVE_TTL_S + 1
-    await svc.get(track)
+    expired = await svc.get(track)
+    assert expired["lrclib"] is None and expired["chain"][2]["state"] == "not_run"
+    assert len(seen) == 1
+    await svc.lookup_lrclib(track)
     assert len(seen) == 2

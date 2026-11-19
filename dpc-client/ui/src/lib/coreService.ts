@@ -2055,11 +2055,3 @@ export function getMusicLyrics(trackId: string, refresh = false): Promise<MusicA
 export function saveMusicLyrics(trackId: string, lrcText: string): Promise<MusicAnswer<LyricsAnswer>> {
     return callMusic(sendCommand, 'save_music_lyrics', { track_id: trackId, lrc_text: lrcText });
 }
-
-/** "Find on LRCLIB": sends artist, title and duration to lrclib.net. Stored when
- *  nothing is stored or `replace`; otherwise it comes back as `candidate`. */
-export function lookupMusicLyricsLrclib(
-    trackId: string, query: { artist?: string; title?: string; album?: string } = {}, replace = false,
-): Promise<MusicAnswer<LyricsAnswer>> {
-    return callMusic(sendCommand, 'lookup_music_lyrics_lrclib', { track_id: trackId, ...query, replace });
-}

@@ -209,6 +209,9 @@ timestamps lie outside them and are worth one read by Mike before acceptance.
   editing, which is always possible (SPEC §12 decisions 8 and 13). Nothing replaces
   existing lyrics without an explicit choice. Where an edit is saved (tags or a sidecar)
   interacts with track identity: Q4.
+  *Implementation note (2026-11-20):* the automatic chain reads only the local LRCLIB
+  cache; a request to lrclib.net goes out only on the explicit "Find on LRCLIB" lookup
+  (review of `cb9af8a1`: no egress on a track change).
 - **D7. "Generate similar" means both** "same style" (a new song) **and** "cover" (the
   same melody and lyrics with a new arrangement), as two separate actions (SPEC §12
   decision 10).

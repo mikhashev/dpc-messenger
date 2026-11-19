@@ -22,6 +22,7 @@ import {
     listMusicPlaylists,
     removeMusicFolder,
     rescanMusicFolder,
+    sendCommand,
     updateMusicPlaylist,
 } from '$lib/coreService';
 import { detectWindows } from '$lib/utils/attachmentSrc';
@@ -46,7 +47,10 @@ import {
     throttle,
     trackPlaybackUrl,
     VOLUME_SAVE_MS,
+    callMusic,
+    lrclibLookupPayload,
     type LibraryEntry,
+    type LyricsAnswer,
     type MusicAnswer,
     type MusicFolder,
     type PlaybackEnv,
@@ -578,6 +582,20 @@ export function setVolume(volume: number, final = false): void {
     musicPlayback.update(s => ({ ...s, volume: v }));
     rememberVolume.call();
     if (final) rememberVolume.flush();
+}
+
+// -- lyrics ----------------------------------------------------------------------
+
+/** "Find on LRCLIB" (the only call that sends anything to lrclib.net; the core makes
+ *  it, never the webview). `replace` applies a found result over stored lyrics; over
+ *  the person's own (manual or edited) the core also needs `overwriteManual`, which the
+ *  Lyrics area passes only after the person confirms. */
+export function lookupLyricsOnLrclib(
+    trackId: string,
+    query: { artist?: string; title?: string; album?: string } = {},
+    opts: { replace?: boolean; overwriteManual?: boolean } = {},
+): Promise<MusicAnswer<LyricsAnswer>> {
+    return callMusic<LyricsAnswer>(sendCommand, 'lookup_music_lyrics_lrclib', lrclibLookupPayload(trackId, query, opts));
 }
 
 export function clearNotice(): void {

@@ -1,13 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import {
     LRCLIB_EGRESS_TEXT,
+    LYRICS_OVERWRITE_CONFIRM_TEXT,
     countUnstampedLines,
     currentLyricIndex,
     formatLrc,
     guessArtistTitle,
     lrcStamp,
+    lrclibLookupPayload,
     lrclibOutcomeText,
     lyricsBadge,
+    lyricsIsOwnEdit,
     lyricsSynced,
     lyricsWindow,
     stampLrcLine,
@@ -17,6 +20,7 @@ import {
 } from './musicPlayer';
 import lyricsPanel from '../components/music/MusicLyrics.svelte?raw';
 import player from '../components/music/MusicPlayer.svelte?raw';
+import musicService from '../services/music.ts?raw';
 
 // The Lyrics area's pure rules (ADR-051 D6; SPEC flows 11 and 13). The parser and the
 // chain are the core's (dpc_client_core/music/lyrics.py) and tested there.
@@ -149,11 +153,30 @@ describe('LRCLIB in the panel', () => {
     });
 
     it('the panel shows the egress note, and the webview never calls lrclib.net itself', () => {
-        expect(LRCLIB_EGRESS_TEXT).toBe('Sends artist, title and duration to lrclib.net');
+        expect(LRCLIB_EGRESS_TEXT).toBe('Sends artist, title, album and duration to lrclib.net');
         expect(lyricsPanel).toContain('LRCLIB_EGRESS_TEXT');
         expect(lyricsPanel).toContain('Find on LRCLIB');
         expect(lyricsPanel).not.toMatch(/fetch\(|lrclib\.net\/api|XMLHttpRequest/);
         expect(lyricsPanel).toContain('Use LRCLIB lyrics (replaces current)');
+    });
+
+    it('opening a track never asks lrclib.net: the automatic load reads only get_music_lyrics', () => {
+        const effect = lyricsPanel.slice(lyricsPanel.indexOf('// Another track: start over'), lyricsPanel.indexOf('let synced = $derived'));
+        expect(effect).toContain('if (id) load(id);');
+        expect(effect).not.toMatch(/findOnLrclib|lookupLyricsOnLrclib|lookup_music_lyrics_lrclib/);
+        const load = lyricsPanel.slice(lyricsPanel.indexOf('async function load('), lyricsPanel.indexOf('// Another track: start over'));
+        expect(load).toContain('getMusicLyrics(');
+        expect(load).not.toMatch(/findOnLrclib|lookupLyricsOnLrclib|lookup_music_lyrics_lrclib/);
+        // The lookup is reached only from a button.
+        const calls = [...lyricsPanel.matchAll(/findOnLrclib\(/g)].length;
+        const clicks = [...lyricsPanel.matchAll(/onclick=\{\(\) => findOnLrclib\(/g)].length;
+        expect(clicks).toBe(2);
+        expect(calls).toBe(clicks + 1); // + its definition
+    });
+
+    it('the lookup goes through the core command, never straight to lrclib.net', () => {
+        expect(musicService).toContain("'lookup_music_lyrics_lrclib'");
+        expect(musicService).not.toMatch(/fetch\(|lrclib\.net\/api|XMLHttpRequest/);
     });
 
     it('sits in the Listen view under Now playing', () => {
@@ -163,5 +186,44 @@ describe('LRCLIB in the panel', () => {
         expect(now).toBeGreaterThan(0);
         expect(lyr).toBeGreaterThan(now);
         expect(lyr).toBeLessThan(upNext);
+    });
+});
+
+describe('replacing the lyrics the person wrote or edited', () => {
+    const base: Lyrics = { track_hash: 'h', source: 'lrclib', lines: [{ t_start: 1, text: 'a' }] };
+
+    it('manual or edited lyrics are their own; chain lyrics are not', () => {
+        expect(lyricsIsOwnEdit({ ...base, source: 'manual' })).toBe(true);
+        expect(lyricsIsOwnEdit({ ...base, source: 'manual', edited: true })).toBe(true);
+        expect(lyricsIsOwnEdit({ ...base, source: 'tags', edited: true })).toBe(true);
+        expect(lyricsIsOwnEdit(base)).toBe(false);
+        expect(lyricsIsOwnEdit({ ...base, source: 'lrc' })).toBe(false);
+        expect(lyricsIsOwnEdit(null)).toBe(false);
+    });
+
+    it('overwrite_manual is sent only with replace and only when confirmed', () => {
+        expect(lrclibLookupPayload('trk_1', { artist: 'A', title: 'T' }))
+            .toEqual({ track_id: 'trk_1', artist: 'A', title: 'T', replace: false });
+        expect(lrclibLookupPayload('trk_1', {}, { replace: true }))
+            .toEqual({ track_id: 'trk_1', replace: true });
+        expect(lrclibLookupPayload('trk_1', {}, { replace: true, overwriteManual: true }))
+            .toEqual({ track_id: 'trk_1', replace: true, overwrite_manual: true });
+        expect(lrclibLookupPayload('trk_1', {}, { overwriteManual: true }))
+            .toEqual({ track_id: 'trk_1', replace: false });
+    });
+
+    it('the panel asks with the confirm dialog of the app before it sends overwrite_manual', () => {
+        expect(LYRICS_OVERWRITE_CONFIRM_TEXT).toContain('Replace your own lyrics');
+        expect(lyricsPanel).toContain("import { confirmAsync } from '$lib/utils/dialog';");
+        expect(lyricsPanel).not.toMatch(/window\.confirm|[^.\w]confirm\(/);
+        const fn = lyricsPanel.slice(lyricsPanel.indexOf('async function findOnLrclib('), lyricsPanel.indexOf('async function startEdit('));
+        const ask = fn.indexOf('confirmAsync(LYRICS_OVERWRITE_CONFIRM_TEXT');
+        const guard = fn.indexOf('if (!yes || trackId !== id) return;');
+        const send = fn.indexOf('lookupLyricsOnLrclib(');
+        expect(fn).toContain('if (replace && lyricsIsOwnEdit(lyrics))');
+        expect(ask).toBeGreaterThan(0);
+        expect(guard).toBeGreaterThan(ask);
+        expect(send).toBeGreaterThan(guard);
+        expect(fn).toContain("a.code === 'overwrite_manual_required'");
     });
 });

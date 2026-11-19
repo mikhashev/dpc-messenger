@@ -7,24 +7,30 @@
   textarea with "Stamp current time", Alt+L inside it, and Save).
 
   The lyrics come from the core (dpc_client_core/music/lyrics.py) through
-  getMusicLyrics / lookupMusicLyricsLrclib / saveMusicLyrics. The webview never talks
-  to lrclib.net itself: the core makes that call. Nothing replaces stored lyrics
-  without the person's choice: an LRCLIB result over existing lyrics is offered with
-  "Use LRCLIB lyrics (replaces current)".
+  getMusicLyrics / lookupLyricsOnLrclib / saveMusicLyrics. Opening a track runs only
+  getMusicLyrics, which reads the sidecar, the tags and the local LRCLIB cache and sends
+  nothing; lrclib.net is asked only when the person clicks "Find on LRCLIB", and then by
+  the core, never by the webview. Nothing replaces stored lyrics without the person's
+  choice: an LRCLIB result over existing lyrics is offered with "Use LRCLIB lyrics
+  (replaces current)", and over the person's own (manual or edited) lyrics that button
+  asks first (confirmAsync) before it sends overwrite_manual.
 -->
 
 <script lang="ts">
   import { tick, untrack } from 'svelte';
-  import { getMusicLyrics, lookupMusicLyricsLrclib, saveMusicLyrics } from '$lib/coreService';
-  import { seekTo } from '$lib/services/music';
+  import { getMusicLyrics, saveMusicLyrics } from '$lib/coreService';
+  import { lookupLyricsOnLrclib, seekTo } from '$lib/services/music';
+  import { confirmAsync } from '$lib/utils/dialog';
   import {
     LRCLIB_EGRESS_TEXT,
+    LYRICS_OVERWRITE_CONFIRM_TEXT,
     countUnstampedLines,
     formatLrc,
     formatTime,
     guessArtistTitle,
     lrclibOutcomeText,
     lyricsBadge,
+    lyricsIsOwnEdit,
     lyricsSynced,
     lyricsWindow,
     stampLrcLine,
@@ -92,7 +98,8 @@
     status = 'ready';
   }
 
-  // Another track: start over, and read its lyrics (stored, or the chain).
+  // Another track: start over, and read its lyrics (stored, or the chain: sidecar, tags,
+  // the local LRCLIB cache). This runs with no click, so it never asks lrclib.net.
   $effect(() => {
     const id = trackId;
     untrack(() => {
@@ -148,13 +155,27 @@
   async function findOnLrclib(replace = false) {
     const id = trackId;
     if (!id || busy) return;
+    // The person's own lyrics are replaced only after they say so; the core refuses
+    // replace over them without overwrite_manual.
+    let overwriteManual = false;
+    if (replace && lyricsIsOwnEdit(lyrics)) {
+      busy = 'lookup';
+      const yes = await confirmAsync(LYRICS_OVERWRITE_CONFIRM_TEXT, { title: 'Replace lyrics', kind: 'warning' });
+      busy = '';
+      if (!yes || trackId !== id) return;
+      overwriteManual = true;
+    }
     busy = 'lookup';
     message = '';
-    const a = await lookupMusicLyricsLrclib(id, { artist: qArtist.trim(), title: qTitle.trim() }, replace);
+    const a = await lookupLyricsOnLrclib(id, { artist: qArtist.trim(), title: qTitle.trim() }, { replace, overwriteManual });
     busy = '';
     if (trackId !== id) return;
     if (!a.ok) {
-      message = a.unavailable ? 'Lyrics are not available on this backend yet.' : `Find on LRCLIB: ${a.message}`;
+      message = a.unavailable
+        ? 'Lyrics are not available on this backend yet.'
+        : a.code === 'overwrite_manual_required'
+          ? 'Your own lyrics were kept: replacing them needs your confirmation.'
+          : `Find on LRCLIB: ${a.message}`;
       return;
     }
     lyrics = a.data.lyrics ?? null;
@@ -336,7 +357,7 @@
         title={lrclibEnabled ? LRCLIB_EGRESS_TEXT : 'Online lookup is off ([music] lrclib_enabled)'}
       >{busy === 'lookup' ? 'Searching…' : 'Find on LRCLIB'}</button>
     </div>
-    <p class="muted tiny egress">{lrclibEnabled ? `${LRCLIB_EGRESS_TEXT}, an external service (no audio, no file path).` : 'Online lookup is off ([music] lrclib_enabled = false): nothing is sent to lrclib.net.'}</p>
+    <p class="muted tiny egress">{lrclibEnabled ? `${LRCLIB_EGRESS_TEXT}, an external service, only when you click Find on LRCLIB (no audio, no file path).` : 'Online lookup is off ([music] lrclib_enabled = false): nothing is sent to lrclib.net.'}</p>
     {#if lrclib && expanded}<p class="muted tiny" role="status">{lrclibOutcomeText(lrclib)}</p>{/if}
   {/if}
 
@@ -349,9 +370,9 @@
     </details>
   {/if}
   {#if entry && expanded && !editing && status !== 'loading'}
-    <!-- Runs the chain again (a changed sidecar, a retag); a manual edit is never replaced. -->
+    <!-- Runs the chain again (a changed sidecar, a retag), sending nothing; a manual edit is never replaced. -->
     <button type="button" class="small-btn again" onclick={() => trackId && load(trackId, true)} disabled={!!busy}
-      title="Read the .lrc sidecar and the file tags again, then LRCLIB; your own edits are kept">{busy === 'refresh' ? 'Looking…' : 'Look again'}</button>
+      title="Read the .lrc sidecar, the file tags and the local LRCLIB cache again (nothing is sent; Find on LRCLIB asks lrclib.net); your own edits are kept">{busy === 'refresh' ? 'Looking…' : 'Look again'}</button>
   {/if}
 </section>
 

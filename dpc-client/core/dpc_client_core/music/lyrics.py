@@ -12,11 +12,17 @@
    text as unsynced lines. ffprobe does not surface ID3 SYLT (synced) frames: checked
    with ffmpeg 8.1.2 on a hand-built tag holding both a USLT and a SYLT frame, where only
    the USLT came back. So SYLT-only files have no lyrics from this step.
-3. `lrclib`: `GET https://lrclib.net/api/get` by artist, title, album and duration, when
-   `[music] lrclib_enabled` is on (default on; Mike's call that LRCLIB is in the chain,
-   2026-11-19, SPEC §12 decision 13). The record must match the track's duration within
-   ±2 s; `syncedLyrics` is preferred, `plainLyrics` gives unsynced lines, and
-   `instrumental` stops the chain with no lyrics.
+3. `lrclib`: **the local LRCLIB cache only**. The automatic chain (`get`, which the
+   player runs on every track change) never sends a request: it shows what an earlier
+   explicit lookup cached for the same track hash and query, and otherwise reports the
+   step as `not_run`. The request itself, `GET https://lrclib.net/api/get` by artist,
+   title, album and duration, is sent only by `lookup_lrclib`, the person's "Find on
+   LRCLIB" click, and only when `[music] lrclib_enabled` is on (default on; Mike's call
+   that LRCLIB is in the chain, 2026-11-19, SPEC §12 decision 13; that it is never sent
+   without a click follows the review of the first build, 2026-11-20). The record must
+   match the track's duration within ±2 s, compared with the unrounded duration (the
+   request carries whole seconds); `syncedLyrics` is preferred, `plainLyrics` gives
+   unsynced lines, and `instrumental` stops the chain with no lyrics.
 4. `transcribe`: not run here. It is a later explicit action (a `transcribe` job); the
    chain reports it as `not_run`.
 5. `manual`: always possible. `save_manual` stores the person's LRC with
@@ -31,7 +37,10 @@ the file (ADR-051 Q4: tags in watched folders are never rewritten).
 again and replaces what is stored only when it came from the chain (`lrc`, `tags`,
 `lrclib`) and was not edited; manual or edited lyrics are kept and the new result is
 offered as `candidate`. An explicit LRCLIB lookup stores its result only when nothing is
-stored or the caller passes `replace`; otherwise it too answers with a `candidate`.
+stored or the caller passes `replace`; otherwise it too answers with a `candidate`. Over
+manual or edited lyrics `replace` alone is refused (`overwrite_manual_required`): the
+caller must also pass `overwrite_manual`, which the player sends only after the person
+confirms.
 
 **LRCLIB.** The call runs in core with httpx (already a core dependency), never in the
 webview. Requests are serialised with a small gap, carry an identified User-Agent
@@ -40,10 +49,11 @@ and honour `429 Retry-After`: until it passes no request is sent. Timeouts are s
 outcome is cached in `<DPC home>/music/lyrics_cache.json` under the track's hash plus the
 normalised query (`artist|title|album|duration`): found records for good, `not_found`,
 `instrumental`, `mismatch` and `empty` for `LRCLIB_NEGATIVE_TTL_S` (7 days), errors and
-rate limits never. After a network error the automatic chain skips LRCLIB for
-`LRCLIB_ERROR_BACKOFF_S`, so opening tracks offline does not retry on every open; an
-explicit lookup still tries. **Egress:** the query sends the artist, title, album and
-duration (and this machine's IP) to lrclib.net; no audio, no path, no hash.
+rate limits never. The automatic chain shows any cached outcome; an explicit lookup uses
+a cached found record but asks again past a cached negative (the person pressed the
+button to try again), while a `429 Retry-After` block still holds. **Egress:** only on
+the explicit lookup, the query sends the artist, title, album and duration (and this
+machine's IP) to lrclib.net; no audio, no path, no hash.
 """
 
 from __future__ import annotations
@@ -61,6 +71,7 @@ import re
 import threading
 import time
 import unicodedata
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,7 +98,6 @@ LRCLIB_TIMEOUT_S = 8.0
 LRCLIB_MIN_GAP_S = 0.3            # between two requests (the docs: one at a time, 200-500 ms apart)
 LRCLIB_DEFAULT_RETRY_AFTER_S = 60.0
 LRCLIB_MAX_RETRY_AFTER_S = 3600.0
-LRCLIB_ERROR_BACKOFF_S = 60.0     # the automatic chain skips LRCLIB this long after a network error
 LRCLIB_CACHE_MAX_ENTRIES = 5000
 
 SIDECAR_MAX_BYTES = 1024 * 1024
@@ -376,10 +386,18 @@ def _norm(text: Optional[str]) -> str:
 
 @dataclass
 class LrclibQuery:
+    """`duration` is the whole seconds sent to lrclib.net and kept in the cache key;
+    `duration_exact` the track's unrounded duration, which the ±2 s match is checked
+    against (rounding first would widen the tolerance to ±2.5 s). It never leaves core."""
+
     artist: str
     title: str
     album: Optional[str]
     duration: Optional[int]
+    duration_exact: Optional[float] = None
+
+    def match_duration(self) -> Optional[float]:
+        return self.duration_exact if self.duration_exact is not None else self.duration
 
     def key(self) -> str:
         return "|".join((_norm(self.artist), _norm(self.title), _norm(self.album),
@@ -507,8 +525,9 @@ class LrclibClient:
         }
         if rec.get("instrumental") is True:
             return {"result": "instrumental", "record": {**meta, "synced": False}}
-        if (q.duration is not None and meta["duration"] is not None
-                and abs(meta["duration"] - q.duration) > LRCLIB_DURATION_TOLERANCE_S):
+        expected = q.match_duration()
+        if (expected is not None and meta["duration"] is not None
+                and abs(meta["duration"] - expected) > LRCLIB_DURATION_TOLERANCE_S):
             return {"result": "mismatch", "record": {**meta, "synced": False}}
         synced = rec.get("syncedLyrics")
         if isinstance(synced, str):
@@ -619,8 +638,7 @@ class MusicLyrics:
                  lrclib_enabled: Callable[[], bool] = lambda: True,
                  tools: Optional[MediaTools] = None,
                  client: Optional[LrclibClient] = None,
-                 cache: Optional[LrclibCache] = None,
-                 clock: Callable[[], float] = time.monotonic):
+                 cache: Optional[LrclibCache] = None):
         self.library = library
         music_root = music_dir_of(dpc_home_dir)
         self.root = music_root / LYRICS_DIR
@@ -628,9 +646,9 @@ class MusicLyrics:
         self.client = client or LrclibClient()
         self._lrclib_enabled = lrclib_enabled
         self._tools = tools
-        self._clock = clock
-        self._last_error_at = -math.inf
-        self._locks: Dict[str, asyncio.Lock] = {}
+        # One lock per track while someone holds or waits on it: a holder and every
+        # waiter keep a strong reference, so an entry vanishes only when nobody needs it.
+        self._locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
 
     # -- storage ---------------------------------------------------------------
 
@@ -649,8 +667,15 @@ class MusicLyrics:
         except (ValueError, UnicodeDecodeError, schemas.SchemaError) as exc:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             aside = path.with_name(f"{path.name}.corrupt-{stamp}")
+            try:
+                os.replace(path, aside)
+            except OSError as move_exc:
+                # Locked (Windows: another process has it open) or read-only: the file
+                # stays where it is and is treated as absent; the next write replaces it.
+                logger.error("music: %s is not valid lyrics (%s) and could not be moved aside (%s); "
+                             "treating it as absent", path, exc, move_exc)
+                return None
             logger.error("music: %s is not valid lyrics (%s); moved aside to %s", path, exc, aside.name)
-            os.replace(path, aside)
             return None
 
     async def load_stored(self, track_id: str) -> Optional[dict]:
@@ -663,7 +688,8 @@ class MusicLyrics:
     def _lock(self, track_id: str) -> asyncio.Lock:
         lock = self._locks.get(track_id)
         if lock is None:
-            lock = self._locks[track_id] = asyncio.Lock()
+            lock = asyncio.Lock()
+            self._locks[track_id] = lock
         return lock
 
     async def _media_tools(self) -> MediaTools:
@@ -697,23 +723,32 @@ class MusicLyrics:
         q_title = title.strip() if isinstance(title, str) and title.strip() else e_title
         q_album = album.strip() if isinstance(album, str) and album.strip() else (entry.get("album") or None)
         duration = None
+        exact = None
         if duration_s is not None and 1 <= round(duration_s) <= 3600:
             duration = int(round(duration_s))
-        return LrclibQuery(artist=q_artist, title=q_title, album=q_album, duration=duration)
+            exact = float(duration_s)
+        return LrclibQuery(artist=q_artist, title=q_title, album=q_album, duration=duration,
+                           duration_exact=exact)
 
-    async def _lrclib(self, track_hash: str, q: LrclibQuery) -> Dict[str, Any]:
-        """The outcome for a query: from the cache, else from lrclib.net (then cached)."""
+    async def _lrclib_cached(self, track_hash: str, q: LrclibQuery) -> Optional[Dict[str, Any]]:
+        """The cached outcome for a query, or None. Never touches the network."""
         await self.cache.ensure_loaded()
-        key = LrclibCache.make_key(track_hash, q)
-        hit = self.cache.get(key)
-        if hit is not None:
-            hit.pop("fetched_at", None)
-            hit.pop("expires_at", None)
-            return {**hit, "cached": True}
+        hit = self.cache.get(LrclibCache.make_key(track_hash, q))
+        if hit is None:
+            return None
+        hit.pop("fetched_at", None)
+        hit.pop("expires_at", None)
+        return {**hit, "cached": True}
+
+    async def _lrclib_fetch(self, track_hash: str, q: LrclibQuery) -> Dict[str, Any]:
+        """The explicit lookup's outcome: a cached found record, else lrclib.net (then
+        cached). A cached negative is passed over, since the person asked again; the
+        client's `Retry-After` block still holds."""
+        hit = await self._lrclib_cached(track_hash, q)
+        if hit is not None and hit.get("result") in FOUND_RESULTS:
+            return hit
         outcome = await self.client.get(q)
-        if outcome.get("result") == "error":
-            self._last_error_at = self._clock()
-        await self.cache.put(key, outcome)
+        await self.cache.put(LrclibCache.make_key(track_hash, q), outcome)
         return {**outcome, "cached": False}
 
     @staticmethod
@@ -745,7 +780,9 @@ class MusicLyrics:
 
     async def get(self, track_id: str, *, refresh: bool = False) -> Dict[str, Any]:
         """The track's lyrics: stored ones as they are, else (or with `refresh`) the
-        chain's result, stored. See the module docstring for the never-overwrite rule."""
+        chain's result, stored. See the module docstring for the never-overwrite rule.
+        Runs with no click (every track change), so it never sends a request: its LRCLIB
+        step reads the local cache only."""
         lyrics_file = self.lyrics_path(track_id)
         async with self._lock(track_id):
             entry = self.library.get_entry(track_id)
@@ -817,16 +854,14 @@ class MusicLyrics:
                     chain.append(_step("tags", "found",
                                        f"tag {picked[0]}: {len(lines)} {'timed' if synced else 'unsynced'} lines"))
 
-        # (c) LRCLIB
+        # (c) LRCLIB: the local cache only. This chain runs on every track change with
+        # no click, so it never sends anything; "Find on LRCLIB" (`lookup_lrclib`) does.
         lrclib: Optional[dict] = None
         instrumental = False
         if found is not None:
             chain.append(_step("lrclib", "not_needed"))
         elif not lrclib_enabled:
             chain.append(_step("lrclib", "disabled", "online lookup is off ([music] lrclib_enabled)"))
-        elif self._clock() - self._last_error_at < LRCLIB_ERROR_BACKOFF_S:
-            chain.append(_step("lrclib", "skipped",
-                               "lrclib.net could not be reached a moment ago; use Find on LRCLIB to try again"))
         else:
             duration = await self._duration(entry, path, probed)
             q = self.build_query(entry, duration)
@@ -837,19 +872,24 @@ class MusicLyrics:
                 lrclib = {"result": "no_duration", "cached": False, "query": q.as_dict(), "record": None}
                 chain.append(_step("lrclib", "skipped", "the track's duration is unknown, so a match cannot be checked"))
             else:
-                outcome = await self._lrclib(track_hash, q)
-                lrclib = self._lrclib_answer(q, outcome)
-                result = outcome["result"]
-                if result in FOUND_RESULTS:
-                    found = self._lrclib_lyrics(track_hash, outcome)
-                    chain.append(_step("lrclib", "found", f"{result} lyrics, record {outcome['record']['id']}"
-                                       + (" (from the local cache)" if outcome.get("cached") else "")))
-                elif result == "instrumental":
-                    instrumental = True
-                    chain.append(_step("lrclib", "instrumental", "LRCLIB marks this track instrumental"))
+                outcome = await self._lrclib_cached(track_hash, q)
+                if outcome is None:
+                    chain.append(_step("lrclib", "not_run",
+                                       "nothing cached; Find on LRCLIB asks lrclib.net (an explicit action)"))
                 else:
-                    chain.append(_step("lrclib", "none" if result in NEGATIVE_RESULTS else "error",
-                                       outcome.get("error") or result.replace("_", " ")))
+                    lrclib = self._lrclib_answer(q, outcome)
+                    result = outcome["result"]
+                    if result in FOUND_RESULTS:
+                        found = self._lrclib_lyrics(track_hash, outcome)
+                        chain.append(_step("lrclib", "found",
+                                           f"{result} lyrics, record {outcome['record']['id']} (from the local cache)"))
+                    elif result == "instrumental":
+                        instrumental = True
+                        chain.append(_step("lrclib", "instrumental",
+                                           "LRCLIB marks this track instrumental (from the local cache)"))
+                    else:
+                        chain.append(_step("lrclib", "none",
+                                           f"{result.replace('_', ' ')} (from the local cache)"))
 
         # (d) transcribe and (e) manual
         if found is not None:
@@ -862,13 +902,24 @@ class MusicLyrics:
         return found, chain, lrclib
 
     async def lookup_lrclib(self, track_id: str, *, artist: Optional[str] = None, title: Optional[str] = None,
-                            album: Optional[str] = None, replace: bool = False) -> Dict[str, Any]:
-        """The explicit "Find on LRCLIB". A found result is stored when nothing is
-        stored or `replace`; otherwise it comes back as `candidate`."""
+                            album: Optional[str] = None, replace: bool = False,
+                            overwrite_manual: bool = False) -> Dict[str, Any]:
+        """The explicit "Find on LRCLIB", the only path that sends a request. A found
+        result is stored when nothing is stored or `replace`; otherwise it comes back as
+        `candidate`. Over manual or edited lyrics `replace` is refused with
+        `overwrite_manual_required` (before anything is sent) unless `overwrite_manual`
+        is passed too: the person's own lyrics are never replaced by one call."""
         lyrics_file = self.lyrics_path(track_id)
         async with self._lock(track_id):
             entry = self.library.get_entry(track_id)
             stored = await asyncio.to_thread(self._read_stored, lyrics_file)
+            if (replace and not overwrite_manual and stored is not None
+                    and (stored.get("source") == "manual" or stored.get("edited"))):
+                raise MusicLibraryError(
+                    "overwrite_manual_required",
+                    "the stored lyrics are your own edit; replacing them with LRCLIB lyrics needs "
+                    "an explicit confirmation (overwrite_manual)",
+                )
             answer: Dict[str, Any] = {"lyrics": stored, "applied": False, "candidate": None}
             if not self.lrclib_enabled():
                 answer["lrclib"] = {"result": "disabled", "cached": False, "query": None, "record": None}
@@ -882,7 +933,7 @@ class MusicLyrics:
             if q.duration is None:
                 answer["lrclib"] = {"result": "no_duration", "cached": False, "query": q.as_dict(), "record": None}
                 return answer
-            outcome = await self._lrclib(entry["source_hash"], q)
+            outcome = await self._lrclib_fetch(entry["source_hash"], q)
             answer["lrclib"] = self._lrclib_answer(q, outcome)
             if outcome["result"] not in FOUND_RESULTS:
                 return answer

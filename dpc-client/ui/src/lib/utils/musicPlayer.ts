@@ -646,8 +646,31 @@ export interface LyricsAnswer {
     kept?: string;
 }
 
-/** The note shown next to "Find on LRCLIB" (SPEC §6 "Egress/privacy"). */
-export const LRCLIB_EGRESS_TEXT = 'Sends artist, title and duration to lrclib.net';
+/** The note shown next to "Find on LRCLIB" (SPEC §6 "Egress/privacy"). Only that click
+ *  sends anything: opening a track reads the sidecar, the tags and the local cache. */
+export const LRCLIB_EGRESS_TEXT = 'Sends artist, title, album and duration to lrclib.net';
+
+/** The question asked before LRCLIB lyrics replace the person's own (manual or edited). */
+export const LYRICS_OVERWRITE_CONFIRM_TEXT =
+    'Replace your own lyrics with the LRCLIB lyrics? Your edited lyrics will be lost.';
+
+/** True for lyrics the person wrote or edited: LRCLIB never replaces them without a
+ *  confirmation (the core refuses with `overwrite_manual_required`). */
+export function lyricsIsOwnEdit(lyrics: Lyrics | null | undefined): boolean {
+    return !!lyrics && (lyrics.source === 'manual' || lyrics.edited === true);
+}
+
+/** The payload of `lookup_music_lyrics_lrclib`. `overwrite_manual` goes only with
+ *  `replace` and only when the person confirmed replacing their own lyrics. */
+export function lrclibLookupPayload(
+    trackId: string,
+    query: { artist?: string; title?: string; album?: string } = {},
+    opts: { replace?: boolean; overwriteManual?: boolean } = {},
+): Record<string, any> {
+    const payload: Record<string, any> = { track_id: trackId, ...query, replace: opts.replace === true };
+    if (opts.replace === true && opts.overwriteManual === true) payload.overwrite_manual = true;
+    return payload;
+}
 
 export function lyricsSynced(lyrics: Lyrics | null | undefined): boolean {
     return !!lyrics && lyrics.synced !== false && lyrics.lines.some(l => l.t_start != null);

@@ -1,12 +1,16 @@
 """The lyrics chain (ADR-051 D6): a `.lrc` sidecar, then embedded tags, then LRCLIB, then
-manual; stored per track under the DPC home, never next to the person's audio.
+manual; stored per track under the DPC home, never next to the person's audio. The
+automatic chain (`get`, run on every track change) reads only the local LRCLIB cache; a
+request goes out only from the explicit lookup ("Find on LRCLIB").
 
 No test reaches the network: every LRCLIB client here has an `httpx.MockTransport`, and
 the `no_network` fixture makes any real httpx transport fail the test.
 """
 
 import asyncio
+import gc
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -93,13 +97,21 @@ def audio(tmp_path):
     return path
 
 
-def make(tmp_path, library, *, tags=None, lrclib=None, enabled=True, ffprobe=True, calls=None, clock=None):
+def make(tmp_path, library, *, tags=None, lrclib=None, enabled=True, ffprobe=True, calls=None):
     tools = MediaTools(ffmpeg=None, ffprobe="ffprobe" if ffprobe else None, runner=probe_runner(tags, calls=calls))
-    kw = {}
-    if clock is not None:
-        kw["clock"] = clock
     return MusicLyrics(tmp_path / "dpc", library, lrclib_enabled=lambda: enabled, tools=tools,
-                       client=(lrclib or Lrclib(ok(record()))).client(), **kw)
+                       client=(lrclib or Lrclib(ok(record()))).client())
+
+
+class ForbiddenClient:
+    """An LRCLIB client that fails the test if asked: the automatic chain must not ask."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def get(self, q):
+        self.calls += 1
+        raise AssertionError(f"the automatic chain asked lrclib.net: {q}")
 
 
 def snapshot(folder):
@@ -146,11 +158,69 @@ async def test_a_sidecar_without_timed_lines_falls_through_to_the_tags(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_without_sidecar_and_tags_lrclib_is_asked_with_the_entry_metadata(tmp_path, audio):
+async def test_without_sidecar_and_tags_the_automatic_chain_sends_nothing(tmp_path, audio):
     server = Lrclib(ok(record()))
     svc = make(tmp_path, FakeLibrary(audio, artist="Band", title="Song", album="LP", duration_s=215.4), lrclib=server)
     answer = await svc.get(TRACK_ID)
-    assert answer["lyrics"]["source"] == "lrclib"
+    assert answer["lyrics"] is None and answer["lrclib"] is None
+    assert answer["chain"][2]["state"] == "not_run" and "Find on LRCLIB" in answer["chain"][2]["detail"]
+    assert answer["lrclib_enabled"] is True
+    refreshed = await svc.get(TRACK_ID, refresh=True)
+    assert refreshed["chain"][2]["state"] == "not_run"
+    assert server.requests == []
+    assert not (tmp_path / "dpc" / "music" / "lyrics" / f"{TRACK_ID}.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_get_music_lyrics_never_calls_the_lrclib_client(tmp_path, audio):
+    """Whatever the cache holds (nothing, a negative, a found record), `get` and
+    `get(refresh=True)` never ask the client."""
+    forbidden = ForbiddenClient()
+    tools = MediaTools(ffmpeg=None, ffprobe="ffprobe", runner=probe_runner())
+    lib = FakeLibrary(audio, artist="Band", title="Song", duration_s=215)
+    svc = MusicLyrics(tmp_path / "dpc", lib, tools=tools, client=forbidden)
+    assert (await svc.get(TRACK_ID))["chain"][2]["state"] == "not_run"
+    assert (await svc.get(TRACK_ID, refresh=True))["chain"][2]["state"] == "not_run"
+    key = LrclibCache.make_key("sha256:aa", MusicLyrics.build_query(lib.entry, 215))
+    await svc.cache.put(key, {"result": "not_found"})
+    negative = await svc.get(TRACK_ID)
+    assert negative["lrclib"]["result"] == "not_found" and negative["lrclib"]["cached"] is True
+    assert negative["chain"][2]["state"] == "none"
+    await svc.cache.put(key, {"result": "synced",
+                              "record": {"id": 9, "artist_name": "Band", "track_name": "Song",
+                                         "album_name": None, "duration": 215, "synced": True},
+                              "lines": [{"t_start": 1.0, "text": "cached"}]})
+    hit = await svc.get(TRACK_ID, refresh=True)
+    assert hit["lyrics"]["source"] == "lrclib" and hit["lyrics"]["lines"] == [{"t_start": 1.0, "text": "cached"}]
+    assert "from the local cache" in hit["chain"][2]["detail"]
+    assert forbidden.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_cached_record_from_an_explicit_lookup_feeds_a_later_automatic_chain(tmp_path, audio):
+    server = Lrclib(ok(record()))
+    first = make(tmp_path, FakeLibrary(audio, artist="Band", title="Song", duration_s=215), lrclib=server,
+                 tags={"LYRICS": "[00:01.00] tag"})
+    await first.get(TRACK_ID)  # the tags are stored
+    offered = await first.lookup_lrclib(TRACK_ID)  # fetched, cached, offered as a candidate
+    assert offered["candidate"]["source"] == "lrclib"
+    (tmp_path / "dpc" / "music" / "lyrics" / f"{TRACK_ID}.json").unlink()
+    # A later session over the same home: no stored lyrics, no tags now, a client that must not be asked.
+    later = MusicLyrics(tmp_path / "dpc", FakeLibrary(audio, artist="Band", title="Song", duration_s=215),
+                        tools=MediaTools(ffmpeg=None, ffprobe="ffprobe", runner=probe_runner()),
+                        client=ForbiddenClient())
+    answer = await later.get(TRACK_ID)
+    assert answer["lyrics"]["source"] == "lrclib" and answer["lrclib"]["cached"] is True
+    assert [s["state"] for s in answer["chain"]] == ["none", "none", "found", "not_needed", "available"]
+    assert len(server.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_explicit_lookup_asks_lrclib_with_the_entry_metadata(tmp_path, audio):
+    server = Lrclib(ok(record()))
+    svc = make(tmp_path, FakeLibrary(audio, artist="Band", title="Song", album="LP", duration_s=215.4), lrclib=server)
+    answer = await svc.lookup_lrclib(TRACK_ID)
+    assert answer["applied"] is True and answer["lyrics"]["source"] == "lrclib"
     assert answer["lyrics"]["lrclib"] == {"id": 42, "artist_name": "Band", "track_name": "Song",
                                           "album_name": "LP", "duration": 215, "synced": True}
     assert answer["lrclib"]["result"] == "synced" and answer["lrclib"]["cached"] is False
@@ -159,15 +229,16 @@ async def test_without_sidecar_and_tags_lrclib_is_asked_with_the_entry_metadata(
     assert dict(request.url.params) == {"artist_name": "Band", "track_name": "Song", "album_name": "LP", "duration": "215"}
     assert request.headers["user-agent"].startswith("dpc-messenger-music/")
     assert "+https://github.com/mikhashev/dpc-messenger" in request.headers["user-agent"]
-    assert [s["step"] for s in answer["chain"]] == ["lrc", "tags", "lrclib", "transcribe", "manual"]
-    assert answer["chain"][3]["state"] == "not_needed"
+    back = await svc.get(TRACK_ID)
+    assert back["from_store"] is True and back["lyrics"] == answer["lyrics"]
+    assert len(server.requests) == 1
 
 
 @pytest.mark.asyncio
 async def test_artist_and_title_come_from_the_file_name_without_tags(tmp_path, audio):
     server = Lrclib(ok(record()))
     svc = make(tmp_path, FakeLibrary(audio), lrclib=server)  # duration from ffprobe: 215.4
-    await svc.get(TRACK_ID)
+    await svc.lookup_lrclib(TRACK_ID)
     [request] = server.requests
     assert request.url.params["artist_name"] == "Band" and request.url.params["track_name"] == "Song"
     assert request.url.params["duration"] == "215"
@@ -187,6 +258,7 @@ async def test_without_an_artist_or_a_duration_lrclib_is_skipped(tmp_path):
     answer = await svc2.get(TRACK_ID)
     assert answer["lrclib"]["result"] == "no_duration"
     assert answer["chain"][1]["state"] == "unavailable"
+    assert (await svc.lookup_lrclib(TRACK_ID))["lrclib"]["result"] == "no_query"
     assert server.requests == []
 
 
@@ -194,7 +266,10 @@ async def test_without_an_artist_or_a_duration_lrclib_is_skipped(tmp_path):
 async def test_instrumental_stops_the_chain_without_lyrics(tmp_path, audio):
     server = Lrclib(ok(record(instrumental=True, plainLyrics=None, syncedLyrics=None)))
     svc = make(tmp_path, FakeLibrary(audio, duration_s=215), lrclib=server)
-    answer = await svc.get(TRACK_ID)
+    looked = await svc.lookup_lrclib(TRACK_ID)
+    assert looked["applied"] is False and looked["lrclib"]["result"] == "instrumental"
+    answer = await svc.get(TRACK_ID)  # the cached outcome; nothing more is sent
+    assert len(server.requests) == 1
     assert answer["lyrics"] is None and answer["lrclib"]["result"] == "instrumental"
     assert answer["chain"][2]["state"] == "instrumental"
     assert "instrumental" in answer["chain"][3]["detail"]
@@ -215,21 +290,36 @@ async def test_the_disabled_setting_sends_nothing(tmp_path, audio):
 
 
 @pytest.mark.asyncio
-async def test_a_network_error_makes_the_automatic_chain_wait_but_not_the_explicit_lookup(tmp_path, audio):
+async def test_a_network_error_is_not_cached_and_the_next_click_tries_again(tmp_path, audio):
     def down(request):
         raise httpx.ConnectError("offline", request=request)
     server = Lrclib(down)
-    now = [1000.0]
-    svc = make(tmp_path, FakeLibrary(audio, duration_s=215), lrclib=server, clock=lambda: now[0])
-    first = await svc.get(TRACK_ID)
+    svc = make(tmp_path, FakeLibrary(audio, duration_s=215), lrclib=server)
+    first = await svc.lookup_lrclib(TRACK_ID)
     assert first["lrclib"]["result"] == "error" and "could not reach" in first["lrclib"]["error"]
-    second = await svc.get(TRACK_ID)
-    assert second["chain"][2]["state"] == "skipped" and len(server.requests) == 1
+    chain = await svc.get(TRACK_ID)
+    assert chain["chain"][2]["state"] == "not_run" and len(server.requests) == 1
     await svc.lookup_lrclib(TRACK_ID)
     assert len(server.requests) == 2
-    now[0] += lyrics_mod.LRCLIB_ERROR_BACKOFF_S + 1
-    await svc.get(TRACK_ID)
-    assert len(server.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_lookup_asks_again_past_a_cached_not_found_but_not_past_a_429(tmp_path, audio):
+    replies = [httpx.Response(404), httpx.Response(429, headers={"Retry-After": "120"}),
+               httpx.Response(200, json=record())]
+    server = Lrclib(lambda request: replies.pop(0))
+    svc = make(tmp_path, FakeLibrary(audio, duration_s=215), lrclib=server)
+    assert (await svc.lookup_lrclib(TRACK_ID))["lrclib"]["result"] == "not_found"
+    assert (await svc.get(TRACK_ID))["lrclib"]["result"] == "not_found"  # the chain shows the cached negative
+    limited = await svc.lookup_lrclib(TRACK_ID)  # the button passes over the cached negative
+    assert limited["lrclib"]["result"] == "rate_limited" and len(server.requests) == 2
+    blocked = await svc.lookup_lrclib(TRACK_ID)  # but the Retry-After block holds
+    assert blocked["lrclib"]["result"] == "rate_limited" and len(server.requests) == 2
+    svc.client.blocked_until = -1.0
+    found = await svc.lookup_lrclib(TRACK_ID)
+    assert found["applied"] is True and len(server.requests) == 3
+    again = await svc.lookup_lrclib(TRACK_ID)  # a cached found record is used, not fetched again
+    assert again["lrclib"]["cached"] is True and len(server.requests) == 3
 
 
 # -- storage and the never-overwrite rule --------------------------------------------
@@ -239,7 +329,7 @@ async def test_found_lyrics_are_stored_and_returned_from_the_store(tmp_path, aud
     server = Lrclib(ok(record()))
     calls = []
     svc = make(tmp_path, FakeLibrary(audio, duration_s=215), lrclib=server, calls=calls)
-    await svc.get(TRACK_ID)
+    await svc.lookup_lrclib(TRACK_ID)
     stored_file = tmp_path / "dpc" / "music" / "lyrics" / f"{TRACK_ID}.json"
     on_disk = json.loads(stored_file.read_text(encoding="utf-8"))
     assert on_disk["source"] == "lrclib" and on_disk["track_hash"] == "sha256:aa"
@@ -277,9 +367,84 @@ async def test_an_explicit_lookup_replaces_stored_lyrics_only_when_asked(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prior", ["manual", "edited"])
+async def test_replace_over_the_persons_own_lyrics_needs_overwrite_manual(tmp_path, audio, prior):
+    server = Lrclib(ok(record()))
+    svc = make(tmp_path, FakeLibrary(audio, duration_s=215), lrclib=server,
+               tags={"LYRICS": "[00:01.00] tag"} if prior == "edited" else None)
+    if prior == "edited":
+        await svc.get(TRACK_ID)  # the tags are stored, then edited
+    await svc.save_manual(TRACK_ID, "[00:05.00] my own words")
+    mine = await svc.load_stored(TRACK_ID)
+    assert mine["source"] == "manual" and bool(mine.get("edited")) is (prior == "edited")
+
+    with pytest.raises(MusicLibraryError) as refused:
+        await svc.lookup_lrclib(TRACK_ID, replace=True)
+    assert refused.value.code == "overwrite_manual_required"
+    assert server.requests == []  # refused before anything was sent
+    assert await svc.load_stored(TRACK_ID) == mine
+
+    offered = await svc.lookup_lrclib(TRACK_ID)  # no replace: a candidate, the edit kept
+    assert offered["applied"] is False and offered["candidate"]["source"] == "lrclib"
+    assert await svc.load_stored(TRACK_ID) == mine
+
+    taken = await svc.lookup_lrclib(TRACK_ID, replace=True, overwrite_manual=True)
+    assert taken["applied"] is True and taken["lyrics"]["source"] == "lrclib"
+    assert (await svc.load_stored(TRACK_ID))["source"] == "lrclib"
+    assert len(server.requests) == 1  # the confirmed replace used the cached record
+
+
+@pytest.mark.asyncio
+async def test_overwrite_manual_without_replace_does_not_replace(tmp_path, audio):
+    svc = make(tmp_path, FakeLibrary(audio, duration_s=215))
+    await svc.save_manual(TRACK_ID, "[00:05.00] mine")
+    answer = await svc.lookup_lrclib(TRACK_ID, overwrite_manual=True)
+    assert answer["applied"] is False and answer["lyrics"]["source"] == "manual"
+    assert answer["candidate"]["source"] == "lrclib"
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_lookups_on_one_track_send_one_request_and_store_once(tmp_path, audio):
+    class SlowTransport(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self.requests = []
+
+        async def handle_async_request(self, request):
+            self.requests.append(request)
+            await asyncio.sleep(0.05)
+            return httpx.Response(200, json=record())
+
+    transport = SlowTransport()
+    tools = MediaTools(ffmpeg=None, ffprobe="ffprobe", runner=probe_runner())
+    svc = MusicLyrics(tmp_path / "dpc", FakeLibrary(audio, artist="Band", title="Song", duration_s=215),
+                      tools=tools, client=LrclibClient(transport=transport, min_gap_s=0))
+    a, b = await asyncio.gather(svc.lookup_lrclib(TRACK_ID), svc.lookup_lrclib(TRACK_ID))
+    assert len(transport.requests) == 1
+    assert sorted([a["applied"], b["applied"]]) == [False, True]
+    second = b if a["applied"] else a
+    assert second["lrclib"]["cached"] is True and second["candidate"]["source"] == "lrclib"
+    assert (await svc.load_stored(TRACK_ID))["source"] == "lrclib"
+
+
+@pytest.mark.asyncio
+async def test_the_per_track_locks_do_not_pile_up(tmp_path, audio):
+    svc = make(tmp_path, FakeLibrary(audio, duration_s=215), tags={"LYRICS": "[00:01.00] tag"})
+    await svc.get(TRACK_ID)
+    await svc.lookup_lrclib(TRACK_ID)
+    await svc.save_manual(TRACK_ID, "[00:01.00] mine")
+    gc.collect()
+    assert len(svc._locks) == 0
+    held = svc._lock(TRACK_ID)
+    assert svc._lock(TRACK_ID) is held  # the same lock while someone has it
+    del held
+    gc.collect()
+    assert len(svc._locks) == 0
+
+
+@pytest.mark.asyncio
 async def test_a_manual_edit_round_trips(tmp_path, audio):
     svc = make(tmp_path, FakeLibrary(audio, duration_s=215))
-    first = await svc.get(TRACK_ID)  # LRCLIB synced lyrics are stored
+    first = await svc.lookup_lrclib(TRACK_ID)  # LRCLIB synced lyrics are stored
     text = lyrics_mod.format_lrc(first["lyrics"]) + "\n[00:03.00] a third line <00:04.50>"
     saved = (await svc.save_manual(TRACK_ID, text))["lyrics"]
     assert saved["source"] == "manual" and saved["edited"] is True and "lrclib" not in saved
@@ -316,6 +481,29 @@ async def test_a_corrupt_stored_file_is_moved_aside(tmp_path, audio):
 
 
 @pytest.mark.asyncio
+async def test_a_corrupt_stored_file_that_cannot_be_moved_is_treated_as_absent(tmp_path, audio, monkeypatch, caplog):
+    """A file another process holds open cannot be renamed on Windows; the command must
+    not fail on it."""
+    svc = make(tmp_path, FakeLibrary(audio, duration_s=215), tags={"LYRICS": "[00:01.00] tag"})
+    stored = tmp_path / "dpc" / "music" / "lyrics" / f"{TRACK_ID}.json"
+    stored.parent.mkdir(parents=True)
+    stored.write_text("{not json", encoding="utf-8")
+    real_replace = os.replace
+
+    def locked(src, dst):
+        if ".corrupt-" in str(dst):
+            raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+        return real_replace(src, dst)
+    monkeypatch.setattr(lyrics_mod.os, "replace", locked)
+    assert await svc.load_stored(TRACK_ID) is None
+    assert stored.read_text(encoding="utf-8") == "{not json"
+    assert "could not be moved aside" in caplog.text
+    answer = await svc.get(TRACK_ID)  # the command answers; the chain's result replaces the bad file
+    assert answer["lyrics"]["source"] == "tags"
+    assert json.loads(stored.read_text(encoding="utf-8"))["source"] == "tags"
+
+
+@pytest.mark.asyncio
 async def test_nothing_is_written_into_the_persons_folder(tmp_path, audio):
     (audio.parent / "Other - Track.flac").write_bytes(b"fLaC....")
     before = snapshot(audio.parent)
@@ -323,6 +511,7 @@ async def test_nothing_is_written_into_the_persons_folder(tmp_path, audio):
     await svc.get(TRACK_ID)
     await svc.lookup_lrclib(TRACK_ID, replace=True)
     await svc.save_manual(TRACK_ID, "[00:01.00] mine")
+    await svc.lookup_lrclib(TRACK_ID, replace=True, overwrite_manual=True)
     await svc.get(TRACK_ID, refresh=True)
     assert snapshot(audio.parent) == before
     assert not audio.with_suffix(".lrc").exists()
@@ -405,6 +594,61 @@ def test_the_lyrics_commands_are_coroutines_and_in_the_allowlist():
     assert getattr(MusicCommandsMixin.get_music_lyrics, "dpc_slow", False)
     assert getattr(MusicCommandsMixin.lookup_music_lyrics_lrclib, "dpc_slow", False)
     assert not getattr(MusicCommandsMixin.save_music_lyrics, "dpc_slow", False)
+
+
+@pytest.mark.asyncio
+async def test_the_lookup_command_passes_overwrite_manual_only_when_it_is_true(tmp_path, monkeypatch):
+    seen = []
+
+    class FakeLyrics:
+        async def lookup_lrclib(self, track_id, **kw):
+            seen.append(kw)
+            if kw["replace"] and not kw["overwrite_manual"]:
+                raise MusicLibraryError("overwrite_manual_required", "needs confirmation")
+            return {"lyrics": None, "applied": True, "candidate": None}
+
+    service = _Service(tmp_path)
+
+    async def fake_lyrics():
+        return FakeLyrics()
+    monkeypatch.setattr(service, "_music_lyrics", fake_lyrics)
+    refused = await service.lookup_music_lyrics_lrclib(track_id=TRACK_ID, replace=True)
+    assert refused == {"status": "error", "code": "overwrite_manual_required", "message": "needs confirmation"}
+    truthy = await service.lookup_music_lyrics_lrclib(track_id=TRACK_ID, replace=True, overwrite_manual="yes")
+    assert truthy["status"] == "error"  # only a real true confirms
+    confirmed = await service.lookup_music_lyrics_lrclib(track_id=TRACK_ID, replace=True, overwrite_manual=True)
+    assert confirmed["status"] == "ok"
+    assert [kw["overwrite_manual"] for kw in seen] == [False, False, True]
+
+
+@pytest.mark.asyncio
+async def test_the_get_command_sends_nothing_over_a_real_library(tmp_path, monkeypatch):
+    def init(original):
+        def wrapped(self, home, **kw):
+            kw.setdefault("tools", MediaTools(ffmpeg=None, ffprobe=None))
+            kw.setdefault("save_delay_s", 0.01)
+            original(self, home, **kw)
+        return wrapped
+    monkeypatch.setattr(commands.MusicLibrary, "__init__", init(commands.MusicLibrary.__init__))
+    music = tmp_path / "Music"
+    music.mkdir()
+    (music / "Band - Song.mp3").write_bytes(b"audio bytes")
+    service = _Service(tmp_path / "dpc", {("music", "lrclib_enabled"): "true"})
+    try:
+        folder = (await service.add_music_folder(path=str(music)))["folder"]
+        await service.rescan_music_folder(folder_id=folder["id"])
+        await service._music_library_instance.wait_hashed()
+        [entry] = (await service.list_music_library())["entries"]
+        lyr = await service._music_lyrics()
+        lyr._tools = MediaTools(ffmpeg=None, ffprobe=None)
+        forbidden = ForbiddenClient()
+        lyr.client = forbidden
+        for refresh in (False, True):
+            got = await service.get_music_lyrics(track_id=entry["id"], refresh=refresh)
+            assert got["status"] == "ok" and got["lyrics"] is None and got["lrclib_enabled"] is True
+        assert forbidden.calls == 0
+    finally:
+        await service.stop_music_library()
 
 
 @pytest.mark.parametrize("raw,expected", [(None, True), ("true", True), ("0", False), ("off", False),
