@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cancelNotice, notOfferedNotice, unansweredNotice, type GroupSendResult } from './fileTransferNotice';
+import { cancelNotice, notOfferedNotice, savedOnlyHereNotice, unansweredNotice, type GroupSendResult } from './fileTransferNotice';
 
 const SENTENCE = 'Upload limit reached: 3 uploads are open and the limit is 3 ([file_transfer] max_concurrent_transfers in config.ini, read at start). Open now: a.txt to Ann (waiting for an answer). Each stays open until its receiver answers and the transfer ends.';
 const names: Record<string, string> = { 'dpc-node-d': 'Dora' };
@@ -99,5 +99,24 @@ describe('an offer that expired unanswered', () => {
         const refused = { ...upload, reason: 'firewall_denied', denial_reason: 'too big' };
         expect(cancelNotice(refused, nameOf).toast).toBe('\u2717 Transfer cancelled: a.zip (firewall_denied: too big)');
         expect(unansweredNotice(refused, nameOf)).toBeNull();
+    });
+});
+
+describe('savedOnlyHereNotice', () => {
+    it('says the file is kept and there is no other node, for a group of one node', () => {
+        expect(savedOnlyHereNotice({ saved_locally: true, transfer_ids: [], offline_members: [] }, nameOf))
+            .toBe('Saved in the group. No other node in this group to send it to.');
+    });
+
+    it('names the members that were offline when nobody was offered the file', () => {
+        expect(savedOnlyHereNotice({ saved_locally: true, transfer_ids: [], offline_members: ['dpc-node-d', 'dpc-node-x'] }, nameOf))
+            .toBe('Saved in the group. Not sent: no member is online (Dora, dpc-node-x).');
+    });
+
+    it('stays out of the way when somebody was offered the file, or the answer is not a local-first one', () => {
+        expect(savedOnlyHereNotice({ saved_locally: true, transfer_ids: ['t1'], offline_members: ['dpc-node-d'] }, nameOf)).toBeNull();
+        expect(savedOnlyHereNotice({ saved_locally: true, transfer_ids: [], not_offered: capped.not_offered }, nameOf)).toBeNull();
+        expect(savedOnlyHereNotice({ transfer_ids: [] }, nameOf)).toBeNull();
+        expect(savedOnlyHereNotice(null, nameOf)).toBeNull();
     });
 });

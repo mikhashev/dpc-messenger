@@ -6,7 +6,7 @@
   import type { Writable } from 'svelte/store';
   import { get } from 'svelte/store';
   import FileTransferUI from '$lib/components/FileTransferUI.svelte';
-  import { cancelNotice, refusalNotice, unansweredNotice, notOfferedNotice } from '$lib/fileTransferNotice';
+  import { cancelNotice, refusalNotice, unansweredNotice, notOfferedNotice, savedOnlyHereNotice } from '$lib/fileTransferNotice';
   import VoiceRecorder from '$lib/components/VoiceRecorder.svelte';
   import TokenWarningBanner from '$lib/components/TokenWarningBanner.svelte';
   import ProviderRetryBanner from '$lib/components/ProviderRetryBanner.svelte';
@@ -847,9 +847,11 @@
       pendingFileSend = null;
       describeForAgents = false;
       if (!(groupResult && reportNotOffered(groupId, groupResult))) {
-        fileOfferToastMessage = 'Sending...';
+        // A group file offered to nobody is kept here, not "sending".
+        const keptOnly = savedOnlyHereNotice(groupResult, (id) => peerDisplayNames.get(id));
+        fileOfferToastMessage = keptOnly ?? 'Sending...';
         showFileOfferToast = true;
-        setTimeout(() => (showFileOfferToast = false), 3000);
+        setTimeout(() => (showFileOfferToast = false), keptOnly ? 5000 : 3000);
       }
     } catch (error) {
       fileOfferToastMessage = `Failed to send: ${error}`;

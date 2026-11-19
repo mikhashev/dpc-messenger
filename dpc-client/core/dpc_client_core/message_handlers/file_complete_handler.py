@@ -133,6 +133,12 @@ class FileCompleteHandler(MessageHandler):
                 # Dedup: for group sends, one transfer per recipient all complete separately.
                 # Only show in UI and add to history once (on the first FILE_COMPLETE).
                 ui_dedup_key = group_file_ui_key(transfer.group_id, transfer.filename)
+                if (ui_dedup_key not in self.service._processed_message_ids
+                        and self._sender_record_exists(transfer)):
+                    # The send path wrote the record (local-first) and its key has
+                    # since left the bounded window: a large file can take longer
+                    # to upload than a thousand other messages take to arrive.
+                    self.service._processed_message_ids.add(ui_dedup_key)
                 if ui_dedup_key not in self.service._processed_message_ids:
                     self.service._processed_message_ids.add(ui_dedup_key)
                     message_event["group_id"] = transfer.group_id
@@ -197,3 +203,20 @@ class FileCompleteHandler(MessageHandler):
         self.logger.debug(f"FILE_COMPLETE processed, transfer marked as completed: {transfer.filename}")
 
         return None
+
+    def _sender_record_exists(self, transfer) -> bool:
+        """Whether this node's group history already holds its own record of the file.
+
+        Found by the message id the file was offered under, as the receive side
+        finds the author's record (`find_file_record`). False when the transfer
+        carries no id or the monitor cannot say.
+        """
+        if not transfer.message_id:
+            return False
+        monitor = self.service._get_or_create_conversation_monitor(transfer.group_id)
+        finder = getattr(monitor, "find_file_record", None)
+        if not callable(finder):
+            return False
+        found = finder(self.service.p2p_manager.node_id, transfer.filename,
+                       transfer.size_bytes, transfer.hash, message_id=transfer.message_id)
+        return isinstance(found, dict)

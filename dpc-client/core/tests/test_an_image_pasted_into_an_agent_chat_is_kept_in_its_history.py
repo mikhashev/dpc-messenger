@@ -258,7 +258,8 @@ def test_an_image_that_was_not_kept_says_that_instead_of_naming_a_path():
 def test_a_message_without_an_attachment_replays_exactly_as_before():
     assert history_body(_record()) == "what is this?"
     assert history_body(_record([])) == "what is this?"
-    assert history_body(_record([{"type": "voice", "filename": "v.wav"}])) == "what is this?"
+    # A voice or file attachment carries a marker of its own since 2026-11-19:
+    # test_a_file_sent_to_a_group_of_one_node_is_kept_and_its_agents_see_it.py
 
 
 def test_a_filename_cannot_end_the_marker_or_start_a_line_of_its_own():

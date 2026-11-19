@@ -120,10 +120,38 @@ export interface GroupSendResult {
     transfer_ids?: string[];
     not_offered?: NotOfferedRow[];
     upload_limit?: { limit: number; sentence: string };
+    /** `send_group_file`: the copy and the sender's record were written before any offer. */
+    saved_locally?: boolean;
+    /** `send_group_file`: the other member nodes that were not connected, so not offered. */
+    offline_members?: string[];
 }
 
 const UPLOAD_LIMIT_REASON = 'max_concurrent_transfers';
 const TOAST_NAMES = 3;
+
+/**
+ * The toast for a group file kept here and offered to nobody, or null when
+ * somebody was offered it (or the answer is not `send_group_file`'s).
+ *
+ * A group whose only node is this one (a person and its agents) has no member
+ * to send to; "Sending..." told the person the file was on its way when it went
+ * nowhere. The file is in the group's history either way.
+ */
+export function savedOnlyHereNotice(
+    result: GroupSendResult | null | undefined,
+    nameOf: (nodeId: string) => string | undefined,
+): string | null {
+    if (!result?.saved_locally) return null;
+    if (Array.isArray(result.transfer_ids) && result.transfer_ids.length > 0) return null;
+    if (Array.isArray(result.not_offered) && result.not_offered.length > 0) return null;
+    const offline = Array.isArray(result.offline_members) ? result.offline_members : [];
+    if (offline.length === 0) {
+        return 'Saved in the group. No other node in this group to send it to.';
+    }
+    const names = offline.map((id) => nameOf(id) || id);
+    const shown = names.slice(0, TOAST_NAMES).join(', ') + (names.length > TOAST_NAMES ? ` and ${names.length - TOAST_NAMES} more` : '');
+    return `Saved in the group. Not sent: no member is online (${shown}).`;
+}
 
 /**
  * The warning for a group send that left members out, or null when it offered

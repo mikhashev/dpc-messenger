@@ -874,7 +874,7 @@ def history_body(record: Dict[str, Any]) -> str:
     if record.get("turn_end") == "failed":
         lines = content.strip().splitlines()
         return lines[0][:FAILED_TURN_REPLAY_CHARS] if lines else ""
-    markers = image_attachment_markers(record)
+    markers = image_attachment_markers(record) + file_attachment_markers(record)
     if markers:
         return (content + "\n\n" if content else "") + "\n".join(markers)
     return content
@@ -901,9 +901,10 @@ def image_attachment_markers(record: Dict[str, Any]) -> List[str]:
     it is kept, as a path under the DPC home — the folder above `agents/` in
     the sandbox path the runtime section shows — so the agent can open it again
     with describe_image without the machine's user name travelling in the prompt.
-    describe_image checks an absolute path against the firewall, and no default
-    grants read access to the conversations folder, so the marker says the
-    reopening depends on that access instead of promising it.
+    describe_image checks an absolute path against the firewall; since 2026-11-11
+    an agent may read the `files/` of its own chats (`reads_own_chat_files`), but
+    the owner's extended-read switch and the turn's audience still decide, so the
+    marker says the reopening depends on that access instead of promising it.
     A record whose image was not kept on disk says so. The thumbnail and the
     bytes never go in. A function of the record alone, like `history_body`.
     """
@@ -920,17 +921,66 @@ def image_attachment_markers(record: Dict[str, Any]) -> List[str]:
         if not file_path:
             out.append(f"[image: {name}{size}; not kept on disk, it was visible in that turn only]")
             continue
-        found = _CONVERSATION_FILE.search(str(file_path))
-        if found:
-            where = "conversations/{}/files/{}".format(
-                _marker_text(found.group(1)),
-                "/".join(_marker_text(part) for part in re.split(r"[\\/]", found.group(2))))
-        else:
-            where = f"this chat's files folder, as {name}"
+        where = _kept_at(file_path, name)
         out.append(
             f"[image: {name}{size}; kept at {where} under the DPC home "
             "(the folder above agents/ in your sandbox path); describe_image can open it "
             "again where your read access reaches that folder]")
+    return out
+
+
+def _kept_at(file_path: Any, name: str) -> str:
+    """Where an attachment is kept, as a path under the DPC home, never the absolute one."""
+    found = _CONVERSATION_FILE.search(str(file_path))
+    if found:
+        return "conversations/{}/files/{}".format(
+            _marker_text(found.group(1)),
+            "/".join(_marker_text(part) for part in re.split(r"[\\/]", found.group(2))))
+    return f"this chat's files folder, as {name}"
+
+
+# The attachment types `file_attachment_markers` names, and the word each is named with.
+_FILE_MARKER_KINDS = {"file": "file", "voice": "voice message"}
+
+
+def file_attachment_markers(record: Dict[str, Any]) -> List[str]:
+    """One line per file or voice message attached to a history record.
+
+    The sibling of `image_attachment_markers` for what a model cannot see: an
+    mp3, a PDF or a voice note sent into a chat reached the agent as the record's
+    text alone ("Sent file: x.mp3 (4.69 MB)"), with nothing saying where the
+    bytes are. The marker names the file, its MIME type, its size, and where it
+    is kept under the DPC home, in the same words the image marker uses, so the
+    agent can open it with a file tool (read_file, read_document,
+    transcribe_audio_file) on a later turn. Images keep their own marker: they also
+    went in as vision input, and describe_image is their tool. Nothing of the
+    file's content goes in. A function of the record alone, like `history_body`.
+    """
+    out: List[str] = []
+    for att in record.get("attachments") or []:
+        if not isinstance(att, dict):
+            continue
+        kind = _FILE_MARKER_KINDS.get(att.get("type"))
+        if not kind:
+            continue
+        name = _marker_text(att.get("filename") or kind)
+        details = [_marker_text(att.get("mime_type") or "application/octet-stream")]
+        size_mb = att.get("size_mb")
+        if isinstance(size_mb, (int, float)) and not isinstance(size_mb, bool):
+            details.append(f"{size_mb} MB")
+        voice_metadata = att.get("voice_metadata")
+        duration = voice_metadata.get("duration_seconds") if isinstance(voice_metadata, dict) else None
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+            details.append(f"{duration:g} s")
+        described = f"{name}, {', '.join(details)}"
+        file_path = att.get("file_path")
+        if not file_path:
+            out.append(f"[{kind}: {described}; not kept on disk on this node]")
+            continue
+        out.append(
+            f"[{kind}: {described}; kept at {_kept_at(file_path, name)} under the DPC home "
+            "(the folder above agents/ in your sandbox path); a file tool can open it "
+            "where your read access reaches that folder]")
     return out
 
 

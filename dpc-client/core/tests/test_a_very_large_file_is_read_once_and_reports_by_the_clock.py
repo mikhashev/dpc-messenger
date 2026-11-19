@@ -204,12 +204,23 @@ async def test_the_ui_receives_a_bounded_stream_ending_at_one_hundred(tmp_path, 
 # --- one hash per group send -------------------------------------------------
 
 
-def _group_stub(manager, members):
+def _group_stub(manager, members, conversation_dir):
+    # The send keeps its copy and record in the group's folder first (local-first,
+    # 2026-11-19), so the stub carries a monitor and a UI to announce it to.
+    monitor = SimpleNamespace(
+        _get_conversation_dir=lambda: conversation_dir,
+        add_message=lambda *a, **kw: None,
+        save_history=lambda: True,
+        get_last_msg_index=lambda: 1,
+    )
     return SimpleNamespace(
         group_manager=SimpleNamespace(get_group=lambda gid: SimpleNamespace(members=members)),
         p2p_coordinator=SimpleNamespace(get_connected_peers=lambda: set(members)),
-        p2p_manager=SimpleNamespace(node_id=SELF),
+        p2p_manager=SimpleNamespace(node_id=SELF, get_display_name=lambda: "Me"),
         file_transfer_manager=manager,
+        _get_or_create_conversation_monitor=lambda gid: monitor,
+        _processed_message_ids=set(),
+        local_api=_Api(),
     )
 
 
@@ -229,7 +240,8 @@ async def test_a_group_send_hashes_the_file_once_for_all_members(tmp_path, monke
 
     monkeypatch.setattr(ftm, "hash_file_in_one_pass", counting)
 
-    result = await CoreService.send_group_file(_group_stub(manager, members), "group-x", str(path))
+    result = await CoreService.send_group_file(
+        _group_stub(manager, members, tmp_path / "group-x"), "group-x", str(path))
 
     assert result["status"] == "success"
     assert len(result["transfer_ids"]) == 3

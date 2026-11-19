@@ -7882,52 +7882,133 @@ class CoreService:
     async def send_group_file(
         self, group_id: str, file_path: str, file_size_bytes: int = None
     ) -> Dict[str, Any]:
-        """Send a file to all group members via fan-out file transfer.
+        """Send a file to a group: keep it here first, then offer it to the connected members.
 
-        The file is hashed once for the whole fan-out, not once per member.
+        Local-first, like send_group_image and send_group_voice_message (ADR-032
+        Part A, phase 3): the file is copied into the group's `files/` folder and
+        the sender's record is written and shown before any member is offered it.
+        A group whose only node is this one (a person and its agents) has nobody
+        to offer the file to, and it used to vanish there with a success answer:
+        no copy, no record, nothing for the agents to see. The record written here
+        is the sender's only one; the dedup key it seeds makes FileCompleteHandler
+        skip its echo when a member finishes. Every member's copy carries the same
+        message id. The file is hashed once for the whole fan-out, not once per member.
 
         Args:
             group_id: Target group ID
             file_path: Path to file to send
             file_size_bytes: Size the UI measured; it only sizes the UI's command timeout
+
+        Returns:
+            On success: `saved_locally` (the copy and the record exist), `file_path`
+            (the copy), `message_id`, `msg_index`, `size_bytes`, `mime_type`;
+            `transfer_ids`, one per member offered the file, empty when no other node
+            was connected; `offline_members`, the other member nodes that were not
+            connected and so were not offered it; and `not_offered` / `upload_limit`
+            for connected members the offer failed for. An offer is not a delivery:
+            a member has the file when its FILE_COMPLETE arrives.
         """
+        import mimetypes
+        import shutil
+
         try:
             group = self.group_manager.get_group(group_id)
             if not group:
                 return {"status": "error", "message": f"Group {group_id} not found"}
 
-            from pathlib import Path
             path = Path(file_path)
             if not path.exists():
                 return {"status": "error", "message": f"File not found: {file_path}"}
 
-            connected_peers = self.p2p_coordinator.get_connected_peers()
-            transfer_ids = []
-            not_offered = NotOfferedReport(self.file_transfer_manager.peer_label)
-            fingerprint = None  # (file hash, chunk hashes), computed for the first member only
-            # One id for the whole fan-out: every member's copy, and every
-            # relay of it, is this one message. The clock keeps a second send
-            # of the same file a second message.
-            import hashlib
-            import time
+            # Keep the file in the group's own folder, where a member's copy of a
+            # group file lands too (FileTransferManager._incoming_destination), so
+            # the record's path outlives the place it was picked from. A name
+            # already taken there gets a `_N` suffix, as voice does.
+            _group_monitor = self._get_or_create_conversation_monitor(group_id)
+            group_files_dir = _group_monitor._get_conversation_dir() / "files"
+            group_files_dir.mkdir(parents=True, exist_ok=True)
+            local_path = group_files_dir / path.name
+            if local_path.exists():
+                stem, suffix = local_path.stem, local_path.suffix
+                counter = 1
+                while local_path.exists():
+                    local_path = group_files_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+            await asyncio.to_thread(shutil.copyfile, str(path), str(local_path))
+
+            final_filename = local_path.name
+            size_bytes = local_path.stat().st_size
+            size_mb = round(size_bytes / (1024 * 1024), 2)
+            # The same guess send_file makes for the offer (_detect_mime_type).
+            mime_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
+            # No hash: hashing a large file is a pass of its own, done below only
+            # when a member is offered it. A sender's record is matched on name
+            # and size (conversation_monitor.attachment_matches).
+            attachment = {
+                "type": "file",
+                "filename": final_filename,
+                "size_bytes": size_bytes,
+                "size_mb": size_mb,
+                "mime_type": mime_type,
+                "status": "completed",
+                "file_path": str(local_path),
+            }
+
+            # One id for the record, the broadcast and the whole fan-out: every
+            # member's copy, and every relay of it, is this one message. The clock
+            # keeps a second send of the same file a second message.
             message_id = hashlib.sha256(
-                f"{self.p2p_manager.node_id}:group-file-send:{group_id}:{path.name}:"
+                f"{self.p2p_manager.node_id}:group-file-send:{group_id}:{final_filename}:"
                 f"{int(time.time() * 1000)}".encode()
             ).hexdigest()[:16]
+
+            # Keyed on the on-disk name, which is what FileCompleteHandler sees as
+            # transfer.filename: the offers below send this copy.
+            ui_dedup_key = group_file_ui_key(group_id, final_filename)
+            msg_index = None
+            if ui_dedup_key not in self._processed_message_ids:
+                self._processed_message_ids.add(ui_dedup_key)
+                # Store, then read the index, then announce (as send_group_image).
+                if _group_monitor:
+                    _group_monitor.add_message(
+                        "user", f"Sent file: {final_filename} ({size_mb} MB)", [attachment],
+                        sender_node_id=self.p2p_manager.node_id,
+                        sender_name=(self.p2p_manager.get_display_name() or "User"),
+                        message_id=message_id,
+                        sender_type="human",
+                    )
+                    _group_monitor.save_history()
+                    msg_index = _group_monitor.get_last_msg_index()
+                await self.local_api.broadcast_event("group_file_received", {
+                    "sender_node_id": "user",
+                    "sender_name": "You",
+                    "text": "",
+                    "message_id": message_id,
+                    "msg_index": msg_index,
+                    "attachments": [attachment],
+                    "group_id": group_id,
+                })
+
+            connected_peers = self.p2p_coordinator.get_connected_peers()
+            transfer_ids = []
+            offline_members = []
+            not_offered = NotOfferedReport(self.file_transfer_manager.peer_label)
+            fingerprint = None  # (file hash, chunk hashes), computed for the first member only
 
             for node_id in group.members:
                 if node_id == self.p2p_manager.node_id:
                     continue
                 if node_id not in connected_peers:
                     logger.debug("Skipping offline member %s for group file", node_id[:20])
+                    offline_members.append(node_id)
                     continue
 
                 try:
                     if fingerprint is None:
-                        fingerprint = await self.file_transfer_manager.compute_file_fingerprint(path)
+                        fingerprint = await self.file_transfer_manager.compute_file_fingerprint(local_path)
                     tid = await self.file_transfer_manager.send_file(
                         node_id=node_id,
-                        file_path=path,
+                        file_path=local_path,
                         group_id=group_id,
                         file_hash=fingerprint[0],
                         chunk_hashes=fingerprint[1],
@@ -7938,7 +8019,22 @@ class CoreService:
                     logger.warning("Failed to send file to %s: %s", node_id[:20], e)
                     not_offered.record(node_id, e)
 
-            return {"status": "success", "transfer_ids": transfer_ids, **not_offered.fields()}
+            logger.info(
+                "Group file %s kept in %s; offered to %d member(s), %d offline",
+                final_filename, group_id, len(transfer_ids), len(offline_members),
+            )
+            return {
+                "status": "success",
+                "saved_locally": True,
+                "file_path": str(local_path),
+                "message_id": message_id,
+                "msg_index": msg_index,
+                "size_bytes": size_bytes,
+                "mime_type": mime_type,
+                "transfer_ids": transfer_ids,
+                "offline_members": offline_members,
+                **not_offered.fields(),
+            }
         except Exception as e:
             logger.error("Error sending group file: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
