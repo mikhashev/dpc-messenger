@@ -161,6 +161,7 @@
   let userScrolled = false;   // the reader has touched this chat's scroll since it opened
   let atBottom = true;        // as of the last scroll: live content may follow the reader
   let loadingOlder = false;
+  let readerMovedAt = 0;      // performance.now() of the last wheel, pointer, touch or scroll key
 
   $effect(() => {
     void conversationId;
@@ -225,6 +226,7 @@
   // A wheel up at the very top moves nothing, so no scroll event says so.
   function onWheel(e: WheelEvent) {
     userScrolled = true;
+    readerMovedAt = performance.now();
     const el = chatWindowElement;
     if (!el || e.deltaY >= 0) return;
     if (shouldLoadOlder({ pager, scrollTop: el.scrollTop, movedUp: true, userScrolled })) loadOlder();
@@ -232,6 +234,7 @@
 
   function onReaderInput() {
     userScrolled = true;
+    readerMovedAt = performance.now();
   }
 
   // A drag on the scrollbar or a touch also counts. Listened to directly: the
@@ -253,14 +256,24 @@
 
   // Keys that scroll the focused window up; the window itself takes no keys.
   function onWindowKey(e: KeyboardEvent) {
-    if (e.key === 'PageUp' || e.key === 'Home' || e.key === 'ArrowUp') userScrolled = true;
+    if (e.key === 'PageUp' || e.key === 'Home' || e.key === 'ArrowUp') { userScrolled = true; readerMovedAt = performance.now(); }
   }
 
-  // Auto-scroll when streaming text updates — only for a reader at the bottom.
+  // Follow a live turn for a reader at the bottom: streamed text, and every
+  // tool-call snapshot and progress line, since a round of tools streams no text.
+  // Instant, not the window's smooth scroll: a smooth jump fires scroll events
+  // short of the bottom, which read as the reader leaving it and ended the follow.
   $effect(() => {
-    if (agentStreamingText && chatWindowElement && atBottom) {
-      chatWindowElement.scrollTop = chatWindowElement.scrollHeight;
-    }
+    void liveToolCalls; void agentProgressRound; void agentProgressTool; void agentProgressMessage;
+    const el = chatWindowElement;
+    const live = agentStreamingText || liveToolCalls.length > 0 || agentProgressTool || agentProgressMessage;
+    // A reader's own scroll in progress (a smooth jump to round 1) is not overridden.
+    if (!live || !el || !atBottom || performance.now() - readerMovedAt < 1000) return;
+    const behavior = el.style.scrollBehavior;
+    el.style.scrollBehavior = 'auto';
+    el.scrollTop = el.scrollHeight;
+    el.style.scrollBehavior = behavior;
+    lastScrollTop = el.scrollTop;
   });
 
   // Escape HTML to prevent XSS
