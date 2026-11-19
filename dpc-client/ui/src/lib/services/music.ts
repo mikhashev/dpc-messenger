@@ -43,7 +43,9 @@ import {
     shuffleOff,
     shuffleOn,
     stepQueue,
+    throttle,
     trackPlaybackUrl,
+    VOLUME_SAVE_MS,
     type LibraryEntry,
     type MusicAnswer,
     type MusicFolder,
@@ -304,7 +306,14 @@ function titleOf(id: string | null): string {
 
 let audio: HTMLAudioElement | null = null;
 let releaseSource: () => void = () => {};
+/** Bumped by every load; a load whose token is no longer this one is superseded. */
 let loadToken = 0;
+/** The token of the load whose source the audio element holds now. Its events
+ *  (`ended`, `timeupdate`, duration, `error`) count only while it is `loadToken`:
+ *  an `ended` that loses the race with a manual Next would otherwise advance the
+ *  queue a second time, and a late `timeupdate` would show the old track's time. */
+let audioToken = -1;
+const current = () => audioToken === loadToken;
 
 function ensureAudio(): HTMLAudioElement | null {
     if (audio || typeof Audio === 'undefined') return audio;
@@ -313,15 +322,19 @@ function ensureAudio(): HTMLAudioElement | null {
     a.volume = get(musicPlayback).volume;
     a.addEventListener('play', () => musicPlayback.update(s => ({ ...s, playing: true })));
     a.addEventListener('pause', () => musicPlayback.update(s => ({ ...s, playing: false })));
-    a.addEventListener('timeupdate', () => musicPlayback.update(s => ({ ...s, currentTime: a.currentTime })));
+    a.addEventListener('timeupdate', () => {
+        if (current()) musicPlayback.update(s => ({ ...s, currentTime: a.currentTime }));
+    });
     const takeDuration = () => {
-        if (Number.isFinite(a.duration)) musicPlayback.update(s => ({ ...s, duration: a.duration }));
+        if (current() && Number.isFinite(a.duration)) musicPlayback.update(s => ({ ...s, duration: a.duration }));
     };
     a.addEventListener('loadedmetadata', takeDuration);
     a.addEventListener('durationchange', takeDuration);
-    a.addEventListener('ended', () => { void handleEnded(); });
+    a.addEventListener('ended', () => {
+        if (current()) void handleEnded(audioToken);
+    });
     a.addEventListener('error', () => {
-        if (!a.getAttribute('src')) return;
+        if (!a.getAttribute('src') || !current()) return;
         const code = a.error?.code;
         musicPlayback.update(s => ({ ...s, playing: false, loadingTrack: false }));
         say(`Could not play "${titleOf(get(musicPlayback).loadedId)}": the webview could not open the file${code ? ` (media error ${code})` : ''}.`);
@@ -376,6 +389,7 @@ async function startAt(queue: QueueState, index: number, autoplay: boolean): Pro
     releaseSource = source.release;
     a.loop = get(musicPlayback).repeat === 'one';
     a.src = source.url;
+    audioToken = token;
     musicPlayback.update(s => ({ ...s, loadedId: id, loadingTrack: false }));
     if (autoplay) {
         try {
@@ -387,8 +401,9 @@ async function startAt(queue: QueueState, index: number, autoplay: boolean): Pro
     return true;
 }
 
-async function applyStep(r: StepResult, autoplay: boolean): Promise<void> {
-    const q = get(musicPlayback).queue;
+/** Act on `r`, a step computed from `q`: its index is an index into `q`, never
+ *  into a queue read later. */
+async function applyStep(r: StepResult, q: QueueState, autoplay: boolean): Promise<void> {
     switch (r.kind) {
         case 'restart':
             if (audio && get(musicPlayback).loadedId === currentId(q)) {
@@ -412,24 +427,49 @@ async function applyStep(r: StepResult, autoplay: boolean): Promise<void> {
     }
 }
 
-async function handleEnded(): Promise<void> {
-    const s = get(musicPlayback);
-    await applyStep(onTrackEnded(s.queue, s.repeat, await playablePredicate()), true);
+/** The queue as it is now, pointed at `id` when `id` is still in it: the step that
+ *  follows an `await` is taken from the fresh queue and the track that was current
+ *  before the await, so a queue edit in between cannot shift it onto another row. */
+function freshQueueAt(id: string | null): QueueState {
+    const q = get(musicPlayback).queue;
+    if (!id || currentId(q) === id) return q;
+    const i = q.ids.indexOf(id);
+    return i >= 0 ? { ...q, index: i } : q;
 }
 
-/** Next track (N). */
-export async function nextTrack(): Promise<void> {
-    const s = get(musicPlayback);
+async function handleEnded(token: number): Promise<void> {
+    const endedId = get(musicPlayback).loadedId;
     const playable = await playablePredicate();
-    await applyStep(stepQueue(s.queue, 1, { repeat: s.repeat, playable }), s.playing);
+    // A load began while the predicate was read: that load owns the queue now.
+    if (token !== loadToken) return;
+    const s = get(musicPlayback);
+    const q = freshQueueAt(endedId);
+    await applyStep(onTrackEnded(q, s.repeat, playable), q, true);
+}
+
+/** Next track (N). A step asked for before another load began (the track ended
+ *  and moved on, or a row was picked) is dropped: the track it meant to leave is
+ *  already left. */
+export async function nextTrack(): Promise<void> {
+    const token = loadToken;
+    const from = currentId(get(musicPlayback).queue);
+    const playable = await playablePredicate();
+    if (token !== loadToken) return;
+    const s = get(musicPlayback);
+    const q = freshQueueAt(from);
+    await applyStep(stepQueue(q, 1, { repeat: s.repeat, playable }), q, s.playing);
 }
 
 /** Previous track (P); past the first PREV_RESTART_S seconds it restarts the track. */
 export async function prevTrack(): Promise<void> {
-    const s = get(musicPlayback);
+    const token = loadToken;
+    const from = currentId(get(musicPlayback).queue);
     const playable = await playablePredicate();
+    if (token !== loadToken) return;
+    const s = get(musicPlayback);
+    const q = freshQueueAt(from);
     const currentTime = s.loadedId ? (audio?.currentTime ?? s.currentTime) : 0;
-    await applyStep(stepQueue(s.queue, -1, { repeat: s.repeat, playable, currentTime }), s.playing);
+    await applyStep(stepQueue(q, -1, { repeat: s.repeat, playable, currentTime }), q, s.playing);
 }
 
 /** Play / pause (Space). With nothing loaded it starts the current track of the queue,
@@ -447,12 +487,13 @@ export async function togglePlay(): Promise<void> {
         return;
     }
     const playable = await playablePredicate();
-    if (cur && playable(cur)) {
-        await startAt(s.queue, s.queue.index, true);
+    const q = freshQueueAt(cur);
+    if (cur && currentId(q) === cur && playable(cur)) {
+        await startAt(q, q.index, true);
         return;
     }
     // The current track cannot play: the next one that can, from here.
-    await applyStep(stepQueue(s.queue, 1, { repeat: s.repeat, playable }), true);
+    await applyStep(stepQueue(q, 1, { repeat: get(musicPlayback).repeat, playable }), q, true);
 }
 
 /** Play a list from `startId`, or from its start (a random track with shuffle on). */
@@ -527,11 +568,16 @@ export function seekBy(delta: number): void {
     seekTo(audio.currentTime + delta);
 }
 
-export function setVolume(volume: number): void {
+const rememberVolume = throttle(remember, VOLUME_SAVE_MS);
+
+/** Set the volume at once; it is written to storage at most every VOLUME_SAVE_MS
+ *  while the slider moves, and once more when it is let go (`final`). */
+export function setVolume(volume: number, final = false): void {
     const v = Math.max(0, Math.min(1, volume));
     if (audio) audio.volume = v;
     musicPlayback.update(s => ({ ...s, volume: v }));
-    remember();
+    rememberVolume.call();
+    if (final) rememberVolume.flush();
 }
 
 export function clearNotice(): void {

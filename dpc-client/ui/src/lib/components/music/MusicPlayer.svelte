@@ -478,6 +478,11 @@
     setVolume(parseFloat((e.currentTarget as HTMLInputElement).value));
   }
 
+  /** The slider is let go: write the last value now (the drag writes are throttled). */
+  function onVolumeEnd(e: Event) {
+    setVolume(parseFloat((e.currentTarget as HTMLInputElement).value), true);
+  }
+
   // -- keyboard: only while focus is inside this window, never while typing --------
 
   function handleKeydown(e: KeyboardEvent) {
@@ -675,7 +680,7 @@
                 <div class="modes">{@render modeButtons(false)}</div>
                 <label class="volume">
                   <span class="muted small">Volume</span>
-                  <input type="range" min="0" max="1" step="0.05" value={p.volume} oninput={onVolume} aria-label="Volume" />
+                  <input type="range" min="0" max="1" step="0.05" value={p.volume} oninput={onVolume} onchange={onVolumeEnd} aria-label="Volume" />
                 </label>
               </div>
               <p class="muted tiny">Space play/pause · N next · P previous · Shift+S shuffle · Shift+R repeat · ← → seek</p>

@@ -34,6 +34,7 @@ import {
     shuffleOff,
     shuffleOn,
     stepQueue,
+    throttle,
     trackPlaybackUrl,
     type LibraryEntry,
     type PlaybackEnv,
@@ -402,5 +403,60 @@ describe('display', () => {
         expect(matchesFilter(e, 'rain')).toBe(false);
         expect(matchesFilter(e, '  ')).toBe(true);
         expect(matchesFilter(null, 'x')).toBe(false);
+    });
+});
+
+describe('throttle (the volume write)', () => {
+    function clock() {
+        let t = 0;
+        const due: Array<{ at: number; fn: () => void; id: number }> = [];
+        let next = 1;
+        return {
+            timers: {
+                now: () => t,
+                setTimeout: (fn: () => void, ms: number) => { due.push({ at: t + ms, fn, id: next }); return next++; },
+                clearTimeout: (id: number) => { const i = due.findIndex(d => d.id === id); if (i >= 0) due.splice(i, 1); },
+            },
+            advance(ms: number) {
+                t += ms;
+                for (const d of [...due].sort((a, b) => a.at - b.at)) {
+                    if (d.at <= t) { due.splice(due.indexOf(d), 1); d.fn(); }
+                }
+            },
+            waiting: () => due.length,
+        };
+    }
+
+    it('runs the first call at once and folds the calls inside the window into one trailing run', () => {
+        const c = clock();
+        const fn = vi.fn();
+        const t = throttle(fn, 250, c.timers);
+        t.call(); t.call(); t.call();
+        expect(fn).toHaveBeenCalledTimes(1);
+        expect(c.waiting()).toBe(1);
+        c.advance(249);
+        expect(fn).toHaveBeenCalledTimes(1);
+        c.advance(1);
+        expect(fn).toHaveBeenCalledTimes(2);
+        c.advance(1000);
+        expect(fn).toHaveBeenCalledTimes(2);
+        t.call(); // the window has passed: at once again
+        expect(fn).toHaveBeenCalledTimes(3);
+    });
+
+    it('flush runs a waiting call now and only then; cancel drops it', () => {
+        const c = clock();
+        const fn = vi.fn();
+        const t = throttle(fn, 250, c.timers);
+        t.flush();
+        expect(fn).not.toHaveBeenCalled();
+        t.call(); t.call();
+        t.flush();
+        expect(fn).toHaveBeenCalledTimes(2);
+        expect(c.waiting()).toBe(0);
+        t.call();
+        t.cancel();
+        c.advance(1000);
+        expect(fn).toHaveBeenCalledTimes(2);
     });
 });

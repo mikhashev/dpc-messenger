@@ -538,3 +538,57 @@ export function saveMusicPreferences(storage: StorageLike | null | undefined, pr
         /* the player works without it */
     }
 }
+
+/** How often a volume drag may write the preferences: the slider fires an input
+ *  event per step, and each write is a synchronous localStorage call. */
+export const VOLUME_SAVE_MS = 250;
+
+export interface Throttled {
+    /** Run now if the last run is `ms` old, else once when it is. */
+    call(): void;
+    /** Run now if a run is waiting (the end of a drag); nothing otherwise. */
+    flush(): void;
+    /** Drop a waiting run. */
+    cancel(): void;
+}
+
+type Timers = {
+    now: () => number;
+    setTimeout: (fn: () => void, ms: number) => unknown;
+    clearTimeout: (handle: any) => void;
+};
+
+const REAL_TIMERS: Timers = {
+    now: () => Date.now(),
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (h) => clearTimeout(h),
+};
+
+/** `fn` at most once per `ms`: the first call runs at once, the calls inside the
+ *  window fold into one trailing run, so the last value is always written. */
+export function throttle(fn: () => void, ms: number, timers: Timers = REAL_TIMERS): Throttled {
+    let last = -Infinity;
+    let pending: unknown = null;
+    const run = () => {
+        pending = null;
+        last = timers.now();
+        fn();
+    };
+    return {
+        call() {
+            if (pending !== null) return;
+            const wait = last + ms - timers.now();
+            if (wait <= 0) run();
+            else pending = timers.setTimeout(run, wait);
+        },
+        flush() {
+            if (pending === null) return;
+            timers.clearTimeout(pending);
+            run();
+        },
+        cancel() {
+            if (pending !== null) timers.clearTimeout(pending);
+            pending = null;
+        },
+    };
+}
