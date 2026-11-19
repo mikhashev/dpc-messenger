@@ -131,6 +131,7 @@ import { isBlockedAuthor } from './utils/blockedRuns';
 import { mergeGroupEvent } from './utils/groupEvents';
 import { showNotificationIfBackground } from './notificationService';
 import { fileSendTimeoutFor, getLocalFileSize } from './fileSendTimeout';
+import { fileSendFields } from './utils/pendingAttachment';
 import {
     TURN_COMMAND_CHECK_MS, chatHasTurnOrWaits, isTurnCommand, noteTurnCommandLook, turnCommandTimedOut,
     type TurnCommandWatch,
@@ -1630,14 +1631,14 @@ export function setActiveChat(chatId: string | null) {
 }
 
 // File transfer helper functions (Week 1)
-export async function sendFile(nodeId: string, filePath: string): Promise<any> {
+/** `text`: what the person wrote with the file; file and words are one message. */
+export async function sendFile(nodeId: string, filePath: string, text: string = ''): Promise<any> {
     // Get file size for timeout calculation (v0.11.2+); 0 makes the backend wait the default
     const fileSizeBytes = await getLocalFileSize(filePath);
 
     return sendCommand('send_file', {
         node_id: nodeId,
-        file_path: filePath,
-        file_size_bytes: fileSizeBytes
+        ...fileSendFields(filePath, fileSizeBytes, text),
     });
 }
 
@@ -1808,11 +1809,11 @@ export async function sendGroupVoiceMessage(groupId: string, audioBase64: string
     });
 }
 
-export async function sendGroupFile(groupId: string, filePath: string): Promise<any> {
+/** `text`: what the person wrote with the file; file and words are one message. */
+export async function sendGroupFile(groupId: string, filePath: string, text: string = ''): Promise<any> {
     return sendCommand('send_group_file', {
         group_id: groupId,
-        file_path: filePath,
-        file_size_bytes: await getLocalFileSize(filePath)
+        ...fileSendFields(filePath, await getLocalFileSize(filePath), text),
     });
 }
 

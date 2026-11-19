@@ -49,6 +49,8 @@
   import { agentAliasToSend } from '$lib/utils/rememberedProvider';
   import { applyUserMessageConfirmed, unconfirmedUserBubbles } from '$lib/utils/liveMessageIdentity';
   import type { Message, Mention, MessageAttachment } from '$lib/types.js';
+  import { getLocalFileSize } from '$lib/fileSendTimeout';
+  import { composerHasContent, pendingFileFrom, replacedAttachmentNotice, type PendingFile } from '$lib/utils/pendingAttachment';
 
   type AIChatMeta = {
     name: string;
@@ -188,16 +190,11 @@
   let showFileOfferToast = $state(false);
   let fileOfferToastMessage = $state('');
 
-  // Send file confirmation
-  let showSendFileDialog = $state(false);
-  let pendingFileSend = $state<{
-    filePath: string;
-    fileName: string;
-    recipientId: string;
-    recipientName: string;
-    imageData?: { dataUrl: string; filename: string; sizeBytes: number };
-    caption?: string;
-  } | null>(null);
+  // The file picked with the paperclip, held above the input like pendingImage:
+  // Send sends it alone or with the words typed, as one message (Mike's call,
+  // 2026-11-19). One attachment per message: a file and a pasted image replace
+  // each other, and the toast says which went.
+  let pendingFile = $state<PendingFile | null>(null);
   let isSendingFile = $state(false);
 
   // Context toggle
@@ -283,6 +280,7 @@
       chatDraftInputs = next.drafts;
       currentInput = next.currentInput;
       if (pendingImage !== null) pendingImage = null;
+      if (pendingFile !== null) pendingFile = null;
       if (voicePreview !== null) voicePreview = null;
       previousChatId = currentChat;
     }
@@ -512,6 +510,10 @@
   async function handleSendMessage() {
     if (pendingImage) {
       await _sendImageMessage();
+      return;
+    }
+    if (pendingFile) {
+      await _sendFileMessage();
       return;
     }
     if (!currentInput.trim()) return;
@@ -799,62 +801,64 @@
   async function handleSendFile() {
     const isTauriEnv = typeof window !== 'undefined' && ((window as any).isTauri === true || !!(window as any).__TAURI__);
     if (!isTauriEnv) return;
+    if (activeChatId.startsWith('telegram-') && !$telegramLinkedChats.get(activeChatId)) return;
+    const pickedFor = activeChatId;
     const { open } = await import('@tauri-apps/plugin-dialog');
     const filePath = await open({ multiple: false, title: 'Select file to send' });
-    if (!filePath || typeof filePath !== 'string') return;
+    if (!filePath || typeof filePath !== 'string' || activeChatId !== pickedFor) return;
 
-    const fileName = filePath.split(/[\\/]/).pop() || filePath;
-    let recipientName = activeChatId;
-
-    if (activeChatId.startsWith('telegram-')) {
-      const linkedChatId = $telegramLinkedChats.get(activeChatId);
-      if (!linkedChatId) return;
-      recipientName = `Telegram (${linkedChatId})`;
-      pendingFileSend = { filePath, fileName, recipientId: activeChatId, recipientName };
-      showSendFileDialog = true;
-    } else if (activeChatId.startsWith('group-')) {
-      const group = get(groupChats).get(activeChatId);
-      recipientName = group?.name || activeChatId;
-      pendingFileSend = { filePath, fileName, recipientId: activeChatId, recipientName: `group "${recipientName}"` };
-      showSendFileDialog = true;
-    } else {
-      recipientName = activeChatId;
-      pendingFileSend = { filePath, fileName, recipientId: activeChatId, recipientName };
-      showSendFileDialog = true;
-    }
+    const picked = pendingFileFrom(filePath, await getLocalFileSize(filePath));
+    if (activeChatId !== pickedFor || isSendingFile) return;
+    const replaced = pendingImage
+      ? { kind: 'image' as const, name: pendingImage.filename }
+      : pendingFile ? { kind: 'file' as const, name: pendingFile.fileName } : null;
+    if (pendingImage) clearPendingImage();
+    pendingFile = picked;
+    if (replaced) showReplacedNotice(replaced, picked.fileName);
+    document.getElementById('message-input')?.focus();
   }
 
-  async function handleConfirmSendFile() {
-    if (!pendingFileSend || isSendingFile) return;
+  function clearPendingFile() { if (!isSendingFile) pendingFile = null; }
+
+  function showReplacedNotice(replaced: { kind: 'image' | 'file'; name: string }, byName: string) {
+    fileOfferToastMessage = replacedAttachmentNotice(replaced, byName);
+    showFileOfferToast = true;
+    setTimeout(() => (showFileOfferToast = false), 5000);
+  }
+
+  // The picked file and the words typed with it, one message. The chip and the
+  // words stay until core has the file, so a failed send can be sent again; the
+  // chip shows the preparation (hashing) meanwhile.
+  async function _sendFileMessage() {
+    if (!pendingFile || isSendingFile) return;
+    const file = pendingFile;
+    const chatId = activeChatId;
+    const text = currentInput.trim();
     isSendingFile = true;
     try {
       let groupResult: any = null;
-      if (pendingFileSend.imageData) {
-        if (pendingFileSend.recipientId.startsWith('group-')) {
-          groupResult = await sendGroupImage(pendingFileSend.recipientId, pendingFileSend.imageData.dataUrl, pendingFileSend.imageData.filename, pendingFileSend.caption || '', describeForAgents);
-        } else {
-          await sendCommand('send_p2p_image', { node_id: pendingFileSend.recipientId, image_base64: pendingFileSend.imageData.dataUrl, filename: pendingFileSend.imageData.filename, text: pendingFileSend.caption || '' });
-        }
+      if (chatId.startsWith('group-')) {
+        groupResult = await sendGroupFile(chatId, file.filePath, text);
+        if (groupResult?.status === 'error') throw new Error(groupResult.message || 'the group send failed');
       } else {
-        if (pendingFileSend.recipientId.startsWith('group-')) {
-          groupResult = await sendGroupFile(pendingFileSend.recipientId, pendingFileSend.filePath);
-        } else {
-          await sendFile(pendingFileSend.recipientId, pendingFileSend.filePath);
-        }
+        // One-to-one, and a Telegram-linked chat through the same command as before
+        await sendFile(chatId, file.filePath, text);
       }
-      const groupId = pendingFileSend.recipientId;
-      showSendFileDialog = false;
-      pendingFileSend = null;
-      describeForAgents = false;
-      if (!(groupResult && reportNotOffered(groupId, groupResult))) {
+      // Sent. The person may have moved to another chat meanwhile: only this
+      // chat's chip and words belong to the message.
+      if (pendingFile === file) pendingFile = null;
+      chatDraftInputs = new Map(chatDraftInputs).set(chatId, '');
+      if (activeChatId === chatId && currentInput.trim() === text) currentInput = '';
+      if (!(groupResult && reportNotOffered(chatId, groupResult))) {
         // A group file offered to nobody is kept here, not "sending".
         const keptOnly = savedOnlyHereNotice(groupResult, (id) => peerDisplayNames.get(id));
         fileOfferToastMessage = keptOnly ?? 'Sending...';
         showFileOfferToast = true;
         setTimeout(() => (showFileOfferToast = false), keptOnly ? 5000 : 3000);
       }
+      autoScroll();
     } catch (error) {
-      fileOfferToastMessage = `Failed to send: ${error}`;
+      fileOfferToastMessage = `Failed to send: ${error instanceof Error ? error.message : String(error)}`;
       showFileOfferToast = true;
       setTimeout(() => (showFileOfferToast = false), 5000);
     } finally {
@@ -863,14 +867,6 @@
       filePreparationProgress.set(null);
       filePreparationCompleted.set(null);
     }
-  }
-
-  function handleCancelSendFile() {
-    showSendFileDialog = false;
-    pendingFileSend = null;
-    filePreparationStarted.set(null);
-    filePreparationProgress.set(null);
-    filePreparationCompleted.set(null);
   }
 
   async function handleAcceptFile(remember: boolean = false) {
@@ -921,6 +917,16 @@
   // ---------------------------------------------------------------------------
   function clearPendingImage() { pendingImage = null; describeForAgents = false; }
 
+  // A pasted image takes the composer's one attachment place; a file waiting
+  // there is dropped, and the toast says so.
+  function setPendingImage(image: { dataUrl: string; filename: string; sizeBytes: number }) {
+    if (isSendingFile) return;  // the file being sent keeps its place until core has it
+    const replaced = pendingFile;
+    pendingFile = null;
+    pendingImage = image;
+    if (replaced) showReplacedNotice({ kind: 'file', name: replaced.fileName }, image.filename);
+  }
+
   async function handlePaste(e: ClipboardEvent) {
     const items = e.clipboardData?.items;
     if (!items) return;
@@ -933,7 +939,7 @@
         const reader = new FileReader();
         reader.onload = (ev) => {
           const dataUrl = ev.target?.result as string;
-          pendingImage = { dataUrl, filename: `paste_${Date.now()}.${item.type.split('/')[1] || 'png'}`, sizeBytes: blob.size };
+          setPendingImage({ dataUrl, filename: `paste_${Date.now()}.${item.type.split('/')[1] || 'png'}`, sizeBytes: blob.size });
         };
         reader.readAsDataURL(blob);
         return;
@@ -951,7 +957,7 @@
             const reader = new FileReader();
             reader.onload = (ev) => {
               const dataUrl = ev.target?.result as string;
-              pendingImage = { dataUrl, filename: `paste_${Date.now()}.${type.split('/')[1] || 'png'}`, sizeBytes: blob.size };
+              setPendingImage({ dataUrl, filename: `paste_${Date.now()}.${type.split('/')[1] || 'png'}`, sizeBytes: blob.size });
             };
             reader.readAsDataURL(blob);
             return;
@@ -1203,14 +1209,11 @@
     groupNameOf={(id) => $groupChats.get(id)?.name}
     onAcceptFile={handleAcceptFile}
     onRejectFile={handleRejectFile}
-    showSendFileDialog={showSendFileDialog}
-    pendingFileSend={pendingFileSend}
+    pendingFile={pendingFile}
+    onClearPendingFile={clearPendingFile}
     isSendingFile={isSendingFile}
-    filePreparationStarted={$filePreparationStarted}
     filePreparationProgress={$filePreparationProgress}
     filePreparationCompleted={$filePreparationCompleted}
-    onConfirmSendFile={handleConfirmSendFile}
-    onCancelSendFile={handleCancelSendFile}
     onToggleDescribeForAgents={(v) => describeForAgents = v}
     activeFileTransfers={$activeFileTransfers}
     onCancelTransfer={handleCancelTransfer}
@@ -1266,7 +1269,7 @@
       bind:value={currentInput}
       placeholder={
         isContextWindowFull ? 'Context window full - Delete text or end session to continue' :
-        ($connectionStatus === 'connected' ? (pendingImage ? 'Add a caption (optional)...' : 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)') : 'Connect to Core Service first...')
+        ($connectionStatus === 'connected' ? (pendingImage || pendingFile ? 'Add a caption (optional)...' : 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)') : 'Connect to Core Service first...')
       }
       disabled={$connectionStatus !== 'connected' || isLoading || (activeChatId.startsWith('agent_') && isSleeping)}
       oninput={(e) => { groupPanelRef?.handleMentionInput(e); }}
@@ -1277,7 +1280,7 @@
         }
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
-          if ((isPeerConnected || isTelegramChat || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_') || activeChatId === 'default') && (currentInput.trim() || pendingImage)) {
+          if ((isPeerConnected || isTelegramChat || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_') || activeChatId === 'default') && !isSendingFile && composerHasContent(currentInput, !!(pendingImage || pendingFile))) {
             handleSendMessage();
           }
         }
@@ -1302,10 +1305,10 @@
     <button
       class="send-button"
       onclick={handleSendMessage}
-      disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || (!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_') && activeChatId !== 'default')}
+      disabled={$connectionStatus !== 'connected' || isLoading || isSendingFile || !composerHasContent(currentInput, !!(pendingImage || pendingFile)) || isContextWindowFull || (!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_') && activeChatId !== 'default')}
       title={!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_') && activeChatId !== 'default' ? 'Peer disconnected' : ''}
     >
-      {#if isLoading}Sending...{:else}Send{/if}
+      {#if isLoading || isSendingFile}Sending...{:else}Send{/if}
     </button>
     </div>
     </div>

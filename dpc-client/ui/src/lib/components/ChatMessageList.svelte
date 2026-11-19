@@ -14,6 +14,7 @@
   import type { Message, Mention } from '$lib/types.js';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import { revealInFolder } from '$lib/utils/revealInFolder';
+  import { playsInline, knownDurationSeconds, isAttachmentPlaceholderText } from '$lib/utils/pendingAttachment';
   import { tick } from 'svelte';
   import {
     historyPagers, shouldLoadOlder, pickAnchorIndex, scrollTopKeepingAnchor,
@@ -380,8 +381,10 @@
           <ThinkingBlock thinking={msg.thinking} tokenCount={msg.thinkingTokens} />
         {/if}
 
-        <!-- Message text (hidden for voice attachments with transcription to avoid duplication, v0.15.1+) -->
-        {#if msg.text && msg.text !== '[Image]' && !msg.attachments?.some(a => a.type === 'voice' && a.transcription)}
+        <!-- Message text (hidden for voice attachments with transcription to avoid duplication, v0.15.1+,
+             and when it is only the "Sent file: <name> (<MB> MB)" line the attachment card repeats) -->
+        {#if msg.text && msg.text !== '[Image]' && !msg.attachments?.some(a => a.type === 'voice' && a.transcription)
+             && !isAttachmentPlaceholderText(msg.text, msg.attachments)}
           {#if enableMarkdown}
             <MarkdownMessage content={msg.text} />
           {:else if msg.mentions && msg.mentions.length > 0}
@@ -443,8 +446,8 @@
                   {/if}
                 </div>
               {:else}
-                <!-- Regular file attachment -->
-                <div class="file-attachment">
+                <!-- Regular file attachment; an audio/* file also plays here (ADR-051 D19) -->
+                <div class="file-attachment" class:audio-file={playsInline(attachment)}>
                   <div class="file-details">
                     <div class="file-name">{attachment.filename}</div>
                     <div class="file-meta">
@@ -456,6 +459,19 @@
                         • {attachment.status}
                       {/if}
                     </div>
+                    {#if playsInline(attachment)}
+                      <div class="file-audio-player">
+                        {#key attachment.file_path}
+                          <VoicePlayer
+                            audioUrl={attachment.file_path ?? ''}
+                            filePath={attachment.file_path}
+                            duration={knownDurationSeconds(attachment)}
+                            downloadName={attachment.filename}
+                            showDownload={false}
+                          />
+                        {/key}
+                      </div>
+                    {/if}
                     {#if attachment.file_path && revealErrors[attachment.file_path]}
                       <div class="file-reveal-error">{revealErrors[attachment.file_path]}</div>
                     {/if}
@@ -700,6 +716,15 @@
   .file-details {
     flex: 1;
     min-width: 0;
+  }
+
+  /* The player sits under the name; "Show in folder" stays at the top right. */
+  .file-attachment.audio-file {
+    align-items: flex-start;
+  }
+
+  .file-audio-player {
+    margin-top: 8px;
   }
 
   .file-name {

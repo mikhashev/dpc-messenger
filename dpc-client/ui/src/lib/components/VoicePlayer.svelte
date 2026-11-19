@@ -40,8 +40,13 @@
   interface VoicePlayerProps {
     audioUrl: string;
     filePath?: string;  // Local file path (for Tauri desktop app)
-    duration: number;
+    // Seconds; 0 or absent when the record knows no length (an audio file sent
+    // as a file): the audio element's loadedmetadata supplies it then.
+    duration?: number;
     timestamp?: string;
+    downloadName?: string;  // The download link's file name; a voice message's own otherwise
+    // A file attachment is already on disk with "Show in folder" beside it: no download link there.
+    showDownload?: boolean;
     compact?: boolean;
     transcription?: {  // v0.13.2+ auto-transcription
       text: string;
@@ -54,7 +59,11 @@
     showTranscriberName?: boolean;  // Whether to show who transcribed (v0.13.2+)
   }
 
-  let { audioUrl, filePath, duration, timestamp, compact = false, transcription, showTranscriberName = false }: VoicePlayerProps = $props();
+  let { audioUrl, filePath, duration = 0, timestamp, downloadName, showDownload = true, compact = false, transcription, showTranscriberName = false }: VoicePlayerProps = $props();
+
+  // The length the element reports once it has read the file's header.
+  let measuredDuration = $state(0);
+  let shownDuration = $derived(duration > 0 ? duration : measuredDuration);
 
   // Debug props immediately
   $effect(() => {
@@ -104,7 +113,7 @@
       if (conversationsIndex !== -1 && conversationsIndex + 3 < pathParts.length) {
         const peerId = pathParts[conversationsIndex + 1];
         const filename = pathParts[pathParts.length - 1];  // Last part is filename
-        const httpUrl = `http://localhost:9998/files/${peerId}/${filename}`;
+        const httpUrl = `http://localhost:9998/files/${encodeURIComponent(peerId)}/${encodeURIComponent(filename)}`;
         console.log(`[VoicePlayer] ✅ TAURI (Linux): Using HTTP file server: ${httpUrl}`);
         actualAudioUrl = httpUrl;
       } else {
@@ -135,7 +144,7 @@
     if (conversationsIndex !== -1 && conversationsIndex + 3 < pathParts.length) {
       const peerId = pathParts[conversationsIndex + 1];
       const filename = pathParts[pathParts.length - 1];  // Last part is filename
-      const httpUrl = `http://localhost:9998/files/${peerId}/${filename}`;
+      const httpUrl = `http://localhost:9998/files/${encodeURIComponent(peerId)}/${encodeURIComponent(filename)}`;
       console.log(`[VoicePlayer] ✅ BROWSER: Using HTTP file server: ${httpUrl}`);
       actualAudioUrl = httpUrl;
     } else {
@@ -202,6 +211,11 @@
       currentTime = 0;
     };
 
+    const handleDuration = () => {
+      const d = audioElement?.duration;
+      if (Number.isFinite(d) && d > 0) measuredDuration = d;
+    };
+
     // Create audio element (initially without src)
     audioElement = new Audio();
     audioElement.volume = volume;
@@ -209,9 +223,13 @@
     audioElement.addEventListener('play', handlePlay);
     audioElement.addEventListener('pause', handlePause);
     audioElement.addEventListener('ended', handleEnded);
+    audioElement.addEventListener('loadedmetadata', handleDuration);
+    audioElement.addEventListener('durationchange', handleDuration);
 
     return () => {
       if (audioElement) {
+        audioElement.removeEventListener('loadedmetadata', handleDuration);
+        audioElement.removeEventListener('durationchange', handleDuration);
         audioElement.removeEventListener('timeupdate', handleTimeUpdate);
         audioElement.removeEventListener('play', handlePlay);
         audioElement.removeEventListener('pause', handlePause);
@@ -255,12 +273,12 @@
       <input
         type="range"
         min="0"
-        max={duration}
+        max={shownDuration}
         value={currentTime}
         oninput={handleSeek}
         class="progress-bar"
       />
-      <span class="time-total">{formatTime(duration)}</span>
+      <span class="time-total">{shownDuration > 0 ? formatTime(shownDuration) : '--:--'}</span>
     </div>
 
     <button
@@ -286,13 +304,13 @@
       />
     </div>
   {:else}
-    <span class="compact-duration">{formatTime(duration)}</span>
+    <span class="compact-duration">{shownDuration > 0 ? formatTime(shownDuration) : '--:--'}</span>
   {/if}
 
-  {#if !compact}
+  {#if !compact && showDownload}
     <a
       href={audioUrl}
-      download={timestamp ? `voice_${timestamp}.webm` : 'voice.webm'}
+      download={downloadName ?? (timestamp ? `voice_${timestamp}.webm` : 'voice.webm')}
       class="download-button"
       title="Download voice message"
     >

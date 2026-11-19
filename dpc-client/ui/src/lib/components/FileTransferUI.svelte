@@ -7,6 +7,7 @@
   import { alwaysAllowLabel, alwaysAllowLimits, offerQuestion, senderLabel } from '$lib/fileTransferPermission';
   import { speedAndTimeLeft } from '$lib/utils/transferSpeed';
   import { transferRowLabel } from '$lib/utils/transferRowLabel';
+  import { formatMegabytes, pendingFileTypeLabel, type PendingFile } from '$lib/utils/pendingAttachment';
 
   // Props (Svelte 5 runes mode)
   let {
@@ -34,15 +35,12 @@
     onAcceptFile,
     onRejectFile,
 
-    // Send file confirmation dialog state
-    showSendFileDialog = false,
-    pendingFileSend = null,
+    // The file picked with the paperclip, waiting in the composer for Send
+    pendingFile = null,
+    onClearPendingFile,
     isSendingFile = false,
-    filePreparationStarted = null,
     filePreparationProgress = null,
     filePreparationCompleted = null,
-    onConfirmSendFile,
-    onCancelSendFile,
     onToggleDescribeForAgents,
 
     // Active transfers state
@@ -72,21 +70,11 @@
     groupNameOf?: (groupId: string) => string | undefined;
     onAcceptFile: (remember?: boolean) => void;
     onRejectFile: () => void;
-    showSendFileDialog?: boolean;
-    pendingFileSend?: {
-      filePath: string;
-      fileName: string;
-      recipientId: string;
-      recipientName: string;
-      imageData?: { dataUrl: string; filename: string; sizeBytes: number };
-      caption?: string;
-    } | null;
+    pendingFile?: PendingFile | null;
+    onClearPendingFile: () => void;
     isSendingFile?: boolean;
-    filePreparationStarted?: any;
     filePreparationProgress?: any;
     filePreparationCompleted?: any;
-    onConfirmSendFile: () => void;
-    onCancelSendFile: () => void;
     onToggleDescribeForAgents?: (value: boolean) => void;
     activeFileTransfers?: Map<string, any>;
     onCancelTransfer: (transferId: string, filename: string) => void;
@@ -248,6 +236,34 @@
   {/if}
 {/if}
 
+<!-- File Chip: a picked file waits here with the words typed below it; Send sends both as one message -->
+{#if pendingFile}
+  <div class="image-preview-chip">
+    <div class="file-chip-icon" aria-hidden="true">{pendingFile.mimeType.startsWith('audio/') ? '🎵' : '📄'}</div>
+    <div class="preview-info">
+      <span class="preview-filename" title={pendingFile.filePath}>{pendingFile.fileName}</span>
+      <span class="preview-size">
+        {formatMegabytes(pendingFile.sizeBytes)} • {pendingFileTypeLabel(pendingFile)}
+        {#if isSendingFile}
+          •
+          {#if filePreparationCompleted}
+            Sending...
+          {:else if filePreparationProgress?.phase === 'hashing_file'}
+            Computing file hash: {filePreparationProgress.percent}%
+          {:else if filePreparationProgress?.phase === 'computing_chunks'}
+            Computing chunk hashes: {filePreparationProgress.percent}%
+          {:else if filePreparationProgress}
+            Preparing file: {filePreparationProgress.percent}%
+          {:else}
+            Preparing...
+          {/if}
+        {/if}
+      </span>
+    </div>
+    <button class="preview-remove" onclick={onClearPendingFile} disabled={isSendingFile} aria-label="Remove file">✕</button>
+  </div>
+{/if}
+
 <!-- Voice Preview Chip (v0.13.0+) -->
 {#if voicePreview}
   <div class="voice-preview-chip">
@@ -309,6 +325,9 @@
       <p><strong>File:</strong> {currentFileOffer.filename}</p>
       <p><strong>Size:</strong> {(currentFileOffer.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
       <p><strong>From:</strong> {senderLabel(currentFileOffer)}</p>
+      {#if currentFileOffer.text}
+        <p class="offer-text"><strong>Message:</strong> {currentFileOffer.text}</p>
+      {/if}
       {#if question}
         <label class="remember-sender">
           <input type="checkbox" bind:checked={rememberSender} />
@@ -318,65 +337,6 @@
       <div class="modal-buttons">
         <button class="accept-button" onclick={() => onAcceptFile(question ? rememberSender : false)}>Accept</button>
         <button class="reject-button" onclick={onRejectFile}>Reject</button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- Send File Confirmation Dialog -->
-{#if showSendFileDialog && pendingFileSend}
-  <div class="modal-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && onCancelSendFile()}>
-    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1">
-      <h3>{pendingFileSend.imageData ? 'Send Screenshot' : 'Send File'}</h3>
-      <p><strong>{pendingFileSend.imageData ? 'Image' : 'File'}:</strong> {pendingFileSend.fileName}</p>
-      <p><strong>To:</strong> {pendingFileSend.recipientName}</p>
-
-      {#if pendingFileSend.imageData}
-        <p style="margin-top: 10px; font-size: 13px;">
-          <strong>Size:</strong> {(pendingFileSend.imageData.sizeBytes / (1024 * 1024)).toFixed(2)} MB
-        </p>
-        <!-- Show thumbnail for screenshots -->
-        <div style="margin-top: 10px; text-align: center;">
-          <img
-            src={pendingFileSend.imageData.dataUrl}
-            alt="Screenshot preview"
-            style="max-width: 100%; max-height: 150px; border-radius: 4px; border: 1px solid #ddd;"
-          />
-        </div>
-      {:else if filePreparationStarted && isSendingFile}
-        <p style="margin-top: 10px; font-size: 13px;">
-          <strong>Size:</strong> {filePreparationStarted.size_mb} MB
-        </p>
-      {/if}
-
-      {#if filePreparationProgress && isSendingFile}
-        <div style="margin-top: 15px;">
-          <p style="font-size: 13px; margin-bottom: 5px; color: #555;">
-            {#if filePreparationProgress.phase === 'hashing_file'}
-              Computing file hash: {filePreparationProgress.percent}%
-            {:else if filePreparationProgress.phase === 'computing_chunks'}
-              Computing chunk hashes: {filePreparationProgress.percent}%
-            {:else}
-              Preparing file: {filePreparationProgress.percent}%
-            {/if}
-          </p>
-          <div style="width: 100%; background-color: #e0e0e0; border-radius: 4px; height: 8px; overflow: hidden;">
-            <div style="width: {filePreparationProgress.percent}%; background-color: #4CAF50; height: 100%; transition: width 0.3s ease;"></div>
-          </div>
-        </div>
-      {/if}
-
-      <div class="modal-buttons">
-        <button class="accept-button" onclick={onConfirmSendFile} disabled={isSendingFile}>
-          {#if filePreparationCompleted && isSendingFile}
-            Sending...
-          {:else if isSendingFile}
-            Preparing...
-          {:else}
-            Send
-          {/if}
-        </button>
-        <button class="reject-button" onclick={onCancelSendFile} disabled={isSendingFile}>Cancel</button>
       </div>
     </div>
   </div>
@@ -768,6 +728,26 @@
   .offer-question {
     font-size: 13px;
     line-height: 1.4;
+  }
+
+  .offer-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .file-chip-icon {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+    flex-shrink: 0;
+  }
+
+  .preview-remove:disabled {
+    background: #9e9e9e;
+    cursor: not-allowed;
   }
 
   .remember-sender {

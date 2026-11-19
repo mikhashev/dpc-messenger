@@ -24,6 +24,7 @@ export type MessageAttachment = {
   transfer_id?: string;
   status?: string;
   data_url?: string;           // Base64 data URL (used in ChatPanel image preview)
+  duration_seconds?: number;   // An audio file's length when the record knows it; else the player measures it
   thumbnail?: string;          // Base64 thumbnail data URL
   // Image-specific fields (Phase 2.4):
   dimensions?: { width: number; height: number };
