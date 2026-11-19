@@ -49,6 +49,7 @@ from .providers.base import (
 )
 from .local_api import ENV_VAR_NAME_RE as _ENV_VAR_NAME, LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
+from .music.commands import MusicCommandsMixin
 from .gateway import (
     GATEWAY_HOST,
     GATEWAY_KEY_NAME,
@@ -467,7 +468,7 @@ async def hash_and_note_group_file(service, group_id: str, message_id: str, path
         logger.warning("Could not hash the kept group file %s: %s", path.name, e)
 
 
-class CoreService:
+class CoreService(MusicCommandsMixin):
     """
     The main orchestrating class for the D-PC client's backend.
     Manages all sub-components and the application's lifecycle.
@@ -1194,6 +1195,10 @@ class CoreService:
         # First, so that it lands as early as it can; nothing below waits for it.
         self._start_device_context_refresh()
 
+        # The music library (ADR-051): loads its folders and starts polling them;
+        # a failure is logged and leaves the commands answering with an error.
+        await self.start_music_library()
+
         # Local engines (llama-server, Strata) live on this loop; a start reached
         # from an agent tool's per-call loop is forwarded here. A missing pin is
         # offered to the owner through the consent service, never fetched by a start.
@@ -1512,6 +1517,13 @@ class CoreService:
         device_context_stop = getattr(self, "_device_context_stop", None)
         if device_context_stop is not None:
             device_context_stop.set()
+
+        # The music library stops polling and hashing and writes what is pending,
+        # before the registry refuses the ffmpeg probes it may still be running.
+        try:
+            await self.stop_music_library()
+        except Exception:
+            logger.exception("music: the library did not stop cleanly")
 
         # ADR-046 point 7, step 1: the process registry refuses new entries from
         # here, so nothing is born after the stop below; every later stop reads

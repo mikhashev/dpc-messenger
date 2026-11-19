@@ -138,6 +138,10 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # The idle swap of local engines: whether it is on, and how long it waits for a busy holder
     "set_local_engine_swap",
     "list_model_files",
+    # The music library (ADR-051 Phase 0): watched folders, tracks, playlists
+    "list_music_folders", "add_music_folder", "remove_music_folder", "rescan_music_folder",
+    "list_music_library", "get_music_track",
+    "list_music_playlists", "create_music_playlist", "update_music_playlist", "delete_music_playlist",
     "list_strata_models",
     "install_strata_model",
     # The process registry (ADR-046 point 8): what runs now, who started it
