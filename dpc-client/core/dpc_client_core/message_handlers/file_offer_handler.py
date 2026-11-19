@@ -115,6 +115,22 @@ class FileOfferHandler(MessageHandler):
                 sender_node_id, transfer_id, ALREADY_RECEIVED_REASON
             )
             return None
+        if open_request is not None:
+            # Only the file requested: its name, the record's size and the
+            # record's content hash where the record has them. Otherwise a peer
+            # that was asked could push any bytes and have the auto-accept glue
+            # them onto the record (found by Zcode in review, 2026-11-19).
+            # Refused here, never passed on as an ordinary offer.
+            why = file_requests.offer_mismatch(open_request, payload)
+            if why is not None:
+                from ..managers.file_request import NOT_THE_REQUESTED_FILE_REASON
+                self.logger.warning(f"Offer {transfer_id} from {sender_node_id} answers request "
+                                    f"{open_request.request_id[:8]} with another file ({why}); refused")
+                await file_transfer_manager._send_file_cancel(
+                    sender_node_id, transfer_id, NOT_THE_REQUESTED_FILE_REASON
+                )
+                await file_requests.offer_mismatched(open_request, sender_node_id, why)
+                return None
 
         # Check firewall permission. The outcome is a word compared by value —
         # testing a tuple for truth is how every allow-list, size cap and MIME
@@ -301,6 +317,9 @@ class FileOfferHandler(MessageHandler):
             # The record the file completes is the requested one, by its id.
             transfer.request_id = open_request.request_id
             transfer.message_id = open_request.message_id
+            # What the bytes must hash to once here: the record's hash, not the
+            # one the offer declares (None when the record has none).
+            transfer.requested_hash = open_request.file_hash
         file_transfer_manager.active_transfers[transfer_id] = transfer
         if open_request is not None:
             await file_requests.offer_taken(open_request, sender_node_id, transfer_id)

@@ -112,8 +112,10 @@ def merge_received_attachment(target: Dict[str, Any], source: Dict[str, Any]) ->
     Path, hash, transfer id and status are the transfer's; a thumbnail or
     dimensions the sender's copy already carries are kept.
     """
+    # `content_verified: False`: a file requested for a record with no content
+    # hash, taken on its name and size alone (managers/file_request.py).
     for key in ("file_path", "hash", "transfer_id", "size_mb", "size_bytes",
-                "status", "mime_type", "voice_metadata"):
+                "status", "mime_type", "voice_metadata", "content_verified"):
         value = source.get(key)
         if value in (None, ""):
             continue

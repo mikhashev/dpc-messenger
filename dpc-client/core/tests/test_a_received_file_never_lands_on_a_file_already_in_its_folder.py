@@ -193,13 +193,20 @@ async def test_an_image_and_a_voice_message_of_a_taken_name_are_second_files(tmp
 
 
 @pytest.mark.asyncio
-async def test_a_temporary_name_that_is_taken_is_neither_truncated_nor_deleted(tmp_path):
+@pytest.mark.parametrize("leftover", ["file", "directory"])
+async def test_a_temporary_name_that_is_taken_is_left_alone_and_the_file_still_arrives(tmp_path, leftover):
     # The temporary name is built from the peer's filename and transfer id; a
-    # file already there under it is not this transfer's to overwrite or remove.
+    # file already there under it (left by a crash during the same transfer,
+    # or a squatter) is not this transfer's to overwrite or remove. It used to
+    # fail the receive with receive_error (Zcode in review, 2026-11-19); the
+    # transfer now writes under a fresh temporary name beside it.
     manager, api = _manager(tmp_path)
     destination = manager._get_peer_storage_path(PEER) / "x.txt"
     squatter = manager._receive_path_for(destination, "t-1")
-    squatter.write_bytes(b"not yours")
+    if leftover == "file":
+        squatter.write_bytes(b"not yours")
+    else:
+        squatter.mkdir()
     transfer = FileTransfer(
         transfer_id="t-1", filename="x.txt", size_bytes=3, hash="none", mime_type="text/plain",
         chunk_size=3, node_id=PEER, direction="download", status=TransferStatus.TRANSFERRING,
@@ -210,9 +217,60 @@ async def test_a_temporary_name_that_is_taken_is_neither_truncated_nor_deleted(t
     await manager.handle_file_chunk(PEER, {
         "transfer_id": "t-1", "chunk_index": 0, "data": base64.b64encode(b"abc").decode()})
 
-    assert squatter.read_bytes() == b"not yours"
+    if leftover == "file":
+        assert squatter.read_bytes() == b"not yours"
+    else:
+        assert squatter.is_dir()
+    assert transfer.status == TransferStatus.COMPLETED
     assert "t-1" not in manager.active_transfers
-    assert not destination.exists()
+    assert destination.read_bytes() == b"abc"
+    others = sorted(p.name for p in destination.parent.iterdir() if p not in (destination, squatter))
+    assert others == [], f"the fresh temporary file was left behind: {others}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name, saved", [
+    ("CON", "_CON"),
+    ("nul.txt", "_nul.txt"),
+    ("COM1.mp3", "_COM1.mp3"),
+    ("LPT9", "_LPT9"),
+    ("aux .log", "_aux .log"),
+    ("COM¹.txt", "_COM¹.txt"),
+    ("CONOUT$", "_CONOUT$"),
+    ("console.txt", "console.txt"),
+    ("COM10.txt", "COM10.txt"),
+])
+async def test_a_name_windows_reserves_for_a_device_is_received_as_a_file(tmp_path, name, saved):
+    # Zcode in review, 2026-11-19, reported that such a name fails the receive;
+    # it is prefixed with "_" on every platform, and the record keeps the name sent.
+    manager, api = _manager(tmp_path)
+
+    await _receive(manager, "t-1", name, b"a device name")
+
+    (att,) = api.attachments("new_p2p_message")
+    assert Path(att["file_path"]).name == saved
+    assert Path(att["file_path"]).read_bytes() == b"a device name"
+    assert att["filename"] == name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["a" * 250 + ".mp3", "я" * 200 + ".txt", "b" * 300])
+async def test_a_name_too_long_for_one_path_component_is_cut_and_the_file_still_arrives(tmp_path, name):
+    # 255 bytes (ext4, APFS) or units (NTFS) per component, and the temporary
+    # file adds its own suffix: such a name failed the receive on every platform.
+    manager, api = _manager(tmp_path)
+
+    await _receive(manager, "t-1", name, b"a long name")
+    await _receive(manager, "t-2", name, b"the same long name again")
+
+    first, second = api.attachments("new_p2p_message")
+    for att, data in ((first, b"a long name"), (second, b"the same long name again")):
+        saved = Path(att["file_path"]).name
+        assert len(saved.encode("utf-8")) <= FileTransferManager.MAX_INCOMING_NAME_BYTES + 3  # `_1`
+        assert Path(att["file_path"]).read_bytes() == data
+        assert att["filename"] == name, "the record keeps the name as it was sent"
+    assert Path(first["file_path"]).suffix == Path(name).suffix
+    assert first["file_path"] != second["file_path"]
 
 
 def test_a_claimed_name_is_an_empty_file_and_the_next_claim_moves_on(tmp_path):

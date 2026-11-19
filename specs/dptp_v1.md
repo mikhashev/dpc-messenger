@@ -1426,9 +1426,21 @@ Offers a file to the peer for transfer.
   the file even when it does not keep screenshots, completes the record the request
   named instead of writing a new one, and does not relay the file on; a second offer
   for a request already being served is refused with FILE_CANCEL `already_received`.
-  The firewall's "who may send this node a file" still decides first. The holder adds
-  no record of its own when the transfer completes. A receiver that predates the field
-  ignores it and takes the offer as any other.
+  The offer must be the file requested: its `filename` the requested one, its
+  `size_bytes` the record's size when the record has one, its `hash` the record's
+  content hash when the record has one; any other offer is refused with FILE_CANCEL
+  `not_the_requested_file` and the requester asks the next peer. When the record has a
+  hash, the received bytes are hashed and compared with the record's hash, not the
+  offer's (even when the receiver's `verify_hash` is off); a mismatch is
+  `hash_mismatch`, and the next peer is asked. A record without a hash is completed on
+  its name and size, the bytes checked only against the offer's own hash in transit, and
+  the completed attachment carries `content_verified: false`; a record with neither a
+  hash nor a size is not requested. (Found by Zcode in review, 2026-11-19: the offer's
+  name, size and hash were once never compared, so a peer that was asked could have any
+  bytes completed a record.) The firewall's "who may send this node a file" still
+  decides, after these checks. The holder adds no record of its own when the transfer
+  completes. A receiver that predates the field ignores it and takes the offer as any
+  other.
 
 **Group file relay and its identity.** A member that receives a group file offers it on
 to every member it is connected to except itself, the hop it came from and the author
@@ -1599,7 +1611,11 @@ Cancels an in-progress or pending file transfer.
     nothing. An older sender takes it as any other cancel
   - `firewall_denied` - Receiver's firewall rejected the offer, including a transfer
     over the receiver's size limit (`file_offer_handler.py`)
-  - `hash_mismatch` - SHA256 verification failed
+  - `hash_mismatch` - SHA256 verification failed (for an offer that answers a
+    FILE_REQUEST, against the requested record's hash)
+  - `not_the_requested_file` (v1.16) - The offer answers the receiver's FILE_REQUEST
+    with another file: a name, a size or a hash the requested record does not have.
+    The receiver asks its next peer. An older sender takes it as any other cancel
   - `chunk_verification_failed` - Chunk CRC32 verification failed after max retries (v0.11.1+)
   - `missing_chunks` - Reassembly timed out with chunks still missing: after 30 s with
     no chunk the receiver re-asks up to 64 missing indices through FILE_CHUNK_RETRY, and
@@ -1715,8 +1731,19 @@ every other case — not a member, not that conversation, no such record, no fil
 (ADR-047 §4), so the answer tells a non-member nothing about what this node holds. The
 requester is never told a path.
 
-**Limits.** A peer answers `busy` to more than 20 requests a minute from one requester,
-and when its upload slots (`max_concurrent_transfers`) are all taken.
+**Limits.** A peer answers `busy` to more than 20 requests a minute from one requester
+(`retry_after_sec` 60), when its upload slots (`max_concurrent_transfers`) are all
+taken, and when it would serve the requester a file it is sending that requester now or
+offered it less than 60 s ago (`SAME_FILE_INTERVAL_S`; `retry_after_sec` the seconds
+left, or 60 while the upload runs), so one member cannot have a large file sent to it
+again and again. The per-file wait is checked only after the request is found
+servable, so a `busy` for it tells nobody else what the peer holds. A peer forgets a
+requester that sent it nothing for a minute.
+
+**The requester and `busy`.** When nobody offered the file and a peer answered `busy`
+with a `retry_after_sec` of at most 120 s, the requester waits that long once, still
+`requesting`, and asks that peer again. Otherwise the request ends as `busy` (with
+the longest `retry_after_sec` named) rather than as `not_held`.
 
 **Older peers.** A peer that predates the command logs it as unknown and drops it
 (§7); it never answers, so the requester moves on after the wait, and when nobody
@@ -1743,7 +1770,8 @@ The answer to FILE_REQUEST when the peer does not offer the file (v1.16).
 - `request_id` (string, required): copied from the request.
 - `reason` (string, required): `not_held` — not served, for any reason but load — or
   `busy` — served later. Any other value is read as `not_held`.
-- `retry_after_sec` (integer, optional, with `busy`): when asking again makes sense.
+- `retry_after_sec` (integer, optional, with `busy`): when asking again makes sense; the
+  requester honours it (see *The requester and `busy`* under FILE_REQUEST).
 
 A requester ignores an answer for a request it does not have open, or from a peer it did
 not ask. When every peer asked answered `not_held` it reports that nobody online holds
@@ -3820,9 +3848,12 @@ DPTP is designed to be extensible. New commands can be added by:
   holder answers with an ordinary offer that completes the existing record, everyone
   else with `not_held`. Serving is limited to members of the record's group, or to the
   other party of a one-to-one chat (Mike's call, 2026-11-19: show that the file is not on
-  the node and let the node request it). **Additive:** an older peer drops the request as
-  an unknown command and the requester moves on after 10 s; an older receiver ignores
-  `request_id`.
+  the node and let the node request it). The requester takes only the file requested
+  (name, the record's size and content hash) and refuses any other offer with the new
+  FILE_CANCEL reason `not_the_requested_file`; a holder serves one file to one
+  requester at most once a minute (found by Zcode in review, 2026-11-19).
+  **Additive:** an older peer drops the request as an unknown command and the requester
+  moves on after 10 s; an older receiver ignores `request_id`.
 
 ### v1.15 (November 2026)
 - **§3.18 Group Chat Messages** — new section for the ten `GROUP_*` commands the code sends

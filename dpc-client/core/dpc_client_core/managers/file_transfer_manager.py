@@ -48,6 +48,7 @@ import logging
 import hashlib
 import os
 import re
+import secrets
 import base64
 import time
 import uuid
@@ -356,6 +357,10 @@ class FileTransfer:
     # completes a record both sides already have, so neither side adds one, and
     # the requester neither asks its user nor relays the file on.
     request_id: Optional[str] = None
+    # A download that answers a FILE_REQUEST for a record with a content hash:
+    # that hash. The received bytes must hash to it, whatever the offer
+    # declared and whatever `verify_hash` says (managers/file_request.py).
+    requested_hash: Optional[str] = None
     # A download whose sender no rule names (FILE_TRANSFER_ASK), until the user
     # answers "allow files from X?"; a decline meanwhile tells the sender why.
     awaiting_permission: bool = False
@@ -621,11 +626,34 @@ class FileTransferManager:
     # each created as ordinary files and listed by `dir` (checked 2026-08-07,
     # three ways). The guard costs one underscore on a name nobody sends by
     # accident, so it stays; the reasoning is corrected rather than the code.
+    # Windows also reserves the superscript digits ¹ ² ³ after COM and LPT, and
+    # CONIN$ / CONOUT$; the stem is compared with trailing spaces cut, as Win32
+    # reads `aux .log` as AUX on the versions that reserve these names.
     _RESERVED_NAMES = frozenset(
-        ["CON", "PRN", "AUX", "NUL"]
-        + [f"COM{i}" for i in range(1, 10)]
-        + [f"LPT{i}" for i in range(1, 10)]
+        ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+        + [f"COM{i}" for i in [*range(1, 10), "¹", "²", "³"]]
+        + [f"LPT{i}" for i in [*range(1, 10), "¹", "²", "³"]]
     )
+
+    # One path component may be 255 bytes on ext4 and APFS and 255 UTF-16 units
+    # on NTFS. The temporary file adds `.<12 hex>[.<8 hex>].tmp` and a taken
+    # name `_N`, so a name a peer sends is cut to this many UTF-8 bytes: a name
+    # of 240 characters used to fail the receive at the temporary file on every
+    # platform (checked on Windows 11, 2026-11-19: OSError 22).
+    MAX_INCOMING_NAME_BYTES = 200
+
+    @staticmethod
+    def _bounded_name(name: str) -> str:
+        """`name` cut to MAX_INCOMING_NAME_BYTES, keeping a short suffix."""
+        limit = FileTransferManager.MAX_INCOMING_NAME_BYTES
+        if len(name.encode("utf-8")) <= limit:
+            return name
+        stem, suffix = os.path.splitext(name)
+        if len(suffix.encode("utf-8")) > 20:
+            stem, suffix = name, ""
+        budget = limit - len(suffix.encode("utf-8"))
+        stem = stem.encode("utf-8")[:budget].decode("utf-8", "ignore").rstrip(". ")
+        return (stem or "received_file") + suffix
 
     @staticmethod
     def _safe_incoming_name(filename: str) -> str:
@@ -650,7 +678,8 @@ class FileTransferManager:
         if not name.strip(". "):
             # "", ".", "..", "..." — a name that would address a directory.
             return "received_file"
-        if name.split(".")[0].upper() in FileTransferManager._RESERVED_NAMES:
+        name = FileTransferManager._bounded_name(name)
+        if name.split(".")[0].rstrip(" ").upper() in FileTransferManager._RESERVED_NAMES:
             name = "_" + name
         return name
 
@@ -1333,6 +1362,31 @@ class FileTransferManager:
         tag = hashlib.sha256(str(transfer_id).encode()).hexdigest()[:12]
         return file_path.with_name(f"{file_path.name}.{tag}.tmp")
 
+    # Fresh temporary names tried after the transfer's own is taken.
+    RECEIVE_PATH_ATTEMPTS = 16
+
+    @classmethod
+    def _claim_receive_path(cls, file_path: Path, transfer_id: str):
+        """Create the temporary file exclusively: (path, open handle).
+
+        The transfer's own name first (`_receive_path_for`); when a file or a
+        directory already has it, a name with a random part, so a leftover
+        never blocks a receive and is never touched.
+        """
+        first = cls._receive_path_for(file_path, transfer_id)
+        for attempt in range(cls.RECEIVE_PATH_ATTEMPTS + 1):
+            path = first if attempt == 0 else first.with_name(
+                f"{first.name[:-len('.tmp')]}.{secrets.token_hex(4)}.tmp")
+            try:
+                return path, open(path, "x+b")
+            except FileExistsError:
+                continue
+            except PermissionError:
+                if os.path.lexists(path):
+                    continue  # a directory of that name on Windows
+                raise
+        raise FileExistsError(f"no free temporary name beside {file_path}")
+
     def _open_receive(self, node_id: str, transfer: FileTransfer) -> None:
         """Decide the destination and open the temporary file, sized to the offer.
 
@@ -1344,12 +1398,13 @@ class FileTransferManager:
         transfer.save_to_disk = save_to_disk
         if not save_to_disk:
             return
-        receive_path = self._receive_path_for(file_path, transfer.transfer_id)
         # Exclusive, and recorded only once created: the temporary name is built
         # from the peer's filename and transfer id, so a file already there
         # under it is someone else's, to be neither truncated nor deleted by
-        # this transfer's release.
-        handle = open(receive_path, "x+b")
+        # this transfer's release. Such a file (one left by a crash during the
+        # same transfer, or a squatter) no longer fails the receive: the
+        # transfer takes a fresh name beside it (Zcode in review, 2026-11-19).
+        receive_path, handle = self._claim_receive_path(file_path, transfer.transfer_id)
         transfer.receive_path = receive_path
         try:
             handle.truncate(max(0, int(transfer.size_bytes or 0)))
@@ -1661,7 +1716,11 @@ class FileTransferManager:
         if save_to_disk:
             temp_path = transfer.receive_path
             computed_hash = None
-            if self.verify_hash and transfer.hash != "none":
+            # A requested file is checked against the requested record's hash,
+            # not the offer's own: a holder could declare the right hash and
+            # send other bytes, or declare "none" to skip the check.
+            expected_hash = transfer.requested_hash or transfer.hash
+            if transfer.requested_hash or (self.verify_hash and transfer.hash != "none"):
                 try:
                     computed_hash = await self._compute_file_hash_async(temp_path)
                 except OSError as e:
@@ -1673,11 +1732,14 @@ class FileTransferManager:
                 if self.active_transfers.get(tid) is not transfer:
                     temp_path.unlink(missing_ok=True)  # cancelled while hashing
                     return
-                if computed_hash != transfer.hash:
+                if computed_hash != expected_hash:
                     logger.error(
-                        f"Hash mismatch for {transfer.filename}: expected {transfer.hash}, "
+                        f"Hash mismatch for {transfer.filename}: expected {expected_hash}, "
                         f"got {computed_hash}; every chunk passed its CRC, the whole file is dropped"
                     )
+                    if transfer.request_id:
+                        # Not the requested file: the request asks the next peer.
+                        self.file_requests.wrong_bytes(transfer.request_id, tid, node_id)
                     await self._fail_download(node_id, transfer, "hash_mismatch")
                     return
             else:
@@ -1785,6 +1847,11 @@ class FileTransferManager:
                 "transfer_id": transfer.transfer_id,
                 "status": "completed"
             }
+            if transfer.request_id and not transfer.requested_hash:
+                # Requested for a record with no content hash: the name and size
+                # matched and the bytes hash to what their sender declared, but
+                # nothing ties them to what the record's author sent.
+                attachment["content_verified"] = False
 
             # A plain file keeps the path it was saved under, so the chat can
             # show it in its folder. Image and voice take theirs below.
@@ -1816,9 +1883,15 @@ class FileTransferManager:
             elif not is_image and not is_voice and transfer.text:
                 caption_text = transfer.text
 
+            attachment_index = None
             if existing_record is not None:
                 # Patched in place: the signature covers no attachment field.
                 attachment = conversation_monitor.attach_received_file(existing_record, attachment)
+                # Which attachment of the record it was, so the UI completes that
+                # one and not another of the same name.
+                attachment_index = next(
+                    (i for i, att in enumerate(existing_record.get("attachments") or ())
+                     if att is attachment), None)
                 logger.info("Completed the sender's record %s with the received %s",
                             message_id, transfer.filename)
 
@@ -1830,6 +1903,8 @@ class FileTransferManager:
                 "message_id": message_id,
                 "attachments": [attachment]
             }
+            if attachment_index is not None:
+                message_event["attachment_index"] = attachment_index
 
             if transfer.group_id:
                 message_event["group_id"] = transfer.group_id
@@ -1855,7 +1930,7 @@ class FileTransferManager:
             await self.local_api.broadcast_event("file_transfer_complete", completion_event)
 
             if transfer.request_id:
-                await self.file_requests.received(transfer.request_id, attachment)
+                await self.file_requests.received(transfer.request_id, attachment, attachment_index)
 
             # Add to backend conversation monitor (RECEIVER SIDE)
             # This ensures transcriptions can be attached and knowledge extraction works

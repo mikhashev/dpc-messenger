@@ -25,6 +25,23 @@ not a member, no such record, no file on disk — reads `not_held`, the one
 answer ADR-047 §4 gives, so the answer tells a non-member nothing about what
 this node holds.
 
+The requester takes only the file it asked for (found by Zcode in review,
+2026-11-19: an answer was matched on `request_id`, the peer and the group
+alone, so a peer that was asked could push any bytes and have them glued onto
+the record). An offer that answers a request must carry the requested
+`filename`, the record's `size_bytes` when the record has one, and the record's
+content `hash` when the record has one; otherwise it is refused with
+FILE_CANCEL `not_the_requested_file` and the next peer is asked. When the
+record has a hash, the bytes that arrive are hashed and compared with *that*
+hash, whatever `verify_hash` says and whatever the offer declared; a mismatch
+drops the file (`hash_mismatch`) and the next peer is asked. A record without
+a hash (a sender's own record of a group file carries none, see
+`attachment_matches`) can only be checked by its name and size: the file is
+taken when both match, its bytes are checked against the offer's own hash in
+transit, and the completed attachment is marked `content_verified: False`,
+because nothing ties those bytes to what the author sent. A record with
+neither a hash nor a size is not requested at all.
+
 The automatic version (fetch after sync, on reconnect, on being added) is card
 A-NODE-THAT-SYNCS-A-RECORD-NEVER-FETCHES-THE-FILE-IT-LACKS, under the epic of
 ADR-047; it is meant to call `FileRequests.request` too.
@@ -34,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -48,6 +66,12 @@ FILE_REQUEST_DECLINED = "FILE_REQUEST_DECLINED"
 # The one refusal, whatever the cause (ADR-047 §4), and the one that is not.
 NOT_HELD_REASON = "not_held"
 BUSY_REASON = "busy"
+# FILE_CANCEL from the requester: the offer answers its request with another
+# file (a name, size or hash the requested record does not have).
+NOT_THE_REQUESTED_FILE_REASON = "not_the_requested_file"
+# The requester's own note for a peer that offered another file, or sent bytes
+# that do not hash to the record's hash; never on the wire as a decline.
+_OFFERED_ANOTHER_FILE = "offered_another_file"
 
 # The UI event and its states.
 FILE_REQUEST_STATUS_EVENT = "file_request_status"
@@ -56,6 +80,7 @@ STATE_RECEIVING = "receiving"
 STATE_RECEIVED = "received"
 STATE_NOT_HELD = "not_held"     # every peer asked answered that it does not serve the file
 STATE_NO_ANSWER = "no_answer"   # nobody offered it and at least one peer never answered
+STATE_BUSY = "busy"             # nobody offered it and a peer that may hold it answered busy
 STATE_FAILED = "failed"         # an offer came, and the transfer ended without the file
 
 # How long the requester waits for one peer before asking the next; the
@@ -65,6 +90,15 @@ REQUEST_ANSWER_TIMEOUT_S = 10.0
 REQUEST_MEMORY_S = 3600.0
 # Requests one peer may put to this node per minute; more are answered `busy`.
 REQUESTS_PER_MINUTE = 20
+# One file is served to one requester at most once per this many seconds, and
+# never while an upload of it to that requester runs: a multi-GB file asked for
+# again and again would otherwise take the holder's upload for good. A
+# requester that got the file never asks again (its record names a file that
+# is here), so only one whose transfer failed meets the wait.
+SAME_FILE_INTERVAL_S = 60.0
+# A `busy` answer whose `retry_after_sec` is at most this is waited out once and
+# the peer asked again; a longer one ends the request as `busy`.
+MAX_RETRY_WAIT_S = 120.0
 
 ATTACHMENT_KINDS = ("file", "image", "voice")
 _MAX_FIELD_CHARS = 128
@@ -126,8 +160,15 @@ class OpenRequest:
     size_bytes: Optional[int]
     file_hash: Optional[str]
     candidates: List[str]
+    # Where the attachment is in the record, so the UI completes that one.
+    attachment_index: Optional[int] = None
     created: float = field(default_factory=time.monotonic)
     declined: Dict[str, str] = field(default_factory=dict)  # node -> reason
+    retry_after: Dict[str, float] = field(default_factory=dict)  # busy node -> seconds it named
+    next_candidate: int = 0        # the index in `candidates` asked next
+    asking: Optional[str] = None   # the peer whose answer is awaited now
+    silent: List[str] = field(default_factory=list)
+    retried: bool = False          # the busy peers have had their second ask
     transfer_id: Optional[str] = None
     holder: Optional[str] = None
     state: str = STATE_REQUESTING
@@ -157,6 +198,8 @@ class FileRequests:
         self.answer_timeout_s = REQUEST_ANSWER_TIMEOUT_S
         self._open: Dict[str, OpenRequest] = {}
         self._asked_by: Dict[str, List[float]] = {}  # requester -> request times (holder side)
+        # (requester, path) -> when this node last offered it that file (holder side)
+        self._served: Dict[tuple, float] = {}
 
     # --- shared ------------------------------------------------------------
 
@@ -208,14 +251,15 @@ class FileRequests:
     # --- requester ---------------------------------------------------------
 
     @staticmethod
-    def _find_attachment(record: Dict[str, Any], filename: Optional[str]) -> Optional[Dict[str, Any]]:
-        for att in record.get("attachments") or ():
+    def _find_attachment(record: Dict[str, Any], filename: Optional[str]):
+        """(index, attachment) of the first file attachment named `filename`, or (None, None)."""
+        for index, att in enumerate(record.get("attachments") or ()):
             if not isinstance(att, dict) or att.get("type") not in ATTACHMENT_KINDS:
                 continue
             if filename and att.get("filename") != filename:
                 continue
-            return att
-        return None
+            return index, att
+        return None, None
 
     async def request(self, conversation_id: str, message_id: str,
                       filename: Optional[str] = None) -> Dict[str, Any]:
@@ -242,11 +286,20 @@ class FileRequests:
         record = next((r for r in records if r.get("id") == message_id), None)
         if record is None:
             return {"status": "error", "message": f"No message {message_id} in this chat"}
-        attachment = self._find_attachment(record, filename)
+        index, attachment = self._find_attachment(record, filename)
         if attachment is None:
             return {"status": "error", "message": "That message carries no file"}
         if file_is_here(attachment.get("file_path")):
             return {"status": "available", "file_path": attachment["file_path"]}
+        size = attachment.get("size_bytes")
+        size = size if isinstance(size, int) and not isinstance(size, bool) else None
+        file_hash = _real_hash(attachment.get("hash"))
+        if size is None and file_hash is None:
+            # Nothing but a name to check an answer against: any bytes under that
+            # name would complete the record.
+            return {"status": "error",
+                    "message": "The record names neither the size nor the hash of its file, "
+                               "so a file sent for it could not be checked"}
 
         for open_request in self._open.values():
             if (open_request.conversation_id == conversation_id
@@ -267,16 +320,16 @@ class FileRequests:
             return {"status": "no_peers",
                     "message": "No member of this chat who may hold the file is online"}
 
-        size = attachment.get("size_bytes")
         request = OpenRequest(
             request_id=str(uuid.uuid4()),
             conversation_id=conversation_id,
             group_id=conversation_id if is_group else None,
             message_id=message_id,
             filename=str(attachment.get("filename") or ""),
-            size_bytes=size if isinstance(size, int) and not isinstance(size, bool) else None,
-            file_hash=_real_hash(attachment.get("hash")),
+            size_bytes=size,
+            file_hash=file_hash,
             candidates=candidates,
+            attachment_index=index,
         )
         self._open[request.request_id] = request
         await self._emit(request, STATE_REQUESTING, asking=list(candidates))
@@ -286,51 +339,111 @@ class FileRequests:
         return {"status": "requesting", "request_id": request.request_id,
                 "asking": list(candidates)}
 
+    async def _ask(self, request: OpenRequest, node_id: str) -> None:
+        """Put the request to `node_id` and wait for its answer or the timeout."""
+        request.answered.clear()
+        request.asking = node_id
+        try:
+            await self.manager.p2p_manager.send_message_to_peer(node_id, {
+                "command": FILE_REQUEST, "payload": request.wire_payload(),
+            })
+        except Exception as e:  # noqa: BLE001 - a dropped peer is a peer that did not answer
+            logger.info("FILE_REQUEST %s could not reach %s: %s",
+                        request.request_id[:8], node_id[:20], e)
+            request.asking = None
+            if node_id not in request.silent:
+                request.silent.append(node_id)
+            return
+        try:
+            await asyncio.wait_for(request.answered.wait(), self.answer_timeout_s)
+        except asyncio.TimeoutError:
+            pass
+        request.asking = None
+        if (not request.transfer_id and node_id not in request.declined
+                and node_id not in request.silent):
+            request.silent.append(node_id)
+
+    def _busy_to_ask_again(self, request: OpenRequest) -> Dict[str, float]:
+        """The busy peers whose `retry_after_sec` is short enough to wait out, once."""
+        if request.retried:
+            return {}
+        return {node: wait for node, wait in request.retry_after.items()
+                if request.declined.get(node) == BUSY_REASON and 0 < wait <= MAX_RETRY_WAIT_S}
+
     async def _ask_in_turn(self, request: OpenRequest) -> None:
-        silent: List[str] = []
-        for node_id in request.candidates:
+        """Ask the candidates not yet asked, one at a time, until one offers the file.
+
+        Run again, from where it stopped, when the file a peer sent turned out
+        not to be the requested one (`wrong_bytes`).
+        """
+        while request.next_candidate < len(request.candidates):
             if request.transfer_id:
                 return
-            request.answered.clear()
-            try:
-                await self.manager.p2p_manager.send_message_to_peer(node_id, {
-                    "command": FILE_REQUEST, "payload": request.wire_payload(),
-                })
-            except Exception as e:  # noqa: BLE001 - a dropped peer is a peer that did not answer
-                logger.info("FILE_REQUEST %s could not reach %s: %s",
-                            request.request_id[:8], node_id[:20], e)
-                silent.append(node_id)
-                continue
-            try:
-                await asyncio.wait_for(request.answered.wait(), self.answer_timeout_s)
-            except asyncio.TimeoutError:
-                pass
+            node_id = request.candidates[request.next_candidate]
+            request.next_candidate += 1
+            await self._ask(request, node_id)
             if request.transfer_id:
                 return
-            if node_id not in request.declined:
-                silent.append(node_id)
+        again = self._busy_to_ask_again(request)
+        if again:
+            # The peer said when asking again makes sense (`retry_after_sec`):
+            # the request waits it out once, still `requesting`, then asks again.
+            request.retried = True
+            wait = max(again.values())
+            await self._emit(request, STATE_REQUESTING, asking=list(again), retry_after_sec=wait)
+            await asyncio.sleep(wait)
+            for node_id in sorted(again, key=again.get):
+                if request.transfer_id:
+                    return
+                request.declined.pop(node_id, None)
+                await self._ask(request, node_id)
+                if request.transfer_id:
+                    return
         if request.transfer_id:
             return
-        if silent:
-            await self._emit(request, STATE_NO_ANSWER, silent=silent)
+        await self._end_without_file(request)
+
+    async def _end_without_file(self, request: OpenRequest) -> None:
+        reasons = set(request.declined.values())
+        if request.silent:
+            await self._emit(request, STATE_NO_ANSWER, silent=list(request.silent))
+        elif BUSY_REASON in reasons:
+            busy = [n for n, r in request.declined.items() if r == BUSY_REASON]
+            waits = [request.retry_after[n] for n in busy if n in request.retry_after]
+            extra = {"retry_after_sec": max(waits)} if waits else {}
+            await self._emit(request, STATE_BUSY, busy=busy, **extra)
+        elif _OFFERED_ANOTHER_FILE in reasons:
+            await self._emit(request, STATE_FAILED,
+                             reason="a peer sent a file other than the one requested")
         else:
             await self._emit(request, STATE_NOT_HELD)
         logger.info("FILE_REQUEST %s for %s: %s (%d declined, %d silent)",
                     request.request_id[:8], request.filename, request.state,
-                    len(request.declined), len(silent))
+                    len(request.declined), len(request.silent))
 
     async def handle_declined(self, node_id: str, payload: Dict[str, Any]) -> None:
         request = self._open.get(payload.get("request_id"))
         if request is None or node_id not in request.candidates:
             return
         reason = payload.get("reason")
-        request.declined[node_id] = reason if reason in (NOT_HELD_REASON, BUSY_REASON) else NOT_HELD_REASON
-        request.answered.set()
+        reason = reason if reason in (NOT_HELD_REASON, BUSY_REASON) else NOT_HELD_REASON
+        request.declined[node_id] = reason
+        wait = payload.get("retry_after_sec")
+        if (reason == BUSY_REASON and isinstance(wait, (int, float))
+                and not isinstance(wait, bool) and wait > 0):
+            request.retry_after[node_id] = float(wait)
+        if node_id in request.silent:
+            request.silent.remove(node_id)  # it answered after its wait
+        # Only the answer awaited now ends the wait: a late answer from a peer
+        # asked earlier must not cut short the wait for the one asked now.
+        if request.asking == node_id:
+            request.answered.set()
 
     def open_request_for_offer(self, node_id: str, payload: Dict[str, Any]) -> Optional[OpenRequest]:
         """The open request an incoming FILE_OFFER answers, or None.
 
         It must come from a peer the request was put to, for the same group.
+        Whether it offers the file requested is `offer_mismatch`'s question.
         """
         request = self._open.get(payload.get("request_id"))
         if request is None or node_id not in request.candidates:
@@ -338,6 +451,35 @@ class FileRequests:
         if (payload.get("group_id") or None) != request.group_id:
             return None
         return request
+
+    @staticmethod
+    def offer_mismatch(request: OpenRequest, payload: Dict[str, Any]) -> Optional[str]:
+        """Why an offer that answers `request` is not the requested file, or None.
+
+        The name always (a holder offers the name its record has, which is the
+        requested one); the size when the record has one; the content hash when
+        the record has one. The hash an offer declares is checked again against
+        the bytes once they are here (`_finalize_download`, `requested_hash`).
+        """
+        if payload.get("filename") != request.filename:
+            return f"name {str(payload.get('filename'))[:80]!r}, requested {request.filename[:80]!r}"
+        size = payload.get("size_bytes")
+        if request.size_bytes is not None and (
+                isinstance(size, bool) or not isinstance(size, int) or size != request.size_bytes):
+            return f"size {size!r}, requested {request.size_bytes}"
+        if request.file_hash and _real_hash(payload.get("hash")) != request.file_hash:
+            return f"hash {str(payload.get('hash'))[:16]!r}, requested {request.file_hash[:16]!r}"
+        return None
+
+    async def offer_mismatched(self, request: OpenRequest, node_id: str, why: str) -> None:
+        """The offer from `node_id` was refused as another file: ask the next peer."""
+        logger.warning("FILE_REQUEST %s: %s offered another file (%s); refused",
+                       request.request_id[:8], node_id[:20], why)
+        request.declined[node_id] = _OFFERED_ANOTHER_FILE
+        if node_id in request.silent:
+            request.silent.remove(node_id)
+        if request.asking == node_id:
+            request.answered.set()
 
     async def offer_taken(self, request: OpenRequest, node_id: str, transfer_id: str) -> None:
         request.transfer_id = transfer_id
@@ -349,11 +491,36 @@ class FileRequests:
         """This node's own firewall refused the offer that answers the request."""
         await self._emit(request, STATE_FAILED, reason=reason)
 
-    async def received(self, request_id: Optional[str], attachment: Dict[str, Any]) -> None:
+    async def received(self, request_id: Optional[str], attachment: Dict[str, Any],
+                       attachment_index: Optional[int] = None) -> None:
         request = self._open.pop(request_id, None) if request_id else None
         if request is None:
             return
-        await self._emit(request, STATE_RECEIVED, attachment=dict(attachment))
+        if attachment_index is None:
+            attachment_index = request.attachment_index
+        extra = {"attachment_index": attachment_index} if attachment_index is not None else {}
+        await self._emit(request, STATE_RECEIVED, attachment=dict(attachment), **extra)
+
+    def wrong_bytes(self, request_id: Optional[str], transfer_id: str, node_id: str) -> None:
+        """The file `node_id` sent does not hash to the requested record's hash.
+
+        The caller drops the transfer; the request goes on with the peers not
+        yet asked, as after a refused offer.
+        """
+        request = self._open.get(request_id) if request_id else None
+        if request is None or request.transfer_id != transfer_id:
+            return
+        logger.warning("FILE_REQUEST %s: the file %s sent does not match the record's hash",
+                       request.request_id[:8], node_id[:20])
+        request.transfer_id = None
+        request.holder = None
+        request.declined[node_id] = _OFFERED_ANOTHER_FILE
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if request.task is None or request.task.done():
+            request.task = loop.create_task(self._ask_in_turn(request))
 
     def transfer_ended(self, request_id: Optional[str], transfer_id: str, reason: str) -> None:
         """A download that answered a request left the table without its file."""
@@ -372,10 +539,33 @@ class FileRequests:
 
     def _too_many(self, node_id: str) -> bool:
         now = time.monotonic()
+        # A peer that asked nothing for a minute is forgotten, so a peer that
+        # left, and every peer that ever asked, does not stay in the table.
+        for peer in [p for p, times in self._asked_by.items()
+                     if not times or now - times[-1] >= 60.0]:
+            del self._asked_by[peer]
         recent = [t for t in self._asked_by.get(node_id, []) if now - t < 60.0]
         recent.append(now)
         self._asked_by[node_id] = recent
         return len(recent) > REQUESTS_PER_MINUTE
+
+    def _same_file_wait(self, node_id: str, path: Path) -> Optional[int]:
+        """Seconds before `node_id` may be offered `path` again, or None when it may now.
+
+        Never while an upload of that file to that requester runs, and at most
+        once per SAME_FILE_INTERVAL_S from the last offer of it.
+        """
+        now = time.monotonic()
+        for key in [k for k, when in self._served.items() if now - when >= SAME_FILE_INTERVAL_S]:
+            del self._served[key]
+        for transfer in list(self.manager.active_transfers.values()):
+            if (transfer.direction == "upload" and transfer.request_id
+                    and transfer.node_id == node_id and transfer.file_path == path):
+                return int(SAME_FILE_INTERVAL_S)
+        last = self._served.get((node_id, str(path)))
+        if last is None:
+            return None
+        return max(1, math.ceil(SAME_FILE_INTERVAL_S - (now - last)))
 
     def _served_attachment(self, node_id: str, payload: Dict[str, Any]):
         """(record, attachment, path) this node may send `node_id` for the request, or None."""
@@ -446,6 +636,14 @@ class FileRequests:
             await self._decline(node_id, request_id, NOT_HELD_REASON)
             return
         record, att, path = found
+        # After the lookup, never before: only a requester this node may serve
+        # meets the wait, so `busy` here tells nobody else what this node holds.
+        wait = self._same_file_wait(node_id, path)
+        if wait is not None:
+            logger.info("FILE_REQUEST %s from %s: %s was offered to it within %ds; busy",
+                        request_id[:8], node_id[:20], att.get("filename"), int(SAME_FILE_INTERVAL_S))
+            await self._decline(node_id, request_id, BUSY_REASON, retry_after_sec=wait)
+            return
         group_id = payload.get("group_id")
         kind = att.get("type")
         image_metadata = None
@@ -471,6 +669,7 @@ class FileRequests:
                 filename=att.get("filename"),
                 request_id=request_id,
             )
+            self._served[(node_id, str(path))] = time.monotonic()
             logger.info("FILE_REQUEST %s from %s: offering %s", request_id[:8], node_id[:20],
                         att.get("filename"))
         except MaxConcurrentTransfersExceeded:
