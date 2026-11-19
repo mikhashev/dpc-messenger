@@ -160,36 +160,58 @@ class LoopLagProbe:
         return max(0.0, end - self._queued_at)
 
 
+def reading_hops(loop) -> int:
+    """Timer hops before `TransportReader` reads: 2 on Windows' Proactor, 1 on any other loop.
+
+    A selector loop (the default on Linux and macOS, and chosen on Windows
+    by some) runs a turn's I/O callbacks — `_write_ready`, which also resumes
+    the TLS layer — before the timers due in that turn, so one hop reads
+    after the socket took what it could. The Proactor issues the next send
+    from the last one's completion callback, a turn later (review of
+    08493d5f, 2026-11-20).
+    """
+    proactor = getattr(asyncio, "ProactorEventLoop", None)  # Windows only
+    return 2 if proactor is not None and isinstance(loop, proactor) else 1
+
+
 class TransportReader:
-    """The transport's write buffer, read by timer callbacks two turns of the loop from now.
+    """The transport's write buffer, read by timer callbacks one or two turns of the loop from now.
 
     asyncio runs a turn's I/O callbacks (a send completed, the socket
     writable) after the tasks already queued, so a sender back from
     `sleep(0)` still sees the buffer as it was before that turn. A timer
-    due now runs in the next turn, after that turn's I/O callbacks. Two such
-    hops, because Windows' Proactor moves a transport's buffer one send per
+    due now runs in the next turn, after that turn's I/O callbacks. On a
+    selector loop one such hop is enough. On Windows' Proactor two
+    (`reading_hops`), because it moves a transport's buffer one send per
     turn — the next send is issued from the last one's completion callback —
     so even a link that keeps up empties a window's buffer only in the
     second turn (measured 2026-11-20 on loopback TLS with a loop of 0.1 s
     turns: one hop read every window of four 1 MiB chunks as the link
     behind). On a loop of 0.4 s turns the reading lands up to three turns
     after the window's last frame, so a slow link can look as if it kept up
-    with one doubling more than it does; `ChunkWindow` caps the budget at
-    what the link moved per turn once it sees it behind. It costs the
-    sender no wait unless it asks for the reading (`taken`).
+    with more than it does; `ChunkWindow` grows on such a late reading by
+    one chunk, not by doubling, and caps the budget at what the link moved
+    per turn once it sees it behind. It costs the sender no wait unless it
+    asks for the reading (`taken`).
     """
 
-    __slots__ = ("_size_of", "_handle", "taken", "after_bytes", "taken_at")
+    __slots__ = ("_size_of", "_handle", "_hops_left", "taken", "after_bytes", "taken_at")
 
     def __init__(self, size_of):
+        loop = asyncio.get_running_loop()
         self._size_of = size_of
+        self._hops_left = reading_hops(loop)
         self.after_bytes = None
         self.taken_at = None
         self.taken = asyncio.Event()
-        self._handle = asyncio.get_running_loop().call_later(0, self._hop)
+        self._handle = loop.call_later(0, self._hop)
 
     def _hop(self) -> None:
-        self._handle = asyncio.get_running_loop().call_later(0, self._read)
+        self._hops_left -= 1
+        if self._hops_left > 0:
+            self._handle = asyncio.get_running_loop().call_later(0, self._hop)
+        else:
+            self._read()
 
     def _read(self) -> None:
         self._handle = None
@@ -209,7 +231,9 @@ class TransportReading:
 
     `at_end_bytes` right after the window's last frame, `after_turn_bytes`
     at least one whole turn of the loop later (`TransportReader`), `turn_s`
-    apart;
+    apart; `after_turn_bytes` is None when that reading did not come within
+    `READING_WAIT_MAX_S` (or the transport could not say then): the
+    connection can report its buffer, but this window has no verdict;
     `burst_bytes` what the window handed over since its last wait that
     suspended (all of it when none did), `written_bytes` all it handed over,
     `loop_turn_s` one turn of the loop as the window's closing turn measured it. Read with
@@ -219,7 +243,7 @@ class TransportReading:
     why `ChunkWindow` compares it with the burst and not with zero.
     """
     at_end_bytes: int
-    after_turn_bytes: int
+    after_turn_bytes: Optional[int]
     turn_s: float
     burst_bytes: int
     written_bytes: int

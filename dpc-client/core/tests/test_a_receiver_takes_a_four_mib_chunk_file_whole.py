@@ -183,24 +183,3 @@ async def test_a_tls_link_reports_the_bytes_in_both_of_its_layers(tmp_path):
     plain = PeerConnection("dpc-node-" + "c" * 32, None, SimpleNamespace(
         transport=_Layer(5_000), get_extra_info=lambda name, default=None: default))
     assert plain.get_write_buffer_size() == 5_000
-
-
-@pytest.mark.asyncio
-async def test_where_the_os_has_it_a_direct_link_caps_the_kernels_unsent_bytes():
-    """Linux and macOS: TCP_NOTSENT_LOWAT keeps file data in asyncio's buffer, where the
-    data lane sees it, rather than in a kernel buffer of several MB a chat frame queues
-    behind unseen. Windows has no such option; nothing is set there."""
-    from dpc_client_core.p2p_manager import NOTSENT_LOWAT_BYTES
-    server, (c_reader, c_writer), (s_reader, s_writer) = await _loopback_pair()
-    try:
-        for writer, direction in ((c_writer, "out"), (s_writer, "in")):
-            PeerConnection("dpc-node-" + "c" * 32, None, writer, direction=direction)
-            option = getattr(socket, "TCP_NOTSENT_LOWAT", None)
-            if option is None:
-                continue
-            sock = writer.get_extra_info("socket")
-            assert sock.getsockopt(socket.IPPROTO_TCP, option) == NOTSENT_LOWAT_BYTES, direction
-    finally:
-        c_writer.close()
-        s_writer.close()
-        server.close()

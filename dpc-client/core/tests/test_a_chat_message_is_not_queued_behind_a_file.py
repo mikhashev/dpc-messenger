@@ -150,9 +150,23 @@ async def test_with_no_rate_known_and_a_busy_loop_a_slow_link_still_puts_one_fra
     a loop this slow the reading lands two or three turns late, 0.8-1.2 s,
     in which this link moves three or four chunks: that is as far as the
     cold start can probe here (readings later than 2.5 turns are scaled
-    down, LATE_READING_TURNS). A chat frame's wait is what is ahead of it on
-    the link plus the turns of the busy loop it needs to be sent and read,
-    which it pays with or without a file.
+    down, LATE_READING_TURNS), and a reading that late adds one chunk to
+    what it saw cleared rather than doubling it (EARLY_READING_TURNS). A chat
+    frame's wait is what is ahead of it on the link plus the turns of the
+    busy loop it needs to be sent and read, which it pays with or without a
+    file.
+
+    What this proves, and what it does not (review of 08493d5f, a fresh
+    subagent, 2026-11-20): its bound on the bytes ahead of chat also holds at
+    08493d5f's parent ff03caf2, whose cold start never got past two chunks
+    on this 900 KB file, and it does not exercise F1 (1 MiB chunks; that is
+    `test_a_busy_loop_on_a_fast_link_grows_the_window_past_one_chunk_and_
+    learns_the_rate`). It does prove F4 here: every window is counted as the
+    loop's, where ff03caf2 counted two of eight and read the rest
+    of the loop's turns as the link's rate. The bound on what is ahead is a
+    property, not a count of frames, which the timer moved by a frame from
+    run to run: no more than the largest window, and fewer than the 16
+    frames the unknown-rate budget of 9f8538f0 allowed.
     """
     rate = 300_000
     monkeypatch.setattr(bench, "LOAD_SLICE_S", 0.02)  # 20 tasks x 20 ms: a 0.4 s turn
@@ -163,11 +177,12 @@ async def test_with_no_rate_known_and_a_busy_loop_a_slow_link_still_puts_one_fra
           f"peak window {window.peak_chunks} chunks, {window.loop_limited_windows} loop-limited, "
           f"{getattr(window, 'link_behind_windows', '-')} found the link behind, rate {window.rate.bytes_per_second()}")
     assert row["chunk_size"] == 64 * 1024
-    assert window.rate.measured and window.rate.bytes_per_second() <= rate  # 9f8538f0: none
+    assert window.rate.measured and window.rate.bytes_per_second() <= rate
+    assert window.loop_limited_windows == window.windows, window.windows  # ff03caf2: 2 of 8
     ahead = row["ahead_of_chat"]
     assert len(ahead) >= 6, row
     assert max(ahead) <= window.peak_chunks * ONE_FRAME_BYTES, (ahead, window.peak_chunks)
-    assert max(ahead) <= 4 * ONE_FRAME_BYTES, ahead  # 9f8538f0: up to 16 frames
+    assert max(ahead) < 16 * ONE_FRAME_BYTES, ahead  # 9f8538f0's unknown-rate budget: 16 frames
     # The wait: that one frame's transmit time, and the turns of the busy loop
     # the probe needs to be sent, carried and read (four at the most here).
     one_frame_s = ONE_FRAME_BYTES / rate
@@ -180,9 +195,15 @@ async def test_with_no_rate_known_and_a_busy_loop_a_slow_link_still_puts_one_fra
 @pytest.mark.asyncio
 async def test_a_busy_loop_on_a_link_slower_than_its_turns_keeps_one_frame_ahead_of_chat(tmp_path, monkeypatch):
     """0.3 MB/s, the loop held 0.1 s a turn (the benchmark's --load): one 64 KiB chunk takes
-    three turns of this link, so the first reading finds the link behind. The allowance
-    stays 0 — one frame ahead of chat — and the rate is what the link took, not the loop's
-    pace (74c2de84 remembered 0.12 MB/s for this link, the loop's pace)."""
+    three turns of this link, so a reading finds the link behind. The allowance stays 0 from
+    then on, and the rate is what the link took, not the loop's pace (74c2de84 remembered
+    0.12 MB/s for this link, the loop's pace; ff03caf2 about the same).
+
+    Not asserted (review of 08493d5f, 2026-11-20): that the window never grew past one
+    chunk. That holds only while every reading lands before the 0.29 s frame has left, and a
+    stall of the loop (a CI runner) can make one reading late, which reads the link as keeping
+    up and lets one more chunk wait once. What is ahead of chat stays within the largest
+    window, and fewer than 9f8538f0's 16 frames."""
     rate = 300_000
     row, sender = await _transfer_with_chat(tmp_path, rate, 400_000, probe_s=0.15, monkeypatch=monkeypatch,
                                             load=True)
@@ -192,8 +213,10 @@ async def test_a_busy_loop_on_a_link_slower_than_its_turns_keeps_one_frame_ahead
     measured = window.rate.bytes_per_second()
     # File bytes of a 0.3 MB/s framed link: about 225 KB/s (74c2de84: 0.12 MB/s, the loop's pace)
     assert measured and 0.8 * rate * 0.75 <= measured <= rate, measured
-    assert window.link_behind and window.peak_chunks == 1
-    assert max(row["ahead_of_chat"]) <= ONE_FRAME_BYTES, row["ahead_of_chat"]
+    assert window.link_behind
+    ahead = row["ahead_of_chat"]
+    assert max(ahead) <= window.peak_chunks * ONE_FRAME_BYTES, (ahead, window.peak_chunks)
+    assert max(ahead) < 16 * ONE_FRAME_BYTES, ahead
 
 
 # --- the lanes ---------------------------------------------------------------------
@@ -567,3 +590,89 @@ async def test_a_busy_loop_on_a_fast_link_grows_the_window_past_one_chunk_and_le
     assert window.peak_chunks > 1
     assert window.rate.measured
     assert sender.manager.link_rates.get(bench.RECEIVER, "direct_tls")
+
+
+# --- the review of 08493d5f (a fresh subagent, 2026-11-20) -----------------------------
+
+
+def _hops_on(loop):
+    """The turn of the loop in which `TransportReader` reads, counted by a callback that
+    re-queues itself once a turn, and `reading_hops` for that loop."""
+    from dpc_client_core.send_lanes import TransportReader, reading_hops
+
+    async def main():
+        running = asyncio.get_running_loop()
+        turns, seen = [0], []
+
+        def tick():
+            turns[0] += 1
+            handle[0] = running.call_soon(tick)
+
+        handle = [running.call_soon(tick)]
+        reader = TransportReader(lambda: seen.append(turns[0]) or 0)
+        await asyncio.wait_for(reader.taken.wait(), 5)
+        handle[0].cancel()
+        return reading_hops(running), seen[0]
+
+    try:
+        return loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
+def test_on_a_selector_loop_the_reading_comes_one_turn_after_the_window():
+    """A selector loop runs a turn's I/O callbacks (`_write_ready`, which also resumes the TLS
+    layer) before the timers due in it, so one hop already reads after the socket took what
+    it could. 08493d5f made every loop wait two, which on Linux and macOS read a link one
+    turn later than it needed to and let it look as if it kept up with a turn more."""
+    hops, read_in_turn = _hops_on(asyncio.SelectorEventLoop())
+    assert hops == 1 and read_in_turn == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Proactor is Windows' own loop")
+def test_on_windows_proactor_the_reading_comes_two_turns_after_the_window():
+    """The Proactor issues a transport's next send from the last one's completion callback,
+    a turn later: one hop read every window of four 1 MiB chunks as the link behind."""
+    hops, read_in_turn = _hops_on(asyncio.ProactorEventLoop())
+    assert hops == 2 and read_in_turn == 2
+
+
+class _ReadableTurnPeer(_TurnPeer):
+    """A connection that can report its write buffer, which never empties."""
+
+    def get_write_buffer_size(self):
+        return 50_000
+
+
+@pytest.mark.asyncio
+async def test_a_readable_connection_whose_reading_never_came_gets_no_allowance(monkeypatch):
+    """08493d5f: on a loop slower than READING_WAIT_MAX_S a turn the second reading timed out,
+    the window's `reading` was None, and ChunkWindow took the connection for one that cannot
+    report its buffer and granted the 1 MiB cold-start budget DPTP §3.11 keeps for those. The
+    reading now comes back with `after_turn_bytes` None, and that earns nothing."""
+    from dpc_client_core import p2p_manager, send_lanes
+
+    # A reading many turns away, and a wait for it shorter than one turn here
+    monkeypatch.setattr(send_lanes, "reading_hops", lambda loop: 1000)
+    monkeypatch.setattr(p2p_manager, "READING_WAIT_MAX_S", 0.001)
+    stop = asyncio.Event()
+
+    async def busy():
+        while not stop.is_set():
+            time.sleep(0.01)
+            await asyncio.sleep(0)
+
+    loaders = [asyncio.get_running_loop().create_task(busy()) for _ in range(2)]  # a 20 ms turn
+    await asyncio.sleep(0)
+    window = cw.ChunkWindow(64 * 1024)
+    try:
+        p2p = _p2p(_ReadableTurnPeer())
+        result = await p2p.send_data_window("peer", [{"command": "FILE_CHUNK"}])
+    finally:
+        stop.set()
+        await asyncio.gather(*loaders)
+    assert result.reading is not None and result.reading.after_turn_bytes is None, result
+    window.on_window(64 * 1024, result.elapsed_s, result.loop_lag_s, reading=result.reading)
+    assert window.loop_limited_windows == 1
+    assert window.allowance_bytes() == 0 and window.chunks == 1
+    assert window.loop_budget_bytes() == 64 * 1024  # not UNKNOWN_RATE_WINDOW_BYTES

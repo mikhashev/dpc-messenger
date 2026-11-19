@@ -438,6 +438,11 @@ search is wanted first: a `hash` search is what phase 3 needs, a name search is 
   from the loop's lag and the transport's write buffer together, the bound doubles past 1 MiB
   while the link keeps up and drops to the measured rate once it does not
   (`managers/chunk_window.py`).
+  Third review (2026-11-20): a reading that comes two or more turns late grows the bound by one
+  chunk, not by doubling (on a loaded 2 MB/s link at most 525 KB ahead of chat instead of
+  788 KB, chat's worst wait unchanged at about 425 ms; a loaded loopback 11.2 -> 9.7 MB/s); a
+  reading that never came earns nothing; `TCP_NOTSENT_LOWAT` is not set (on a busy selector loop
+  it would read as the link's pace) until a Linux measurement on a throttled link says otherwise.
 
 ## Confirmation
 

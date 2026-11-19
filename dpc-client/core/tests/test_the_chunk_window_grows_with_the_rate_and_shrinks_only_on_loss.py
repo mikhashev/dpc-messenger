@@ -374,10 +374,11 @@ def test_only_after_a_window_the_loop_held_back_may_the_transport_hold_more_than
 # --- the transport's reading (review of 9f8538f0, a fresh subagent and Zcode, 2026-11-20) ---
 
 
-def _reading(burst, after, at_end=None, turn_s=0.1, written=None):
+def _reading(burst, after, at_end=None, turn_s=0.1, written=None, loop_turn_s=0.0):
     from dpc_client_core.send_lanes import TransportReading
     return TransportReading(at_end_bytes=burst if at_end is None else at_end, after_turn_bytes=after,
-                            turn_s=turn_s, burst_bytes=burst, written_bytes=burst if written is None else written)
+                            turn_s=turn_s, burst_bytes=burst, written_bytes=burst if written is None else written,
+                            loop_turn_s=loop_turn_s)
 
 
 def test_a_busy_loop_on_a_link_that_keeps_up_grows_a_one_mib_chunk_window_and_learns_a_rate():
@@ -500,3 +501,44 @@ async def test_a_cancelled_upload_waits_for_its_reading_thread_before_the_file_i
     with pytest.raises(asyncio.CancelledError):
         await upload
     assert released == [True]  # released only once the thread had closed the file
+
+
+# --- the review of 08493d5f (a fresh subagent, 2026-11-20) ------------------------------
+
+
+def test_a_reading_within_a_turn_doubles_and_a_later_one_adds_one_chunk():
+    """On a loaded 2 MB/s link the cold start put up to 9 chunks (788 KB) ahead of chat once
+    per transfer: a reading two or three turns after the window (the Proactor's two hops)
+    doubled what it proved, and the link looked as if it kept up with turns of bytes it did
+    not. A reading later than EARLY_READING_TURNS now credits what it saw cleared and one
+    chunk more, so the transport holds at most what a reading proved plus one chunk; a
+    reading within a turn (a selector loop's one hop) still doubles."""
+    framed = cw.framed_chunk_bytes(MiB)
+    early, late = ChunkWindow(MiB), ChunkWindow(MiB)
+    turn = 0.1
+    grown = {"early": [], "late": []}
+    for _ in range(4):
+        for name, window, turn_s in (("early", early, 1.0 * turn), ("late", late, 2.0 * turn)):
+            k = window.window_chunks()
+            window.on_window(k * MiB, 3 * turn, loop_lag_s=3 * turn,
+                             reading=_reading(k * framed, 0, turn_s=turn_s, loop_turn_s=turn))
+            grown[name].append(window.window_chunks())
+            if name == "late":
+                # The next window may leave in the transport what this one proved, and one chunk
+                assert window.allowance_bytes() == k * framed, (k, window.allowance_bytes())
+    assert grown["early"] == [2, 4, 8, 8], grown
+    assert grown["late"] == [2, 3, 4, 5], grown
+
+
+def test_a_readable_connection_whose_second_reading_never_came_gets_no_allowance():
+    """A loop slower than READING_WAIT_MAX_S a turn: the connection can report its buffer, so
+    the unknown-rate budget (1 MiB, for a relay or UDP) is not its, and with no verdict the
+    next window leaves nothing more than its chunk in the transport."""
+    framed = cw.framed_chunk_bytes(CHUNK)
+    missed, unreadable = ChunkWindow(CHUNK), ChunkWindow(CHUNK)
+    missed.on_window(CHUNK, 2.5, loop_lag_s=2.5, reading=_reading(framed, None, turn_s=1.0, loop_turn_s=1.2))
+    unreadable.on_window(CHUNK, 2.5, loop_lag_s=2.5)
+    assert missed.loop_limited_windows == 1 and not missed.loop_limited
+    assert missed.allowance_bytes() == 0 and missed.chunks == 1
+    assert missed.loop_budget_bytes() == CHUNK
+    assert unreadable.allowance_bytes() == framed  # 9f8538f0's rule, where it still applies

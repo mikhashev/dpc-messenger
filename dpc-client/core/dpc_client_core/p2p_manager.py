@@ -104,35 +104,6 @@ def set_tcp_nodelay(writer: Any) -> bool:
         return False
 
 
-# The most unsent bytes the kernel keeps for a direct connection where the
-# socket option exists (Linux, macOS): past it the socket reads as not
-# writable, so file data waits in asyncio's buffer, where the data lane sees
-# it (send_lanes.TransportReading), instead of in a kernel buffer of several
-# MB that a chat frame must queue behind unseen. Bytes sent and not yet
-# acknowledged do not count, so a fast link's throughput is untouched.
-NOTSENT_LOWAT_BYTES = 128 * 1024
-
-
-def set_notsent_lowat(writer: Any) -> bool:
-    """Cap the kernel's unsent bytes on a direct connection (TCP_NOTSENT_LOWAT); True when set.
-
-    Linux and macOS have the option; Windows has none, and there the
-    Proactor's buffer counts a send until the kernel took it. A socket or a
-    Python without it is left as it was.
-    """
-    option = getattr(_socket_module, "TCP_NOTSENT_LOWAT", None)
-    if option is None:
-        return False
-    try:
-        sock = writer.get_extra_info("socket")
-        if sock is None or sock.family not in (_socket_module.AF_INET, _socket_module.AF_INET6):
-            return False
-        sock.setsockopt(_socket_module.IPPROTO_TCP, option, NOTSENT_LOWAT_BYTES)
-        return True
-    except (AttributeError, OSError, TypeError, ValueError):
-        return False
-
-
 async def _within(awaitable, deadline: Optional[float]) -> bool:
     """Await `awaitable` until `deadline` (perf_counter); False when it ran out, the await cancelled."""
     if deadline is None:
@@ -185,7 +156,6 @@ class PeerConnection:
         # Kept apart from any throughput figure (managers/chunk_window.py).
         self.link_rtt_s: Optional[float] = None
         set_tcp_nodelay(writer)
-        set_notsent_lowat(writer)
         set_write_marks(writer)
 
     async def send(self, message: Dict[str, Any]):
@@ -224,7 +194,13 @@ class PeerConnection:
         asyncio's transport; on TLS the TLS layer's backlog plus the socket
         transport beneath it, which holds the frame the TLS layer already
         encrypted (the TLS transport counts only its own). On Windows'
-        Proactor the socket transport counts a send still in flight.
+        Proactor the socket transport counts a send still in flight. What the
+        kernel's send buffer already took is not seen, on any OS. No
+        TCP_NOTSENT_LOWAT caps it: on a selector loop (Linux, macOS) a busy
+        loop refills the socket once per turn, so a cap would read as the
+        link's pace and be remembered as its rate (review of 08493d5f,
+        2026-11-20); it returns only with a Linux measurement on a
+        throttled link.
         """
         transport = self.writer.transport
         size = transport.get_write_buffer_size()
@@ -2315,11 +2291,16 @@ class P2PManager:
                             waited_from = time.perf_counter()
                             await _within(reader.taken.wait(), waited_from + READING_WAIT_MAX_S)
                             lag += time.perf_counter() - waited_from  # the sender's own wait, not the link's
-                            if reader.after_bytes is not None:
-                                reading = TransportReading(
-                                    at_end_bytes=at_end, after_turn_bytes=reader.after_bytes,
-                                    turn_s=reader.taken_at - at_end_time,
-                                    burst_bytes=burst, written_bytes=written, loop_turn_s=loop_turn_s)
+                            # A reading that did not come in time (a loop slower than
+                            # READING_WAIT_MAX_S a turn) is still a reading: its
+                            # after_turn_bytes None earns no allowance, where None for
+                            # the whole reading would mean a connection that cannot
+                            # report its buffer (DPTP §3.11; review of 08493d5f).
+                            taken_at = reader.taken_at if reader.taken_at is not None else time.perf_counter()
+                            reading = TransportReading(
+                                at_end_bytes=at_end, after_turn_bytes=reader.after_bytes,
+                                turn_s=taken_at - at_end_time,
+                                burst_bytes=burst, written_bytes=written, loop_turn_s=loop_turn_s)
                     finally:
                         if reader is not None:
                             reader.cancel()

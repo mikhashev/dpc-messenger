@@ -67,7 +67,9 @@ current budget (`allowance_bytes`), what a node whose loop turns every
   mark: the link kept up. Such a window may grow, since more chunks per turn
   of the loop is what a node busy with a model needs, within
   `loop_budget_bytes`: the rate last measured, or twice the burst the link
-  was just seen to clear, so a 1 MiB chunk is not stuck at one per turn
+  was just seen to clear (that burst and one chunk more when the reading
+  came later than `EARLY_READING_TURNS`), so a 1 MiB chunk is not stuck at
+  one per turn
   (`UNKNOWN_RATE_WINDOW_BYTES` only on a connection whose buffer cannot be
   read, as before); and its wall time is a lower
   bound on the rate (kept only if it raises it), so a busy node still
@@ -173,9 +175,16 @@ LOOP_LIMITED_SHARE = 0.5
 DRAINED_BUFFER_BYTES = 16 * KiB
 DRAINED_BUFFER_SHARE = 1 / 8
 # Turns of the loop after which a reading of the transport counts as late
-# (`send_lanes.TransportReader` reads two hops on): what the link cleared by
-# then is scaled down to this many turns before it earns a larger window.
+# (`send_lanes.TransportReader` reads one hop on, two on Windows' Proactor):
+# what the link cleared by then is scaled down to this many turns before it
+# earns a larger window.
 LATE_READING_TURNS = 2.5
+# A reading at most this many turns after the window's last frame (one hop on
+# a selector loop) doubles what the link cleared; a later one (the Proactor's
+# two hops, or a slower loop) credits what it cleared plus one chunk, so the
+# transport never holds more than a reading proved and one chunk (review of
+# 08493d5f, 2026-11-20: the cold start put up to 9 chunks before chat).
+EARLY_READING_TURNS = 1.5
 # A doubling on link-limited windows is worth another while it raised the
 # rate by at least this factor (BBR leaves startup below 1.25 over three
 # rounds); a smaller step must buy the same share of what it could have:
@@ -415,7 +424,7 @@ class ChunkWindow:
         self.loop_limited = False
         # What the transport's reading says (`on_window`, `reading`): the
         # largest window, file bytes, the link was seen to clear within a turn
-        # of the loop (doubled while it keeps clearing), and whether a
+        # of the loop (doubled, or one chunk more, while it keeps clearing), and whether a
         # loop-limited window has found the link behind it yet.
         self.cleared_bytes = 0
         self.link_behind = False
@@ -440,7 +449,8 @@ class ChunkWindow:
         none is (on a connection whose buffer cannot be read; where it can, the
         reading is the only evidence: one chunk until it says more); or more,
         the window the transport was seen to clear within a turn of the loop,
-        doubled each time it does (`cleared_bytes`). Once a
+        doubled each time it does, or one chunk more on a late reading
+        (`cleared_bytes`, `EARLY_READING_TURNS`). Once a
         loop-limited window has found the link behind it (`link_behind`) the
         unknown-rate bound no longer applies and nothing doubles: the measured
         rate, or what the link was measured to move in one turn of the loop,
@@ -592,8 +602,10 @@ class ChunkWindow:
             cleared = int(cleared * late / reading.turn_s)
         if self.link_behind:
             self.cleared_bytes = max(self.cleared_bytes, cleared)
-        else:
+        elif reading.turn_s <= EARLY_READING_TURNS * reading.loop_turn_s:
             self.cleared_bytes = max(self.cleared_bytes, min(MAX_BYTES_IN_FLIGHT, 2 * cleared))
+        else:
+            self.cleared_bytes = max(self.cleared_bytes, min(MAX_BYTES_IN_FLIGHT, cleared + self.chunk_size))
         # The link moved the window in its wall time at least: a lower bound.
         self.rate.add(nbytes, elapsed_s, app_limited=True)
 
@@ -623,7 +635,10 @@ class ChunkWindow:
 
 def _link_verdict(reading) -> Optional[str]:
     """`kept up` when, a turn of the loop after the window's last frame, the transport held little of its burst;
-    `behind` when it held more and the link visibly took some in that turn; None when nothing moved."""
+    `behind` when it held more and the link visibly took some in that turn; None when nothing moved,
+    or when the second reading never came (a readable connection: no allowance, not the unreadable 1 MiB)."""
+    if reading.after_turn_bytes is None:
+        return None
     drained = max(DRAINED_BUFFER_BYTES, reading.burst_bytes * DRAINED_BUFFER_SHARE)
     if reading.after_turn_bytes <= drained:
         return "kept up"
