@@ -750,7 +750,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **33 sections, 185 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **34 sections, 186 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -989,6 +989,12 @@ An empty default means the key is written blank and the feature stays off until 
 | Key | Default | Notes |
 |---|---|---|
 | `embedding_device` | `auto` | Where the embedding model (indexing, Active Recall) runs for every agent: auto, cpu, cuda or mps. auto = an agent profile's memory.embedding_device, else cuda, then mps, then cpu; any other value overrides the profiles |
+
+#### `[music]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `poll_interval_s` | `60` | How often the music library re-reads its watched folders, in seconds (ADR-051; polling, no OS file events) |
 
 #### `[oauth]`
 

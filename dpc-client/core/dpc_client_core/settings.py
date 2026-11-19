@@ -313,6 +313,10 @@ class Settings:
             'preparation_progress_interval_chunks': '10000'  # **Inert**, as above
         }
 
+        self._config['music'] = {
+            'poll_interval_s': '60'  # How often the music library re-reads its watched folders, in seconds (ADR-051; polling, no OS file events)
+        }
+
         self._config['conversations'] = {
             # Per-conversation storage settings (v0.21.0)
             'default_persist_p2p_history': 'false',  # Persist P2P chat history by default (false = ephemeral, synced from peer)
