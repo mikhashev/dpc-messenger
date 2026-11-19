@@ -6,13 +6,15 @@ SPEC.md` §4): `mp.library_entry/1`, `mp.music_folder/1`, `mp.playlist/1` and
 keys, no undeclared keys, types, enums, id patterns, and the conditional rules
 (`allOf`) that apply to entries the core creates.
 
-Three keys on `mp.library_entry/1` are not in the SPEC yet and are declared here as
+Four keys on `mp.library_entry/1` are not in the SPEC yet and are declared here as
 extensions, because ADR-051 Q4 and the metadata scope need them:
 
 - `hash_kind`: how `content_hash` was computed (`HASH_KINDS`). Two hashes compare
   only when their kinds are equal: a whole-file hash and an audio-payload hash of the
   same file differ.
 - `artist`, `album`: read with ffprobe when it is present.
+- `hash_notes`: short strings saying why the hash is the kind it is (`"ffmpeg
+  absent"`, `"ffmpeg could not read the audio"`); empty for a normal hash.
 
 They are optional, so an entry without them is valid against both shapes.
 """
@@ -56,7 +58,7 @@ _ENTRY_KEYS = set(_ENTRY_REQUIRED) | {
     "needs_readd", "origin", "path", "folder_id", "alt_paths", "file_stat",
     "hash_state", "missing",
     # extensions, see the module docstring
-    "hash_kind", "artist", "album",
+    "hash_kind", "artist", "album", "hash_notes",
 }
 
 _FOLDER_REQUIRED = ("schema", "id", "path", "added_at", "last_scan_at", "watch", "file_count")
@@ -161,6 +163,9 @@ def validate_library_entry(entry: Any) -> None:
         _expect(s, isinstance(entry["missing"], bool), "'missing' must be a boolean")
     if "hash_kind" in entry:
         _expect(s, entry["hash_kind"] is None or entry["hash_kind"] in HASH_KINDS, f"'hash_kind' must be one of {HASH_KINDS} or null")
+    if "hash_notes" in entry:
+        _expect(s, isinstance(entry["hash_notes"], list) and all(_is_str(n) for n in entry["hash_notes"]),
+                "'hash_notes' must be a list of strings")
     for key in ("artist", "album"):
         if key in entry:
             _expect(s, entry[key] is None or _is_str(entry[key]), f"'{key}' must be a string or null")

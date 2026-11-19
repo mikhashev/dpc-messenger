@@ -31,6 +31,21 @@ are, so an unplugged drive does not turn a library into missing tracks.
 hash and the file writes leave the loop, through `asyncio.to_thread`. A caller on
 another loop (an agent tool's per-call loop) must forward to the service loop.
 
+A folder whose root is reachable but where part of the walk fails (a subfolder that
+cannot be listed, a file that cannot be stat'ed: a permission error, a share lost
+half-way) is marked `unavailable` for that scan, with the failure in `state_reason`, and
+nothing under it is marked missing: SPEC §6 makes `unavailable` a property of the
+folder, and a partial listing says nothing about which files are gone.
+
+**What may be watched.** `add_folder` refuses with `MusicLibraryError.code`:
+`invalid_path`, `not_a_folder`, `already_added`, `nested_folder`, and
+`network_path` (a UNC path, a mapped network drive on Windows, a network filesystem
+mount on Linux), `protected_folder` (a filesystem root, the home folder itself, the DPC
+home or anything inside it except its own `music/` subtree, a folder that contains the
+DPC home), `too_many_folders` (more than `MAX_FOLDERS`). A network mount on macOS is not
+detected: reading a mount's filesystem type there needs a subprocess or `statfs`
+through ctypes.
+
 Known limits: a change to a file listed only in `alt_paths` (a duplicate) is not
 noticed until it becomes the primary path; folders may not nest.
 """
@@ -42,6 +57,7 @@ import copy
 import json
 import logging
 import os
+import re
 import secrets
 import unicodedata
 from collections import deque
@@ -60,6 +76,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_POLL_INTERVAL_S = 60.0
 MIN_POLL_INTERVAL_S = 0.01
 DEFAULT_SAVE_DELAY_S = 2.0
+MAX_FOLDERS = 32
+
+# Linux filesystem types that are a network mount (`/proc/self/mounts`, third column).
+# `9p` is left out: WSL mounts the Windows drives with it.
+NETWORK_FS_TYPES = frozenset({
+    "nfs", "nfs4", "cifs", "smb3", "smbfs", "ncpfs", "afs", "ceph", "glusterfs", "lustre",
+    "davfs", "sshfs", "fuse.sshfs", "fuse.davfs2", "fuse.rclone", "fuse.glusterfs", "afpfs",
+})
 
 SMART_ALL_ID = "pl_smart_all"
 SMART_GENERATED_ID = "pl_smart_generated"
@@ -106,18 +130,21 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}{secrets.token_hex(8)}"
 
 
-def walk_audio_files(root: Path) -> List[Tuple[str, int, int]]:
-    """(path, size, mtime_ns) of every audio file under `root`, recursively.
+def walk_audio_files(root: Path) -> Tuple[List[Tuple[str, int, int]], List[Tuple[str, str]]]:
+    """`(found, failed)`: (path, size, mtime_ns) of every audio file under `root`,
+    recursively, and (path, reason) of every subfolder or file the walk could not read.
 
     Directory symlinks are not followed (no loops); a file symlink is read as its
-    target. A subfolder that cannot be read is skipped with a log line. Raises
-    `FolderUnavailable` when `root` itself cannot be listed."""
+    target. A non-empty `failed` means the listing is partial, so a file not in
+    `found` is not known to be gone. Raises `FolderUnavailable` when `root` itself
+    cannot be listed."""
     try:
         with os.scandir(root):
             pass
     except OSError as exc:
         raise FolderUnavailable(str(exc)) from exc
     found: List[Tuple[str, int, int]] = []
+    failed: List[Tuple[str, str]] = []
     stack = [str(root)]
     while stack:
         current = stack.pop()
@@ -125,22 +152,87 @@ def walk_audio_files(root: Path) -> List[Tuple[str, int, int]]:
             listing = os.scandir(current)
         except OSError as exc:
             logger.info("music: cannot list %s: %s", current, exc)
+            failed.append((current, str(exc)))
             continue
         with listing:
-            for item in listing:
-                try:
-                    if item.is_dir(follow_symlinks=False):
-                        stack.append(item.path)
+            try:
+                for item in listing:
+                    try:
+                        if item.is_dir(follow_symlinks=False):
+                            stack.append(item.path)
+                            continue
+                        if os.path.splitext(item.name)[1].lower() not in AUDIO_EXTENSIONS:
+                            continue
+                        if not item.is_file():
+                            continue
+                        st = item.stat()
+                    except OSError as exc:
+                        logger.info("music: cannot read %s: %s", item.path, exc)
+                        failed.append((item.path, str(exc)))
                         continue
-                    if os.path.splitext(item.name)[1].lower() not in AUDIO_EXTENSIONS:
-                        continue
-                    if not item.is_file():
-                        continue
-                    st = item.stat()
-                except OSError:
-                    continue
-                found.append((item.path, st.st_size, st.st_mtime_ns))
-    return found
+                    found.append((item.path, st.st_size, st.st_mtime_ns))
+            except OSError as exc:  # the listing broke off half-way (a share lost mid-walk)
+                logger.info("music: listing %s broke off: %s", current, exc)
+                failed.append((current, str(exc)))
+    return found, failed
+
+
+_MOUNT_ESCAPE = re.compile(r"\\([0-7]{3})")
+
+
+def _mount_fs_type(path: str) -> Optional[str]:
+    """The filesystem type of the mount holding `path`, from `/proc/self/mounts`
+    (Linux); None where that file does not exist."""
+    try:
+        with open("/proc/self/mounts", "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    best, best_type = "", None
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        # The kernel writes space, tab, newline and backslash as octal escapes.
+        mount = _MOUNT_ESCAPE.sub(lambda m: chr(int(m.group(1), 8)), parts[1])
+        inside = path == mount or path.startswith(mount.rstrip("/") + "/")
+        if inside and len(mount) >= len(best):
+            best, best_type = mount, parts[2]
+    return best_type
+
+
+def _is_network_drive(path: Path) -> bool:
+    """A mapped network drive on Windows, a network filesystem mount on Linux. Reads
+    only local tables, never the share itself."""
+    if os.name == "nt":
+        drive = path.drive
+        if len(drive) != 2 or drive[1] != ":":
+            return False
+        try:
+            import ctypes
+
+            drive_remote = 4  # GetDriveTypeW: DRIVE_REMOTE
+            return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == drive_remote
+        except Exception:  # no ctypes or no windll: not detectable here
+            return False
+    fs_type = _mount_fs_type(str(path))
+    return fs_type is not None and fs_type.lower() in NETWORK_FS_TYPES
+
+
+def _is_unc_text(text: str) -> bool:
+    r"""A UNC or Windows device path by its spelling: `\\server\share` or `\\?\...` on
+    any OS, and `//server/share` on Windows."""
+    head = text[:2]
+    if head == "\\\\":
+        return True
+    return os.name == "nt" and len(head) == 2 and all(c in "\\/" for c in head)
+
+
+def _realpath(path: Path) -> Path:
+    try:
+        return Path(os.path.realpath(path))
+    except (OSError, ValueError):
+        return path
 
 
 def _stat_paths(paths: Iterable[str]) -> Dict[str, Tuple[int, int]]:
@@ -165,6 +257,7 @@ class MusicLibrary:
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
         save_delay_s: float = DEFAULT_SAVE_DELAY_S,
     ):
+        self.dpc_home = Path(dpc_home_dir)
         self.root = music_dir_of(dpc_home_dir)
         self._tools = tools
         self.poll_interval_s = max(float(poll_interval_s), MIN_POLL_INTERVAL_S)
@@ -172,7 +265,7 @@ class MusicLibrary:
         self._entries: Dict[str, dict] = {}
         self._folders: Dict[str, dict] = {}
         self._playlists: Dict[str, dict] = {}
-        self._by_hash: Dict[Tuple[str, str], str] = {}
+        self._by_hash: Dict[Tuple[str, str], List[str]] = {}
         self._loaded = False
         self._queue: Deque[str] = deque()
         self._queued: Set[str] = set()
@@ -183,6 +276,7 @@ class MusicLibrary:
         self._worker: Optional[asyncio.Task] = None
         self._poller: Optional[asyncio.Task] = None
         self._save_task: Optional[asyncio.Task] = None
+        self._write_lock: Optional[asyncio.Lock] = None
         self._background: Set[asyncio.Task] = set()
         self._dirty = False
 
@@ -235,10 +329,33 @@ class MusicLibrary:
             atomic_write_text(path, text)
 
     async def flush(self) -> None:
-        """Write the three files now, off the loop."""
-        self._dirty = False
-        texts = self._snapshot_texts()
-        await asyncio.to_thread(lambda: [atomic_write_text(p, t) for p, t in texts])
+        """Write the three files now, off the loop.
+
+        Writes are serialised: the snapshot is taken inside the lock, so a later flush
+        never finishes before an earlier one and leaves the older text on disk. A
+        failed write leaves the library dirty, so the next save tries again."""
+        if self._write_lock is None:
+            self._write_lock = asyncio.Lock()
+        async with self._write_lock:
+            self._dirty = False
+            try:
+                texts = self._snapshot_texts()
+                write = asyncio.ensure_future(
+                    asyncio.to_thread(lambda: [atomic_write_text(p, t) for p, t in texts]))
+            except BaseException:
+                self._dirty = True
+                raise
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                # `stop()` cancels a pending save: keep the lock until the thread is done,
+                # so the final flush's newer text is the one that lands last.
+                self._dirty = True
+                await asyncio.wait({write})
+                raise
+            except BaseException:
+                self._dirty = True
+                raise
 
     def _mark_dirty(self) -> None:
         """Save soon: hashing a large folder changes one entry at a time, and writing
@@ -251,12 +368,19 @@ class MusicLibrary:
                 pass
 
     async def _save_later(self) -> None:
-        await asyncio.sleep(self.save_delay_s)
-        if self._dirty:
+        """Save until nothing is pending. A mutation while a flush is in its thread
+        sets `_dirty` again but starts no task (this one is still running), so the
+        loop, not the mutation, picks it up. A failed save stops the loop with the
+        library still dirty: the next mutation or `stop()` retries."""
+        while self._dirty:
+            await asyncio.sleep(self.save_delay_s)
+            if not self._dirty:
+                break
             try:
                 await self.flush()
             except Exception:
                 logger.exception("music: saving the library failed")
+                break
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -298,7 +422,11 @@ class MusicLibrary:
         self._poller = self._worker = self._save_task = None
         self._background.clear()
         if self._loaded and self._dirty:
-            await self.flush()
+            try:
+                await self.flush()
+            except Exception:
+                # Shutdown goes on; what was not written is lost, and the log says so.
+                logger.exception("music: the final save at shutdown failed")
 
     async def _poll_loop(self) -> None:
         while True:
@@ -325,18 +453,27 @@ class MusicLibrary:
         return (e["hash_kind"], e["content_hash"])
 
     def _index_add(self, e: dict) -> None:
+        """Every entry with a hash is indexed, not only the first: two entries can share
+        one (a library written before collapsing, or loaded from an import)."""
         key = self._hash_key(e)
         if key is not None:
-            self._by_hash.setdefault(key, e["id"])
+            ids = self._by_hash.setdefault(key, [])
+            if e["id"] not in ids:
+                ids.append(e["id"])
 
     def _index_drop(self, e: dict) -> None:
         key = self._hash_key(e)
-        if key is not None and self._by_hash.get(key) == e["id"]:
-            del self._by_hash[key]
+        ids = self._by_hash.get(key) if key is not None else None
+        if ids and e["id"] in ids:
+            ids.remove(e["id"])
+            if not ids:
+                del self._by_hash[key]
 
     def _delete_entry(self, track_id: str, *, replaced_by: Optional[str] = None) -> None:
         """Drop an entry. Its playlist positions move to `replaced_by` when given (a
-        merge), else they are removed."""
+        merge), else they are removed. A merge into a track the playlist already holds
+        drops the merged positions instead, so the collapse adds no duplicate; a
+        repeat the person put there (the same id twice) is left alone."""
         e = self._entries.pop(track_id, None)
         if e is None:
             return
@@ -344,7 +481,7 @@ class MusicLibrary:
         self._verify.pop(track_id, None)
         for pl in self._playlists.values():
             if track_id in pl["track_ids"]:
-                if replaced_by:
+                if replaced_by and replaced_by not in pl["track_ids"]:
                     pl["track_ids"] = [replaced_by if t == track_id else t for t in pl["track_ids"]]
                 else:
                     pl["track_ids"] = [t for t in pl["track_ids"] if t != track_id]
@@ -405,6 +542,8 @@ class MusicLibrary:
         if ident.duration_s is not None:
             e["duration_s"] = round(float(ident.duration_s), 3)
         e["source"]["size_bytes"] = ident.size_bytes
+        # Why the hash is the kind it is ("ffmpeg absent"); empty for a normal hash.
+        e["hash_notes"] = [str(n) for n in ident.notes]
 
     def _enqueue(self, track_id: str, *, first: bool = False) -> None:
         self._ensure_primitives()
@@ -496,17 +635,40 @@ class MusicLibrary:
         self._resolve(e, ident, stat)
         self._mark_dirty()
 
+    def _same_audio(self, e: dict, key: Tuple[str, str]) -> Tuple[List[dict], List[dict]]:
+        """The other entries with this hash, (present, missing), each in a fixed order.
+        Present: oldest first. Missing: the likeliest source of `e` first: the same
+        file name (a move), then the same folder (a rename), then the oldest."""
+        others = [self._entries[i] for i in self._by_hash.get(key, []) if i != e["id"] and i in self._entries]
+        name = Path(e.get("path") or "").name.casefold()
+        present = sorted((o for o in others if not o.get("missing")),
+                         key=lambda o: (o.get("added_at") or "", o["id"]))
+        missing = sorted((o for o in others if o.get("missing")), key=lambda o: (
+            Path(o.get("path") or "").name.casefold() != name,
+            o.get("folder_id") != e.get("folder_id"),
+            o.get("added_at") or "",
+            o["id"],
+        ))
+        return present, missing
+
     def _resolve(self, e: dict, ident: Identity, stat: Tuple[int, int]) -> None:
-        """Give a freshly hashed entry its identity: relink, collapse, or keep it."""
+        """Give a freshly hashed entry its identity: relink, collapse, or keep it.
+
+        When several missing entries share the hash, the first by `_same_audio` takes
+        the new path and the others are merged into it (their playlist positions move
+        to it): one audio, one entry, the same rule as a duplicate."""
         key = (ident.hash_kind, ident.content_hash)
-        other_id = self._by_hash.get(key)
-        other = self._entries.get(other_id) if other_id and other_id != e["id"] else None
+        present, missing = self._same_audio(e, key)
+        other = present[0] if present else (missing[0] if missing else None)
         if other is not None and other.get("missing"):
             # A move or a rename: the known track takes the new path.
             logger.info("music: relinked %s to %s (same audio hash)", other["id"], e["path"])
             self._set_path(other, e["path"], e.get("folder_id"), stat)
             self._apply_metadata(other, ident)
             self._delete_entry(e["id"], replaced_by=other["id"])
+            for extra in missing[1:]:
+                logger.info("music: merged missing %s into %s (same audio hash)", extra["id"], other["id"])
+                self._delete_entry(extra["id"], replaced_by=other["id"])
             return
         if other is not None:
             # The same audio at a second path: one entry, the path in alt_paths.
@@ -526,17 +688,57 @@ class MusicLibrary:
     def list_folders(self) -> List[dict]:
         return [copy.deepcopy(f) for f in self._folders.values()]
 
+    def _check_watchable(self, chosen: Path) -> None:
+        """Raise `MusicLibraryError` unless `chosen` (absolute, normalised) may be
+        watched. Blocking: `add_folder` calls it in a thread. The checks run on the
+        path as given and on its real path, so a symlink or a `subst` drive does not
+        get past them."""
+        if _is_network_drive(chosen):
+            raise MusicLibraryError("network_path", f"a network drive cannot be watched: {chosen}")
+        if not chosen.is_dir():
+            raise MusicLibraryError("not_a_folder", f"not a folder, or not reachable: {chosen}")
+        real = _realpath(chosen)
+        if _is_unc_text(str(real)) or (real != chosen and _is_network_drive(real)):
+            raise MusicLibraryError("network_path", f"a network path cannot be watched: {chosen} is {real}")
+
+        def keys(p: Path) -> Set[str]:
+            return {path_key(str(p)), path_key(str(_realpath(p)))}
+
+        try:
+            home_keys = keys(Path.home())
+        except (RuntimeError, KeyError, OSError):  # no home folder known to the OS
+            home_keys = set()
+        dpc_keys = keys(self.dpc_home)
+        music_keys = keys(self.root)
+        for candidate in (chosen, real):
+            if candidate.parent == candidate or str(candidate) == candidate.anchor:
+                raise MusicLibraryError("protected_folder", f"a filesystem root cannot be watched: {chosen}")
+            key = path_key(str(candidate))
+            if key in home_keys:
+                raise MusicLibraryError("protected_folder", f"the home folder itself cannot be watched: {chosen}")
+            if any(_is_inside(key, m) for m in music_keys):
+                continue  # the DPC home's own music/ subtree is allowed
+            if any(_is_inside(key, d) for d in dpc_keys):
+                raise MusicLibraryError("protected_folder", f"inside the DPC home, which cannot be watched: {chosen}")
+            if any(_is_inside(d, key) for d in dpc_keys):
+                raise MusicLibraryError("protected_folder", f"contains the DPC home, which cannot be watched: {chosen}")
+
     async def add_folder(self, path: str, *, watch: bool = True, scan: bool = True) -> dict:
         """Add a watched folder (only the person does this; SPEC §6). The first scan
         starts in the background when `scan`."""
         if not isinstance(path, str) or not path.strip():
             raise MusicLibraryError("invalid_path", "a folder path is required")
-        chosen = Path(path.strip()).expanduser()
+        if len(self._folders) >= MAX_FOLDERS:
+            raise MusicLibraryError("too_many_folders", f"at most {MAX_FOLDERS} watched folders")
+        text = path.strip()
+        # Before any filesystem call: a check of an unreachable share can hang for seconds.
+        if _is_unc_text(text):
+            raise MusicLibraryError("network_path", f"a network (UNC) path cannot be watched: {text}")
+        chosen = Path(text).expanduser()
         if not chosen.is_absolute():
             raise MusicLibraryError("invalid_path", f"not an absolute path: {path}")
         chosen = Path(os.path.normpath(chosen))
-        if not await asyncio.to_thread(chosen.is_dir):
-            raise MusicLibraryError("not_a_folder", f"not a folder, or not reachable: {chosen}")
+        await asyncio.to_thread(self._check_watchable, chosen)
         key = path_key(str(chosen))
         for f in self._folders.values():
             other = path_key(f["path"])
@@ -607,7 +809,7 @@ class MusicLibrary:
                 for a in e.get("alt_paths") or [] if not _is_inside(path_key(a), fkey)
             ]
             try:
-                found, alt_stats = await asyncio.to_thread(
+                (found, failed), alt_stats = await asyncio.to_thread(
                     lambda: (walk_audio_files(Path(root)), _stat_paths(outside_alts)))
             except FolderUnavailable as exc:
                 if folder_id in self._folders:
@@ -617,14 +819,19 @@ class MusicLibrary:
                 return copy.deepcopy(folder)
             if folder_id not in self._folders:
                 raise MusicLibraryError("unknown_folder", f"no watched folder {folder_id}")
-            self._apply_scan(folder, found, alt_stats)
+            self._apply_scan(folder, found, alt_stats, failed=failed)
             self._mark_dirty()
             return copy.deepcopy(folder)
 
     async def rescan_all(self) -> List[dict]:
         return [await self.rescan_folder(fid) for fid in list(self._folders)]
 
-    def _apply_scan(self, folder: dict, found: List[Tuple[str, int, int]], alt_stats: Dict[str, Tuple[int, int]]) -> None:
+    def _apply_scan(self, folder: dict, found: List[Tuple[str, int, int]], alt_stats: Dict[str, Tuple[int, int]],
+                    *, failed: Optional[List[Tuple[str, str]]] = None) -> None:
+        """Reconcile one walk. With `failed` non-empty the walk was partial: new and
+        changed files are still taken in, but nothing is marked missing or dropped
+        from `alt_paths`, the counts and `last_scan_at` keep the last full scan, and
+        the folder is `unavailable` until a walk completes."""
         folder_id = folder["id"]
         fkey = path_key(folder["path"])
         found_by_key = {path_key(p): (p, size, mtime) for p, size, mtime in found}
@@ -656,6 +863,16 @@ class MusicLibrary:
                 continue
             new = self._new_folder_entry(path, folder_id, size, mtime)
             self._enqueue(new["id"])
+
+        if failed:
+            first_path, first_reason = failed[0]
+            more = f" (and {len(failed) - 1} more)" if len(failed) > 1 else ""
+            folder["watch_state"] = "unavailable"
+            folder["state_reason"] = (
+                f"part of the folder could not be read, so no track was marked missing: "
+                f"{first_path}: {first_reason}{more}"
+            )
+            return
 
         # Entries of this folder whose files are gone.
         for e in list(self._entries.values()):
