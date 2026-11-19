@@ -121,6 +121,8 @@ from .message_handlers.file_chunk_handler import FileChunkHandler
 from .message_handlers.file_complete_handler import FileCompleteHandler
 from .message_handlers.file_cancel_handler import FileCancelHandler
 from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
+from .message_handlers.file_request_handler import FileRequestHandler, FileRequestDeclinedHandler
+from .managers.file_request import mark_availability
 from .message_handlers.voice_transcription_handler import VoiceTranscriptionHandler  # v0.13.2+ auto-transcription
 from .message_handlers.chat_history_handlers import RequestChatHistoryHandler, ChatHistoryResponseHandler
 from .message_handlers.session_handler import (
@@ -831,6 +833,9 @@ class CoreService:
         self.message_router.register_handler(FileCompleteHandler(self))
         self.message_router.register_handler(FileCancelHandler(self))
         self.message_router.register_handler(FileChunkRetryHandler(self))  # v0.11.1
+        # Ask the peers online for a file this node has a record of and not the bytes
+        self.message_router.register_handler(FileRequestHandler(self))
+        self.message_router.register_handler(FileRequestDeclinedHandler(self))
 
         # Voice transcription (v0.13.2+)
         self.message_router.register_handler(VoiceTranscriptionHandler(self))
@@ -6284,6 +6289,13 @@ class CoreService:
                             # Megabytes of tool output the UI would hide (tool_detail.py).
                             if "tool_calls" in out:
                                 out["tool_calls"] = clip_tool_calls(out["tool_calls"])
+                            # A synced record may name a file on its author's disk:
+                            # the UI then offers to request it instead of a player.
+                            if out.get("attachments"):
+                                out["attachments"] = [
+                                    mark_availability(dict(a)) if isinstance(a, dict) else a
+                                    for a in out["attachments"]
+                                ]
                             return out
 
                         messages, has_older = history_page.page_of(records, cursor, page_limit, render_group)
@@ -6377,6 +6389,10 @@ class CoreService:
                                 }
                                 logger.debug(f"Merged transcription for transfer_id={transfer_id} into history")
 
+                        # A one-to-one record whose file is not here can be requested
+                        # from the peer; an AI chat has nobody to ask, so it is left as is.
+                        if conversation_id.startswith("dpc-node-"):
+                            attachment_copy = mark_availability(attachment_copy)
                         attachments.append(attachment_copy)
 
                     message_dict["attachments"] = attachments
@@ -7904,6 +7920,28 @@ class CoreService:
             return {"status": "success"}
         except Exception as e:
             logger.error("Error deleting group: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def request_attachment(
+        self, conversation_id: str, message_id: str, filename: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Ask the peers online for the file of a record whose file is not on this node.
+
+        The record is `message_id` in `conversation_id` (a group, or the node id
+        of a one-to-one chat); `filename` picks the attachment when a record has
+        several. The author is asked first, then the other connected members,
+        one at a time (FILE_REQUEST, managers/file_request.py). Answers at once
+        with `requesting` and the peers to be asked, `available` when the file
+        is already here, `no_peers` when nobody who may hold it is online, or
+        `error`; the outcome arrives as `file_request_status` events, and the
+        file itself through the ordinary transfer, which completes this record.
+        """
+        try:
+            return await self.file_transfer_manager.file_requests.request(
+                conversation_id, message_id, filename)
+        except Exception as e:  # noqa: BLE001 - the UI shows the message
+            logger.error("request_attachment failed for %s in %s: %s",
+                         message_id, conversation_id, e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
     async def send_group_file(

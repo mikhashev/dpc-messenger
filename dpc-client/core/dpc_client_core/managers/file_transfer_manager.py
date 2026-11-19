@@ -351,6 +351,11 @@ class FileTransfer:
     # An upload that passes on a group file this node received, never on the wire:
     # its completion is nobody's message here.
     group_relay: bool = False
+    # The FILE_REQUEST this transfer answers (managers/file_request.py): on an
+    # upload the holder's, on a download the requester's own. Such a transfer
+    # completes a record both sides already have, so neither side adds one, and
+    # the requester neither asks its user nor relays the file on.
+    request_id: Optional[str] = None
     # A download whose sender no rule names (FILE_TRANSFER_ASK), until the user
     # answers "allow files from X?"; a decline meanwhile tells the sender why.
     awaiting_permission: bool = False
@@ -582,6 +587,10 @@ class FileTransferManager:
         self._group_files_held: Dict[str, None] = {}
         self._cancels_sent: Dict[str, tuple] = {}  # transfer_id -> (when, reason)
         self._stray_chunk_ids: Dict[str, float] = {}  # transfer_id -> when first met
+        # FILE_REQUEST, both sides: files this node asked its peers for, and the
+        # answers it gives when asked.
+        from .file_request import FileRequests
+        self.file_requests = FileRequests(self)
 
         # Configuration (from settings)
         self.chunk_size = int(settings.get("file_transfer", "chunk_size", "65536"))  # 64KB
@@ -781,6 +790,7 @@ class FileTransferManager:
         group_relay: bool = False,
         text: Optional[str] = None,
         filename: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> str:
         """
         Initiate file transfer to peer.
@@ -816,6 +826,8 @@ class FileTransferManager:
                 `<stem>_N<suffix>` because the name was taken in its folder, and the
                 author's record, which every member matches the file against, has
                 the author's name.
+            request_id: The FILE_REQUEST this offer answers; it travels on the
+                offer so the requester matches it to its own record.
 
         Returns:
             transfer_id: Unique transfer identifier
@@ -884,6 +896,7 @@ class FileTransferManager:
             group_id=group_id,             # Group ID for group file transfers (v0.19.0+)
             group_relay=group_relay,
             text=text or None,
+            request_id=request_id or None,
         )
         if group_id and message_id:
             transfer.message_id = message_id
@@ -916,6 +929,10 @@ class FileTransferManager:
         # The words written with the file; a peer that predates the field ignores it
         if transfer.text:
             payload["text"] = transfer.text
+
+        # The request this offer answers; a receiver that predates it ignores it
+        if transfer.request_id:
+            payload["request_id"] = transfer.request_id
 
         # Add group_id if provided (v0.19.0+: Group file transfers)
         if group_id:
@@ -1101,7 +1118,13 @@ class FileTransferManager:
                     and transfer.image_metadata is not None)
 
     def _saves_to_disk(self, transfer: FileTransfer) -> bool:
-        """False for a screenshot when the owner turned save_screenshots_to_disk off."""
+        """False for a screenshot when the owner turned save_screenshots_to_disk off.
+
+        Never for a transfer that answers a FILE_REQUEST: the requester asked for
+        the file to be here, and the holder's copy is one its record names.
+        """
+        if transfer.request_id:
+            return True
         if not self._is_screenshot(transfer) or not self.firewall:
             return True
         return saves_screenshots_to_disk(self.firewall)
@@ -1163,6 +1186,12 @@ class FileTransferManager:
         self._stop_answer_timer(transfer)
         self._release_receive(transfer)
         self._release_upload(transfer)
+        if (transfer is not None and getattr(transfer, "request_id", None)
+                and transfer.direction == "download"
+                and transfer.status != TransferStatus.COMPLETED
+                and getattr(self, "file_requests", None) is not None):
+            self.file_requests.transfer_ended(transfer.request_id, transfer.transfer_id,
+                                              transfer.status.value)
 
     # --- offers nobody has answered ------------------------------------------
 
@@ -1724,7 +1753,9 @@ class FileTransferManager:
                 else None
             )
             finder = getattr(conversation_monitor, "find_file_record", None)
-            if transfer.group_id and callable(finder):
+            # A file this node requested completes the record it was requested
+            # for, found by the record's id: one-to-one as well as in a group.
+            if (transfer.group_id or transfer.request_id) and callable(finder):
                 # By the offer's message_id first: in a star the file arrives
                 # from the relay, not its author, and only the id finds the
                 # author's record. The record found is signed by whoever it
@@ -1823,6 +1854,9 @@ class FileTransferManager:
                 completion_event["group_id"] = transfer.group_id
             await self.local_api.broadcast_event("file_transfer_complete", completion_event)
 
+            if transfer.request_id:
+                await self.file_requests.received(transfer.request_id, attachment)
+
             # Add to backend conversation monitor (RECEIVER SIDE)
             # This ensures transcriptions can be attached and knowledge extraction works
             # For group transfers, key on group_id; for P2P, key on node_id
@@ -1888,8 +1922,10 @@ class FileTransferManager:
         if blocked_author:
             logger.info("Group file %s in %s is by blocked node %s: kept, not relayed",
                         transfer.filename, transfer.group_id, transfer.sender_node_id)
+        # Not a file this node asked for: it is an old file of the group, not a
+        # new one the star needs carried, and a member that lacks it asks too.
         if (transfer.group_id and save_to_disk and file_path and file_path.exists()
-                and not blocked_author
+                and not blocked_author and not transfer.request_id
                 and self.service and hasattr(self.service, 'group_manager')):
             file_key = self._offer_key(transfer.group_id, transfer.message_id, transfer.hash)
             relay_key = f"relay:{file_key or transfer.transfer_id}"

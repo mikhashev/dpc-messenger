@@ -194,6 +194,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "send_file",
     "accept_file_transfer",
     "cancel_file_transfer",
+    # Ask the peers online for a file this node has a record of and not the bytes
+    "request_attachment",
     # Images
     "send_image",
     "send_p2p_image",

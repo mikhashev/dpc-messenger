@@ -66,6 +66,10 @@ class FileCompleteHandler(MessageHandler):
             # A group file this node passed on for its author: the author's
             # message, not ours. It already has its record here, from the receive.
             self.logger.debug(f"Relay of group file {transfer.filename} delivered to {sender_node_id}")
+        elif transfer.direction == "upload" and transfer.request_id:
+            # A file a peer asked for (FILE_REQUEST): the record it completes is
+            # already in this node's history, the one the file was served from.
+            self.logger.info(f"Requested file {transfer.filename} delivered to {sender_node_id}")
         elif transfer.direction == "upload":
             # Sender side: Broadcast "You sent file X" message now that receiver accepted and completed
             import hashlib

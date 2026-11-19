@@ -101,6 +101,21 @@ class FileOfferHandler(MessageHandler):
 
         file_transfer_manager = self.service.file_transfer_manager
 
+        # An offer that answers this node's own FILE_REQUEST (managers/file_request.py):
+        # the file of a record already here, which the user asked for.
+        file_requests = getattr(file_transfer_manager, "file_requests", None)
+        open_request = (file_requests.open_request_for_offer(sender_node_id, payload)
+                        if file_requests is not None else None)
+        if open_request is not None and open_request.transfer_id:
+            # A second holder answered the same request: the first one's file is coming.
+            from ..managers.file_transfer_manager import ALREADY_RECEIVED_REASON
+            self.logger.info(f"Offer {transfer_id} answers request {open_request.request_id[:8]}, "
+                             f"which another holder already serves; refused")
+            await file_transfer_manager._send_file_cancel(
+                sender_node_id, transfer_id, ALREADY_RECEIVED_REASON
+            )
+            return None
+
         # Check firewall permission. The outcome is a word compared by value —
         # testing a tuple for truth is how every allow-list, size cap and MIME
         # filter once came to be unreachable on the receiving side.
@@ -130,6 +145,8 @@ class FileOfferHandler(MessageHandler):
                 "command": "FILE_CANCEL",
                 "payload": cancel_payload
             })
+            if open_request is not None:
+                await file_requests.offer_refused(open_request, str(denial_reason or "firewall_denied"))
             return None
 
         # A group file this node already has comes back on every relay of a
@@ -138,7 +155,9 @@ class FileOfferHandler(MessageHandler):
         # After the firewall, never before: a peer it refuses must not learn
         # from the answer whether this node holds a file. Before the dialog,
         # so a relay of a held file asks nobody "allow files from X?".
-        if group_id and file_transfer_manager.holds_group_file(
+        # A requested file is let through: this node asked for it because the
+        # copy it once had, or wrote, is gone from its disk.
+        if open_request is None and group_id and file_transfer_manager.holds_group_file(
                 group_id, message_id, author_node_id, hash_value):
             from ..managers.file_transfer_manager import ALREADY_RECEIVED_REASON
             self.logger.info(
@@ -169,6 +188,9 @@ class FileOfferHandler(MessageHandler):
         sender_name = self.service.peer_metadata.get(sender_node_id, {}).get("name") or sender_node_id
 
         def add_group_fields(event_data):
+            if open_request is not None:
+                # The UI opens no accept dialog for a file its user asked for.
+                event_data["request_id"] = open_request.request_id
             if group_id:
                 event_data["group_id"] = group_id
                 if author_node_id:
@@ -275,7 +297,13 @@ class FileOfferHandler(MessageHandler):
             message_id=message_id,
             awaiting_permission=awaiting_permission,
         )
+        if open_request is not None:
+            # The record the file completes is the requested one, by its id.
+            transfer.request_id = open_request.request_id
+            transfer.message_id = open_request.message_id
         file_transfer_manager.active_transfers[transfer_id] = transfer
+        if open_request is not None:
+            await file_requests.offer_taken(open_request, sender_node_id, transfer_id)
 
         # Every offer that is left waiting for a person below (the question, or the
         # accept button of an ordinary file) has a deadline: see begin_waiting_for_answer.
@@ -284,7 +312,7 @@ class FileOfferHandler(MessageHandler):
         # Voice messages: Typically small (< 10MB), personal communication
         # Images (screenshots): Pasted from clipboard, shared in conversation context
         # Group files: Shared in group chat context, should flow like messages
-        if (is_voice or is_image or group_id) and not awaiting_permission:
+        if (is_voice or is_image or group_id or open_request is not None) and not awaiting_permission:
             # Send FILE_ACCEPT to peer immediately to start the download
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "FILE_ACCEPT",
@@ -298,8 +326,10 @@ class FileOfferHandler(MessageHandler):
                 transfer_type = 'Voice'
             elif is_image:
                 transfer_type = 'Image'
-            else:
+            elif group_id:
                 transfer_type = 'Group file'
+            else:
+                transfer_type = 'Requested file'
             self.logger.info(f"{transfer_type} transfer auto-accepted: {transfer_id}")
         elif awaiting_permission:
             self.logger.info(f"Transfer from {sender_node_id} waits for the user's permission: {transfer_id}")

@@ -1,6 +1,6 @@
-# DPTP Specification: D-PC Transfer Protocol v1.15
+# DPTP Specification: D-PC Transfer Protocol v1.16
 
-**Version:** 1.15
+**Version:** 1.16
 **Status:** Draft / PoC
 **Date:** November 2026
 **License:** CC0 1.0 Universal (Public Domain)
@@ -1420,6 +1420,15 @@ Offers a file to the peer for transfer.
   file, copied unchanged by every relay. The offer travels over a hop that may be a
   relay, so this is the author's name as claimed, unsigned: it decides whether a member
   takes the copy and where a relay may go, and never whom the file is credited to.
+- `request_id` (string, optional, v1.16): the `FILE_REQUEST` this offer answers, copied
+  from it. A receiver that has that request open from this sender, for the same
+  `group_id`, accepts the offer without asking its user (it asked for the file), keeps
+  the file even when it does not keep screenshots, completes the record the request
+  named instead of writing a new one, and does not relay the file on; a second offer
+  for a request already being served is refused with FILE_CANCEL `already_received`.
+  The firewall's "who may send this node a file" still decides first. The holder adds
+  no record of its own when the transfer completes. A receiver that predates the field
+  ignores it and takes the offer as any other.
 
 **Group file relay and its identity.** A member that receives a group file offers it on
 to every member it is connected to except itself, the hop it came from and the author
@@ -1644,6 +1653,101 @@ Requests re-transmission of a specific chunk that failed verification (v0.11.1+)
 - For 159 MB file (2,541 chunks): 10 KB overhead for CRC32 hashes vs 80 KB for SHA256 per-chunk
 - CRC32 verification ~10x faster than SHA256
 - Prevents wasting time on corrupted transfers (detect at chunk-level, not file-level)
+
+---
+
+#### FILE_REQUEST
+
+Asks a peer to offer this node the file of a record it has and whose file is not on its
+disk (v1.16). History sync carries records, never bytes: a member that was offline, or
+added to a group, after a file was sent holds the author's record with a path on the
+author's disk and no file. The node's user asks for the file; the automatic fetch after
+sync (ADR-047's holder list and pull) is meant to send the same request.
+
+**Format:**
+```json
+{
+  "command": "FILE_REQUEST",
+  "payload": {
+    "request_id": "0f8c2a5e-6b1d-4e0b-9a51-2f4c7d9e1a33",
+    "group_id": "group-0a52389f2bb6",
+    "message_id": "5d0c1e9a7b3f2a44",
+    "filename": "track.mp3",
+    "size_bytes": 4918633,
+    "hash": "a1b2c3d4e5f6..."
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): the requester's id for this request, at most 128
+  characters; the answer carries it back.
+- `message_id` (string, required): the id of the record the file belongs to.
+- `filename` (string, required): the attachment's `filename` in that record.
+- `group_id` (string, optional): the group the record is in. Absent, the request is about
+  the one-to-one chat between the two nodes.
+- `size_bytes` (integer, optional), `hash` (string, optional): the attachment's size and
+  SHA-256 when the record carries them. They identify the file together with
+  `filename`, as `attachment_matches` does: the name, then the hash when both sides have
+  a real one, else the size.
+
+**Who is asked.** One connected peer at a time: for a group, the record's author first
+(`sender_node_id`), then the other connected members of the group; for a one-to-one chat,
+its other party. The requester waits up to 10 s for each (`REQUEST_ANSWER_TIMEOUT_S`, the
+precedent is SKILL_SEARCH) and stops at the first offer. An offer that arrives after the
+wait is still taken while the request is remembered (one hour).
+
+**Who answers, and how.** The peer serves the file only if all of these hold, checked on
+every request:
+- for a group file, the group exists on this node, the requester is in its `members` and
+  so is this node; the record is looked up in that group's history only;
+- for a one-to-one file, the record is looked up in this node's chat with the requester
+  only;
+- a record with that `message_id` holds a file, image or voice attachment matching the
+  request, or, when the request carries a real `hash`, a record of the same conversation
+  holds one with that hash (a one-to-one record has a different id on each side); and
+  the attachment's `file_path` is a file on this node's disk.
+
+It then sends an ordinary **FILE_OFFER** carrying the request's `request_id` (for a group
+file also `group_id`, the record's `message_id` and its author as `sender_node_id`). In
+every other case — not a member, not that conversation, no such record, no file on disk
+— it answers **FILE_REQUEST_DECLINED** with `not_held`, the one answer for all of them
+(ADR-047 §4), so the answer tells a non-member nothing about what this node holds. The
+requester is never told a path.
+
+**Limits.** A peer answers `busy` to more than 20 requests a minute from one requester,
+and when its upload slots (`max_concurrent_transfers`) are all taken.
+
+**Older peers.** A peer that predates the command logs it as unknown and drops it
+(§7); it never answers, so the requester moves on after the wait, and when nobody
+offered the file reports that a peer did not answer rather than that nobody holds it.
+
+---
+
+#### FILE_REQUEST_DECLINED
+
+The answer to FILE_REQUEST when the peer does not offer the file (v1.16).
+
+**Format:**
+```json
+{
+  "command": "FILE_REQUEST_DECLINED",
+  "payload": {
+    "request_id": "0f8c2a5e-6b1d-4e0b-9a51-2f4c7d9e1a33",
+    "reason": "not_held"
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): copied from the request.
+- `reason` (string, required): `not_held` — not served, for any reason but load — or
+  `busy` — served later. Any other value is read as `not_held`.
+- `retry_after_sec` (integer, optional, with `busy`): when asking again makes sense.
+
+A requester ignores an answer for a request it does not have open, or from a peer it did
+not ask. When every peer asked answered `not_held` it reports that nobody online holds
+the file.
 
 ---
 
@@ -3708,6 +3812,17 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.16 (November 2026)
+- **§3.11 FILE_REQUEST, FILE_REQUEST_DECLINED** and the optional `request_id` on
+  FILE_OFFER — a node that holds a record whose file is not on its disk (history sync
+  carries records, never bytes) asks the peers online for the file, the author first; a
+  holder answers with an ordinary offer that completes the existing record, everyone
+  else with `not_held`. Serving is limited to members of the record's group, or to the
+  other party of a one-to-one chat (Mike's call, 2026-11-19: show that the file is not on
+  the node and let the node request it). **Additive:** an older peer drops the request as
+  an unknown command and the requester moves on after 10 s; an older receiver ignores
+  `request_id`.
 
 ### v1.15 (November 2026)
 - **§3.18 Group Chat Messages** — new section for the ten `GROUP_*` commands the code sends
