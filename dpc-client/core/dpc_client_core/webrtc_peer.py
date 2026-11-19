@@ -373,9 +373,9 @@ class WebRTCPeerConnection:
     def write_nowait(self, message: Dict[str, Any]) -> int:
         """Queue one message on the channel without waiting; its length.
 
-        The data lane writes a window this way and then waits in `drain`
-        (`P2PManager.send_data_window`). `send` never looked at the buffer:
-        aiortc queues whatever it is given.
+        The data lane writes a window this way, one message at a time, and
+        waits in `drain` before each (`P2PManager.send_data_window`). `send`
+        never looked at the buffer: aiortc queues whatever it is given.
         """
         if not self.data_channel or self.data_channel.readyState != "open":
             raise ConnectionError(f"Data channel not ready for {self.node_id}")
@@ -383,20 +383,27 @@ class WebRTCPeerConnection:
         self.data_channel.send(json_str)
         return len(json_str)
 
+    def set_write_allowance(self, nbytes: int) -> None:
+        """Let up to `nbytes` stay queued in aiortc before `drain` waits; never less than WEBRTC_DRAIN_LOW_BYTES."""
+        self._drain_low_bytes = max(WEBRTC_DRAIN_LOW_BYTES, int(nbytes))
+
     async def drain(self) -> None:
-        """Wait until the channel's `bufferedAmount` is at most WEBRTC_DRAIN_LOW_BYTES.
+        """Wait until the channel's `bufferedAmount` is at most WEBRTC_DRAIN_LOW_BYTES (or the allowance).
 
         Woken by aiortc's `bufferedamountlow` event, and re-checked every
         WEBRTC_DRAIN_RECHECK_S in case it never comes (a channel that closed).
+        The data lane bounds the wait (`drain_timeout_s`) and may cancel it;
+        the listener is removed either way.
         """
         while True:
             channel = self.data_channel
             if not channel or channel.readyState != "open":
                 raise ConnectionError(f"Data channel to {self.node_id} closed while draining")
-            if channel.bufferedAmount <= WEBRTC_DRAIN_LOW_BYTES:
+            mark = getattr(self, "_drain_low_bytes", WEBRTC_DRAIN_LOW_BYTES)
+            if channel.bufferedAmount <= mark:
                 return
             low = asyncio.Event()
-            channel.bufferedAmountLowThreshold = WEBRTC_DRAIN_LOW_BYTES
+            channel.bufferedAmountLowThreshold = mark
             listening = hasattr(channel, "on") and hasattr(channel, "remove_listener")
             if listening:
                 channel.on("bufferedamountlow", low.set)

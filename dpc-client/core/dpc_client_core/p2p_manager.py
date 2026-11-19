@@ -100,6 +100,40 @@ def set_tcp_nodelay(writer: Any) -> bool:
         return False
 
 
+async def _within(awaitable, deadline: Optional[float]) -> bool:
+    """Await `awaitable` until `deadline` (perf_counter); False when it ran out, the await cancelled."""
+    if deadline is None:
+        await awaitable
+        return True
+    try:
+        await asyncio.wait_for(awaitable, max(0.0, deadline - time.perf_counter()))
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+# The write marks of a direct connection's transport (send_lanes.py): above
+# HIGH its `drain` waits until the buffer is down to LOW. asyncio's TCP
+# transport has these by default; its TLS layer keeps 512 KiB before it pushes
+# back, which on a 0.3 MB/s link put ~1.7 s of file data in front of chat.
+WRITE_HIGH_WATER_BYTES = 64 * 1024
+WRITE_LOW_WATER_BYTES = 16 * 1024
+
+
+def set_write_marks(writer: Any) -> bool:
+    """Give a direct connection's transport the data lane's write marks; True when set.
+
+    On a TLS stream this sets the TLS layer's marks (the socket transport
+    beneath keeps asyncio's 64 KiB / 16 KiB); on plain TCP it restates the
+    default. The same API on every event loop and OS.
+    """
+    try:
+        writer.transport.set_write_buffer_limits(high=WRITE_HIGH_WATER_BYTES, low=WRITE_LOW_WATER_BYTES)
+        return True
+    except (AttributeError, NotImplementedError, TypeError, ValueError):
+        return False
+
+
 class PeerConnection:
     """A unified wrapper for a direct TLS P2P connection."""
     def __init__(self, node_id: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -118,6 +152,7 @@ class PeerConnection:
         # Kept apart from any throughput figure (managers/chunk_window.py).
         self.link_rtt_s: Optional[float] = None
         set_tcp_nodelay(writer)
+        set_write_marks(writer)
 
     async def send(self, message: Dict[str, Any]):
         """Sends a message over the TLS stream."""
@@ -135,8 +170,28 @@ class PeerConnection:
         self.writer.write(frame)
         return len(frame)
 
+    def set_write_allowance(self, nbytes: int) -> None:
+        """Let the transport hold up to `nbytes` before `drain` waits; never less than its 64 KiB mark.
+
+        The data lane sets it per window (`P2PManager.send_data_window`): the
+        default mark, more only after a window the event loop rather than the
+        link held back (chunk_window.ChunkWindow.allowance_bytes).
+        """
+        high = max(WRITE_HIGH_WATER_BYTES, int(nbytes))
+        low = WRITE_LOW_WATER_BYTES if high == WRITE_HIGH_WATER_BYTES else high // 4
+        try:
+            self.writer.transport.set_write_buffer_limits(high=high, low=low)
+        except (AttributeError, NotImplementedError, TypeError, ValueError):
+            pass
+
     async def drain(self) -> None:
-        """Wait until the transport has taken what was written."""
+        """Wait while the transport is above its write mark (`set_write_marks`); at once when below.
+
+        The data lane calls it before every frame, so a frame is handed over
+        only when the one before it has (nearly) left for the socket.
+        Cancelling it (a timeout) leaves the stream intact: every frame was
+        handed over whole.
+        """
         await self.writer.drain()
 
     async def read(self) -> Dict[str, Any] | None:
@@ -2084,14 +2139,29 @@ class P2PManager:
         with lanes_of(peer).priority_frame():
             await peer.send(message)
 
-    async def send_data_window(self, node_id: str, messages, still_sending=None) -> DataWindowResult:
-        """Send a window of file frames on the data lane (send_lanes.py) and drain once.
+    async def send_data_window(self, node_id: str, messages, still_sending=None,
+                               drain_timeout_s: Optional[float] = None,
+                               allowance_bytes: int = 0) -> DataWindowResult:
+        """Send a window of file frames on the data lane (send_lanes.py).
 
-        A connection with `write_nowait` and `drain` (direct TLS, WebRTC) gets
-        every frame handed over and one drain; any other is sent frame by
-        frame, yielding to the priority lane between frames and stopping early
-        when `still_sending()` says the transfer is over. The result is what
-        `ChunkWindow` needs: frames sent, wall time, and the event loop's lag.
+        A connection with `write_nowait` and `drain` (direct TLS, WebRTC) is
+        handed one frame at a time: before each frame — the first included,
+        since the last window may still be in the transport — it waits while
+        the transport is above its write mark and while a priority frame is on
+        its way, so a chat frame waits behind at most the frame already handed
+        over. The mark is the transport's own (64 KiB), raised to
+        `allowance_bytes` when the caller's window says the event loop, not
+        the link, is what holds the transfer back (`set_write_allowance`;
+        managers/chunk_window.py). Every wait shares one deadline,
+        `drain_timeout_s` from the start of the window: past it the window
+        stops, the lane is released, and the result says `timed_out` (the caller halves its window and decides
+        whether the transfer goes on). A connection without those two is sent
+        frame by frame through `send`, yielding to the priority lane between
+        frames, with no deadline: such a send cannot be cut without cutting a
+        frame. Either way the window stops early when `still_sending()` says
+        the transfer is over, and ends with at least one turn of the event
+        loop. The result is what `ChunkWindow` needs: frames handed over, wall
+        time, the event loop's lag, and whether the wait timed out.
         """
         peer = self.peers.get(node_id)
         if peer is None:
@@ -2099,24 +2169,52 @@ class P2PManager:
         lanes = lanes_of(peer)
         write_nowait = getattr(peer, "write_nowait", None)
         drain = getattr(peer, "drain", None)
-        async with lanes.data_turn():
+        windowed = callable(write_nowait) and inspect.iscoroutinefunction(drain)
+        allow = getattr(peer, "set_write_allowance", None)
+        if windowed and callable(allow):
+            allow(allowance_bytes)
+        async with lanes.data_lane():
             started = time.perf_counter()
+            deadline = started + drain_timeout_s if drain_timeout_s else None
             sent = 0
-            if callable(write_nowait) and inspect.iscoroutinefunction(drain):
-                for message in messages:
-                    write_nowait(message)
-                    sent += 1
-                probe = LoopLagProbe()
-                await drain()
-            else:
-                probe = LoopLagProbe()
+            timed_out = False
+            probe = None
+            if windowed:
                 for message in messages:
                     if sent and still_sending is not None and not still_sending():
                         break
+                    # Chat first; then the transport below its mark; and chat
+                    # again if a frame of it started while that waited.
+                    if lanes.priority_on_way and not await _within(lanes.wait_priority_idle(), deadline):
+                        timed_out = True
+                        break
+                    if not await _within(drain(), deadline):
+                        timed_out = True
+                        break
+                    if lanes.priority_on_way and not await _within(lanes.wait_priority_idle(), deadline):
+                        timed_out = True
+                        break
+                    write_nowait(message)
+                    sent += 1
+                probe = LoopLagProbe()
+                if not timed_out and not await _within(drain(), deadline):
+                    timed_out = True
+            else:
+                probe = LoopLagProbe()
+                for message in messages:
+                    if sent:
+                        await asyncio.sleep(0)  # a send that never suspends still lets chat in between frames
+                        if still_sending is not None and not still_sending():
+                            break
                     await lanes.wait_priority_idle()
                     await peer.send(message)
                     sent += 1
-            return DataWindowResult(sent, time.perf_counter() - started, probe.lag_s())
+            if not probe.ran:
+                # Nothing above suspended (a socket that keeps taking data
+                # never does on a selector loop): let chat, re-asks and
+                # LINK_PONG in now, and let the probe measure the loop.
+                await asyncio.sleep(0)
+            return DataWindowResult(sent, time.perf_counter() - started, probe.lag_s(), timed_out)
 
     async def _get_primary_local_ip(self) -> str:
         """

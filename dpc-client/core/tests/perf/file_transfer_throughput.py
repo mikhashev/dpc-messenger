@@ -25,10 +25,21 @@ handle_file_accept, handle_file_chunk, PeerConnection, P2PManager.__new__),
 so the same file measures the old build: put that build's packages first on
 PYTHONPATH and run this file by its path.
 
+`--selector` runs the sender on a SelectorEventLoop, the loop Linux and macOS
+use by default, on Windows too (where the default is the Proactor).
+
+The in-process link delivers by a timer (`asyncio.sleep`); on Windows that
+timer ticks every 15.6 ms unless something raised the system timer's
+resolution, so on a fast link the timer, not the sender, can set the pace.
+`--timer-1ms` raises it to 1 ms for the run (`timeBeginPeriod`, Windows
+only; Linux and macOS timers are finer already). A real socket wakes its
+writer on I/O, not on a timer.
+
 Run, from dpc-client/core:
     python tests/perf/file_transfer_throughput.py --sizes 4 100 300
     python tests/perf/file_transfer_throughput.py --sizes 4 20 --load
     python tests/perf/file_transfer_throughput.py --sizes 20 --link-rate 2
+    python tests/perf/file_transfer_throughput.py --sizes 30 --link-rate 40 --timer-1ms
 
 Nothing touches ~/.dpc; everything is in a temporary directory.
 """
@@ -98,9 +109,20 @@ class ThrottledLink:
         self._low = asyncio.Event()
         self._low.set()
         self._pump = None
+        # Bytes already queued in front of each frame that is not file data
+        # (a chat line, a control frame), at the moment it was handed over.
+        self.ahead_of_priority: List[int] = []
+
+    def set_write_allowance(self, nbytes: int) -> None:
+        """As PeerConnection's: the mark `drain` waits above, never below HIGH_WATER."""
+        high = max(ThrottledLink.HIGH_WATER, int(nbytes))
+        self.HIGH_WATER = high
+        self.LOW_WATER = ThrottledLink.LOW_WATER if high == ThrottledLink.HIGH_WATER else high // 4
 
     def write_nowait(self, message: dict) -> int:
         nbytes = len(json.dumps(message)) + 10
+        if message.get("command") != "FILE_CHUNK":
+            self.ahead_of_priority.append(self._queued_bytes)
         self._last_due = max(self._last_due, time.perf_counter()) + nbytes / self.rate
         self._queue.append((message, nbytes, self._last_due))
         self._queued_bytes += nbytes
@@ -294,6 +316,7 @@ class Sender:
             "chunk_size": transfer_offer.get("chunk_size"),
             "chunks": len(transfer_offer.get("chunk_hashes") or []),
             "chat_waits": list(chat_waits),
+            "ahead_of_chat": [],
             "errors": self.errors[errors_before:],
             "timed_out": done is None,
         }
@@ -469,14 +492,20 @@ async def run(sizes_mb: List[float], link_rate_mb: Optional[float], load: bool,
         try:
             for size_mb in sizes_mb:
                 path = make_file(outbox, int(size_mb * MB), f"f{size_mb:g}MB.bin")
+                for link in throttled:
+                    link.ahead_of_priority.clear()
                 row = await sender.send(path, timeout_s, chat_waits, offers)
                 row["label"] = f"{size_mb:g} MB"
+                if throttled:
+                    row["ahead_of_chat"] = list(throttled[0].ahead_of_priority)
                 rows.append(row)
                 path.unlink()
                 print(f"  {row['label']:>8}: "
                       + (f"{row['mb_per_s']:.2f} MB/s in {row['seconds']:.2f} s"
                          if row["seconds"] else f"did not finish in {timeout_s:.0f} s")
                       + f", chunk {row['chunk_size']}, {row['chunks']} chunks, chat wait {_ms(row['chat_waits'])}"
+                      + (f", file bytes ahead of a chat frame at most {max(row['ahead_of_chat'])}"
+                         if row["ahead_of_chat"] else "")
                       + (f", errors {row['errors']}" if row["errors"] else ""), flush=True)
         finally:
             stop_load.set()
@@ -503,6 +532,10 @@ def main(argv=None) -> int:
     parser.add_argument("--timeout", type=float, default=600.0, help="seconds per file before giving up")
     parser.add_argument("--chunk-size", default=None, help="[file_transfer] chunk_size for both nodes")
     parser.add_argument("--log", action="store_true", help="print the sender's upload summary lines")
+    parser.add_argument("--selector", action="store_true",
+                        help="run the sender on a SelectorEventLoop (the Linux and macOS default) on Windows too")
+    parser.add_argument("--timer-1ms", action="store_true",
+                        help="Windows: raise the system timer to 1 ms for the run (the in-process link's pump)")
     parser.add_argument("--frame-cost", action="store_true",
                         help="only measure what one FILE_CHUNK of 64 KiB, 1 MiB, 4 MiB costs a receiver")
     args = parser.parse_args(argv)
@@ -519,12 +552,19 @@ def main(argv=None) -> int:
     settings = {}
     if args.chunk_size is not None:
         settings["chunk_size"] = args.chunk_size
+    if args.selector and sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    if args.timer_1ms and sys.platform == "win32":
+        import ctypes
+        ctypes.windll.winmm.timeBeginPeriod(1)  # undone by Windows when the process ends
     import dpc_client_core
     print(f"dpc_client_core from {Path(dpc_client_core.__file__).parent}")
     print(f"python {sys.version.split()[0]} on {sys.platform}; link: "
           + (f"in-process, throttled to {args.link_rate} MB/s" if args.link_rate
              else "loopback TLS, receiver in its own process")
-          + ("; sender loop loaded" if args.load else "; loop idle"), flush=True)
+          + ("; sender loop loaded" if args.load else "; loop idle")
+          + f"; sender on {'SelectorEventLoop' if args.selector or sys.platform != 'win32' else 'ProactorEventLoop'}"
+          + ("; 1 ms timer" if args.timer_1ms and sys.platform == "win32" else ""), flush=True)
     rows = asyncio.run(run(args.sizes, args.link_rate, args.load, args.timeout, settings))
     return 0 if all(not r["timed_out"] and not r["errors"] for r in rows) else 1
 

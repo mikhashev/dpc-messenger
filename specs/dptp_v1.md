@@ -1392,9 +1392,11 @@ Offers a file to the peer for transfer.
   per file: by size (64 KiB up to 100 MiB, 1 MiB up to 1 GiB, 4 MiB above), capped by the
   connection tier (1 MiB on WebRTC, 64 KiB on a relay, gossip or UDP) and by the rate it last
   measured to this peer (one chunk crosses in about 0.2 s; 1 MiB while no rate is known), or
-  takes the owner's fixed `[file_transfer] chunk_size`. A receiver must use this value and
-  nothing else; every receiver since `cda6364f` does. No wire change: any positive size is
-  valid, and a frame stays under the §2 cap (a 16 MiB chunk is about 21.3 MiB framed)
+  takes the owner's fixed `[file_transfer] chunk_size` — which since 2026-11-20 is held to the
+  tier cap on every tier but direct TLS, and raised so `chunk_hashes` never exceeds 2^17
+  entries. A receiver must use this value and nothing else; every receiver since `cda6364f`
+  does. No wire change: any positive size is valid, and a frame stays under the §2 cap (a
+  16 MiB chunk is about 21.3 MiB framed)
 - `chunk_hashes` (array of strings, optional): CRC32 hashes per chunk (v0.11.1+, 8-char hex strings)
 - `image_metadata` (object, optional): Metadata for image transfers (v0.12.0)
   - `dimensions` (object, required): Image dimensions
@@ -1546,10 +1548,20 @@ Transfers a single chunk of file data.
 - **Retry on failure (v0.11.1+):** If chunk verification fails, sends FILE_CHUNK_RETRY (max 3 retries per chunk)
 - Progress tracking: `(chunk_index + 1) / total_chunks * 100%`
 - Receiver sends FILE_COMPLETE after receiving all chunks
-- **Sending (2026-11-19, ADR-047 phases 0 and 2):** the sender writes a window of chunks and
-  drains the connection once per window, behind every other message on that connection (a
-  chat line is never queued behind more file data than the link moves in about 0.1 s). This is
-  sender behaviour only; the frames are unchanged
+- **Sending (2026-11-19, ADR-047 phases 0 and 2; bounds restated 2026-11-20):** the sender
+  sends chunks in windows behind every other message on that connection. Within a window it
+  hands the connection one chunk at a time, each only once no other message is on its way and
+  the connection has taken the chunk before it (it is below its write mark), and it ends
+  every window with a turn of its event loop. A chat line sent during a transfer therefore
+  waits behind at most the one chunk already handed to the transport (on TLS, one in the TLS
+  layer and one in the socket transport beneath it, besides each layer's 64 KiB write mark),
+  plus what the operating system's socket buffer already holds — which the sender does not
+  control. The one exception is a sender whose event loop, not the link, held back its last
+  window (a node busy with a model): it may leave the rest of the next window in the
+  transport, at most what the link was last measured to move in 0.1 s, or 1 MiB while no rate
+  is known. A window the connection does not take within its timeout (at least 10 s) halves
+  the window and releases the connection; three such windows in a row that move nothing end
+  the transfer with `send_error`. This is sender behaviour only; the frames are unchanged
 
 ---
 
@@ -1816,6 +1828,7 @@ Client configuration (`~/.dpc/config.ini`):
 [file_transfer]
 enabled = true
 chunk_size = auto        # or a fixed size: 65537, 64KiB, 1MiB; the legacy 65536 reads as auto
+chunk_delay = 0          # seconds of pause after each window; the legacy 0.001 reads as 0
 background_threshold_mb = 50
 max_concurrent_transfers = 3
 verify_hash = true

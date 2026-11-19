@@ -427,6 +427,12 @@ search is wanted first: a `hash` search is what phase 3 needs, a name search is 
   paths live side by side for as long as old peers exist; one more hash pass per file sent.
 - **Neutral:** the DHT stays out of this decision; the firewall's "who may send me a file"
   is untouched; a pull is still subject to it (the receiver asked).
+- **Implementation note (2026-11-20):** "Priority" is kept as closely as asyncio's transports
+  allow: the data lane hands over one chunk at a time, so a chat frame waits behind at most the
+  one chunk already handed to the transport (on TLS, one in the TLS layer and one beneath it),
+  plus what the operating system's socket buffer holds; a sender whose event loop rather than
+  the link held back its last window may leave up to 0.1 s of the measured rate, or 1 MiB with
+  none measured, more in the transport (`send_lanes.py`; DPTP §3.11 FILE_CHUNK).
 
 ## Confirmation
 

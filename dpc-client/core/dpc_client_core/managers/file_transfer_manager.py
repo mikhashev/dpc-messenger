@@ -57,6 +57,7 @@ import base64
 import time
 import uuid
 import zlib  # For CRC32 checksums
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Callable, List, Any, NamedTuple, Tuple, TYPE_CHECKING
@@ -66,7 +67,10 @@ from enum import Enum
 from ..firewall import FILE_TRANSFER_PROVED_CONNECTION_DEFAULT, FILE_TRANSFER_PROVED_CONNECTION_KEY, is_blocked_by
 from ..p2p_manager import peer_proof
 from ..send_lanes import DataWindowResult
-from .chunk_window import ChunkWindow, PeerLinkRates, choose_chunk_size, parse_chunk_size_setting, SMALL_FILE_CHUNK_BYTES
+from .chunk_window import (
+    ChunkWindow, PeerLinkRates, choose_chunk_size, parse_chunk_delay_setting, parse_chunk_size_setting,
+    SMALL_FILE_CHUNK_BYTES,
+)
 from .transfer_speed import TransferSpeed
 
 if TYPE_CHECKING:
@@ -87,6 +91,12 @@ HASH_READ_BLOCK_BYTES = 8 * 1024 * 1024
 _monotonic = time.monotonic  # Indirection so a test can drive the clock
 _answer_sleep = asyncio.sleep  # Indirection so a test can hold the answer clocks
 
+
+def _discard_result(future) -> None:
+    """Retrieve a finished future's outcome nobody waits for, so asyncio logs nothing."""
+    if not future.cancelled():
+        future.exception()
+
 # Receiving. The sender streams chunks back to back, so a silence means the
 # stream has ended or lost something, not that it is slow: 30 s of nothing is
 # 64 KB at ~2 KB/s, slower than any relay we route through. A sender of this
@@ -96,6 +106,12 @@ RECEIVE_STALL_TIMEOUT_S = 30.0
 # Indices re-asked per round: 64 chunks (4 MB at the default size) keeps one
 # re-ask from flooding the sender, which answers each with its own file read.
 RECEIVE_REASK_BATCH = 64
+# Sending. Timed-out windows in a row that handed nothing to the transport
+# before the upload ends with `send_error` (each waits at least
+# chunk_window.DRAIN_TIMEOUT_FLOOR_S), and how long that FILE_CANCEL may wait
+# on a connection that is not taking data.
+SEND_STALL_WINDOWS = 3
+SEND_CANCEL_TIMEOUT_S = 5.0
 # Rounds in a row with no new chunk before the receiver gives up. With the
 # timeout above a chunk that is never sent ends the transfer within
 # (rounds + 1) * timeout = 120 s of the last chunk that did arrive.
@@ -619,7 +635,8 @@ class FileTransferManager:
         self.chunk_size = self.chunk_size_pinned or SMALL_FILE_CHUNK_BYTES
         # A pause after each window; 0 (the default since 2026-11-19) is none.
         # The old 1 ms default became ~15.6 ms per chunk on Windows' timer.
-        self.chunk_delay = float(settings.get("file_transfer", "chunk_delay", "0"))
+        # The legacy 0.001 every older config.ini carries reads as 0, like chunk_size's 65536.
+        self.chunk_delay = parse_chunk_delay_setting(settings.get("file_transfer", "chunk_delay", "0"))
         # The rate last measured to each peer, for the next file's chunk size.
         self.link_rates = PeerLinkRates()
         self.background_threshold_mb = int(settings.get("file_transfer", "background_threshold_mb", "50"))
@@ -650,13 +667,17 @@ class FileTransferManager:
         loop all use it. A fan-out hashes once, so it takes the smallest size
         any of its peers would get.
         """
-        if self.chunk_size_pinned:
-            return self.chunk_size_pinned
         sizes = []
         for node_id in node_ids:
             tier = self._connection_type(node_id)
-            sizes.append(choose_chunk_size(file_size, tier, self.link_rates.get(node_id, tier)))
-        return min(sizes) if sizes else choose_chunk_size(file_size)
+            sizes.append(choose_chunk_size(file_size, tier, self.link_rates.get(node_id, tier),
+                                           pinned=self.chunk_size_pinned))
+        size = min(sizes) if sizes else choose_chunk_size(file_size, pinned=self.chunk_size_pinned)
+        if self.chunk_size_pinned and size != self.chunk_size_pinned:
+            # The owner's size, held to the tier cap and the CRC list's bound (chunk_window.pinned_chunk_size)
+            logger.info("[file_transfer] chunk_size %d is %d for a file of %d bytes on this link",
+                        self.chunk_size_pinned, size, file_size)
+        return size
 
     def _get_peer_storage_path(self, node_id: str, subdir: str = "files") -> Path:
         """Get storage path for peer's files."""
@@ -1145,10 +1166,12 @@ class FileTransferManager:
             await self.local_api.broadcast_event("file_transfer_started", started)
 
         # Send chunks, a window at a time on the data lane (send_lanes.py),
-        # behind any chat or control frame. The file is held until it is
-        # closed: on Windows a FILE_COMPLETE that arrives during the last
-        # window's pause could not delete it, and the error took the sender's
-        # own message with it.
+        # behind any chat or control frame. The file is held (using_file)
+        # until the loop is done: on Windows a FILE_COMPLETE that arrives
+        # during the last window could not delete it, and the error took the
+        # sender's own message with it. Each window's chunks are read and
+        # framed in a worker thread, the next window's while this one is on
+        # the link, so up to 8 MiB of reading and base64 never holds the loop.
         speed = transfer.speed = TransferSpeed(_monotonic())
         chunk_size = transfer.chunk_size
         total = transfer.total_chunks
@@ -1166,8 +1189,21 @@ class FileTransferManager:
             return (self.active_transfers.get(transfer_id) is transfer
                     and transfer.status not in (TransferStatus.CANCELLED, TransferStatus.FAILED))
 
+        ready: deque = deque()  # (index, bytes, frame): read and framed, not yet handed over
+        next_read = 0           # the first chunk not read yet
+        prefetch = None         # the worker reading the next window
+        stalled_windows = 0     # timed-out windows in a row that handed nothing over
+
+        def read_ahead(count: int):
+            nonlocal next_read, prefetch
+            count = min(count, total - next_read)
+            if count > 0:
+                prefetch = asyncio.ensure_future(asyncio.to_thread(
+                    self._read_chunk_frames, transfer, next_read, count))
+                next_read += count
+
         try:
-            with self.using_file(transfer.file_path), open(transfer.file_path, 'rb') as f:
+            with self.using_file(transfer.file_path):
                 chunk_index = 0
                 while chunk_index < total:
                     if not still_sending():
@@ -1177,19 +1213,29 @@ class FileTransferManager:
                         )
                         break
 
-                    count = min(window.chunks if window else 1, total - chunk_index)
-                    frames, sizes = [], []
-                    for index in range(chunk_index, chunk_index + count):
-                        chunk_data = f.read(chunk_size)
-                        sizes.append(len(chunk_data))
-                        frames.append(self._chunk_frame(transfer, index, chunk_data))
-                    chunk_data = None
+                    count = min(window.window_chunks() if window else 1, total - chunk_index)
+                    if prefetch is not None:
+                        ready.extend(await prefetch)
+                        prefetch = None
+                    if len(ready) < count:
+                        read_ahead(count - len(ready))
+                        ready.extend(await prefetch)
+                        prefetch = None
+                    batch = [ready.popleft() for _ in range(count)]
+                    read_ahead(count)  # the next window, while this one is on its way
 
-                    result = await self._send_data_window(node_id, frames, still_sending)
+                    result = await self._send_data_window(
+                        node_id, [frame for _, _, frame in batch], still_sending,
+                        drain_timeout_s=window.drain_timeout_s(sum(n for _, n, _ in batch)) if window else None,
+                        allowance_bytes=window.allowance_bytes() if window else 0)
                     sent = result.frames
-                    frames = None  # the window's bytes are the transport's now
+                    for item in reversed(batch[sent:]):
+                        ready.appendleft(item)  # not handed over: first in the next window
+                    sizes = [n for _, n, _ in batch[:sent]]
+                    batch = None  # the window's bytes are the transport's now
                     if window is not None:
-                        window.on_window(sum(sizes[:sent]), result.elapsed_s, result.loop_lag_s)
+                        window.on_window(sum(sizes), result.elapsed_s, result.loop_lag_s,
+                                         timed_out=result.timed_out)
 
                     now = _monotonic()
                     for offset in range(sent):
@@ -1210,12 +1256,28 @@ class FileTransferManager:
                                 **speed.fields(transfer.size_bytes),
                             })
                     chunk_index += sent
-                    if sent < count:
-                        f.seek(chunk_index * chunk_size)
+
+                    # A window the transport did not take in time gave up the
+                    # lane, and its window is halved; the send goes on with the
+                    # next one, which first waits for the transport again. A
+                    # peer that takes nothing for SEND_STALL_WINDOWS such
+                    # windows in a row (30 s at the least) has stopped reading:
+                    # the upload ends rather than wait for the connection to die.
+                    if result.timed_out:
+                        stalled_windows = 0 if sent else stalled_windows + 1
+                        logger.info(
+                            "Upload %s to %s: the transport took %d of %d frames within the window's "
+                            "timeout; window now %d chunks", transfer.filename, node_id[:20], sent, count,
+                            window.chunks if window else 1)
+                        if stalled_windows >= SEND_STALL_WINDOWS:
+                            raise ConnectionError(
+                                f"{node_id[:20]} took no file data for {stalled_windows} windows in a row")
+                    else:
+                        stalled_windows = 0
 
                     # The owner's pause (chunk_delay, 0 by default). Without
-                    # the lane, a yield per chunk as before; with it the
-                    # drain already yields when the transport is full.
+                    # the lane, a yield per chunk as before; with it the data
+                    # lane ends every window with a turn of the loop.
                     if self.chunk_delay > 0 or not laned:
                         await asyncio.sleep(self.chunk_delay)
                 else:
@@ -1226,12 +1288,36 @@ class FileTransferManager:
             transfer.status = TransferStatus.FAILED
             if window is not None:
                 window.on_error()
-            await self._send_file_cancel(node_id, transfer_id, "send_error")
+            try:
+                # Bounded: on a connection that stopped taking data the cancel
+                # would wait behind the file forever.
+                await asyncio.wait_for(
+                    self._send_file_cancel(node_id, transfer_id, "send_error"), SEND_CANCEL_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                logger.info(f"FILE_CANCEL for {transfer.filename} could not be sent within "
+                            f"{SEND_CANCEL_TIMEOUT_S:.0f}s; the connection is not taking data")
         finally:
+            if prefetch is not None:
+                # A worker still reading the next window: let it finish its
+                # read before the file is released; its frames are not wanted.
+                if not prefetch.done():
+                    await asyncio.wait({prefetch})
+                _discard_result(prefetch)
             if window is not None:
                 self._note_window(node_id, tier, transfer, window, time.perf_counter() - started_at)
             # A completion that came while the file was open left the delete to us
             self._release_upload(transfer)
+
+    @staticmethod
+    def _read_chunk_frames(transfer: FileTransfer, first: int, count: int) -> List[Tuple[int, int, Dict[str, Any]]]:
+        """Chunks `first`.. `first + count - 1` read and framed: (index, bytes, FILE_CHUNK); in a worker thread."""
+        frames = []
+        with open(transfer.file_path, 'rb') as f:
+            f.seek(first * transfer.chunk_size)
+            for index in range(first, first + count):
+                data = f.read(transfer.chunk_size)
+                frames.append((index, len(data), FileTransferManager._chunk_frame(transfer, index, data)))
+        return frames
 
     @staticmethod
     def _chunk_frame(transfer: FileTransfer, chunk_index: int, chunk_data: bytes) -> Dict[str, Any]:
@@ -1251,10 +1337,14 @@ class FileTransferManager:
         return getattr(type(self.p2p_manager), "send_data_window", None) is not None
 
     async def _send_data_window(self, node_id: str, frames: List[Dict[str, Any]],
-                                still_sending: Callable[[], bool]) -> DataWindowResult:
+                                still_sending: Callable[[], bool],
+                                drain_timeout_s: Optional[float] = None,
+                                allowance_bytes: int = 0) -> DataWindowResult:
         """Hand a window of chunk frames to the peer's data lane (send_lanes.py)."""
         if self._has_data_lane():
-            return await self.p2p_manager.send_data_window(node_id, frames, still_sending=still_sending)
+            return await self.p2p_manager.send_data_window(
+                node_id, frames, still_sending=still_sending, drain_timeout_s=drain_timeout_s,
+                allowance_bytes=allowance_bytes)
         started = time.perf_counter()
         sent = 0
         for frame in frames:
@@ -1274,12 +1364,12 @@ class FileTransferManager:
         moved = transfer.speed.done if transfer.speed else 0
         logger.info(
             "Upload %s to %s: %d bytes in %.1fs (%.2f MB/s), chunk %d, window up to %d chunks, "
-            "link rate %s, %d timeouts, %d errors, last link RTT %s (%s)",
+            "link rate %s, %d timeouts, %d errors, %d halvings, last link RTT %s (%s)",
             transfer.filename, node_id[:20], moved, elapsed_s,
             moved / elapsed_s / 1e6 if elapsed_s > 0 else 0.0,
             transfer.chunk_size, window.peak_chunks,
             f"{rate / 1e6:.2f} MB/s" if rate else "not measured",
-            window.timeouts, window.errors,
+            window.timeouts, window.errors, window.halvings,
             f"{rtt:.3f}s" if isinstance(rtt, (int, float)) else "unknown",
             tier or "unknown tier",
         )
@@ -2304,7 +2394,9 @@ class FileTransferManager:
             return
 
         logger.info(f"Resending chunk {chunk_index} for transfer {transfer_id}")
-        # A chunk asked again is a loss: the window halves (chunk_window.py).
+        # A chunk asked again is a loss: the window halves (chunk_window.py),
+        # once per loss event — one stall round re-asks up to
+        # RECEIVE_REASK_BATCH chunks, and that is one loss, not 64.
         if transfer.window is not None:
             transfer.window.on_error()
         # One re-asked chunk at a time per transfer: a receiver re-asks up to
@@ -2316,18 +2408,20 @@ class FileTransferManager:
 
         try:
             async with transfer.resend_lock:
-                # Read and send the specific chunk
-                with self.using_file(transfer.file_path), open(transfer.file_path, 'rb') as f:
-                    f.seek(chunk_index * transfer.chunk_size)
-                    chunk = f.read(transfer.chunk_size)
+                # Read and send the specific chunk; read and framed off the loop
+                with self.using_file(transfer.file_path):
+                    ((_, nbytes, frame),) = await asyncio.to_thread(
+                        self._read_chunk_frames, transfer, chunk_index, 1)
 
-                    if not chunk:
+                    if not nbytes:
                         logger.error(f"Failed to read chunk {chunk_index} from {transfer.file_path}")
                         return
 
                     # On the data lane, behind chat, like the stream itself
+                    window = transfer.window
                     await self._send_data_window(
-                        node_id, [self._chunk_frame(transfer, chunk_index, chunk)], lambda: True)
+                        node_id, [frame], lambda: True,
+                        drain_timeout_s=window.drain_timeout_s(nbytes) if window else None)
 
                     logger.debug(f"Resent chunk {chunk_index}/{transfer.total_chunks} for {transfer.filename}")
 

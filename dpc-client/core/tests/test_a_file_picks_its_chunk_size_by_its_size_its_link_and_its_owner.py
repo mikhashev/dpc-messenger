@@ -109,8 +109,30 @@ def test_the_setting_is_adaptive_unless_the_owner_wrote_a_size(raw, pinned):
     assert parse_chunk_size_setting(raw) == pinned
 
 
-def test_a_pinned_size_wins_over_size_tier_and_speed():
-    assert choose_chunk_size(8 * GiB, "udp_dtls", 5e3, pinned=2 * MiB) == 2 * MiB
+def test_a_pinned_size_wins_over_size_and_speed_on_a_direct_link():
+    assert choose_chunk_size(8 * GiB, "direct_tls", 5e3, pinned=2 * MiB) == 2 * MiB
+    assert choose_chunk_size(10, "direct_tls", None, pinned=16 * MiB) == 16 * MiB
+
+
+@pytest.mark.parametrize("tier, chunk", [
+    ("webrtc", 1 * MiB), ("relay", 64 * KiB), ("gossip", 64 * KiB), ("udp_dtls", 64 * KiB), (None, 64 * KiB),
+])
+def test_a_pinned_size_is_held_to_the_cap_of_any_tier_but_direct_tls(tier, chunk):
+    """The review of 053157be: a pinned size bypassed the tier cap. The safer of its two
+    options: the cap holds for a pinned size too, on every tier but direct TLS."""
+    assert choose_chunk_size(500 * MiB, tier, 100e6, pinned=4 * MiB) == chunk
+    assert choose_chunk_size(500 * MiB, tier, 100e6, pinned=16 * KiB) == 16 * KiB  # a smaller one stands
+
+
+def test_a_pinned_size_never_makes_the_crc_list_longer_than_its_bound():
+    """1 KiB over 6 GiB was 6.3 million CRCs, an offer above the 64 MiB frame cap: a
+    ValueError at the offer. Raised at size selection instead."""
+    size = 6 * GiB
+    chunk = choose_chunk_size(size, "direct_tls", None, pinned=1 * KiB)
+    assert chunk == 64 * KiB and math.ceil(size / chunk) <= cw.MAX_CHUNKS_PER_OFFER
+    # The floor wins over the tier cap: the offer must fit whatever the link
+    big = 47_039_860_096
+    assert math.ceil(big / choose_chunk_size(big, "relay", None, pinned=1 * KiB)) <= cw.MAX_CHUNKS_PER_OFFER
 
 
 def _manager(tmp_path, settings=None, peers=None):
@@ -133,17 +155,44 @@ def _manager(tmp_path, settings=None, peers=None):
     return manager, sent
 
 
-def test_the_manager_reads_the_old_default_as_adaptive_and_a_size_as_pinned(tmp_path):
+def test_the_manager_reads_the_old_default_as_adaptive_and_a_size_as_pinned(tmp_path, caplog):
+    caplog.set_level("INFO", logger="dpc_client_core.managers.chunk_window")
     adaptive, _ = _manager(tmp_path, {"chunk_size": "65536"})
     assert adaptive.chunk_size_pinned is None and adaptive.chunk_size == 64 * KiB
-    pinned, _ = _manager(tmp_path, {"chunk_size": "1MiB"})
+    assert [r for r in caplog.records if "chunk_size = 65536" in r.getMessage() and "auto" in r.getMessage()]
+    direct = {PEER: SimpleNamespace(connection_type="direct_tls")}
+    pinned, _ = _manager(tmp_path, {"chunk_size": "1MiB"}, peers=direct)
     assert pinned.chunk_size_pinned == 1 * MiB
     assert pinned.chunk_size_for(10, [PEER]) == 1 * MiB
+    assert pinned.chunk_size_for(6 * GiB, [PEER]) == 1 * MiB
+    tiny, _ = _manager(tmp_path, {"chunk_size": "1KiB"}, peers=direct)
+    assert tiny.chunk_size_for(6 * GiB, [PEER]) == 64 * KiB  # held to the CRC list's bound
 
 
 def test_chunk_delay_is_zero_by_default(tmp_path):
     manager, _ = _manager(tmp_path)
     assert manager.chunk_delay == 0
+
+
+@pytest.mark.parametrize("raw, delay", [
+    ("0.001", 0.0),      # the old default in every older config.ini: no choice
+    ("1e-3", 0.0),       # the same value written another way
+    ("0", 0.0), ("", 0.0), (None, 0.0),
+    ("0.002", 0.002), ("0.0011", 0.0011), ("0.5", 0.5),  # any other value is the owner's
+    ("-1", 0.0), ("soon", 0.0), ("nan", 0.0),
+])
+def test_the_legacy_chunk_delay_reads_as_zero_and_any_other_is_honoured(raw, delay):
+    assert cw.parse_chunk_delay_setting(raw) == delay
+
+
+def test_the_manager_reads_the_legacy_chunk_delay_as_zero_and_says_so_once(tmp_path, caplog):
+    caplog.set_level("INFO", logger="dpc_client_core.managers.chunk_window")
+    legacy, _ = _manager(tmp_path, {"chunk_delay": "0.001"})
+    assert legacy.chunk_delay == 0
+    lines = [r for r in caplog.records if "chunk_delay = 0.001" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].levelname == "INFO"
+    owner, _ = _manager(tmp_path, {"chunk_delay": "0.01"})
+    assert owner.chunk_delay == 0.01
 
 
 def test_a_fan_out_takes_the_smallest_size_any_member_would_get(tmp_path):

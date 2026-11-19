@@ -92,3 +92,18 @@ def test_a_write_on_a_closed_channel_is_refused():
     channel.readyState = "closing"
     with pytest.raises(ConnectionError):
         _peer(channel).write_nowait({"command": "FILE_CHUNK", "payload": {}})
+
+
+@pytest.mark.asyncio
+async def test_a_busy_windows_allowance_lets_more_stay_queued_and_one_chunk_puts_the_mark_back():
+    channel = _Channel()
+    peer = _peer(channel)
+    peer.write_nowait({"command": "FILE_CHUNK", "payload": {"data": "x" * (3 * WEBRTC_DRAIN_LOW_BYTES)}})
+    peer.set_write_allowance(4 * WEBRTC_DRAIN_LOW_BYTES)
+    await asyncio.wait_for(peer.drain(), 1)  # within the allowance: no wait
+    peer.set_write_allowance(0)
+    drain = asyncio.create_task(peer.drain())
+    await asyncio.sleep(0.05)
+    assert not drain.done() and channel.bufferedAmountLowThreshold == WEBRTC_DRAIN_LOW_BYTES
+    channel.flush_to(0)
+    await asyncio.wait_for(drain, 1)

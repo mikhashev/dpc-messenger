@@ -17,12 +17,32 @@ Every message to a peer leaves through one of two doors of `P2PManager`:
 
 A connection is one ordered byte stream (TLS) or one ordered channel (WebRTC):
 a frame handed to it cannot be overtaken. So the priority is enforced before
-the hand-over, and what a chat frame can still wait behind is the window
-already written. The sender's `ChunkWindow` keeps that window within what the
-link moves in `CHAT_WAIT_SLO_S` (managers/chunk_window.py), and the chunk size
-keeps one frame within it. A chat frame sent during a transfer therefore waits
-at most about the SLO on a fast link and one frame's transmit time on a slow
-one; `tests/test_a_chat_message_is_not_queued_behind_a_file.py` measures it.
+the hand-over, one frame at a time: the data lane hands a frame over only
+when the connection is below its write mark (its `drain` returns without
+waiting) and no priority frame is on its way, and checks both again before
+the next frame. A chat frame therefore waits behind at most the one file
+frame already handed to the transport (on TLS one in the TLS layer and one
+beneath it, each layer holding at most its 64 KiB mark besides,
+`p2p_manager.set_write_marks`), plus what the operating system's socket
+buffer already holds — as close to ADR-047's "the one chunk already being
+written" as asyncio's transports allow (review of 053157be, 2026-11-20).
+
+One exception, for a node whose event loop is busy (a model running): one
+chunk per turn of a loop that turns every 0.1-0.4 s is the 0.3 MB/s that
+ADR-047 phase 0 set out to fix, so a window that follows one the loop rather
+than the link held back may leave its other K-1 chunks in the transport too
+(`ChunkWindow.allowance_bytes`, `set_write_allowance`), K within the budget:
+the rate last measured times half of `CHAT_WAIT_SLO_S`, or 1 MiB while no
+rate is known. After a window the link held back the mark is the
+transport's own again. The chunk size keeps one frame within what the
+link moves in `CHAT_WAIT_SLO_S` (managers/chunk_window.py);
+`tests/test_a_chat_message_is_not_queued_behind_a_file.py` measures the wait.
+
+A window ends with at least one turn of the event loop: a selector loop
+(Linux, macOS) never suspends a writer whose socket keeps taking data, so
+without it a whole file could be read, framed and written in one go while
+chat, re-asks and LINK_PONG waited. Its wait for the transport is bounded
+(`drain_timeout_s`): a peer that stops reading costs the window, not the lane.
 """
 
 import asyncio
@@ -72,6 +92,12 @@ class SendLanes:
             await self.wait_priority_idle()
             yield
 
+    @contextlib.asynccontextmanager
+    async def data_lane(self):
+        """This connection's data lane, one window at a time; the caller checks the priority lane per frame."""
+        async with self._data_turn:
+            yield
+
 
 def lanes_of(connection: Any) -> SendLanes:
     """The lanes kept on a connection object; a new pair for a reconnect's new object."""
@@ -105,6 +131,11 @@ class LoopLagProbe:
     def _ran(self) -> None:
         self._ran_at = time.perf_counter()
 
+    @property
+    def ran(self) -> bool:
+        """Whether the loop has turned since the probe was queued."""
+        return self._ran_at is not None
+
     def lag_s(self) -> float:
         end = self._ran_at if self._ran_at is not None else time.perf_counter()
         return max(0.0, end - self._queued_at)
@@ -112,7 +143,13 @@ class LoopLagProbe:
 
 @dataclass
 class DataWindowResult:
-    """What one window on the data lane did: frames handed over, wall time, loop lag."""
+    """What one window on the data lane did: frames handed over, wall time, loop lag.
+
+    `timed_out`: the transport did not take the window within the caller's
+    `drain_timeout_s`; the lane was given up there. The frames counted were
+    handed over and stay in the connection's order.
+    """
     frames: int
     elapsed_s: float
     loop_lag_s: float
+    timed_out: bool = False

@@ -300,8 +300,8 @@ class Settings:
         }
 
         self._config['file_transfer'] = {
-            'chunk_size': 'auto',  # auto = per file, by size, tier and measured rate (64 KiB / 1 MiB / 4 MiB); a size (65537, 64KiB, 1MiB) fixes every file's; the legacy 65536 reads as auto
-            'chunk_delay': '0',  # Pause after each window of chunks in seconds; 0 = none
+            'chunk_size': 'auto',  # auto = per file, by size, tier and measured rate (64 KiB / 1 MiB / 4 MiB); a size (65537, 64KiB, 1MiB) fixes every file's, capped by the tier on every link but direct TLS and raised to keep the CRC list within 2^17; the legacy 65536 reads as auto (logged once)
+            'chunk_delay': '0',  # Pause after each window of chunks in seconds; 0 = none; the legacy 0.001 reads as 0 (logged once), any other value is honoured
             'background_threshold_mb': '50',  # Background transfer threshold in MB
             'direct_tls_only_threshold_mb': '100',  # Direct TLS preference threshold in MB
             'max_concurrent_transfers': '3',  # Max concurrent file transfers
