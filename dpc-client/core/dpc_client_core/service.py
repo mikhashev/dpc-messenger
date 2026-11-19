@@ -145,7 +145,7 @@ from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
 )
 from .managers.file_transfer_manager import (
     FileTransferManager, MaxConcurrentTransfersExceeded, NotOfferedReport,
-    group_file_ui_key, saves_screenshots_to_disk,
+    claim_free_name, group_file_ui_key, saves_screenshots_to_disk,
 )
 from .utils.image_utils import screenshot_attachment, screenshot_target
 from .voice_service import VoiceService
@@ -395,25 +395,23 @@ def keep_copy_under_a_free_name(source: Path, directory: Path, name: str) -> Pat
     followed by a copy let both pass the check and the second overwrite the
     first, whose record then named the other's bytes. Blocking; run it in a
     thread. A copy that fails part way removes the file it reserved.
+
+    The reservation is `claim_free_name`, which the receive side uses too, so
+    a member's incoming file never lands on this copy. It also treats a
+    directory of the name as taken: Windows answers PermissionError for one,
+    not FileExistsError, so a file named `screenshots` failed to send there
+    while Linux and macOS moved on to `screenshots_1`.
     """
     import shutil
 
-    stem, suffix = Path(name).stem, Path(name).suffix
-    counter = 0
-    while True:
-        target = directory / (name if counter == 0 else f"{stem}_{counter}{suffix}")
-        try:
-            out = open(target, "xb")
-        except FileExistsError:
-            counter += 1
-            continue
-        try:
-            with out, open(source, "rb") as src:
-                shutil.copyfileobj(src, out)
-        except BaseException:
-            target.unlink(missing_ok=True)
-            raise
-        return target
+    target = claim_free_name(directory, name)
+    try:
+        with open(source, "rb") as src, open(target, "r+b") as out:
+            shutil.copyfileobj(src, out)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return target
 
 
 class CoreService:

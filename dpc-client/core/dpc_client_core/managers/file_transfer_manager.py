@@ -25,7 +25,8 @@ Transfer Flow:
 1. Sender: Compute hash, create FILE_OFFER
 2. Receiver: Check firewall, prompt user, send FILE_ACCEPT
 3. Sender: Send FILE_CHUNK messages (with progress)
-4. Receiver: Write each chunk to the temporary file, verify hash, rename, send FILE_COMPLETE
+4. Receiver: Write each chunk to the temporary file, verify hash, rename it onto
+   a free name (a taken one gets `_N`; nothing on disk is replaced), send FILE_COMPLETE
 5. Both: Update conversation history with attachment metadata
 
 Features:
@@ -46,6 +47,7 @@ import asyncio
 import logging
 import hashlib
 import os
+import re
 import base64
 import time
 import uuid
@@ -207,6 +209,42 @@ class TransferStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+# Enough for any folder a person keeps; a bound so a folder that answers "taken"
+# to every name (a filesystem that refuses the create) ends in an error, not a hang.
+FREE_NAME_ATTEMPTS = 10_000
+
+_WINDOWS_FORBIDDEN_IN_NAME = re.compile(r'[<>"|?*\x00-\x1f]')
+
+
+def claim_free_name(directory: Path, name: str) -> Path:
+    """Create an empty file named `name` in `directory`, or `<stem>_N<suffix>` when taken.
+
+    Returns the path created. The claim is the exclusive create itself
+    (`open(..., "xb")`, O_CREAT | O_EXCL), never a comparison of names: on a
+    case-insensitive volume (NTFS, APFS by default) `Song.mp3` takes `song.mp3`,
+    macOS may store a name in another Unicode normalisation, and Windows drops a
+    trailing dot, so only the filesystem can say that two names are one file.
+    A directory of that name answers PermissionError on Windows and
+    FileExistsError on POSIX; both mean taken. The handle is closed before
+    returning, because Windows refuses to replace or delete an open file: the
+    caller writes into the claimed file or moves another onto it with
+    `os.replace`, which on every platform replaces a closed file atomically.
+    """
+    stem, suffix = Path(name).stem, Path(name).suffix
+    for counter in range(FREE_NAME_ATTEMPTS):
+        target = directory / (name if counter == 0 else f"{stem}_{counter}{suffix}")
+        try:
+            open(target, "xb").close()
+        except FileExistsError:
+            continue
+        except PermissionError:
+            if os.path.lexists(target):
+                continue  # a directory of that name on Windows
+            raise
+        return target
+    raise FileExistsError(f"no free name for {name!r} in {directory} after {FREE_NAME_ATTEMPTS} tries")
 
 
 def group_file_ui_key(group_id: str, filename: str) -> str:
@@ -594,6 +632,12 @@ class FileTransferManager:
         """
         name = str(filename or "").replace("\\", "/").rsplit("/", 1)[-1]
         name = name.replace(":", "_").strip()
+        # A name another platform allows and Windows refuses: the characters
+        # Win32 forbids and the control characters raise OSError there, and a
+        # trailing dot or space is silently dropped, so the record would name a
+        # file that is not on disk. Replaced on every platform, so one name
+        # lands the same everywhere. The record keeps the peer's name as sent.
+        name = _WINDOWS_FORBIDDEN_IN_NAME.sub("_", name).rstrip(". ")
         if not name.strip(". "):
             # "", ".", "..", "..." — a name that would address a directory.
             return "received_file"
@@ -736,6 +780,7 @@ class FileTransferManager:
         sender_node_id: Optional[str] = None,
         group_relay: bool = False,
         text: Optional[str] = None,
+        filename: Optional[str] = None,
     ) -> str:
         """
         Initiate file transfer to peer.
@@ -766,6 +811,11 @@ class FileTransferManager:
             text: What the sender wrote with a plain file. It travels on the offer
                 and becomes the text of the one message both sides record for the
                 file; empty or None leaves the "Sent/Received file: ..." line.
+            filename: The name the offer carries, when it is not the name on disk.
+                A relay passes the name it was offered: its own copy may sit under
+                `<stem>_N<suffix>` because the name was taken in its folder, and the
+                author's record, which every member matches the file against, has
+                the author's name.
 
         Returns:
             transfer_id: Unique transfer identifier
@@ -816,7 +866,7 @@ class FileTransferManager:
         transfer_id = str(uuid.uuid4())
         transfer = FileTransfer(
             transfer_id=transfer_id,
-            filename=file_path.name,
+            filename=filename or file_path.name,
             size_bytes=file_size,
             hash=file_hash,
             mime_type=mime_type,
@@ -1219,7 +1269,12 @@ class FileTransferManager:
     # --- receiving ---------------------------------------------------------
 
     def _incoming_destination(self, node_id: str, transfer: FileTransfer) -> Tuple[Path, bool]:
-        """Where a download lands, and whether it is written to disk at all."""
+        """Where a download is meant to land, and whether it is written to disk at all.
+
+        The name asked for, not yet the name it gets: the folder is shared (a
+        group's sender keeps its own copy here, an earlier file may hold the
+        name), so `_finalize_download` claims a free name at the end.
+        """
         is_image = self._is_screenshot(transfer)
         subdir = "files/screenshots" if is_image else "files"
 
@@ -1261,8 +1316,12 @@ class FileTransferManager:
         if not save_to_disk:
             return
         receive_path = self._receive_path_for(file_path, transfer.transfer_id)
+        # Exclusive, and recorded only once created: the temporary name is built
+        # from the peer's filename and transfer id, so a file already there
+        # under it is someone else's, to be neither truncated nor deleted by
+        # this transfer's release.
+        handle = open(receive_path, "x+b")
         transfer.receive_path = receive_path
-        handle = open(receive_path, "w+b")
         try:
             handle.truncate(max(0, int(transfer.size_bytes or 0)))
         except Exception:
@@ -1595,13 +1654,32 @@ class FileTransferManager:
             else:
                 computed_hash = "none"
 
+            # Never onto a file that is there: the folder is shared with this
+            # node's own kept copies (a group sender keeps its file here) and
+            # with earlier downloads, and a plain os.replace swapped their bytes
+            # under the records that name them. A free name is claimed by an
+            # exclusive create, then the finished file replaces that empty claim.
             try:
-                os.replace(temp_path, file_path)
+                final_path = claim_free_name(file_path.parent, file_path.name)
             except OSError as e:
-                # On Windows a final file held open elsewhere cannot be replaced
-                logger.error(f"Cannot move {temp_path.name} into place: {e}")
+                logger.error(f"No name to save {transfer.filename} under in {file_path.parent}: {e}")
                 await self._fail_download(node_id, transfer, RECEIVE_ERROR_REASON)
                 return
+            try:
+                os.replace(temp_path, final_path)
+            except OSError as e:
+                # On Windows a file held open elsewhere cannot be replaced
+                logger.error(f"Cannot move {temp_path.name} into place: {e}")
+                try:
+                    final_path.unlink(missing_ok=True)  # the empty claim
+                except OSError as unlink_error:
+                    logger.warning("Could not remove the claimed name %s: %s", final_path, unlink_error)
+                await self._fail_download(node_id, transfer, RECEIVE_ERROR_REASON)
+                return
+            if final_path != file_path:
+                logger.info("%s was taken in %s; saved as %s",
+                            file_path.name, file_path.parent, final_path.name)
+            file_path = transfer.destination = final_path
             transfer.receive_path = None
             transfer.status = TransferStatus.COMPLETED
             logger.info(f"{'Screenshot' if is_image else 'File'} saved: {file_path}")
@@ -1663,7 +1741,9 @@ class FileTransferManager:
 
             size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
 
-            # Build attachment
+            # `filename` is the name the sender gave the file: the author's own
+            # record has it, and the merge matches the two on it. Where this
+            # copy is on disk is `file_path`, which may end in `_N`.
             attachment = {
                 "type": "image" if is_image else ("voice" if is_voice else "file"),
                 "filename": transfer.filename,
@@ -1851,6 +1931,7 @@ class FileTransferManager:
                 sender_node_id=received.sender_node_id,
                 group_relay=True,
                 text=received.text,
+                filename=received.filename,  # the copy here may be under `_N`
             )
             logger.info("Relayed group %s %s to %s", kind, received.filename, member_id[:20])
         except Exception as e:  # noqa: BLE001 - one member's failure ends only its relay
