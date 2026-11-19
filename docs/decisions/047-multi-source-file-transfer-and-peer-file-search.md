@@ -1,7 +1,7 @@
 ---
 adr: 047
 title: "Move large files as signed, content-addressed chunks that a node pulls from several holders at once, over the DPC connections it already has, and let members of a group ask each other who holds a file"
-status: proposed
+status: accepted
 date: 2026-10-29
 axis: network, collective
 deciders: [Mike]
@@ -199,7 +199,7 @@ fetch what from whom, and what a search may reveal.
 
 ## Decision
 
-**Option B, entered through Option A's phase 0.** Recommended for Mike's call, not decided.
+**Option B, entered through Option A's phase 0.** Accepted by Mike on 2026-11-19 (Q1 "да", 15:16, AI Studio group).
 
 ### Rationale
 
@@ -482,9 +482,15 @@ is new.
 ## Open Questions
 
 1. **Option B with A's phase 0 first** — or A alone for now, with B later? (Mike)
+   **Decided by Mike, 2026-11-19 (15:16): yes, Option B entered through phase 0.**
 2. **Chunk size on the new path: 1 MiB** for every file, or scaled by size as phase 0's
    proposal (64 KiB / 1 MiB / 4 MiB) at the cost of a longer chat stall per frame on slow
    links? (Mike, after phase 0's numbers)
+   **Decided by Mike, 2026-11-19 (14:52-14:53):** scaled, by file size and by the link's
+   speed ("сделай сразу адаптивно, исходя из размера файла ... ну и с учетом скорости ...
+   есть же уже проверенные временем решения"). Phase 0 picks the size per file and per
+   peer's measured rate at offer time; the window of chunks in flight adapts during the
+   transfer.
 3. **`serve_chunks` on by default** for group files, because the relay already pushes them
    to every member — or off, as C8 asks of shared compute? (Mike)
 4. **Which tiers may serve chunks:** `direct_tls` only (the proved line of ADR-041 D2), or
