@@ -441,6 +441,23 @@ search is wanted first: a `hash` search is what phase 3 needs, a name search is 
   Third review (2026-11-20): a reading that never came earns nothing; `TCP_NOTSENT_LOWAT` is not
   set (on a busy selector loop it would read as the link's pace) until a Linux measurement on a
   throttled link says otherwise.
+- **Implementation note (2026-11-20), phase 1 — the signed description only:** §2's file
+  preimage is in (`dptp-file-v1`, DPTP §4.4), carried as one nested `file_description` object
+  on FILE_OFFER (W1) rather than as the flat optional fields §2 lists, so a relay or holder
+  re-serves it as one blob and its `chunk_size` — the description's, by file size alone
+  (`chunk_window.description_chunk_size`), never the adaptive wire chunk — cannot be read as
+  the wire's. A missing certificate is fetched with CERT_REQUEST to the hop; a requester with
+  another holder to ask gives up one whose certificate does not come within the 10 s answer
+  wait (W2). `created_at` is not signed (M1) and offers without a description are accepted
+  single-source (M2): both the design's defaults, pending Mike, as are the names. Signed today:
+  plain files sent to a group (the fan-out and the background hash of a group with nobody
+  online) and one to one; screenshots and voice messages are not yet. Not in this step:
+  `held_files`, the chunk-digest list on the wire, resume and per-chunk repair (§§3, 6, 8);
+  `chunks_hash` is computed and checked at the end, nothing fetches by it yet. Cost of the
+  extra per-chunk SHA-256 in the one read (`hash_file_in_one_pass`), 1 GB warm in the OS cache,
+  Windows 11 on an AMD desktop, median of three: 0.89 s → 1.25 s (+0.36 s per GB, +41%) at the
+  1 MiB wire chunk, 0.91 s → 1.29 s at a pinned 65537, which gives the same `chunks_hash`.
+  Measured while another test suite ran on the same machine; Linux and macOS not measured.
 
 ## Confirmation
 

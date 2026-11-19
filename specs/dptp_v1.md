@@ -1,6 +1,6 @@
-# DPTP Specification: D-PC Transfer Protocol v1.16
+# DPTP Specification: D-PC Transfer Protocol v1.17
 
-**Version:** 1.16
+**Version:** 1.17
 **Status:** Draft / PoC
 **Date:** November 2026
 **License:** CC0 1.0 Universal (Public Domain)
@@ -1460,6 +1460,36 @@ Offers a file to the peer for transfer.
   decides, after these checks. The holder adds no record of its own when the transfer
   completes. A receiver that predates the field ignores it and takes the offer as any
   other.
+- `file_description` (object, optional, v1.17): the author's signed description of the
+  file (ADR-047 phase 1; §4.4), exactly these keys in this order:
+  `file_preimage_version` (`dptp-file-v1`), `message_id` (the author's record id),
+  `sender_node_id` (the author), `size_bytes`, `chunk_size` (the description's own,
+  by the file's size alone: 64 KiB up to 100 MiB, 1 MiB up to 1 GiB, 4 MiB above, raised
+  to keep 2^17 chunks at most; never the wire `chunk_size` beside it), `hash` (SHA-256 of
+  the file, lowercase hex, no prefix), `chunks_hash` (SHA-256 of the 32-byte SHA-256
+  digests of every description chunk, in order; for an empty file the SHA-256 of
+  nothing), `filename` (the author's name for the file), `mime_type`, `file_signature`
+  (RSA-PSS over the hex SHA-256 of the §4.4 preimage). The author signs it once per
+  message, after the fingerprint and before any offer (one signature for a whole group
+  fan-out); a node without a key sends no description. A relay and a holder answering
+  FILE_REQUEST copy it **byte for byte** and never sign it again. When it is present
+  the offer's `filename`, `size_bytes`, `hash` and `mime_type`, and on a group offer
+  `message_id` and `sender_node_id`, must equal the described ones, and the offer's
+  `hash` is the author's SHA-256 whatever the sender's `verify_hash` says. The
+  receiver judges it after the firewall and before FILE_ACCEPT (§4.4): `verified`
+  accepts; `unverified` (no certificate for the author cached) sends CERT_REQUEST to
+  the hop and takes the file from this one source, checked again at the end; `legacy`
+  (no description, or another `file_preimage_version`) takes the offer as today;
+  `rejected` (a field altered, a signer other than `sender_node_id`, a description of
+  another chat, more than 2^17 described chunks, or an offer that is not the described
+  file) is refused with FILE_CANCEL `file_signature_rejected`. With a description not
+  rejected, the received bytes must hash to its `hash` whatever the receiver's
+  `verify_hash` says (`hash_mismatch` otherwise), and the receiver recomputes its
+  `chunks_hash` in the same read; bytes that match `hash` but not `chunks_hash` are
+  kept and the description is marked rejected and never re-served. The receiver keeps
+  the description on its record's attachment as `file_description`, beside its own
+  verdict `file_verdict` (a local field, dropped when history is imported). A receiver
+  that predates the field ignores it.
 
 **Group file relay and its identity.** A member that receives a group file offers it on
 to every member it is connected to except itself, the hop it came from and the author
@@ -1659,8 +1689,13 @@ Cancels an in-progress or pending file transfer.
   - `hash_mismatch` - SHA256 verification failed (for an offer that answers a
     FILE_REQUEST, against the requested record's hash)
   - `not_the_requested_file` (v1.16) - The offer answers the receiver's FILE_REQUEST
-    with another file: a name, a size or a hash the requested record does not have.
+    with another file: a name, a size or a hash the requested record does not have,
+    or (v1.17) no `file_description` or another one than the record holds.
     The receiver asks its next peer. An older sender takes it as any other cancel
+  - `file_signature_rejected` (v1.17) - The offer's `file_description` does not hold
+    (§4.4): a field altered, signed by a node other than its `sender_node_id`, made for
+    another chat, or the offer around it is not the described file. A requester asks
+    its next peer. An older sender takes it as any other cancel
   - `chunk_verification_failed` - Chunk CRC32 verification failed after max retries (v0.11.1+)
   - `missing_chunks` - Reassembly timed out with chunks still missing: after 30 s with
     no chunk the receiver re-asks up to 64 missing indices through FILE_CHUNK_RETRY, and
@@ -1793,6 +1828,22 @@ the longest `retry_after_sec` named) rather than as `not_held`.
 **Older peers.** A peer that predates the command logs it as unknown and drops it
 (§7); it never answers, so the requester moves on after the wait, and when nobody
 offered the file reports that a peer did not answer rather than that nobody holds it.
+
+**The author's description (v1.17).** A holder offers the record's
+`file_description` (FILE_OFFER) byte for byte when its attachment holds one it did not
+reject. A requester whose record holds a description takes only an offer carrying the
+same one: an offer without it, or with another, is `not_the_requested_file`, so a
+stripped signature cannot downgrade the file to legacy (under either legacy policy).
+A record without one takes a group offer's description only when it names the
+requested `message_id`. An offer whose description is `rejected` is refused with
+`file_signature_rejected` and the next peer is asked. An `unverified` one (no
+certificate for the author here) is held without FILE_ACCEPT while the requester asks
+the holder for the certificate (CERT_REQUEST): verified within the answer wait (10 s),
+it is accepted; otherwise, when another peer remains to be asked, it is given up with
+FILE_CANCEL `no_answer` and the next peer is asked, so a holder that withholds the
+certificate cannot keep the file from being checked. The last peer's unverified offer
+is taken single-source and checked again at the end; still unverified then, the file
+is kept, its attachment marked `file_verdict: unverified` and `content_verified: false`.
 
 ---
 
@@ -3666,6 +3717,79 @@ Agent-to-agent mentions inside one node have no bound of their own.
 `cc_group_chat_bridge.py` (`--mention-depth`, `_reply_mention_depth`,
 `_remember_reply_depth`, `_depth_for_send`)
 
+### 4.4 File description signing
+
+A file's author binds what the file is to its key (ADR-047 phase 1), so a relay or a
+second holder cannot serve other bytes under its name, nor the right bytes under
+another name or MIME type. The description travels as `file_description` on
+FILE_OFFER (§3.11); the names below are proposals pending Mike.
+
+**Version tag:** `dptp-file-v1` (constant `FILE_PREIMAGE_VERSION`), field 1, for the
+reason the HELLO preimage has one: `node.key` signs messages, votes, gossip, commits,
+HELLOs and files, and the tag keeps a file signature from standing for any of them.
+
+**Covered fields, in this order, in the §4.1 encoding (`<byte-length>":"<bytes>`):**
+
+| # | Field |
+|---|---|
+| 1 | `dptp-file-v1` |
+| 2 | `conversation_id`: the `group_id`; for a one-to-one file, the recipient's `node_id`. Never on the wire |
+| 3 | `message_id`: the author's record id |
+| 4 | `sender_node_id`: the author |
+| 5 | `size_bytes`, decimal |
+| 6 | `chunk_size` of the description, decimal |
+| 7 | `hash`: SHA-256 of the file, lowercase hex, no `sha256:` prefix |
+| 8 | `chunks_hash`: SHA-256 of the 32-byte SHA-256 digests of every `chunk_size` slice, in order |
+| 9 | `filename`: the author's name, as carried on the offer, never re-read from a disk |
+| 10 | `mime_type` |
+
+`created_at` is not covered: the record's own signed timestamp dates the file, and the
+content never changes, so there is no freshness to check; replay into another chat is
+blocked by fields 2 and 3 (M1, pending Mike). The preimage is UTF-8, decimal integers
+and lowercase hex: no locale and no timestamp, so it is the same bytes on Windows,
+Linux and macOS (a macOS NFD name or a trailing dot Windows drops never reaches it,
+since the name is the author's string).
+
+**Signature.** `file_content_hash = SHA256(preimage)` as lowercase hex;
+`file_signature = RSA-PSS(SHA256, MAX_LENGTH salt)` over that hex string by the
+author's key (`CommitSigner.sign_commit`), the §4.1 call.
+
+**Verdicts on receipt** (the §4.2 words, the receiver's own, never read off the wire):
+
+| Verdict | When |
+|---|---|
+| `verified` | the signature checks against the cached certificate of `sender_node_id`, for the conversation the receiver works out itself, and the offer's name, size, hash, MIME type (and a group offer's identity) are the described ones |
+| `unverified` | all of that, except that no certificate for `sender_node_id` is cached: CERT_REQUEST to the hop; checked again when the file is complete |
+| `legacy` | no description, or a `file_preimage_version` the receiver does not implement |
+| `rejected` | anything else: FILE_CANCEL `file_signature_rejected` |
+
+**The conversation is the receiver's.** A group file is checked against the group the
+offer came for. A one-to-one file was signed for its recipient: a node that receives
+it from its author checks it against its own `node_id`, and an author that gets its own
+file back (FILE_REQUEST) against the other party's; a one-to-one description whose
+author is neither party is another chat's and rejected.
+
+**What a verified description gives today.** The bytes are bound to it whatever
+`verify_hash` says, and its `chunks_hash` is recomputed at the end. The per-chunk
+digests are computed in the same single read as the file's SHA-256, with a rolling
+digest, so any wire chunk (a pinned 65537 included) gives the same `chunks_hash`. Later
+phases fetch the digest list itself from any holder and check it against
+`chunks_hash`; this version does not send the list.
+
+**Storage.** The author's record keeps the description on its attachment as
+`file_description`; so does a receiver's, when it is not rejected and names that record
+(its author and its `message_id`; in a one-to-one chat, its author). The receiver's
+verdict is the local field `file_verdict`, dropped on history import and computed
+again on use. History sync ships attachments whole, so a member that synced a record
+holds its author's description before it asks for the file; an imported description
+that is not the record's, or whose signature fails, is dropped.
+
+**Implementation:** `dpc-protocol/dpc_protocol/message_signing.py` (`file_preimage`,
+`file_content_hash`), `dpc_client_core/signing.py` (`sign_file_description`,
+`file_description_verdict`, `file_conversation_id`),
+`managers/file_transfer_manager.py` (`offer_file_description`, the finalize checks),
+`message_handlers/file_offer_handler.py`, `managers/file_request.py`
+
 ## 5. Connection Flow
 
 ### Direct TLS Connection
@@ -3886,6 +4010,23 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.17 (November 2026)
+- **§4.4 File description signing, §3.11 FILE_OFFER `file_description`, FILE_CANCEL
+  `file_signature_rejected`, FILE_REQUEST** (ADR-047 phase 1, 2026-11-20) — the author
+  signs a description of each file it sends (`dptp-file-v1`: conversation, message id,
+  author, size, description chunk size, SHA-256, `chunks_hash`, name, MIME type), once
+  per message; relays and holders re-serve it byte for byte. A receiver checks it after
+  the firewall: a description that does not hold, or an offer that is not the described
+  file, is refused; one whose author's certificate is missing is fetched with
+  CERT_REQUEST, and a requester gives up a holder that withholds it for the next one
+  (W2); a verified description binds the bytes whatever `verify_hash` says. A record
+  that holds a description takes no offer without it (`not_the_requested_file`).
+  `created_at` is not signed (M1) and offers without a description stay accepted
+  single-source (M2), both pending Mike, as are the new names. Sender-side signing
+  covers plain files, group and one-to-one; screenshots and voice messages are not
+  signed yet. **Additive:** an older receiver ignores the field and an older sender
+  sends none, which reads as legacy.
 
 ### v1.16 (November 2026)
 - **§3.11 FILE_OFFER `chunk_size`, FILE_CHUNK sending** (2026-11-20, sender behaviour only,
