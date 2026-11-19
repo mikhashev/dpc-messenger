@@ -1,7 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  bubbleAttachmentFor, composerAfterRefusal, confirmedAttachments, fileButtonEnabled, fileButtonTitle,
-  pickedFileAttachment, recordingAttachment, refusalNoticeFor, takesAgentAttachments,
+  AGENT_SEND_CONFIRM_TIMEOUT_MS, HeldSendTimers, bubbleAttachmentFor, composerAfterLateConfirmation,
+  composerAfterRefusal, composerAfterTimeout, confirmedAttachments, fileButtonEnabled, fileButtonTitle,
+  lateConfirmationNoticeFor, pickedFileAttachment, recordingAttachment, refusalNoticeFor,
+  takesAgentAttachments, unconfirmedNoticeFor,
   type ComposerState, type FileButtonState,
 } from './agentChatAttachment';
 
@@ -175,5 +177,156 @@ describe('composerAfterRefusal: a refused send gives back what the person typed 
       .toBe('Not sent: Recording too long (400 s > 300 s limit). Your words and the attachment are back in the composer.');
     expect(refusalNoticeFor('File too large', false, true)).toContain('attach the file again');
     expect(refusalNoticeFor('', false, false)).toBe('Not sent: core refused it. Your words are back in the draft.');
+  });
+});
+
+// Zcode's review of 3f2c6600: core accepted the send and died, so neither the
+// confirmation nor an ERROR came, and the held send and its bubble waited for ever.
+describe('HeldSendTimers: a held send not confirmed in time is given back', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('the bound covers a cold agent start, not just the record write', () => {
+    expect(AGENT_SEND_CONFIRM_TIMEOUT_MS).toBe(180_000);
+  });
+
+  it('fires once after the bound, and forgets the send before calling back', () => {
+    vi.useFakeTimers();
+    const timers = new HeldSendTimers(1000);
+    const expired: string[] = [];
+    timers.arm('cmd-1', (id) => { expired.push(id); expect(timers.size).toBe(0); });
+    vi.advanceTimersByTime(999);
+    expect(expired).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(expired).toEqual(['cmd-1']);
+    vi.advanceTimersByTime(10_000);
+    expect(expired).toEqual(['cmd-1']);
+  });
+
+  it('a confirmation or an answer in time settles it: nothing fires', () => {
+    vi.useFakeTimers();
+    const timers = new HeldSendTimers(1000);
+    const onExpire = vi.fn();
+    timers.arm('cmd-1', onExpire);
+    timers.arm('cmd-2', onExpire);
+    vi.advanceTimersByTime(500);
+    timers.settle('cmd-1');
+    timers.settle('unknown'); // harmless
+    vi.advanceTimersByTime(1000);
+    expect(onExpire).toHaveBeenCalledTimes(1);
+    expect(onExpire).toHaveBeenCalledWith('cmd-2');
+  });
+
+  it('the panel going away stops every timer', () => {
+    vi.useFakeTimers();
+    const timers = new HeldSendTimers(1000);
+    const onExpire = vi.fn();
+    timers.arm('a', onExpire);
+    timers.arm('b', onExpire);
+    timers.clear();
+    expect(timers.size).toBe(0);
+    vi.advanceTimersByTime(5000);
+    expect(onExpire).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('arming the same id again restarts it rather than firing twice', () => {
+    vi.useFakeTimers();
+    const timers = new HeldSendTimers(1000);
+    const onExpire = vi.fn();
+    timers.arm('a', onExpire);
+    vi.advanceTimersByTime(800);
+    timers.arm('a', onExpire);
+    vi.advanceTimersByTime(800);
+    expect(onExpire).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(200);
+    expect(onExpire).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a timed-out send, and a confirmation that comes after it', () => {
+  type F = { filePath: string };
+  type R = { filePath?: string; duration: number };
+  const file: F = { filePath: '/home/x/song.mp3' };
+  const recording: R = { filePath: '/home/x/.dpc/temp/voice_rec.wav', duration: 12 };
+  const empty = (over: Partial<ComposerState<F, R>> = {}): ComposerState<F, R> => ({
+    activeChatId: 'agent_001', currentInput: '', drafts: new Map(), pendingFile: null,
+    pendingImage: null, voicePreview: null, ...over,
+  });
+
+  it('the timeout gives back what a refusal gives back, and remembers it', () => {
+    const { next, restore } = composerAfterTimeout(empty({ currentInput: 'p.s.' }),
+      { chatId: 'agent_001', text: 'listen', bubbleId: 'b1', file });
+    expect(next.currentInput).toBe('listen\np.s.');
+    expect(next.pendingFile).toBe(file);
+    expect(restore).toMatchObject({ textBefore: 'p.s.', textAfter: 'listen\np.s.', file, recording: null });
+  });
+
+  it('a late confirmation takes the untouched draft back out: nothing is sent twice', () => {
+    const { next, restore } = composerAfterTimeout(empty({ currentInput: 'p.s.' }),
+      { chatId: 'agent_001', text: 'listen', bubbleId: 'b1', file });
+    const after = composerAfterLateConfirmation(next, restore);
+    expect(after.draftCleared).toBe(true);
+    expect(after.currentInput).toBe('p.s.');
+    expect(after.drafts.get('agent_001')).toBe('p.s.');
+    expect(after.pendingFile).toBeNull();
+  });
+
+  it('the recording given back goes too (core has already moved its file)', () => {
+    const { next, restore } = composerAfterTimeout(empty(), { chatId: 'agent_001', text: '', bubbleId: 'b1', recording });
+    expect(restore.recording).toBe(recording);
+    const after = composerAfterLateConfirmation(next, restore);
+    expect(after.draftCleared).toBe(true);
+    expect(after.voicePreview).toBeNull();
+  });
+
+  it("an edited draft stays the person's, words or attachment", () => {
+    const { next, restore } = composerAfterTimeout(empty(), { chatId: 'agent_001', text: 'listen', bubbleId: 'b1', file });
+    const edited = composerAfterLateConfirmation({ ...next, currentInput: 'listen carefully' }, restore);
+    expect(edited.draftCleared).toBe(false);
+    expect(edited.currentInput).toBe('listen carefully');
+    expect(edited.pendingFile).toBe(file);
+    const fileRemoved = composerAfterLateConfirmation({ ...next, pendingFile: null }, restore);
+    expect(fileRemoved.draftCleared).toBe(false);
+    expect(fileRemoved.currentInput).toBe('listen');
+  });
+
+  it('an attachment that could not go back is not touched by the late confirmation', () => {
+    const other: F = { filePath: '/home/x/other.pdf' };
+    const { next, restore } = composerAfterTimeout(empty({ pendingFile: other }),
+      { chatId: 'agent_001', text: 'listen', bubbleId: 'b1', file });
+    expect(restore.file).toBeNull();
+    const after = composerAfterLateConfirmation(next, restore);
+    expect(after.draftCleared).toBe(true);
+    expect(after.currentInput).toBe('');
+    expect(after.pendingFile).toBe(other);
+  });
+
+  it('a chat left meanwhile: its draft is put back as it was, the open chat untouched', () => {
+    const c = empty({ activeChatId: 'agent_002', currentInput: 'here', drafts: new Map([['agent_001', 'later']]) });
+    const { next, restore } = composerAfterTimeout(c, { chatId: 'agent_001', text: 'listen', bubbleId: 'b1', recording });
+    expect(next.drafts.get('agent_001')).toBe('listen\nlater');
+    const after = composerAfterLateConfirmation(next, restore);
+    expect(after.draftCleared).toBe(true);
+    expect(after.drafts.get('agent_001')).toBe('later');
+    expect(after.currentInput).toBe('here');
+  });
+
+  it('the person went back to the chat and left the draft as it was: still cleared', () => {
+    const c = empty({ activeChatId: 'agent_002' });
+    const { next, restore } = composerAfterTimeout(c, { chatId: 'agent_001', text: 'listen', bubbleId: 'b1', file });
+    // switching chats loads the draft into the input
+    const back = { ...next, activeChatId: 'agent_001', currentInput: next.drafts.get('agent_001') ?? '' };
+    const after = composerAfterLateConfirmation(back, restore);
+    expect(after.draftCleared).toBe(true);
+    expect(after.currentInput).toBe('');
+  });
+
+  it('the notices say what happened', () => {
+    expect(unconfirmedNoticeFor(180_000, true, true))
+      .toBe('Core did not confirm the message within 180 s; your draft is back, with the attachment.');
+    expect(unconfirmedNoticeFor(180_000, false, true)).toContain('attach the file again');
+    expect(unconfirmedNoticeFor(30_000, false, false)).toBe('Core did not confirm the message within 30 s; your draft is back.');
+    expect(lateConfirmationNoticeFor(true)).toContain('cleared');
+    expect(lateConfirmationNoticeFor(false)).toContain('your edited draft stays');
   });
 });

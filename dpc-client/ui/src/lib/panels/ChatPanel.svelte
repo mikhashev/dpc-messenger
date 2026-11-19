@@ -43,7 +43,7 @@
   import { estimateConversationUsage } from '$lib/tokenEstimator';
   import { showNotificationIfBackground } from '$lib/notificationService';
   import { offerOpensDialog, offerQuestion } from '$lib/fileTransferPermission';
-  import { untrack } from 'svelte';
+  import { untrack, onDestroy } from 'svelte';
   import { confirmAsync } from '$lib/utils/dialog';
   import { appendToChatDraft, switchChatDraft } from '$lib/utils/chatDraftInputs';
   import { chatInstructionSet } from '$lib/utils/aiChatStore';
@@ -53,9 +53,11 @@
   import { getLocalFileSize } from '$lib/fileSendTimeout';
   import { composerHasContent, pendingFileFrom, replacedAttachmentNotice, type PendingFile } from '$lib/utils/pendingAttachment';
   import {
-    bubbleAttachmentFor, composerAfterRefusal, confirmedAttachments, fileButtonEnabled, fileButtonTitle,
-    pickedFileAttachment, recordingAttachment, refusalNoticeFor, takesAgentAttachments,
-    type AgentChatAttachment, type HeldAgentSend,
+    AGENT_SEND_CONFIRM_TIMEOUT_MS, HeldSendTimers, bubbleAttachmentFor, composerAfterLateConfirmation,
+    composerAfterRefusal, composerAfterTimeout, confirmedAttachments, fileButtonEnabled, fileButtonTitle,
+    lateConfirmationNoticeFor, pickedFileAttachment, recordingAttachment, refusalNoticeFor,
+    takesAgentAttachments, unconfirmedNoticeFor,
+    type AgentChatAttachment, type HeldAgentSend, type UnconfirmedRestore,
   } from '$lib/utils/agentChatAttachment';
 
   type AIChatMeta = {
@@ -205,6 +207,16 @@
   // Sends into an agent chat with an attachment that core has not yet confirmed,
   // by command id: a refusal puts the words and the attachment back (HeldAgentSend).
   const heldAgentSends = new Map<string, HeldAgentSend<PendingFile, VoicePreview>>();
+  // Neither the confirmation nor an ERROR in time (core accepted and died): the
+  // send is given back as a refusal would be, and what was given back is kept
+  // here, by command id, until a late confirmation or an answer settles it.
+  const heldSendTimers = new HeldSendTimers(AGENT_SEND_CONFIRM_TIMEOUT_MS);
+  const unconfirmedAgentSends = new Map<string, UnconfirmedRestore<PendingFile, VoicePreview>>();
+  onDestroy(() => {
+    heldSendTimers.clear();
+    heldAgentSends.clear();
+    unconfirmedAgentSends.clear();
+  });
   let isSendingFile = $state(false);
 
   // Context toggle
@@ -582,7 +594,16 @@
     const confirmed = $userMessageConfirmed;
     if (!confirmed) return;
     // Core kept the attachment and wrote the record: nothing to put back any more.
-    if (confirmed.command_id) heldAgentSends.delete(confirmed.command_id);
+    const commandId = confirmed.command_id;
+    if (commandId) {
+      heldAgentSends.delete(commandId);
+      heldSendTimers.settle(commandId);
+      const late = unconfirmedAgentSends.get(commandId);
+      if (late) {
+        unconfirmedAgentSends.delete(commandId);
+        untrack(() => reconcileLateConfirmation(commandId, late));
+      }
+    }
     const { conversation_id, msg_index } = confirmed;
     if (!conversation_id || !msg_index) return;
     chatHistories.update(h => {
@@ -842,8 +863,10 @@
     });
     const commandId = await _sendAIQuery(text, bubbleId, attachment);
     const send = { chatId, text, bubbleId, ...held };
-    if (commandId) heldAgentSends.set(commandId, send);
-    else restoreRefusedAgentSend(send, 'not connected');
+    if (commandId) {
+      heldAgentSends.set(commandId, send);
+      heldSendTimers.arm(commandId, expireHeldAgentSend);
+    } else restoreRefusedAgentSend(send, 'not connected');
     autoScroll();
   }
 
@@ -877,10 +900,83 @@
     setTimeout(() => (showFileOfferToast = false), 7000);
   }
 
+  // Core neither confirmed nor refused a held send in time. The words and the
+  // attachment go back and the bubble goes, as on a refusal; the "Thinking..."
+  // placeholder keeps its command id (a late answer still lands in it) but says
+  // what happened, and the chat stops loading. A recording that could not go
+  // back keeps its temp file: core may still be moving it.
+  function expireHeldAgentSend(commandId: string) {
+    const held = heldAgentSends.get(commandId);
+    if (!held) return;
+    heldAgentSends.delete(commandId);
+    const { next, restore } = composerAfterTimeout({
+      activeChatId, currentInput, drafts: chatDraftInputs, pendingFile, pendingImage, voicePreview,
+    }, held);
+    unconfirmedAgentSends.set(commandId, restore);
+    currentInput = next.currentInput;
+    chatDraftInputs = next.drafts;
+    pendingFile = next.pendingFile;
+    voicePreview = next.voicePreview;
+    unconfirmedUserBubbles.delete(held.bubbleId);
+    setChatLoading(held.chatId, false);
+    const notice = unconfirmedNoticeFor(AGENT_SEND_CONFIRM_TIMEOUT_MS, next.attachmentRestored, !!(held.file || held.recording));
+    chatHistories.update(h => {
+      const hist = h.get(held.chatId);
+      if (!hist) return h;
+      const m = new Map(h);
+      m.set(held.chatId, hist
+        .filter((msg: any) => msg.id !== held.bubbleId)
+        .map((msg: any) => msg.commandId === commandId ? { ...msg, sender: 'system', text: notice } : msg));
+      return m;
+    });
+    fileOfferToastMessage = notice;
+    showFileOfferToast = true;
+    setTimeout(() => (showFileOfferToast = false), 7000);
+  }
+
+  // Core confirmed a send after it had timed out: the record exists. The bubble
+  // comes back (the confirmation then numbers it and gives it the kept copy), the
+  // placeholder thinks again, and the draft given back is taken out while the
+  // person has not touched it (composerAfterLateConfirmation), so nothing is sent twice.
+  function reconcileLateConfirmation(commandId: string, late: UnconfirmedRestore<PendingFile, VoicePreview>) {
+    const { held } = late;
+    const next = composerAfterLateConfirmation({
+      activeChatId, currentInput, drafts: chatDraftInputs, pendingFile, pendingImage, voicePreview,
+    }, late);
+    currentInput = next.currentInput;
+    chatDraftInputs = next.drafts;
+    pendingFile = next.pendingFile;
+    voicePreview = next.voicePreview;
+    unconfirmedUserBubbles.set(held.bubbleId, commandId);
+    let thinking = false;
+    chatHistories.update(h => {
+      const hist = h.get(held.chatId) || [];
+      if (hist.some((msg: any) => msg.id === held.bubbleId)) return h;
+      const bubble = { id: held.bubbleId, sender: 'user', text: held.text, timestamp: Date.now() };
+      const at = hist.findIndex((msg: any) => msg.commandId === commandId);
+      thinking = at >= 0;
+      const placeholder = { sender: 'ai', text: 'Thinking...' };
+      const updated = at >= 0
+        ? [...hist.slice(0, at), bubble, { ...hist[at], ...placeholder }, ...hist.slice(at + 1)]
+        : [...hist, bubble];
+      const m = new Map(h);
+      m.set(held.chatId, updated);
+      return m;
+    });
+    if (thinking) setChatLoading(held.chatId, true);
+    fileOfferToastMessage = lateConfirmationNoticeFor(next.draftCleared);
+    showFileOfferToast = true;
+    setTimeout(() => (showFileOfferToast = false), 7000);
+  }
+
   // An answer to a held send: an ERROR before the confirmation is a refusal.
   $effect(() => {
     const message = $coreMessages;
     if (message?.command !== 'execute_ai_query' || !message.id) return;
+    heldSendTimers.settle(message.id);
+    // An answer after a timeout: the composer has the draft back already, and
+    // MessageRouterPanel writes the answer into the placeholder.
+    unconfirmedAgentSends.delete(message.id);
     const held = heldAgentSends.get(message.id);
     if (!held) return;
     heldAgentSends.delete(message.id);

@@ -176,3 +176,126 @@ export function refusalNoticeFor(reason: string, attachmentRestored: boolean, ha
   if (hadAttachment) return `Not sent: ${why}. Your words are back in the draft; attach the file again.`;
   return `Not sent: ${why}. Your words are back in the draft.`;
 }
+
+// Zcode's review of 3f2c6600: core may accept `execute_ai_query` and then die,
+// and then neither `user_message_confirmed` nor an ERROR comes back; the held
+// send waited for ever and its bubble stayed "sending". Past this long the send
+// is given back as a refusal would be. Core confirms once the person's record is
+// written, before the agent runs, but what comes first is not always quick: the
+// first prompt to an agent starts its manager (a knowledge index rebuild is
+// logged as "~2 min expected" under --skip-knowledge-index), a recording is
+// measured with ffprobe (up to 15 s, FFPROBE_TIMEOUT_S), and a picked file is
+// copied into the chat's files/ (the firewall cap goes up to 1000 MB). 30 s would
+// give back sends core is still recording; three minutes covers all of these.
+export const AGENT_SEND_CONFIRM_TIMEOUT_MS = 180_000;
+
+/**
+ * One timer per held send, by command id: `arm` starts it, `settle` stops it
+ * (a confirmation or an answer came), `clear` stops all (the panel is going).
+ * A timer that fires is forgotten before `onExpire` runs.
+ */
+export class HeldSendTimers {
+  private timers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  constructor(private readonly ms: number = AGENT_SEND_CONFIRM_TIMEOUT_MS) {}
+
+  arm(id: string, onExpire: (id: string) => void): void {
+    this.settle(id);
+    this.timers.set(id, setTimeout(() => {
+      this.timers.delete(id);
+      onExpire(id);
+    }, this.ms));
+  }
+
+  settle(id: string): void {
+    const t = this.timers.get(id);
+    if (t === undefined) return;
+    clearTimeout(t);
+    this.timers.delete(id);
+  }
+
+  clear(): void {
+    for (const t of this.timers.values()) clearTimeout(t);
+    this.timers.clear();
+  }
+
+  get size(): number {
+    return this.timers.size;
+  }
+}
+
+function chatTextOf<F, R>(c: ComposerState<F, R>, chatId: string): string {
+  return chatId === c.activeChatId ? c.currentInput : (c.drafts.get(chatId) ?? '');
+}
+
+/**
+ * What a timed-out send gave back, kept so a late confirmation can take it
+ * back again while the person has not touched it.
+ */
+export type UnconfirmedRestore<F, R> = {
+  held: HeldAgentSend<F, R>;
+  /** The chat's text before and right after the words were given back. */
+  textBefore: string;
+  textAfter: string;
+  /** The attachment put back in the composer, or null when it could not be. */
+  file: F | null;
+  recording: R | null;
+};
+
+/** The composer after a held send timed out: as after a refusal, plus what was given back. */
+export function composerAfterTimeout<F, R>(
+  c: ComposerState<F, R>, held: HeldAgentSend<F, R>,
+): { next: ComposerState<F, R> & { attachmentRestored: boolean }; restore: UnconfirmedRestore<F, R> } {
+  const next = composerAfterRefusal(c, held);
+  const restore: UnconfirmedRestore<F, R> = {
+    held,
+    textBefore: chatTextOf(c, held.chatId),
+    textAfter: chatTextOf(next, held.chatId),
+    file: next.attachmentRestored && held.file && next.pendingFile === held.file ? held.file : null,
+    recording: next.attachmentRestored && held.recording && next.voicePreview === held.recording ? held.recording : null,
+  };
+  return { next, restore };
+}
+
+/**
+ * The composer when core confirms a send after it had timed out: the record
+ * exists, so what was given back would send it twice. While the person has not
+ * touched it (the chat's text is what the give-back left, and the attachment
+ * given back is still the one in the composer) it is taken back out; once they
+ * have edited it, it stays theirs and the chat shows the recorded message.
+ */
+export function composerAfterLateConfirmation<F, R>(
+  c: ComposerState<F, R>, r: UnconfirmedRestore<F, R>,
+): ComposerState<F, R> & { draftCleared: boolean } {
+  const chatId = r.held.chatId;
+  const open = chatId === c.activeChatId;
+  const textUntouched = chatTextOf(c, chatId) === r.textAfter;
+  // A chat left meanwhile dropped its attachment place: nothing of it is left to check.
+  const fileUntouched = !open || r.file === null || c.pendingFile === r.file;
+  const recordingUntouched = !open || r.recording === null || c.voicePreview === r.recording;
+  if (!textUntouched || !fileUntouched || !recordingUntouched) return { ...c, draftCleared: false };
+  const drafts = new Map(c.drafts);
+  drafts.set(chatId, r.textBefore);
+  if (!open) return { ...c, drafts, draftCleared: true };
+  return {
+    ...c, drafts, currentInput: r.textBefore,
+    pendingFile: r.file !== null ? null : c.pendingFile,
+    voicePreview: r.recording !== null ? null : c.voicePreview,
+    draftCleared: true,
+  };
+}
+
+/** The toast when core did not confirm a held send in time. */
+export function unconfirmedNoticeFor(timeoutMs: number, attachmentRestored: boolean, hadAttachment: boolean): string {
+  const lead = `Core did not confirm the message within ${Math.round(timeoutMs / 1000)} s; your draft is back`;
+  if (attachmentRestored) return `${lead}, with the attachment.`;
+  if (hadAttachment) return `${lead}; attach the file again.`;
+  return `${lead}.`;
+}
+
+/** The toast when core confirms a send after it had timed out. */
+export function lateConfirmationNoticeFor(draftCleared: boolean): string {
+  return draftCleared
+    ? 'Core recorded the message after all; the draft it gave back is cleared.'
+    : 'Core recorded the message after all; it is in the chat, and your edited draft stays.';
+}
