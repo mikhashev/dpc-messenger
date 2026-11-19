@@ -10,6 +10,8 @@ Every answer is `{"status": "ok", ...}` or `{"status": "error", "code", "message
 The mixin needs `self.settings` (a `Settings`); the library lives under
 `settings.dpc_home_dir / "music"`. The poll interval is `[music] poll_interval_s`
 (`DPC_MUSIC_POLL_INTERVAL_S`), read with a default so `settings.py` is unchanged.
+Likewise the LRCLIB step of the lyrics chain is `[music] lrclib_enabled`
+(`DPC_MUSIC_LRCLIB_ENABLED`, default `true`), read on every lookup.
 """
 
 from __future__ import annotations
@@ -19,8 +21,13 @@ from typing import Any, Dict, List, Optional
 
 from ..local_api import slow_command
 from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
+from .lyrics import MusicLyrics
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_LRCLIB_ENABLED = True
+_TRUE = ("1", "true", "yes", "on")
+_FALSE = ("0", "false", "no", "off", "")
 
 
 def _error(exc: Exception) -> Dict[str, Any]:
@@ -34,6 +41,7 @@ class MusicCommandsMixin:
     """Music library commands for `CoreService`."""
 
     _music_library_instance: Optional[MusicLibrary] = None
+    _music_lyrics_instance: Optional[MusicLyrics] = None
 
     def _music_poll_interval_s(self) -> float:
         raw = self.settings.get("music", "poll_interval_s", str(DEFAULT_POLL_INTERVAL_S))
@@ -49,6 +57,24 @@ class MusicCommandsMixin:
                 self.settings.dpc_home_dir, poll_interval_s=self._music_poll_interval_s())
         await self._music_library_instance.start()
         return self._music_library_instance
+
+    def _music_lrclib_enabled(self) -> bool:
+        """`[music] lrclib_enabled`: whether the lyrics chain may ask lrclib.net."""
+        raw = self.settings.get("music", "lrclib_enabled", "true" if DEFAULT_LRCLIB_ENABLED else "false")
+        text = str(raw).strip().lower()
+        if text in _TRUE:
+            return True
+        if text in _FALSE:
+            return False
+        logger.warning("[music] lrclib_enabled %r is not a boolean; using %s", raw, DEFAULT_LRCLIB_ENABLED)
+        return DEFAULT_LRCLIB_ENABLED
+
+    async def _music_lyrics(self) -> MusicLyrics:
+        library = await self._music()
+        if self._music_lyrics_instance is None or self._music_lyrics_instance.library is not library:
+            self._music_lyrics_instance = MusicLyrics(
+                self.settings.dpc_home_dir, library, lrclib_enabled=self._music_lrclib_enabled)
+        return self._music_lyrics_instance
 
     async def start_music_library(self) -> None:
         """Load the library and start watching its folders; called at service start."""
@@ -144,6 +170,40 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    # -- lyrics ------------------------------------------------------------------
+
+    @slow_command
+    async def get_music_lyrics(self, track_id: str, refresh: bool = False) -> Dict[str, Any]:
+        """The track's lyrics. Stored ones come back as they are; without them (or with
+        `refresh`) the chain runs: .lrc sidecar, embedded tags, LRCLIB. `chain` says
+        what each step found; `lrclib` the lookup's result when it ran."""
+        try:
+            return {"status": "ok", **(await (await self._music_lyrics()).get(track_id, refresh=bool(refresh)))}
+        except Exception as exc:
+            return _error(exc)
+
+    async def save_music_lyrics(self, track_id: str, lrc_text: str) -> Dict[str, Any]:
+        """Store the person's LRC as `source: "manual"` under the DPC home."""
+        try:
+            return {"status": "ok", **(await (await self._music_lyrics()).save_manual(track_id, lrc_text))}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
+    async def lookup_music_lyrics_lrclib(self, track_id: str, artist: Optional[str] = None,
+                                         title: Optional[str] = None, album: Optional[str] = None,
+                                         replace: bool = False) -> Dict[str, Any]:
+        """The explicit "Find on LRCLIB": sends artist, title, album and duration to
+        lrclib.net. Stores the result when nothing is stored or `replace`; otherwise it
+        comes back as `candidate`."""
+        try:
+            lyrics = await self._music_lyrics()
+            answer = await lyrics.lookup_lrclib(track_id, artist=artist, title=title, album=album,
+                                                replace=bool(replace))
+            return {"status": "ok", **answer}
+        except Exception as exc:
+            return _error(exc)
+
 
 MUSIC_COMMANDS = (
     "list_music_folders",
@@ -156,4 +216,7 @@ MUSIC_COMMANDS = (
     "create_music_playlist",
     "update_music_playlist",
     "delete_music_playlist",
+    "get_music_lyrics",
+    "save_music_lyrics",
+    "lookup_music_lyrics_lrclib",
 )

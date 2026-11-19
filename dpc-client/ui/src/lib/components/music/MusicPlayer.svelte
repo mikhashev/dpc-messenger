@@ -16,6 +16,9 @@
   folder)"; how core serves those bytes is ADR-051 N8, Mike's open decision. The one
   place that decides is `trackPlaybackUrl` in utils/musicPlayer.ts.
 
+  Under Now playing sits the Lyrics area (MusicLyrics.svelte): the lyrics chain of
+  the core (.lrc sidecar, file tags, LRCLIB, manual edit) for the current track.
+
   The library comes from the core music commands; until they are wired into
   local_api the window says "Music library not available on this backend yet" and
   the player stays usable for nothing else.
@@ -25,6 +28,7 @@
   import { tick, untrack } from 'svelte';
   import { connectionStatus } from '$lib/coreService';
   import { confirmAsync } from '$lib/utils/dialog';
+  import MusicLyrics from './MusicLyrics.svelte';
   import {
     HEADER_HEIGHT,
     clampRect,
@@ -685,6 +689,8 @@
               </div>
               <p class="muted tiny">Space play/pause · N next · P previous · Shift+S shuffle · Shift+R repeat · ← → seek</p>
             </section>
+
+            <MusicLyrics entry={cur} currentTime={loaded ? p.currentTime : 0} duration={shownDuration} {loaded} />
 
             <section class="card" aria-labelledby="up-next-label">
               <div class="section-head">

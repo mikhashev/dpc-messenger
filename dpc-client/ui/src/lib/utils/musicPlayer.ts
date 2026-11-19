@@ -592,3 +592,194 @@ export function throttle(fn: () => void, ms: number, timers: Timers = REAL_TIMER
         },
     };
 }
+
+// -- lyrics (ADR-051 D6; SPEC §3 flows 11-13, 12a; dpc_client_core/music/lyrics.py) --
+
+/** One `mp.lyrics/1` line: `t_start` is null only in unsynced lyrics. */
+export interface LyricsLine {
+    t_start: number | null;
+    t_end?: number;
+    text: string;
+}
+
+/** `mp.lyrics/1`. */
+export interface Lyrics {
+    schema?: string;
+    track_hash: string;
+    source: 'lrc' | 'tags' | 'lrclib' | 'transcribe' | 'manual' | string;
+    language?: string | null;
+    /** Absent means synced; false only for plain (untimed) lines. */
+    synced?: boolean;
+    lines: LyricsLine[];
+    edited?: boolean;
+    lrclib?: { id: number; artist_name: string; track_name: string; album_name: string | null; duration: number | null; synced: boolean };
+    updated_at?: string;
+}
+
+/** What one LRCLIB lookup came to (core: `MusicLyrics._lrclib_answer`). */
+export interface LrclibOutcome {
+    result: 'synced' | 'plain' | 'instrumental' | 'not_found' | 'mismatch' | 'empty' | 'rate_limited' | 'error'
+        | 'disabled' | 'no_query' | 'no_duration' | string;
+    cached: boolean;
+    query: { artist: string; title: string; album: string | null; duration: number | null } | null;
+    record: { id: number; artist_name: string; track_name: string; album_name: string | null; duration: number | null } | null;
+    retry_after?: number;
+    error?: string;
+}
+
+export interface LyricsChainStep {
+    step: 'lrc' | 'tags' | 'lrclib' | 'transcribe' | 'manual' | string;
+    state: string;
+    detail: string;
+}
+
+/** The answer of get_music_lyrics, lookup_music_lyrics_lrclib and save_music_lyrics. */
+export interface LyricsAnswer {
+    lyrics: Lyrics | null;
+    from_store?: boolean;
+    chain?: LyricsChainStep[];
+    lrclib?: LrclibOutcome | null;
+    lrclib_enabled?: boolean;
+    /** Lyrics found but not applied, because others are stored: the person chooses. */
+    candidate?: Lyrics | null;
+    applied?: boolean;
+    kept?: string;
+}
+
+/** The note shown next to "Find on LRCLIB" (SPEC §6 "Egress/privacy"). */
+export const LRCLIB_EGRESS_TEXT = 'Sends artist, title and duration to lrclib.net';
+
+export function lyricsSynced(lyrics: Lyrics | null | undefined): boolean {
+    return !!lyrics && lyrics.synced !== false && lyrics.lines.some(l => l.t_start != null);
+}
+
+/** Where line `i` ends: its `t_end`, else the next line's start, else the track's end. */
+export function lyricsLineEnd(lines: readonly LyricsLine[], i: number, duration: number | null | undefined): number {
+    const l = lines[i];
+    if (l.t_end != null) return l.t_end;
+    const next = lines[i + 1];
+    if (next && next.t_start != null) return next.t_start;
+    return duration != null && Number.isFinite(duration) && duration > 0 ? duration : Infinity;
+}
+
+/** The line current at `t` (SPEC flow 11): from its start until its end, else until
+ *  the next line, else to the end of the track; in a gap after an explicit end, and
+ *  before the first line, none (-1). Untimed lines are never current. */
+export function currentLyricIndex(lines: readonly LyricsLine[], t: number, duration?: number | null): number {
+    let i = -1;
+    for (let k = 0; k < lines.length; k++) {
+        const s = lines[k].t_start;
+        if (s == null) return -1;
+        if (s <= t + 0.02) i = k;
+        else break;
+    }
+    return i >= 0 && t >= lyricsLineEnd(lines, i, duration) ? -1 : i;
+}
+
+/** The compact view's three lines: the previous, the current and the next. Between
+ *  lines (or before the first) `current` is -1, `prev` is the last line that started
+ *  and `next` the one coming up. */
+export function lyricsWindow(lines: readonly LyricsLine[], t: number, duration?: number | null): { prev: number; current: number; next: number } {
+    if (!lines.length || lines[0].t_start == null) return { prev: -1, current: -1, next: lines.length ? 0 : -1 };
+    const current = currentLyricIndex(lines, t, duration);
+    let started = current;
+    if (current < 0) {
+        started = -1;
+        for (let k = 0; k < lines.length && (lines[k].t_start ?? Infinity) <= t + 0.02; k++) started = k;
+    }
+    const next = started + 1 < lines.length ? started + 1 : -1;
+    return { prev: current >= 0 ? current - 1 : started, current, next };
+}
+
+/** `mm:ss.xx` (the core's `lrc_stamp`). */
+export function lrcStamp(t: number | null | undefined): string {
+    const v = Math.max(0, typeof t === 'number' && Number.isFinite(t) ? t : 0);
+    let m = Math.floor(v / 60);
+    let s = Math.round((v - m * 60) * 100) / 100;
+    if (s >= 60) { m++; s -= 60; }
+    return `${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`;
+}
+
+const LRC_LEAD = /^\s*(?:\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]\s*)+/;
+const LRC_META = /^\s*\[[A-Za-z#][A-Za-z0-9_#-]*:.*\]\s*$/;
+
+/** LRC text for lyrics (the core's `format_lrc`): untimed lines without a stamp. */
+export function formatLrc(lyrics: Lyrics | null | undefined): string {
+    if (!lyrics) return '';
+    const out: string[] = [];
+    if (lyrics.language) out.push(`[la:${lyrics.language}]`);
+    for (const l of lyrics.lines) {
+        if (l.t_start == null) out.push(l.text);
+        else out.push(`[${lrcStamp(l.t_start)}] ${l.text}${l.t_end != null ? ` <${lrcStamp(l.t_end)}>` : ''}`);
+    }
+    return out.join('\n');
+}
+
+/** How many lines of an LRC text have text but no leading stamp (Save refuses them). */
+export function countUnstampedLines(text: string): number {
+    let n = 0;
+    for (const line of text.split(/\r?\n/)) {
+        if (!line.trim() || LRC_META.test(line) || LRC_LEAD.test(line)) continue;
+        n++;
+    }
+    return n;
+}
+
+/** "Stamp current time" (SPEC flow 13): the line at `cursor` gets `t` as its leading
+ *  stamp (replacing any it had), and the cursor moves to the start of the next line,
+ *  so lyrics are timed by tapping along. A metadata line (`[la:en]`) is skipped. */
+export function stampLrcLine(text: string, cursor: number, t: number): { text: string; cursor: number } {
+    const at = Math.max(0, Math.min(text.length, cursor));
+    const start = text.lastIndexOf('\n', at - 1) + 1;
+    let end = text.indexOf('\n', at);
+    if (end < 0) end = text.length;
+    const line = text.slice(start, end);
+    if (LRC_META.test(line)) return { text, cursor: end < text.length ? end + 1 : end };
+    const body = line.replace(LRC_LEAD, '').replace(/\r$/, '').trim();
+    const stamped = body ? `[${lrcStamp(t)}] ${body}` : `[${lrcStamp(t)}]`;
+    const out = text.slice(0, start) + stamped + text.slice(end);
+    const lineEnd = start + stamped.length;
+    return { text: out, cursor: lineEnd < out.length ? lineEnd + 1 : lineEnd };
+}
+
+/** The source badge: "lrclib · unsynced", "manual · edited", or "none". */
+export function lyricsBadge(lyrics: Lyrics | null | undefined): string {
+    if (!lyrics) return 'none';
+    const parts = [lyrics.source];
+    if (lyrics.synced === false) parts.push('unsynced');
+    if (lyrics.edited) parts.push('edited');
+    return parts.join(' · ');
+}
+
+/** One honest sentence for an LRCLIB outcome. */
+export function lrclibOutcomeText(o: LrclibOutcome | null | undefined): string {
+    if (!o) return '';
+    const q = o.query;
+    const what = q ? `"${q.artist} - ${q.title}"${q.duration != null ? `, ${q.duration} s` : ''}` : 'this track';
+    const cached = o.cached ? ' (from the local cache)' : '';
+    switch (o.result) {
+        case 'synced': return `LRCLIB: found synced lyrics${cached}.`;
+        case 'plain': return `LRCLIB: found plain lyrics only, without times${cached}.`;
+        case 'instrumental': return `LRCLIB marks this track instrumental: no lyrics${cached}.`;
+        case 'not_found': return `LRCLIB: not found for ${what}${cached}.`;
+        case 'mismatch': return `LRCLIB: a record came back${o.record?.duration != null ? ` (${o.record.duration} s)` : ''}, but its duration is more than ±2 s from this track, so it is not used${cached}.`;
+        case 'empty': return `LRCLIB: the record has no lyrics${cached}.`;
+        case 'rate_limited': return `LRCLIB is rate limiting this machine${o.retry_after ? `; try again in ${o.retry_after} s` : ''}.`;
+        case 'error': return `LRCLIB: ${o.error || 'the lookup failed'}.`;
+        case 'disabled': return 'Online lookup is off ([music] lrclib_enabled = false).';
+        case 'no_query': return 'LRCLIB needs an artist and a title: type them below.';
+        case 'no_duration': return 'LRCLIB needs the track\'s duration to check a match, and it is not known yet.';
+        default: return `LRCLIB: ${o.result}.`;
+    }
+}
+
+/** Artist and title for the LRCLIB fields: the entry's tags, else its file name
+ *  "Artist - Title" (the core's `build_query`). */
+export function guessArtistTitle(entry: LibraryEntry | null | undefined): { artist: string; title: string } {
+    if (!entry) return { artist: '', title: '' };
+    const artist = (entry.artist ?? '').trim();
+    if (artist) return { artist, title: (entry.title ?? '').trim() };
+    const base = (entry.source?.name || entry.title || '').replace(/\.[^./\\]+$/, '').trim();
+    const m = base.match(/^(.+?)\s+[-–—]\s+(.+)$/);
+    return m ? { artist: m[1].trim(), title: m[2].trim() } : { artist: '', title: (entry.title ?? base).trim() };
+}

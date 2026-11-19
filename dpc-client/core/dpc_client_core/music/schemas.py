@@ -1,8 +1,8 @@
 """The shapes of the music library's records, checked in code (no schema library).
 
 The schemas are owned by the music player SPEC (`ai-studio/experiments/music-player/
-SPEC.md` §4): `mp.library_entry/1`, `mp.music_folder/1`, `mp.playlist/1` and
-`mp.track/1`. This module checks the subset of each that the core writes: required
+SPEC.md` §4): `mp.library_entry/1`, `mp.music_folder/1`, `mp.playlist/1`,
+`mp.track/1` and `mp.lyrics/1`. This module checks the subset of each that the core writes: required
 keys, no undeclared keys, types, enums, id patterns, and the conditional rules
 (`allOf`) that apply to entries the core creates.
 
@@ -28,6 +28,7 @@ LIBRARY_ENTRY = "mp.library_entry/1"
 MUSIC_FOLDER = "mp.music_folder/1"
 PLAYLIST = "mp.playlist/1"
 TRACK = "mp.track/1"
+LYRICS = "mp.lyrics/1"
 
 TRACK_ID_RE = re.compile(r"^trk_[0-9a-f]{16}$")
 FOLDER_ID_RE = re.compile(r"^mf_[0-9a-f]{16}$")
@@ -237,9 +238,63 @@ def validate_track(track: Any) -> None:
             _expect(s, _is_str(track[key]), f"'{key}' must be a string")
 
 
+LYRICS_SOURCES = ("lrc", "tags", "lrclib", "transcribe", "manual")
+_LYRICS_REQUIRED = ("schema", "track_hash", "source", "lines")
+_LYRICS_KEYS = set(_LYRICS_REQUIRED) | {"language", "synced", "edited", "job_id", "lrclib", "updated_at"}
+_LYRICS_LINE_KEYS = {"t_start", "t_end", "text"}
+_LRCLIB_KEYS = {"id", "artist_name", "track_name", "album_name", "duration", "synced"}
+
+
+def validate_lyrics(lyrics: Any) -> None:
+    """Raise `SchemaError` unless `lyrics` has the shape of `mp.lyrics/1` (SPEC §4)."""
+    s = LYRICS
+    _check_keys(s, lyrics, _LYRICS_REQUIRED, _LYRICS_KEYS)
+    _expect(s, _is_str(lyrics["track_hash"]), "'track_hash' must be a string")
+    _expect(s, lyrics["source"] in LYRICS_SOURCES, f"'source' must be one of {LYRICS_SOURCES}")
+    if "language" in lyrics:
+        _expect(s, lyrics["language"] is None or _is_str(lyrics["language"]), "'language' must be a string or null")
+    if "synced" in lyrics:
+        _expect(s, isinstance(lyrics["synced"], bool), "'synced' must be a boolean")
+    synced = lyrics.get("synced", True)
+    lines = lyrics["lines"]
+    _expect(s, isinstance(lines, list), "'lines' must be a list")
+    for i, line in enumerate(lines):
+        _expect(s, isinstance(line, Mapping), f"line {i} must be an object")
+        _expect(s, "t_start" in line and "text" in line, f"line {i} needs 't_start' and 'text'")
+        extra = sorted(set(line) - _LYRICS_LINE_KEYS)
+        _expect(s, not extra, f"line {i} has undeclared key(s): {', '.join(extra)}")
+        _expect(s, _is_str(line["text"]), f"line {i}: 'text' must be a string")
+        t = line["t_start"]
+        if t is None:
+            _expect(s, not synced, f"line {i}: 't_start' is null only when 'synced' is false")
+        else:
+            _expect(s, _is_number(t) and t >= 0, f"line {i}: 't_start' must be a number >= 0")
+        if "t_end" in line:
+            _expect(s, _is_number(line["t_end"]) and t is not None and line["t_end"] > t,
+                    f"line {i}: 't_end' must be a number greater than 't_start'")
+    if not synced:
+        _expect(s, all(line["t_start"] is None for line in lines), "unsynced lyrics have every 't_start' null")
+    if "edited" in lyrics:
+        _expect(s, isinstance(lyrics["edited"], bool), "'edited' must be a boolean")
+    if "job_id" in lyrics:
+        _expect(s, _is_str(lyrics["job_id"]), "'job_id' must be a string")
+    if "updated_at" in lyrics:
+        _expect(s, _is_str(lyrics["updated_at"]), "'updated_at' must be a string")
+    if "lrclib" in lyrics:
+        rec = lyrics["lrclib"]
+        _expect(s, isinstance(rec, Mapping) and set(rec) == _LRCLIB_KEYS,
+                f"'lrclib' must have exactly the keys {sorted(_LRCLIB_KEYS)}")
+        _expect(s, _is_int(rec["id"]), "'lrclib.id' must be an integer")
+        _expect(s, _is_str(rec["artist_name"]) and _is_str(rec["track_name"]), "'lrclib' names must be strings")
+        _expect(s, rec["album_name"] is None or _is_str(rec["album_name"]), "'lrclib.album_name' must be a string or null")
+        _expect(s, rec["duration"] is None or _is_number(rec["duration"]), "'lrclib.duration' must be a number or null")
+        _expect(s, isinstance(rec["synced"], bool), "'lrclib.synced' must be a boolean")
+
+
 VALIDATORS: Dict[str, Any] = {
     LIBRARY_ENTRY: validate_library_entry,
     MUSIC_FOLDER: validate_music_folder,
     PLAYLIST: validate_playlist,
     TRACK: validate_track,
+    LYRICS: validate_lyrics,
 }

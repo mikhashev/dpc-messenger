@@ -145,7 +145,7 @@ import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, ag
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionCancelled, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
-import { callMusic, type LibraryEntry, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
+import { callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
 
 // Re-export all service stores for backward compatibility.
 // NOTE: When adding new UI-reactive fields from privacy_rules.json, add the store in
@@ -2041,4 +2041,25 @@ export function updateMusicPlaylist(
 
 export function deleteMusicPlaylist(playlistId: string): Promise<MusicAnswer<{ deleted: string }>> {
     return callMusic(sendCommand, 'delete_music_playlist', { playlist_id: playlistId });
+}
+
+// --- Lyrics (ADR-051 D6; dpc_client_core/music/lyrics.py) ---
+
+/** The track's lyrics: stored ones, or (none stored, or `refresh`) the chain's result:
+ *  .lrc sidecar, embedded tags, then LRCLIB when online lookup is on. */
+export function getMusicLyrics(trackId: string, refresh = false): Promise<MusicAnswer<LyricsAnswer>> {
+    return callMusic(sendCommand, 'get_music_lyrics', { track_id: trackId, refresh });
+}
+
+/** Save the person's LRC as `source: manual` (refused while a line has no stamp). */
+export function saveMusicLyrics(trackId: string, lrcText: string): Promise<MusicAnswer<LyricsAnswer>> {
+    return callMusic(sendCommand, 'save_music_lyrics', { track_id: trackId, lrc_text: lrcText });
+}
+
+/** "Find on LRCLIB": sends artist, title and duration to lrclib.net. Stored when
+ *  nothing is stored or `replace`; otherwise it comes back as `candidate`. */
+export function lookupMusicLyricsLrclib(
+    trackId: string, query: { artist?: string; title?: string; album?: string } = {}, replace = false,
+): Promise<MusicAnswer<LyricsAnswer>> {
+    return callMusic(sendCommand, 'lookup_music_lyrics_lrclib', { track_id: trackId, ...query, replace });
 }
