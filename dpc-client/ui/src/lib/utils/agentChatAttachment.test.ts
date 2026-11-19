@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
-  bubbleAttachmentFor, confirmedAttachments, fileButtonEnabled, fileButtonTitle, pickedFileAttachment,
-  recordingAttachment, takesAgentAttachments, type FileButtonState,
+  bubbleAttachmentFor, composerAfterRefusal, confirmedAttachments, fileButtonEnabled, fileButtonTitle,
+  pickedFileAttachment, recordingAttachment, refusalNoticeFor, takesAgentAttachments,
+  type ComposerState, type FileButtonState,
 } from './agentChatAttachment';
 
 // IN-AN-AGENT-CHAT-THE-MICROPHONE-ONLY-DICTATES-SO-A-HUMMED-MELODY-NEVER-REACHES-THE-AGENT-AS-AUDIO
@@ -114,5 +115,65 @@ describe('the bubble before core confirms', () => {
     expect(confirmedAttachments({ msg_index: 3 })).toBeNull();
     expect(confirmedAttachments({ msg_index: 3, attachments: [] })).toBeNull();
     expect(confirmedAttachments(null)).toBeNull();
+  });
+});
+
+// Zcode's review, 2026-11-20: a refusal from core (too long, too large, the wrong
+// format) used to lose the words and the attachment, cleared at send.
+describe('composerAfterRefusal: a refused send gives back what the person typed and attached', () => {
+  type F = { filePath: string };
+  type R = { filePath?: string; duration: number };
+  const file: F = { filePath: '/home/x/song.mp3' };
+  const recording: R = { filePath: '/home/x/.dpc/temp/voice_rec.wav', duration: 12 };
+  const empty = (over: Partial<ComposerState<F, R>> = {}): ComposerState<F, R> => ({
+    activeChatId: 'agent_001', currentInput: '', drafts: new Map(), pendingFile: null,
+    pendingImage: null, voicePreview: null, ...over,
+  });
+
+  it('the words and the picked file come back to the open chat', () => {
+    const next = composerAfterRefusal(empty(), { chatId: 'agent_001', text: 'listen', bubbleId: 'b1', file });
+    expect(next.currentInput).toBe('listen');
+    expect(next.pendingFile).toBe(file);
+    expect(next.attachmentRestored).toBe(true);
+  });
+
+  it('the recording comes back as the preview', () => {
+    const next = composerAfterRefusal(empty(), { chatId: 'agent_001', text: '', bubbleId: 'b1', recording });
+    expect(next.voicePreview).toBe(recording);
+    expect(next.attachmentRestored).toBe(true);
+    expect(next.currentInput).toBe('');
+  });
+
+  it('words typed since stay, after the returned ones', () => {
+    const next = composerAfterRefusal(empty({ currentInput: 'and also' }),
+      { chatId: 'agent_001', text: 'listen', bubbleId: 'b1', file });
+    expect(next.currentInput).toBe('listen\nand also');
+  });
+
+  it('a file or image attached since keeps its place; the refused file does not push it out', () => {
+    const other: F = { filePath: '/home/x/other.pdf' };
+    const withFile = composerAfterRefusal(empty({ pendingFile: other }), { chatId: 'agent_001', text: 'x', bubbleId: 'b1', file });
+    expect(withFile.pendingFile).toBe(other);
+    expect(withFile.attachmentRestored).toBe(false);
+    const withImage = composerAfterRefusal(empty({ pendingImage: { dataUrl: 'data:' } }), { chatId: 'agent_001', text: 'x', bubbleId: 'b1', file });
+    expect(withImage.pendingFile).toBeNull();
+    expect(withImage.attachmentRestored).toBe(false);
+  });
+
+  it('a chat left meanwhile gets the words in its draft, and the open chat is untouched', () => {
+    const c = empty({ activeChatId: 'agent_002', currentInput: 'other chat', drafts: new Map([['agent_001', 'later']]) });
+    const next = composerAfterRefusal(c, { chatId: 'agent_001', text: 'listen', bubbleId: 'b1', recording });
+    expect(next.drafts.get('agent_001')).toBe('listen\nlater');
+    expect(next.currentInput).toBe('other chat');
+    expect(next.voicePreview).toBeNull();
+    expect(next.attachmentRestored).toBe(false);
+    expect(c.drafts.get('agent_001')).toBe('later'); // the state given is not mutated
+  });
+
+  it('the notice says why and where the message went', () => {
+    expect(refusalNoticeFor('Recording too long (400 s > 300 s limit)', true, true))
+      .toBe('Not sent: Recording too long (400 s > 300 s limit). Your words and the attachment are back in the composer.');
+    expect(refusalNoticeFor('File too large', false, true)).toContain('attach the file again');
+    expect(refusalNoticeFor('', false, false)).toBe('Not sent: core refused it. Your words are back in the draft.');
   });
 });

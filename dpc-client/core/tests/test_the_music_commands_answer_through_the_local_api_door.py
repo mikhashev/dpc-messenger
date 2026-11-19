@@ -105,6 +105,12 @@ def test_the_commands_are_wired_into_the_core_service_and_the_allowlist():
     from dpc_client_core.local_api import ALLOWED_COMMANDS
     from dpc_client_core.service import CoreService
 
-    if not issubclass(CoreService, MusicCommandsMixin):
-        pytest.skip("not wired yet: CoreService does not mix in MusicCommandsMixin (the coordinator adds it)")
+    assert issubclass(CoreService, MusicCommandsMixin)
     assert set(MUSIC_COMMANDS) <= ALLOWED_COMMANDS
+
+
+def test_the_commands_that_wait_on_ffprobe_or_the_disk_walk_do_not_hold_the_socket():
+    # local_api awaits an unmarked handler inline, so one probe would hold back
+    # every request behind it on the same socket.
+    for name in ("get_music_track", "rescan_music_folder", "get_music_lyrics"):
+        assert getattr(getattr(MusicCommandsMixin, name), "dpc_slow", False), name

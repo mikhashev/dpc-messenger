@@ -38,6 +38,7 @@
     sendGroupVoiceMessage,
     sendGroupFile,
     userMessageConfirmed,
+    coreMessages,
   } from '$lib/coreService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
   import { showNotificationIfBackground } from '$lib/notificationService';
@@ -52,8 +53,9 @@
   import { getLocalFileSize } from '$lib/fileSendTimeout';
   import { composerHasContent, pendingFileFrom, replacedAttachmentNotice, type PendingFile } from '$lib/utils/pendingAttachment';
   import {
-    bubbleAttachmentFor, confirmedAttachments, fileButtonEnabled, fileButtonTitle, pickedFileAttachment,
-    recordingAttachment, takesAgentAttachments, type AgentChatAttachment,
+    bubbleAttachmentFor, composerAfterRefusal, confirmedAttachments, fileButtonEnabled, fileButtonTitle,
+    pickedFileAttachment, recordingAttachment, refusalNoticeFor, takesAgentAttachments,
+    type AgentChatAttachment, type HeldAgentSend,
   } from '$lib/utils/agentChatAttachment';
 
   type AIChatMeta = {
@@ -178,7 +180,8 @@
   // State (owned by ChatPanel)
   // ---------------------------------------------------------------------------
   let chatDraftInputs = $state(new Map<string, string>());
-  let voicePreview = $state<{ blob: Blob; duration: number; filePath?: string } | null>(null);
+  type VoicePreview = { blob: Blob; duration: number; filePath?: string };
+  let voicePreview = $state<VoicePreview | null>(null);
   let pendingImage = $state<{ dataUrl: string; filename: string; sizeBytes: number } | null>(null);
   let describeForAgents = $state(false); // "Describe for agents (VL)" toggle, group image sends only
 
@@ -199,6 +202,9 @@
   // 2026-11-19). One attachment per message: a file and a pasted image replace
   // each other, and the toast says which went.
   let pendingFile = $state<PendingFile | null>(null);
+  // Sends into an agent chat with an attachment that core has not yet confirmed,
+  // by command id: a refusal puts the words and the attachment back (HeldAgentSend).
+  const heldAgentSends = new Map<string, HeldAgentSend<PendingFile, VoicePreview>>();
   let isSendingFile = $state(false);
 
   // Context toggle
@@ -575,6 +581,8 @@
   $effect(() => {
     const confirmed = $userMessageConfirmed;
     if (!confirmed) return;
+    // Core kept the attachment and wrote the record: nothing to put back any more.
+    if (confirmed.command_id) heldAgentSends.delete(confirmed.command_id);
     const { conversation_id, msg_index } = confirmed;
     if (!conversation_id || !msg_index) return;
     chatHistories.update(h => {
@@ -744,7 +752,8 @@
     }
   }
 
-  async function _sendAIQuery(text: string, bubbleId: string, attachment?: AgentChatAttachment) {
+  /** Sends the query; the command id, or null when it could not be sent. */
+  async function _sendAIQuery(text: string, bubbleId: string, attachment?: AgentChatAttachment): Promise<string | null> {
     setChatLoading(activeChatId, true);
     const commandId = crypto.randomUUID();
     commandToChatMap.set(commandId, activeChatId);
@@ -805,13 +814,18 @@
       });
       commandToChatMap.delete(commandId);
       persistCommandToChatMap?.();
+      return null;
     }
+    return commandId;
   }
 
   // A file or a recording for the agent, with the words typed, as one message:
   // the bubble at once, then the same query a typed message makes, with the
   // attachment core keeps in the chat's files/ before the agent's turn.
-  async function _sendAgentAttachment(text: string, attachment: AgentChatAttachment, sizeBytes: number) {
+  async function _sendAgentAttachment(
+    text: string, attachment: AgentChatAttachment, sizeBytes: number,
+    held: { file?: PendingFile; recording?: VoicePreview },
+  ) {
     const chatId = activeChatId;
     currentInput = '';
     chatDraftInputs = new Map(chatDraftInputs).set(chatId, '');
@@ -826,9 +840,53 @@
       }]);
       return m;
     });
-    await _sendAIQuery(text, bubbleId, attachment);
+    const commandId = await _sendAIQuery(text, bubbleId, attachment);
+    const send = { chatId, text, bubbleId, ...held };
+    if (commandId) heldAgentSends.set(commandId, send);
+    else restoreRefusedAgentSend(send, 'not connected');
     autoScroll();
   }
+
+  // Core refused a send with an attachment (or it never left): the words and the
+  // attachment go back to the composer, and the bubble that showed them as
+  // sending goes, since nothing was recorded. The error reply stays as the record
+  // of why (MessageRouterPanel writes it).
+  function restoreRefusedAgentSend(held: HeldAgentSend<PendingFile, VoicePreview>, reason: string) {
+    const next = composerAfterRefusal({
+      activeChatId, currentInput, drafts: chatDraftInputs, pendingFile, pendingImage, voicePreview,
+    }, held);
+    currentInput = next.currentInput;
+    chatDraftInputs = next.drafts;
+    pendingFile = next.pendingFile;
+    voicePreview = next.voicePreview;
+    unconfirmedUserBubbles.delete(held.bubbleId);
+    chatHistories.update(h => {
+      const hist = h.get(held.chatId);
+      if (!hist || !hist.some((msg: any) => msg.id === held.bubbleId)) return h;
+      const m = new Map(h);
+      m.set(held.chatId, hist.filter((msg: any) => msg.id !== held.bubbleId));
+      return m;
+    });
+    // A recording that could not go back has nowhere to be sent from: drop its temp file.
+    if (!next.attachmentRestored && held.recording?.filePath) {
+      const lost = held.recording.filePath;
+      import('@tauri-apps/plugin-fs').then(({ remove }) => remove(lost)).catch(() => {});
+    }
+    fileOfferToastMessage = refusalNoticeFor(reason, next.attachmentRestored, !!(held.file || held.recording));
+    showFileOfferToast = true;
+    setTimeout(() => (showFileOfferToast = false), 7000);
+  }
+
+  // An answer to a held send: an ERROR before the confirmation is a refusal.
+  $effect(() => {
+    const message = $coreMessages;
+    if (message?.command !== 'execute_ai_query' || !message.id) return;
+    const held = heldAgentSends.get(message.id);
+    if (!held) return;
+    heldAgentSends.delete(message.id);
+    if (message.status === 'OK') return;
+    untrack(() => restoreRefusedAgentSend(held, message.payload?.message || ''));
+  });
 
   async function _sendTelegramMessage(text: string) {
     try {
@@ -880,8 +938,9 @@
     const text = currentInput.trim();
     if (agentTakesAttachments) {
       // Core copies it into the chat's files/ and the agent reads where it is kept.
+      // A refusal puts the chip and the words back (restoreRefusedAgentSend).
       pendingFile = null;
-      await _sendAgentAttachment(text, pickedFileAttachment(file.filePath), file.sizeBytes);
+      await _sendAgentAttachment(text, pickedFileAttachment(file.filePath), file.sizeBytes, { file });
       return;
     }
     isSendingFile = true;
@@ -1054,13 +1113,14 @@
       } else if (agentTakesAttachments) {
         // Send as audio: the recording goes to the agent as a file, with the words
         // typed. Core moves the recorder's temp file into the chat's files/, so it
-        // is not deleted here (and a refusal leaves it where it was).
+        // is not deleted here; a refusal leaves it where it was and puts the
+        // preview back (restoreRefusedAgentSend).
         const preview = voicePreview;
         const attachment = preview.filePath
           ? recordingAttachment(blob.type || 'audio/wav', duration, { filePath: preview.filePath })
           : recordingAttachment(blob.type || 'audio/webm', duration, { audioBase64: await _blobToBase64(blob) });
         if (voicePreview === preview) voicePreview = null;
-        await _sendAgentAttachment(currentInput.trim(), attachment, blob.size);
+        await _sendAgentAttachment(currentInput.trim(), attachment, blob.size, { recording: preview });
         return;
       } else if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_')) {
         await handleTranscribeVoiceMessage();

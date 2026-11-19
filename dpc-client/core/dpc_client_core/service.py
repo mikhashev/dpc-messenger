@@ -423,11 +423,93 @@ def keep_copy_under_a_free_name(source: Path, directory: Path, name: str) -> Pat
 # person chose to send as audio instead of dictating it.
 AGENT_CHAT_ATTACHMENT_KINDS = ("file", "voice")
 _RECORDING_EXTENSIONS = {"mpeg": "mp3", "x-wav": "wav", "wave": "wav"}
+# The cap on a picked file when the rules name none: the default of
+# `file_transfer.max_size_mb`, the cap the P2P voice send applies (send_voice_message).
+AGENT_CHAT_FILE_DEFAULT_MAX_MB = 100
+# How many bytes of a recording are read to tell its container (`sniff_audio_container`).
+_SNIFF_BYTES = 16
+
+# The containers a declared recording MIME type may arrive in. A type not listed
+# here (one an owner added to voice_messages.mime_types) is not sniffed.
+_CONTAINERS_BY_AUDIO_MIME = {
+    "audio/wav": {"wav"}, "audio/x-wav": {"wav"}, "audio/wave": {"wav"}, "audio/vnd.wave": {"wav"},
+    "audio/ogg": {"ogg"}, "audio/opus": {"ogg", "webm"}, "audio/webm": {"webm"},
+    "audio/flac": {"flac"}, "audio/x-flac": {"flac"},
+    "audio/mpeg": {"mp3"}, "audio/mp3": {"mp3"},
+    "audio/mp4": {"mp4"}, "audio/m4a": {"mp4"}, "audio/x-m4a": {"mp4"}, "audio/aac": {"mp4", "aac"},
+}
+
+
+def sniff_audio_container(head: bytes) -> Optional[str]:
+    """The container the first bytes of an audio file name, or None when they name
+    none: `wav` (RIFF/WAVE), `ogg` (OggS), `flac` (fLaC), `mp3` (an ID3 tag or an
+    MPEG audio frame sync), `aac` (an ADTS frame), `mp4` (ftyp) or `webm` (EBML)."""
+    if len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "wav"
+    if head[:4] == b"OggS":
+        return "ogg"
+    if head[:4] == b"fLaC":
+        return "flac"
+    if head[:3] == b"ID3":
+        return "mp3"
+    if len(head) >= 8 and head[4:8] == b"ftyp":
+        return "mp4"
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return "webm"
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        # Frame sync. Layer bits 00 are ADTS (AAC); 01-11 are MPEG audio layers III-I.
+        return "aac" if (head[1] & 0x06) == 0 else "mp3"
+    return None
+
+
+def refuse_audio_container_mismatch(mime_type: str, head: bytes) -> None:
+    """Refuse a recording whose bytes are not the container its declared MIME type
+    names; the extension the kept file gets is derived from that type."""
+    expected = _CONTAINERS_BY_AUDIO_MIME.get(mime_type)
+    if expected is None:
+        return
+    found = sniff_audio_container(head)
+    if found not in expected:
+        raise ValueError(
+            f"The recording is not {mime_type}: its bytes are "
+            f"{found + ' audio' if found else 'no audio format recognised'}")
+
+
+def measure_recording_seconds(path: Path) -> Optional[float]:
+    """The length of an audio file as ffprobe reads it (`probe_metadata`, through
+    `run_probe`), or None without ffprobe or when it reads no length. Blocking."""
+    from .music.identity import MediaTools, probe_metadata
+
+    tools = MediaTools.discover()
+    if not tools.ffprobe:
+        return None
+    return probe_metadata(path, tools).get("duration_s")
+
+
+def _declared_seconds(value: Any) -> Optional[float]:
+    """The recorder's `duration_seconds` when it is a number of 0 or more, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value < 0:
+        return None
+    return float(value)
+
+
+def _recording_seconds(declared: Any, measure, path: Path, max_voice_seconds: float) -> float:
+    """The recording's length, measured from the file when it can be, else the
+    declared one; refused over `max_voice_seconds` or when neither exists."""
+    measured = measure(path) if measure else None
+    seconds = measured if measured is not None else _declared_seconds(declared)
+    if seconds is None:
+        raise ValueError("The recording's length is unknown: it could not be measured and none was given")
+    if seconds > max_voice_seconds:
+        raise ValueError(f"Recording too long ({seconds:g} s > {max_voice_seconds:g} s limit)")
+    return seconds
 
 
 def keep_agent_chat_attachment(
     files_dir: Path, attachment: Dict[str, Any], *,
     voice_mime_types: List[str], max_voice_seconds: float, temp_dir: Path,
+    max_file_mb: float = AGENT_CHAT_FILE_DEFAULT_MAX_MB,
+    measure_seconds=measure_recording_seconds,
 ) -> Dict[str, Any]:
     """Keep what the person attached in an agent chat in that chat's `files/`.
 
@@ -438,17 +520,23 @@ def keep_agent_chat_attachment(
     (`file_attachment_markers`). Blocking; run it in a thread.
 
     `kind` "file": the picked file is copied under a free name, its MIME type
-    guessed from the name as `send_group_file` does. `kind` "voice": a
+    guessed from the name as `send_group_file` does, when it is within
+    `max_file_mb` (the rules' `file_transfer.max_size_mb`). `kind` "voice": a
     recording, given as the recorder's `file_path` or as `audio_base64` with its
-    `mime_type`; the format must be one `voice_messages.mime_types` lists and the
-    length within `voice_messages.max_duration_seconds`. A recording the desktop
+    `mime_type`; the format must be one `voice_messages.mime_types` lists, the
+    bytes must be the container that type names (`sniff_audio_container`), and
+    the length within `voice_messages.max_duration_seconds`. The length is
+    measured from the file with ffprobe (`measure_seconds`) and the recorder's
+    `duration_seconds` stands in only when it cannot be; with neither the
+    recording is refused. Every check on a recorder's file runs before it is
+    moved, so a refusal leaves it where it was. A recording the desktop
     recorder left in `temp_dir` is moved, not copied, so no copy is left behind;
     it also means the UI never deletes it before core has it. The record carries
     the length as `voice_metadata`, which the player and the marker both read.
     `voice_messages.max_size_mb` is not applied: it caps a voice message that
-    crosses the network, and this one stays on this node with its own agent, as
-    a file kept in a group of one has no cap either. Anything that fails part
-    way removes the file it reserved.
+    crosses the network, and this one stays on this node with its own agent; the
+    length cap bounds it. Anything that fails part way removes the file it
+    reserved (`release_agent_chat_attachment` undoes a keep that succeeded).
     """
     import base64
     import mimetypes
@@ -460,7 +548,6 @@ def keep_agent_chat_attachment(
     kind = attachment.get("kind")
     if kind not in AGENT_CHAT_ATTACHMENT_KINDS:
         raise ValueError(f"Unknown attachment kind: {kind!r}")
-    files_dir.mkdir(parents=True, exist_ok=True)
     extra: Dict[str, Any] = {}
 
     if kind == "file":
@@ -468,6 +555,11 @@ def keep_agent_chat_attachment(
         source = Path(picked)
         if not picked or not source.is_file():
             raise ValueError(f"File not found: {picked}")
+        size_mb = source.stat().st_size / (1024 * 1024)
+        if size_mb > max_file_mb:
+            raise ValueError(
+                f"File too large ({size_mb:.2f} MB > {max_file_mb:g} MB limit, file_transfer.max_size_mb)")
+        files_dir.mkdir(parents=True, exist_ok=True)
         kept = keep_copy_under_a_free_name(source, files_dir, source.name)
         mime_type = mimetypes.guess_type(str(kept))[0] or "application/octet-stream"
     else:
@@ -475,24 +567,33 @@ def keep_agent_chat_attachment(
         if mime_type not in voice_mime_types:
             raise ValueError(
                 f"Unsupported audio format: {mime_type or 'none'}. Supported: {', '.join(voice_mime_types)}")
-        duration = attachment.get("duration_seconds")
-        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration < 0:
-            duration = None
-        if duration is not None and duration > max_voice_seconds:
-            raise ValueError(f"Recording too long ({duration:g} s > {max_voice_seconds:g} s limit)")
+        declared = attachment.get("duration_seconds")
         source_path = str(attachment.get("file_path") or "")
         audio_base64 = attachment.get("audio_base64")
         if not source_path and not audio_base64:
             raise ValueError("A recording needs its file_path or its audio_base64")
+        data = None
+        if source_path:
+            source = Path(source_path)
+            if not source.is_file():
+                raise ValueError(f"Recording not found: {source_path}")
+            with open(source, "rb") as f:
+                refuse_audio_container_mismatch(mime_type, f.read(_SNIFF_BYTES))
+            # Measured where the recorder left it: a refusal must not have moved it.
+            duration = _recording_seconds(declared, measure_seconds, source, max_voice_seconds)
+        else:
+            try:
+                data = base64.b64decode(str(audio_base64), validate=True)
+            except Exception as e:  # noqa: BLE001 — binascii.Error and friends
+                raise ValueError(f"Failed to decode the recording: {e}") from e
+            refuse_audio_container_mismatch(mime_type, data[:_SNIFF_BYTES])
         subtype = mime_type.split("/")[-1]
         extension = _RECORDING_EXTENSIONS.get(subtype, subtype)
         name = f"voice_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.{extension}"
+        files_dir.mkdir(parents=True, exist_ok=True)
         kept = claim_free_name(files_dir, name)
         try:
-            if source_path:
-                source = Path(source_path)
-                if not source.is_file():
-                    raise ValueError(f"Recording not found: {source_path}")
+            if data is None:
                 try:
                     in_temp = source.resolve().is_relative_to(temp_dir.resolve())
                 except OSError:
@@ -506,16 +607,14 @@ def keep_agent_chat_attachment(
                 else:
                     shutil.copyfile(source, kept)
             else:
-                try:
-                    data = base64.b64decode(str(audio_base64), validate=True)
-                except Exception as e:  # noqa: BLE001 — binascii.Error and friends
-                    raise ValueError(f"Failed to decode the recording: {e}") from e
                 kept.write_bytes(data)
+                # The bytes are still in the UI, so measuring the kept copy loses nothing.
+                duration = _recording_seconds(declared, measure_seconds, kept, max_voice_seconds)
         except BaseException:
             kept.unlink(missing_ok=True)
             raise
         extra["voice_metadata"] = {
-            **({"duration_seconds": duration} if duration is not None else {}),
+            "duration_seconds": duration,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -530,6 +629,38 @@ def keep_agent_chat_attachment(
         "file_path": str(kept),
         **extra,
     }
+
+
+def release_agent_chat_attachment(kept: Dict[str, Any], attachment: Dict[str, Any], temp_dir: Path) -> None:
+    """Undo `keep_agent_chat_attachment` when its record could not be written: a
+    recording moved out of the recorder's `temp_dir` goes back there, so the
+    person can send it again; a copy is removed. Never raises."""
+    import os
+    import shutil
+
+    try:
+        if not kept.get("file_path"):
+            return
+        kept_path = Path(str(kept["file_path"]))
+        if not kept_path.is_file():
+            return
+        source_path = str(attachment.get("file_path") or "") if attachment.get("kind") == "voice" else ""
+        if source_path:
+            source = Path(source_path)
+            try:
+                was_moved = source.parent.resolve().is_relative_to(temp_dir.resolve()) and not source.exists()
+            except OSError:
+                was_moved = False
+            if was_moved:
+                try:
+                    os.replace(kept_path, source)
+                except OSError:  # another volume: copy back, then remove the kept one
+                    shutil.copyfile(kept_path, source)
+                    kept_path.unlink(missing_ok=True)
+                return
+        kept_path.unlink(missing_ok=True)
+    except Exception as e:  # noqa: BLE001 — a cleanup must not hide the failure it follows
+        logger.warning("Could not undo the agent chat attachment %s: %s", kept.get("file_path"), e)
 
 
 def agent_chat_attachment_text(attachment: Dict[str, Any]) -> str:
@@ -9908,7 +10039,9 @@ class CoreService(MusicCommandsMixin):
     async def _keep_agent_chat_attachment(self, agent_manager, conversation_id: str,
                                           attachment: Dict[str, Any]) -> Dict[str, Any]:
         """Keep a 1:1 agent chat's attachment in its `files/`, under the limits
-        `voice_messages` sets for a recording (`keep_agent_chat_attachment`).
+        `voice_messages` sets for a recording and the rules'
+        `file_transfer.max_size_mb` for a picked file, the cap the P2P voice send
+        applies (`keep_agent_chat_attachment`).
 
         A group keeps its own record (ADR-031 §3; `send_group_file`), so it is
         refused here rather than written into the agent's monitor.
@@ -9921,10 +10054,15 @@ class CoreService(MusicCommandsMixin):
             "voice_messages", "mime_types",
             "audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav").split(",") if m.strip()]
         max_voice_seconds = float(self.settings.get("voice_messages", "max_duration_seconds", "300"))
+        max_file_mb = self.firewall.rules.get("file_transfer", {}).get(
+            "max_size_mb", AGENT_CHAT_FILE_DEFAULT_MAX_MB)
+        if isinstance(max_file_mb, bool) or not isinstance(max_file_mb, (int, float)) or max_file_mb <= 0:
+            max_file_mb = AGENT_CHAT_FILE_DEFAULT_MAX_MB  # the editor refuses such a value; never "no cap"
         return await asyncio.to_thread(
             keep_agent_chat_attachment, files_dir, attachment,
             voice_mime_types=voice_mime_types, max_voice_seconds=max_voice_seconds,
-            temp_dir=DPC_HOME_DIR / "temp",
+            temp_dir=DPC_HOME_DIR / "temp", max_file_mb=max_file_mb,
+            measure_seconds=measure_recording_seconds,
         )
 
     async def _execute_agent_query(self, command_id: str, prompt: str, conversation_id: str,
@@ -9952,8 +10090,12 @@ class CoreService(MusicCommandsMixin):
                 chat's `files/` and goes on the person's record before the run, so
                 the agent reads its marker (name, MIME type, size, where it is
                 kept) in this very turn. With no words the record says
-                "Sent file: <name> (<MB> MB)", as a group file does.
+                "Sent file: <name> (<MB> MB)", as a group file does. Should the
+                record not be written, the kept file is undone
+                (`release_agent_chat_attachment`): no file without its record.
         """
+        attachments = None
+        recorded = False
         try:
             # Get the dpc_agent provider
             dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
@@ -9966,7 +10108,6 @@ class CoreService(MusicCommandsMixin):
 
             # A file or recording rides with the words: kept first, so a refusal
             # (missing file, unsupported format) answers before anything is recorded.
-            attachments = None
             if attachment:
                 attachments = [await self._keep_agent_chat_attachment(
                     agent_manager, conversation_id, attachment)]
@@ -10001,6 +10142,7 @@ class CoreService(MusicCommandsMixin):
                     sender_node_id=node_id,
                     sender_name=self.p2p_manager.get_display_name() or "User",
                 )
+                recorded = True
                 monitor.save_history()
                 user_msg_index = monitor.get_last_msg_index()
                 # The same confirmation as a question to the agent, so the bubble
@@ -10051,6 +10193,7 @@ class CoreService(MusicCommandsMixin):
                 sender_node_id=_user_node_id,
                 sender_name=self.p2p_manager.get_display_name() or "User",
             )
+            recorded = True
             monitor.save_history()
             _early_user_msg_index = monitor.get_last_msg_index()
 
@@ -10192,6 +10335,11 @@ class CoreService(MusicCommandsMixin):
 
         except Exception as e:
             logger.error("Agent query failed for %s: %s", conversation_id, e, exc_info=True)
+            if attachments and not recorded:
+                # Kept, then the record failed: a recording goes back to the
+                # recorder's temp folder, a copy is removed.
+                await asyncio.to_thread(
+                    release_agent_chat_attachment, attachments[0], attachment, DPC_HOME_DIR / "temp")
             await self.local_api.send_response_to_all(
                 command_id=command_id,
                 command="execute_ai_query",

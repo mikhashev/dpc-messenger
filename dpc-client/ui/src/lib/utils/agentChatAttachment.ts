@@ -110,3 +110,69 @@ export function confirmedAttachments(confirmed: unknown): MessageAttachment[] | 
   const list = (confirmed as { attachments?: unknown } | null | undefined)?.attachments;
   return Array.isArray(list) && list.length > 0 ? (list as MessageAttachment[]) : null;
 }
+
+/**
+ * A message with an attachment sent into an agent chat, held until core answers:
+ * core may refuse it (too long, too large, the wrong format, a missing file), and
+ * a refusal must not lose what the person typed and attached. Cleared on
+ * `user_message_confirmed` for its command, restored on an ERROR before that.
+ */
+export type HeldAgentSend<F, R> = {
+  chatId: string;
+  text: string;
+  /** The optimistic bubble drawn at send, removed on a refusal. */
+  bubbleId: string;
+  file?: F | null;
+  recording?: R | null;
+};
+
+export type ComposerState<F, R> = {
+  activeChatId: string;
+  currentInput: string;
+  drafts: Map<string, string>;
+  pendingFile: F | null;
+  pendingImage: unknown | null;
+  voicePreview: R | null;
+};
+
+function joinDraft(held: string, now: string): string {
+  if (!held) return now;
+  if (!now.trim()) return held;
+  return `${held}\n${now}`;
+}
+
+/**
+ * The composer after core refused a held send. The words go back first in the
+ * chat they were typed in (before anything typed since); the file or recording
+ * goes back when that chat is open and its attachment place is free. A chat
+ * left meanwhile has dropped its attachment place, so there only the words return.
+ */
+export function composerAfterRefusal<F, R>(
+  c: ComposerState<F, R>, held: HeldAgentSend<F, R>,
+): ComposerState<F, R> & { attachmentRestored: boolean } {
+  const drafts = new Map(c.drafts);
+  if (held.chatId !== c.activeChatId) {
+    drafts.set(held.chatId, joinDraft(held.text, drafts.get(held.chatId) ?? ''));
+    return { ...c, drafts, attachmentRestored: false };
+  }
+  const currentInput = joinDraft(held.text, c.currentInput);
+  drafts.set(held.chatId, currentInput);
+  let { pendingFile, voicePreview } = c;
+  let attachmentRestored = false;
+  if (held.file && pendingFile === null && c.pendingImage === null) {
+    pendingFile = held.file;
+    attachmentRestored = true;
+  } else if (held.recording && voicePreview === null) {
+    voicePreview = held.recording;
+    attachmentRestored = true;
+  }
+  return { ...c, currentInput, drafts, pendingFile, voicePreview, attachmentRestored };
+}
+
+/** The toast after a refusal: why, and where the message went. */
+export function refusalNoticeFor(reason: string, attachmentRestored: boolean, hadAttachment: boolean): string {
+  const why = reason || 'core refused it';
+  if (attachmentRestored) return `Not sent: ${why}. Your words and the attachment are back in the composer.`;
+  if (hadAttachment) return `Not sent: ${why}. Your words are back in the draft; attach the file again.`;
+  return `Not sent: ${why}. Your words are back in the draft.`;
+}

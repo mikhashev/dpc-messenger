@@ -19,6 +19,8 @@ from __future__ import annotations
 import base64
 import json
 import pathlib
+import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -37,6 +39,8 @@ from dpc_client_core.firewall import ContextFirewall
 from dpc_client_core.managers import agent_manager as am
 from dpc_client_core.service import CoreService
 
+# The real measure, kept before any test replaces it in the module.
+MEASURE = service_mod.measure_recording_seconds
 CID = "agent_hum_7244b181"
 GROUP = "group-000000000001"
 WAV = b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 64
@@ -53,10 +57,13 @@ class _Agent:
         return "a melody in D minor"
 
 
-def _world(tmp_path, monkeypatch):
+def _world(tmp_path, monkeypatch, measured=None):
+    """`measured`: what ffprobe reads as the recording's length (None: it reads
+    none, as without ffprobe); the tests that run the real ffprobe say so."""
     home = tmp_path / "home"
     monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(service_mod, "DPC_HOME_DIR", home / ".dpc")
+    monkeypatch.setattr(service_mod, "measure_recording_seconds", lambda path: measured)
     conv_dir = home / ".dpc" / "conversations" / CID
     conv_dir.mkdir(parents=True)
     monitor = ConversationMonitor(
@@ -107,9 +114,11 @@ def _world(tmp_path, monkeypatch):
 
     provider = SimpleNamespace(_ensure_manager=AsyncMock(return_value=manager),
                                get_manager=lambda conv: manager)
+    settings = {}
     service = SimpleNamespace(
         llm_manager=SimpleNamespace(providers={"dpc_agent": provider}),
-        settings=SimpleNamespace(get=lambda section, key, default=None: default),
+        settings=SimpleNamespace(get=lambda section, key, default=None: settings.get((section, key), default)),
+        firewall=SimpleNamespace(rules={}),
         local_api=SimpleNamespace(broadcast_event=broadcast, send_response_to_all=respond),
         p2p_manager=SimpleNamespace(node_id="dpc-node-me", get_display_name=lambda: "Mike"),
         reset_cc_agent_chain=lambda conv: None,
@@ -120,7 +129,7 @@ def _world(tmp_path, monkeypatch):
     service._keep_agent_chat_attachment = MethodType(CoreService._keep_agent_chat_attachment, service)
     service._execute_agent_query = MethodType(CoreService._execute_agent_query, service)
     return SimpleNamespace(home=home, conv_dir=conv_dir, monitor=monitor, agent=agent,
-                           events=events, responses=responses, service=service)
+                           events=events, responses=responses, service=service, settings=settings)
 
 
 def _recording(w, name="voice_rec.wav", data=WAV):
@@ -435,3 +444,302 @@ def test_an_unknown_kind_is_refused(tmp_path):
         service_mod.keep_agent_chat_attachment(
             tmp_path / "files", {"kind": "image", "file_path": "x"},
             voice_mime_types=["audio/wav"], max_voice_seconds=300, temp_dir=tmp_path / "temp")
+
+
+# --- the limits are core's, not the recorder's word (Zcode's review, 2026-11-20) ---
+
+FFMPEG = shutil.which("ffmpeg")
+FFPROBE = shutil.which("ffprobe")
+needs_ffmpeg = pytest.mark.skipif(
+    FFMPEG is None or FFPROBE is None,
+    reason="ffmpeg and ffprobe are not both on PATH, so no WAV can be generated and measured")
+
+
+def _sine_wav(path, seconds):
+    subprocess.run([FFMPEG, "-nostdin", "-v", "error", "-y", "-f", "lavfi",
+                    "-i", f"sine=frequency=440:duration={seconds}", str(path)],
+                   check=True, timeout=60, stdin=subprocess.DEVNULL, capture_output=True)
+    return path
+
+
+def _refused(w, words):
+    assert [r["status"] for r in w.responses] == ["ERROR"]
+    assert words in w.responses[0]["payload"]["message"]
+    assert _history(w) == [] and w.agent.calls == []
+    files = w.conv_dir / "files"
+    assert not files.exists() or list(files.glob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_a_recording_with_no_length_that_cannot_be_measured_is_refused(
+    tmp_path, signing_identity, monkeypatch,
+):
+    w = _world(tmp_path, monkeypatch, measured=None)
+    rec = _recording(w)
+
+    await _send(w, attachment={"kind": "voice", "file_path": str(rec), "mime_type": "audio/wav"})
+
+    _refused(w, "length is unknown")
+    assert rec.exists(), "a refusal leaves the recording where the recorder put it"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declared", ["12", None, True, float("nan"), -1])
+async def test_a_length_that_is_not_a_number_counts_as_none(
+    tmp_path, signing_identity, monkeypatch, declared,
+):
+    w = _world(tmp_path, monkeypatch, measured=None)
+
+    await _send(w, attachment={**_voice(_recording(w)), "duration_seconds": declared})
+
+    _refused(w, "length is unknown")
+
+
+@pytest.mark.asyncio
+async def test_the_measured_length_wins_over_a_shorter_declared_one(tmp_path, signing_identity, monkeypatch):
+    w = _world(tmp_path, monkeypatch, measured=400.0)
+    rec = _recording(w)
+
+    await _send(w, attachment=_voice(rec, duration=20))
+
+    _refused(w, "too long (400 s > 300 s limit)")
+    assert rec.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_measured_length_stands_in_for_a_missing_one_and_is_what_the_record_carries(
+    tmp_path, signing_identity, monkeypatch,
+):
+    w = _world(tmp_path, monkeypatch, measured=12.5)
+
+    await _send(w, attachment={"kind": "voice", "file_path": str(_recording(w)), "mime_type": "audio/wav"})
+
+    (att,) = _users(w)[0]["attachments"]
+    assert att["voice_metadata"]["duration_seconds"] == 12.5
+
+
+@pytest.mark.asyncio
+async def test_a_browser_recording_is_measured_after_it_is_written_and_removed_on_a_refusal(
+    tmp_path, signing_identity, monkeypatch,
+):
+    w = _world(tmp_path, monkeypatch, measured=900.0)
+    webm = b"\x1aE\xdf\xa3 webm bytes"
+
+    await _send(w, attachment={"kind": "voice", "audio_base64": base64.b64encode(webm).decode(),
+                               "mime_type": "audio/webm", "duration_seconds": 3})
+
+    _refused(w, "too long")
+
+
+@needs_ffmpeg
+@pytest.mark.asyncio
+async def test_with_ffprobe_a_real_wav_longer_than_the_limit_is_refused_whatever_it_declares(
+    tmp_path, signing_identity, monkeypatch,
+):
+    w = _world(tmp_path, monkeypatch)
+    monkeypatch.setattr(service_mod, "measure_recording_seconds", MEASURE)  # the real ffprobe
+    w.settings[("voice_messages", "max_duration_seconds")] = "2"
+    temp = w.home / ".dpc" / "temp"
+    temp.mkdir(parents=True)
+    rec = _sine_wav(temp / "voice_rec.wav", 3)
+
+    await _send(w, attachment=_voice(rec, duration=0.5))
+
+    _refused(w, "too long (3 s > 2 s limit)")
+    assert rec.exists()
+
+
+@needs_ffmpeg
+@pytest.mark.asyncio
+async def test_with_ffprobe_a_real_wav_within_the_limit_carries_its_measured_length(
+    tmp_path, signing_identity, monkeypatch,
+):
+    w = _world(tmp_path, monkeypatch)
+    monkeypatch.setattr(service_mod, "measure_recording_seconds", MEASURE)
+    temp = w.home / ".dpc" / "temp"
+    temp.mkdir(parents=True)
+    rec = _sine_wav(temp / "voice_rec.wav", 1)
+
+    # The recorder overstated it: the measured length is what counts.
+    await _send(w, attachment=_voice(rec, duration=999))
+
+    (att,) = _users(w)[0]["attachments"]
+    assert att["voice_metadata"]["duration_seconds"] == pytest.approx(1.0, abs=0.05)
+    assert not rec.exists()
+
+
+def test_without_ffprobe_nothing_is_measured(monkeypatch, tmp_path):
+    from dpc_client_core.music import identity
+
+    monkeypatch.setattr(identity.shutil, "which", lambda name: None)
+    assert MEASURE(tmp_path / "anything.wav") is None
+
+
+# --- a file picked with the paperclip has the file-transfer cap --------------------
+
+@pytest.mark.asyncio
+async def test_a_picked_file_over_the_file_transfer_cap_is_refused_and_not_copied(
+    tmp_path, signing_identity, monkeypatch,
+):
+    w = _world(tmp_path, monkeypatch)
+    w.service.firewall.rules = {"file_transfer": {"max_size_mb": 1}}
+    big = _picked(w, "big.bin", b"\x00" * (1024 * 1024 + 1))
+
+    await _send(w, attachment={"kind": "file", "file_path": str(big)})
+
+    _refused(w, "File too large (1.00 MB > 1 MB limit, file_transfer.max_size_mb)")
+    assert not (w.conv_dir / "files").exists()
+    assert big.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_picked_file_within_the_cap_is_kept(tmp_path, signing_identity, monkeypatch):
+    w = _world(tmp_path, monkeypatch)
+    w.service.firewall.rules = {"file_transfer": {"max_size_mb": 1}}
+
+    await _send(w, attachment={"kind": "file", "file_path": str(_picked(w, "ok.bin", b"\x00" * 1024))})
+
+    assert len(_users(w)) == 1 and [r["status"] for r in w.responses] == ["OK"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cap", [0, -5, "big", True, None])
+async def test_a_cap_that_is_not_a_positive_number_falls_back_to_the_default_not_to_none(
+    tmp_path, signing_identity, monkeypatch, cap,
+):
+    w = _world(tmp_path, monkeypatch)
+    w.service.firewall.rules = {"file_transfer": {"max_size_mb": cap}}
+    seen = {}
+
+    def keeper(files_dir, attachment, **kwargs):
+        seen.update(kwargs)
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(service_mod, "keep_agent_chat_attachment", keeper)
+    await _send(w, attachment={"kind": "file", "file_path": str(_picked(w))})
+
+    assert seen["max_file_mb"] == service_mod.AGENT_CHAT_FILE_DEFAULT_MAX_MB
+
+
+@pytest.mark.asyncio
+async def test_a_recording_is_held_to_its_length_not_to_the_file_cap(tmp_path, signing_identity, monkeypatch):
+    w = _world(tmp_path, monkeypatch)
+    w.service.firewall.rules = {"file_transfer": {"max_size_mb": 0.0001}}
+
+    await _send(w, attachment=_voice(_recording(w)))
+
+    assert len(_users(w)) == 1 and [r["status"] for r in w.responses] == ["OK"]
+
+
+# --- the bytes must be the format the MIME type names ------------------------------
+
+@pytest.mark.parametrize("head, container", [
+    (b"RIFF\x24\x00\x00\x00WAVEfmt ", "wav"),
+    (b"OggS\x00\x02", "ogg"),
+    (b"fLaC\x00\x00\x00\x22", "flac"),
+    (b"ID3\x04\x00\x00", "mp3"),
+    (b"\xff\xfb\x90\x64", "mp3"),
+    (b"\xff\xf1\x50\x80", "aac"),
+    (b"\x00\x00\x00\x20ftypM4A ", "mp4"),
+    (b"\x1a\x45\xdf\xa3\x9f", "webm"),
+    (b"%PDF-1.4", None),
+    (b"", None),
+])
+def test_the_container_is_told_from_the_first_bytes(head, container):
+    assert service_mod.sniff_audio_container(head) == container
+
+
+@pytest.mark.asyncio
+async def test_a_recording_whose_bytes_are_not_its_declared_type_is_refused_and_left_in_place(
+    tmp_path, signing_identity, monkeypatch,
+):
+    w = _world(tmp_path, monkeypatch)
+    rec = _recording(w)  # a WAV
+
+    await _send(w, attachment={**_voice(rec), "mime_type": "audio/mpeg"})
+
+    _refused(w, "The recording is not audio/mpeg: its bytes are wav audio")
+    assert rec.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_browser_recording_of_unknown_bytes_is_refused(tmp_path, signing_identity, monkeypatch):
+    w = _world(tmp_path, monkeypatch)
+
+    await _send(w, attachment={"kind": "voice", "audio_base64": base64.b64encode(b"<html>nope").decode(),
+                               "mime_type": "audio/webm", "duration_seconds": 3})
+
+    _refused(w, "no audio format recognised")
+
+
+def test_a_type_the_owner_added_that_is_not_sniffed_passes_the_sniff():
+    service_mod.refuse_audio_container_mismatch("audio/x-custom", b"anything")
+
+
+# --- no file without its record ----------------------------------------------------
+
+def _record_fails(w):
+    def add_message(*args, **kwargs):
+        raise OSError("disk full")
+    w.monitor.add_message = add_message
+
+
+@pytest.mark.asyncio
+async def test_a_recording_goes_back_to_the_temp_folder_when_its_record_cannot_be_written(
+    tmp_path, signing_identity, monkeypatch,
+):
+    w = _world(tmp_path, monkeypatch)
+    rec = _recording(w)
+    _record_fails(w)
+
+    await _send(w, attachment=_voice(rec))
+
+    assert [r["status"] for r in w.responses] == ["ERROR"]
+    assert rec.read_bytes() == WAV, "moved back where the recorder left it, so it can be sent again"
+    assert list((w.conv_dir / "files").glob("*")) == []
+    assert w.agent.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_picked_files_copy_is_removed_when_its_record_cannot_be_written(
+    tmp_path, signing_identity, monkeypatch,
+):
+    w = _world(tmp_path, monkeypatch)
+    pdf = _picked(w)
+    _record_fails(w)
+
+    await _send(w, attachment={"kind": "file", "file_path": str(pdf)})
+
+    assert [r["status"] for r in w.responses] == ["ERROR"]
+    assert list((w.conv_dir / "files").glob("*")) == []
+    assert pdf.exists(), "the person's own file is never touched"
+
+
+@pytest.mark.asyncio
+async def test_a_browser_recordings_kept_copy_is_removed_when_its_record_cannot_be_written(
+    tmp_path, signing_identity, monkeypatch,
+):
+    w = _world(tmp_path, monkeypatch)
+    _record_fails(w)
+
+    await _send(w, attachment={"kind": "voice", "audio_base64": base64.b64encode(WAV).decode(),
+                               "mime_type": "audio/wav", "duration_seconds": 3})
+
+    assert [r["status"] for r in w.responses] == ["ERROR"]
+    assert list((w.conv_dir / "files").glob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_the_record_keeps_the_file(tmp_path, signing_identity, monkeypatch):
+    # The agent's run failing is not a refusal: the record and its file stay.
+    w = _world(tmp_path, monkeypatch)
+
+    async def broken(**kwargs):
+        raise RuntimeError("provider down")
+    w.agent.process = broken
+
+    await _send(w, attachment=_voice(_recording(w)))
+
+    assert [r["status"] for r in w.responses] == ["ERROR"]
+    (user,) = _users(w)
+    assert Path(user["attachments"][0]["file_path"]).is_file()
