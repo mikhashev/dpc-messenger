@@ -418,6 +418,126 @@ def keep_copy_under_a_free_name(source: Path, directory: Path, name: str) -> Pat
     return target
 
 
+# What the UI may attach to a message in a 1:1 agent chat (`execute_ai_query`'s
+# `attachment`): a file picked with the paperclip, or a microphone recording the
+# person chose to send as audio instead of dictating it.
+AGENT_CHAT_ATTACHMENT_KINDS = ("file", "voice")
+_RECORDING_EXTENSIONS = {"mpeg": "mp3", "x-wav": "wav", "wave": "wav"}
+
+
+def keep_agent_chat_attachment(
+    files_dir: Path, attachment: Dict[str, Any], *,
+    voice_mime_types: List[str], max_voice_seconds: float, temp_dir: Path,
+) -> Dict[str, Any]:
+    """Keep what the person attached in an agent chat in that chat's `files/`.
+
+    Returns the history record's attachment, the shape `send_group_file` writes:
+    `type` "file" with `mime_type`, `size_bytes`, `size_mb` and the kept
+    `file_path`, so the bubble plays an audio/* file inline with "Show in
+    folder" beside it (ADR-051 D19) and the agent reads the file's marker
+    (`file_attachment_markers`). Blocking; run it in a thread.
+
+    `kind` "file": the picked file is copied under a free name, its MIME type
+    guessed from the name as `send_group_file` does. `kind` "voice": a
+    recording, given as the recorder's `file_path` or as `audio_base64` with its
+    `mime_type`; the format must be one `voice_messages.mime_types` lists and the
+    length within `voice_messages.max_duration_seconds`. A recording the desktop
+    recorder left in `temp_dir` is moved, not copied, so no copy is left behind;
+    it also means the UI never deletes it before core has it. The record carries
+    the length as `voice_metadata`, which the player and the marker both read.
+    `voice_messages.max_size_mb` is not applied: it caps a voice message that
+    crosses the network, and this one stays on this node with its own agent, as
+    a file kept in a group of one has no cap either. Anything that fails part
+    way removes the file it reserved.
+    """
+    import base64
+    import mimetypes
+    import os
+    import shutil
+
+    if not isinstance(attachment, dict):
+        raise ValueError("The attachment must be an object")
+    kind = attachment.get("kind")
+    if kind not in AGENT_CHAT_ATTACHMENT_KINDS:
+        raise ValueError(f"Unknown attachment kind: {kind!r}")
+    files_dir.mkdir(parents=True, exist_ok=True)
+    extra: Dict[str, Any] = {}
+
+    if kind == "file":
+        picked = str(attachment.get("file_path") or "")
+        source = Path(picked)
+        if not picked or not source.is_file():
+            raise ValueError(f"File not found: {picked}")
+        kept = keep_copy_under_a_free_name(source, files_dir, source.name)
+        mime_type = mimetypes.guess_type(str(kept))[0] or "application/octet-stream"
+    else:
+        mime_type = str(attachment.get("mime_type") or "").split(";")[0].strip().lower()
+        if mime_type not in voice_mime_types:
+            raise ValueError(
+                f"Unsupported audio format: {mime_type or 'none'}. Supported: {', '.join(voice_mime_types)}")
+        duration = attachment.get("duration_seconds")
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration < 0:
+            duration = None
+        if duration is not None and duration > max_voice_seconds:
+            raise ValueError(f"Recording too long ({duration:g} s > {max_voice_seconds:g} s limit)")
+        source_path = str(attachment.get("file_path") or "")
+        audio_base64 = attachment.get("audio_base64")
+        if not source_path and not audio_base64:
+            raise ValueError("A recording needs its file_path or its audio_base64")
+        subtype = mime_type.split("/")[-1]
+        extension = _RECORDING_EXTENSIONS.get(subtype, subtype)
+        name = f"voice_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.{extension}"
+        kept = claim_free_name(files_dir, name)
+        try:
+            if source_path:
+                source = Path(source_path)
+                if not source.is_file():
+                    raise ValueError(f"Recording not found: {source_path}")
+                try:
+                    in_temp = source.resolve().is_relative_to(temp_dir.resolve())
+                except OSError:
+                    in_temp = False
+                if in_temp:
+                    try:
+                        os.replace(source, kept)
+                    except OSError:  # another volume: copy, then remove the recorder's file
+                        shutil.copyfile(source, kept)
+                        source.unlink(missing_ok=True)
+                else:
+                    shutil.copyfile(source, kept)
+            else:
+                try:
+                    data = base64.b64decode(str(audio_base64), validate=True)
+                except Exception as e:  # noqa: BLE001 — binascii.Error and friends
+                    raise ValueError(f"Failed to decode the recording: {e}") from e
+                kept.write_bytes(data)
+        except BaseException:
+            kept.unlink(missing_ok=True)
+            raise
+        extra["voice_metadata"] = {
+            **({"duration_seconds": duration} if duration is not None else {}),
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    size_bytes = kept.stat().st_size
+    return {
+        "type": "file",
+        "filename": kept.name,
+        "size_bytes": size_bytes,
+        "size_mb": round(size_bytes / (1024 * 1024), 2),
+        "mime_type": mime_type,
+        "status": "completed",
+        "file_path": str(kept),
+        **extra,
+    }
+
+
+def agent_chat_attachment_text(attachment: Dict[str, Any]) -> str:
+    """The record's text for an attachment sent with no words: the line a group
+    file gets, which the bubble hides (isAttachmentPlaceholderText)."""
+    return f"Sent file: {attachment.get('filename')} ({attachment.get('size_mb')} MB)"
+
+
 # The record-hash passes still running (`hash_and_note_group_file`). Held here
 # because a task nothing references can be collected before it finishes.
 PENDING_RECORD_HASHES: Set[asyncio.Task] = set()
@@ -9785,10 +9905,33 @@ class CoreService(MusicCommandsMixin):
 
     # --- AI Query Methods ---
 
+    async def _keep_agent_chat_attachment(self, agent_manager, conversation_id: str,
+                                          attachment: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep a 1:1 agent chat's attachment in its `files/`, under the limits
+        `voice_messages` sets for a recording (`keep_agent_chat_attachment`).
+
+        A group keeps its own record (ADR-031 §3; `send_group_file`), so it is
+        refused here rather than written into the agent's monitor.
+        """
+        if conversation_id.startswith("group-"):
+            raise ValueError("A group keeps its files through send_group_file")
+        monitor = agent_manager._get_or_create_agent_monitor(conversation_id)
+        files_dir = monitor._get_conversation_dir() / "files"
+        voice_mime_types = [m.strip().lower() for m in self.settings.get(
+            "voice_messages", "mime_types",
+            "audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav").split(",") if m.strip()]
+        max_voice_seconds = float(self.settings.get("voice_messages", "max_duration_seconds", "300"))
+        return await asyncio.to_thread(
+            keep_agent_chat_attachment, files_dir, attachment,
+            voice_mime_types=voice_mime_types, max_voice_seconds=max_voice_seconds,
+            temp_dir=DPC_HOME_DIR / "temp",
+        )
+
     async def _execute_agent_query(self, command_id: str, prompt: str, conversation_id: str,
                                    include_context: bool, instruction_set_name: str,
                                    agent_llm_provider: str,
-                                   reasoning_effort: str = None) -> None:
+                                   reasoning_effort: str = None,
+                                   attachment: Optional[Dict[str, Any]] = None) -> None:
         """
         Execute an agent query (routes to DpcAgentManager).
 
@@ -9804,6 +9947,12 @@ class CoreService(MusicCommandsMixin):
             agent_llm_provider: Underlying LLM provider for the agent
             reasoning_effort: Level chosen in this chat's header for this call
                 only; empty means the agent's own configured level applies
+            attachment: A file or a recording the person sent with the words,
+                one per message (`keep_agent_chat_attachment`). It is kept in the
+                chat's `files/` and goes on the person's record before the run, so
+                the agent reads its marker (name, MIME type, size, where it is
+                kept) in this very turn. With no words the record says
+                "Sent file: <name> (<MB> MB)", as a group file does.
         """
         try:
             # Get the dpc_agent provider
@@ -9814,6 +9963,18 @@ class CoreService(MusicCommandsMixin):
             # Ensure agent manager exists for this conversation
             await dpc_agent_provider._ensure_manager(agent_id=conversation_id)
             agent_manager = dpc_agent_provider.get_manager(conversation_id)
+
+            # A file or recording rides with the words: kept first, so a refusal
+            # (missing file, unsupported format) answers before anything is recorded.
+            attachments = None
+            if attachment:
+                attachments = [await self._keep_agent_chat_attachment(
+                    agent_manager, conversation_id, attachment)]
+                if not (prompt or "").strip():
+                    prompt = agent_chat_attachment_text(attachments[0])
+            # The kept attachment goes back with the confirmation, so the bubble
+            # drawn before core had the file gets its path and its player.
+            confirmed_extra = {"attachments": attachments} if attachments else {}
 
             # A human message starts a new CC<->agent chain for this conversation.
             # Only the UI reaches here (execute_ai_query); the chain re-invokes the
@@ -9835,6 +9996,7 @@ class CoreService(MusicCommandsMixin):
                 monitor.add_message(
                     role="user",
                     content=prompt,
+                    attachments=attachments,
                     timestamp=utc_now_iso(),
                     sender_node_id=node_id,
                     sender_name=self.p2p_manager.get_display_name() or "User",
@@ -9848,6 +10010,7 @@ class CoreService(MusicCommandsMixin):
                     "msg_index": user_msg_index,
                     "message_id": monitor.message_history[-1].get("id"),
                     "command_id": command_id,
+                    **confirmed_extra,
                 })
 
                 # Broadcast @CC mention event (picked up by dpc-agent-chat MCP server)
@@ -9883,6 +10046,7 @@ class CoreService(MusicCommandsMixin):
             monitor.add_message(
                 role="user",
                 content=prompt,
+                attachments=attachments,
                 timestamp=utc_now_iso(),
                 sender_node_id=_user_node_id,
                 sender_name=self.p2p_manager.get_display_name() or "User",
@@ -9897,6 +10061,7 @@ class CoreService(MusicCommandsMixin):
                 "msg_index": _early_user_msg_index,
                 "message_id": monitor.message_history[-1].get("id"),
                 "command_id": command_id,
+                **confirmed_extra,
             })
 
             # Process message through agent (agent manager handles its own prompt assembly)
@@ -10464,6 +10629,16 @@ class CoreService(MusicCommandsMixin):
             conversation_id.startswith('agent_')
         )
 
+        # A file or a recording sent with the words (`keep_agent_chat_attachment`).
+        # Only an agent can open one; a plain AI chat or a group never takes it here.
+        attachment = kwargs.get("attachment")
+        if attachment and (not is_agent_conversation or conversation_id.startswith("group-")):
+            await self.local_api.send_response_to_all(
+                command_id=command_id, command="execute_ai_query", status="ERROR",
+                payload={"message": "A file or a recording can be sent this way only into an agent chat."},
+            )
+            return
+
         if is_agent_conversation:
             logger.debug("Routing to agent manager for conversation %s", conversation_id)
             return await self._execute_agent_query(
@@ -10474,6 +10649,7 @@ class CoreService(MusicCommandsMixin):
                 instruction_set_name=instruction_set_name,
                 agent_llm_provider=agent_llm_provider,
                 reasoning_effort=reasoning_effort,
+                attachment=attachment or None,
             )
 
         monitor = self._get_or_create_conversation_monitor(conversation_id, instruction_set_name)

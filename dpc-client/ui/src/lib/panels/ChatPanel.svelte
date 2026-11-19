@@ -51,6 +51,10 @@
   import type { Message, Mention, MessageAttachment } from '$lib/types.js';
   import { getLocalFileSize } from '$lib/fileSendTimeout';
   import { composerHasContent, pendingFileFrom, replacedAttachmentNotice, type PendingFile } from '$lib/utils/pendingAttachment';
+  import {
+    bubbleAttachmentFor, confirmedAttachments, fileButtonEnabled, fileButtonTitle, pickedFileAttachment,
+    recordingAttachment, takesAgentAttachments, type AgentChatAttachment,
+  } from '$lib/utils/agentChatAttachment';
 
   type AIChatMeta = {
     name: string;
@@ -217,6 +221,9 @@
     $chatProviders.get(activeChatId) === 'dpc_agent' ||
     (agentChatToAgentId.get(activeChatId) ?? activeChatId).startsWith('agent_')
   );
+  // A 1:1 agent chat: a recording can go to the agent as audio and the paperclip
+  // attaches a file for it (ADR-051 Phase 0). Never a group (ADR-032 Part B stands).
+  let agentTakesAttachments = $derived(takesAgentAttachments(activeChatId, isAgentChat));
   let currentTokenUsage = $derived(tokenUsageMap.get(activeChatId) || { used: 0, limit: 0 });
   let effectiveTokenUsage = $derived({
     used: currentTokenUsage.used,
@@ -246,6 +253,10 @@
   );
 
   let isTelegramChat = $derived(activeChatId.startsWith('telegram-'));
+  let fileButtonState = $derived({
+    chatId: activeChatId, isAgentChat, connected: $connectionStatus === 'connected', isLoading,
+    isPeerConnected, isTelegramChat, isSleeping: activeChatId.startsWith('agent_') && !!isSleeping,
+  });
   let isActuallyAIChat = $derived($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-'));
   let isGroupChat = $derived(activeChatId.startsWith('group-'));
   // Measured against the default limit when the window is unknown: nothing to be full of.
@@ -570,7 +581,17 @@
       const chatId = Array.from(h.keys()).find(k => k === conversation_id || k.endsWith(conversation_id));
       if (!chatId) return h;
       const hist = h.get(chatId) || [];
-      const updated = applyUserMessageConfirmed(hist, confirmed);
+      let updated = applyUserMessageConfirmed(hist, confirmed);
+      // A file or recording sent to an agent: the bubble was drawn before core
+      // kept the file, and takes the kept copy's path (and so its player) here.
+      const kept = confirmedAttachments(confirmed);
+      if (kept) {
+        const at = updated.findIndex((msg: any) => msg.sender === 'user' && msg.msg_index === msg_index);
+        if (at >= 0) {
+          updated = [...updated];
+          updated[at] = { ...updated[at], attachments: kept };
+        }
+      }
       if (updated === hist) return h;
       const m = new Map(h);
       m.set(chatId, updated);
@@ -723,7 +744,7 @@
     }
   }
 
-  async function _sendAIQuery(text: string, bubbleId: string) {
+  async function _sendAIQuery(text: string, bubbleId: string, attachment?: AgentChatAttachment) {
     setChatLoading(activeChatId, true);
     const commandId = crypto.randomUUID();
     commandToChatMap.set(commandId, activeChatId);
@@ -748,6 +769,7 @@
       instruction_set_name: chatInstructionSet(chatMeta),
     };
     if (selectedPeerContexts.size > 0) payload.context_ids = Array.from(selectedPeerContexts);
+    if (attachment) payload.attachment = attachment;
 
     // The header's Reasoning control for a chat with no agent behind it. An agent
     // carries its own level in its config and the loop reads it there; this one has
@@ -784,6 +806,28 @@
       commandToChatMap.delete(commandId);
       persistCommandToChatMap?.();
     }
+  }
+
+  // A file or a recording for the agent, with the words typed, as one message:
+  // the bubble at once, then the same query a typed message makes, with the
+  // attachment core keeps in the chat's files/ before the agent's turn.
+  async function _sendAgentAttachment(text: string, attachment: AgentChatAttachment, sizeBytes: number) {
+    const chatId = activeChatId;
+    currentInput = '';
+    chatDraftInputs = new Map(chatDraftInputs).set(chatId, '');
+    clearAgentStreaming();
+    const bubbleId = crypto.randomUUID();
+    chatHistories.update(h => {
+      const m = new Map(h);
+      const hist = m.get(chatId) || [];
+      m.set(chatId, [...hist, {
+        id: bubbleId, sender: 'user', text, timestamp: Date.now(),
+        attachments: [bubbleAttachmentFor(attachment, sizeBytes)],
+      }]);
+      return m;
+    });
+    await _sendAIQuery(text, bubbleId, attachment);
+    autoScroll();
   }
 
   async function _sendTelegramMessage(text: string) {
@@ -834,6 +878,12 @@
     const file = pendingFile;
     const chatId = activeChatId;
     const text = currentInput.trim();
+    if (agentTakesAttachments) {
+      // Core copies it into the chat's files/ and the agent reads where it is kept.
+      pendingFile = null;
+      await _sendAgentAttachment(text, pickedFileAttachment(file.filePath), file.sizeBytes);
+      return;
+    }
     isSendingFile = true;
     try {
       let groupResult: any = null;
@@ -1001,6 +1051,17 @@
         }
         const base64Audio = await _blobToBase64(blob);
         reportNotOffered(activeChatId, await sendGroupVoiceMessage(activeChatId, base64Audio, duration, blob.type || 'audio/webm'));
+      } else if (agentTakesAttachments) {
+        // Send as audio: the recording goes to the agent as a file, with the words
+        // typed. Core moves the recorder's temp file into the chat's files/, so it
+        // is not deleted here (and a refusal leaves it where it was).
+        const preview = voicePreview;
+        const attachment = preview.filePath
+          ? recordingAttachment(blob.type || 'audio/wav', duration, { filePath: preview.filePath })
+          : recordingAttachment(blob.type || 'audio/webm', duration, { audioBase64: await _blobToBase64(blob) });
+        if (voicePreview === preview) voicePreview = null;
+        await _sendAgentAttachment(currentInput.trim(), attachment, blob.size);
+        return;
       } else if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_')) {
         await handleTranscribeVoiceMessage();
         return;
@@ -1199,9 +1260,10 @@
     onSendVoiceMessage={handleSendVoiceMessage}
     onTranscribeVoiceMessage={handleTranscribeVoiceMessage}
     {isTranscribing}
-    isLocalAIChat={activeChatId === 'local_ai' || activeChatId.startsWith('ai_')
-      || activeChatId.startsWith('agent_')}
-    canSendAudio={voiceAudioSinkExists(activeChatId)}
+    isLocalAIChat={!agentTakesAttachments && (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')
+      || activeChatId.startsWith('agent_'))}
+    isAgentChat={agentTakesAttachments}
+    canSendAudio={agentTakesAttachments || voiceAudioSinkExists(activeChatId)}
     showFileOfferDialog={showFileOfferDialog}
     currentFileOffer={currentFileOffer}
     firewallRules={fileOfferRules}
@@ -1298,8 +1360,8 @@
     <button
       class="file-button"
       onclick={handleSendFile}
-      disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_') || activeChatId === 'default' || (!isPeerConnected && !isTelegramChat)}
-      title={isPeerConnected || isTelegramChat || activeChatId.startsWith('agent_') || activeChatId === 'default' ? 'Send file' : 'Peer disconnected'}
+      disabled={!fileButtonEnabled(fileButtonState)}
+      title={fileButtonTitle(fileButtonState)}
     >📎</button>
 
     <button

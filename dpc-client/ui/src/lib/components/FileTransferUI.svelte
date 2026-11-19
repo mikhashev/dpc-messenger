@@ -24,6 +24,8 @@
     onTranscribeVoiceMessage,
     isTranscribing = false,
     isLocalAIChat = false,
+    // A 1:1 agent chat: the recording is either dictated or sent to the agent as audio
+    isAgentChat = false,
     canSendAudio = true,
 
     // File offer dialog state
@@ -62,6 +64,7 @@
     onTranscribeVoiceMessage?: () => Promise<void>;
     isTranscribing?: boolean;
     isLocalAIChat?: boolean;
+    isAgentChat?: boolean;
     canSendAudio?: boolean;
     showFileOfferDialog?: boolean;
     currentFileOffer?: any;
@@ -290,6 +293,8 @@
       >
         {#if isTranscribing}
           <span class="transcribe-spinner" aria-hidden="true"></span> Loading…
+        {:else if isAgentChat}
+          📝 Dictate
         {:else if isLocalAIChat}
           📝 Send
         {:else}
@@ -301,9 +306,12 @@
       <button
         class="voice-send-button"
         onclick={onSendVoiceMessage}
-        title="Send voice message"
+        disabled={isAgentChat && isTranscribing}
+        title={isAgentChat
+          ? "Send the recording to the agent as an audio file, with the words typed"
+          : "Send voice message"}
       >
-        Send
+        {#if isAgentChat}🎵 Send as audio{:else}Send{/if}
       </button>
     {/if}
     <button
