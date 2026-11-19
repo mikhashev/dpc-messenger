@@ -77,9 +77,12 @@
   // A file event for a message already on screen completes that bubble (a file
   // this node requested completes the record it was requested for). True when it
   // did; the caller then appends nothing.
-  function completeBubbleInPlace(chatId: string, id: string | undefined, attachments: any[] | undefined): boolean {
+  // `index`: where the attachment is in the record, when core names it
+  // (`attachment_index`), so a record with two files of one name completes one.
+  function completeBubbleInPlace(chatId: string, id: string | undefined, attachments: any[] | undefined,
+                                 index?: number): boolean {
     const hist = get(chatHistories).get(chatId);
-    const next = hist ? patchAttachmentsById(hist, id, attachments) : null;
+    const next = hist ? patchAttachmentsById(hist, id, attachments, index) : null;
     if (!next) return false;
     chatHistories.update(h => {
       const newMap = new Map(h);
@@ -97,7 +100,7 @@
   $effect(() => {
     const evt = $fileRequestStatus;
     if (evt && evt.state === 'received' && evt.attachment) {
-      completeBubbleInPlace(evt.conversation_id, evt.message_id, [evt.attachment]);
+      completeBubbleInPlace(evt.conversation_id, evt.message_id, [evt.attachment], evt.attachment_index);
       fileRequestStatus.set(null);
     }
   });
@@ -108,7 +111,7 @@
       const msg = $p2pMessages;
       const messageId = msg.message_id || `${msg.sender_node_id}-${msg.text}`;
       const completed = msg.sender_node_id !== "user" && msg.message_id
-        && completeBubbleInPlace(msg.sender_node_id, msg.message_id, msg.attachments);
+        && completeBubbleInPlace(msg.sender_node_id, msg.message_id, msg.attachments, msg.attachment_index);
 
       if (!completed && !processedMessageIds.has(messageId)) {
         processedMessageIds.add(messageId);
@@ -235,7 +238,7 @@
       const msg = $groupFileReceived;
       const messageId = msg.message_id || `group-file-${msg.group_id}-${Date.now()}`;
       const completed = !!msg.message_id
-        && completeBubbleInPlace(msg.group_id, msg.message_id, msg.attachments);
+        && completeBubbleInPlace(msg.group_id, msg.message_id, msg.attachments, msg.attachment_index);
 
       if (!completed && !processedMessageIds.has(messageId)) {
         processedMessageIds.add(messageId);

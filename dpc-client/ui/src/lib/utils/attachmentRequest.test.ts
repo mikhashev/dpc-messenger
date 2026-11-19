@@ -43,6 +43,18 @@ describe('what the row says', () => {
         expect(requestStatusText({ state: 'no_answer' })).toMatch(/^Nobody online answered/);
         expect(requestStatusText({ state: 'no_peers' })).toBe('No member of this chat is online');
         expect(requestStatusText({ state: 'failed', reason: 'cancelled' })).toBe('The transfer failed: cancelled');
+        expect(requestStatusText({ state: 'busy', retryAfterSec: 42 })).toBe('A peer with this file is busy; try again in 42 s');
+        expect(requestStatusText({ state: 'busy' })).toBe('A peer with this file is busy; try again later');
+        expect(requestStatusText({ state: 'requesting', retryAfterSec: 0.3 })).toBe('Requesting… a peer is busy, asking again in 1 s');
+    });
+
+    it('offers the button again after busy, and keeps the wait core named', () => {
+        expect(showsRequestButton(missing, { state: 'busy' })).toBe(true);
+        const map = applyRequestStatus(new Map(), {
+            request_id: 'r1', conversation_id: 'group-x', message_id: 'm1', filename: 'song.mp3',
+            state: 'busy', retry_after_sec: 600,
+        });
+        expect(map.get(requestKey('group-x', 'm1', 'song.mp3'))?.retryAfterSec).toBe(600);
     });
 
     it('reads the command answer', () => {
@@ -88,6 +100,45 @@ describe('the arriving file completes the bubble already on screen', () => {
         expect('available' in next![1].attachments![0]).toBe(false);
         expect(showsRequestButton(next![1].attachments![0])).toBe(false);
         expect(history[1].attachments![0].available).toBe(false); // the old history is not mutated
+    });
+
+    it('completes only the attachment core names when a record has two of one name (Zcode, 2026-11-19)', () => {
+        const first = { ...missing, size_bytes: 3 };
+        const second = { ...missing, size_bytes: 3 };
+        const history = [{ id: 'm1', attachments: [first, second] }];
+        const arrived = { ...present, file_path: '/here/song_1.mp3' };
+
+        const byIndex = patchAttachmentsById(history, 'm1', [arrived], 1)!;
+        expect(byIndex[0].attachments![0].available).toBe(false);
+        expect(byIndex[0].attachments![1].file_path).toBe('/here/song_1.mp3');
+        expect('available' in byIndex[0].attachments![1]).toBe(false);
+
+        // Without an index, one attachment: the first that is the same file.
+        const byIdentity = patchAttachmentsById(history, 'm1', [arrived])!;
+        expect(byIdentity[0].attachments![0].file_path).toBe('/here/song_1.mp3');
+        expect(byIdentity[0].attachments![1].available).toBe(false);
+    });
+
+    it('matches by hash, else size, never by name alone', () => {
+        const small = { ...missing, size_bytes: 3, hash: 'aaa' };
+        const large = { ...missing, size_bytes: 9, hash: 'bbb' };
+        const history = [{ id: 'm1', attachments: [small, large] }];
+
+        const byHash = patchAttachmentsById(history, 'm1', [{ ...present, size_bytes: 9, hash: 'bbb', file_path: '/l' }])!;
+        expect(byHash[0].attachments!.map((a: any) => a.file_path)).toEqual([small.file_path, '/l']);
+
+        const bySize = patchAttachmentsById(
+            [{ id: 'm1', attachments: [{ ...small, hash: undefined }, { ...large, hash: undefined }] }],
+            'm1', [{ ...present, size_bytes: 9, hash: 'zzz', file_path: '/l' }])!;
+        expect(bySize[0].attachments![1].file_path).toBe('/l');
+        expect(bySize[0].attachments![0].available).toBe(false);
+
+        // An index that names an attachment of another name is not trusted.
+        const wrongIndex = patchAttachmentsById(
+            [{ id: 'm1', attachments: [{ ...missing, filename: 'other.mp3' }, small] }],
+            'm1', [{ ...present, size_bytes: 3, hash: 'aaa', file_path: '/s' }], 0)!;
+        expect(wrongIndex[0].attachments![0].available).toBe(false);
+        expect(wrongIndex[0].attachments![1].file_path).toBe('/s');
     });
 
     it('says null for an id that is not on screen, so the caller appends as before', () => {

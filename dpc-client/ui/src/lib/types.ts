@@ -239,6 +239,8 @@ export interface P2PMessage {
     text: string;
     timestamp?: number;
     attachments?: MessageAttachment[];
+    /** A received file that completed a record already here: its place in that record's attachments. */
+    attachment_index?: number;
 }
 
 // --- Knowledge Commit ---
@@ -561,6 +563,8 @@ export interface GroupFileEvent {
     mime_type?: string;
     text?: string;
     attachments?: MessageAttachment[];
+    /** A received file that completed a record already here: its place in that record's attachments. */
+    attachment_index?: number;
 }
 
 /** `group_invite_received`: the whole group record after `apply_sync`, plus the creator's name. */
