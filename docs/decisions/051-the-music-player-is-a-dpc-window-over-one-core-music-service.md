@@ -355,6 +355,23 @@ consensus 2026-11-20)") and are not decisions.
   path as a live stream (`loadedmetadata duration=0.00`, `seekable` only what had played).
   See the N8 entry for the shape.
 
+- **D29. Song creation is tracked as evolution; the process shows a lineage graph** (14:34,
+  14:52). Mike's direction: creating a song is like evolution; each take records what
+  changed from the version before it and why versions were rejected, and the process shows
+  the branches as a graph. On the fitness side (14:46): "fitness is my ear, yes, but there
+  will also be models like Flamingo (and probably others) + tools for the agent, the
+  spectrogram, other things", so those signals are recorded as advisory with their source
+  and none selects (SPEC §12 decision 29); a person makes every selection. Mike asked for
+  it to be added to the ADR and the other docs (14:52). **The specifics are proposals
+  (CC with the group's review), not decisions:** the genotype / substrate / phenotype
+  record, edge kinds, failure classes, selection events, the measurement rules, the
+  generated `lineage.json` / `lineage.html`, and the lineage fields on
+  `register_generated` (D21); see `experiments/music-player/docs/EVOLUTION.md` and
+  `docs/PROVENANCE.md` in ai-studio, and SPEC §12 decision 36. **Open for Mike:** blind
+  A/B from slice 1; a mandatory reason + failure class on Discard (a `rejected` status
+  instead of removing the entry, which would change SPEC decision 35); the style battery;
+  graph per song; agent notes; the true-peak export policy; the `N_delta` warning.
+
 ### Not decided
 
 Each item needs Mike's yes or a measurement. Where an item is built in practice, a dated
