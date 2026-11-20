@@ -458,6 +458,15 @@ search is wanted first: a `hash` search is what phase 3 needs, a name search is 
   Windows 11 on an AMD desktop, median of three: 0.89 s → 1.25 s (+0.36 s per GB, +41%) at the
   1 MiB wire chunk, 0.91 s → 1.29 s at a pinned 65537, which gives the same `chunks_hash`.
   Measured while another test suite ran on the same machine; Linux and macOS not measured.
+- **Implementation note (2026-11-20), who may serve a file again** (card
+  A-SYNCED-ATTACHMENT-PATH-CAN-MAKE-THIS-NODE-SERVE-ANY-FILE-ON-ITS-DISK, `be1bd489`; Ark's
+  review): a group FILE_OFFER needs `may_share_group` — the group held here and the sender in
+  its roster — and is otherwise answered FILE_CANCEL `not_a_member`. So once a member leaves a
+  group, the copies of its files that member holds are no longer reachable by the others.
+  Mike's option A for that card (a file is served only from inside the conversation's own
+  `files` folder) makes a one-to-one file sent from where it lay, outside the store, not
+  re-servable; the card's option B (a registry of the paths this node wrote) is later. Those
+  are the card's options, not this ADR's Options A–C.
 
 ## Confirmation
 

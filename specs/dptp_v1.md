@@ -1694,6 +1694,10 @@ Cancels an in-progress or pending file transfer.
     nothing. An older sender takes it as any other cancel
   - `firewall_denied` - Receiver's firewall rejected the offer, including a transfer
     over the receiver's size limit (`file_offer_handler.py`)
+  - `not_a_member` (v1.17) - A group file offered for a group the receiver does not
+    hold, or by a sender outside its roster; one word for both, as GROUP_ACCESS_DENIED
+    (§3.18, `group_access.py`). Checked before the firewall; no folder is made for it.
+    An older sender takes it as any other cancel
   - `hash_mismatch` - SHA256 verification failed (for an offer that answers a
     FILE_REQUEST, against the requested record's hash)
   - `not_the_requested_file` (v1.16) - The offer answers the receiver's FILE_REQUEST
@@ -4074,6 +4078,9 @@ DPTP is designed to be extensible. New commands can be added by:
   verified description takes an offer without one when it is the described file, and
   keeps its own description for the end-of-download check; the description chunk-size
   table is pinned to `dptp-file-v1`.
+- **§3.11 FILE_CANCEL `not_a_member`** (2026-11-20, found in review by Ark) — a group
+  FILE_OFFER for a group the receiver does not hold, or from a sender outside its roster,
+  is refused with this reason instead of left unanswered, so the sender frees its upload.
 
 ### v1.16 (November 2026)
 - **§3.11 FILE_OFFER `chunk_size`, FILE_CHUNK sending** (2026-11-20, sender behaviour only,

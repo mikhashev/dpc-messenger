@@ -72,6 +72,7 @@ import logging
 import math
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -122,6 +123,11 @@ SAME_FILE_INTERVAL_S = 60.0
 # A `busy` answer whose `retry_after_sec` is at most this is waited out once and
 # the peer asked again; a longer one ends the request as `busy`.
 MAX_RETRY_WAIT_S = 120.0
+# Files whose SHA-256 a holder remembers, keyed by (resolved path, size,
+# mtime_ns): a file asked for again is not read again while it is unchanged.
+# `SAME_FILE_INTERVAL_S` limits each requester, not the hashing, and every
+# requester may ask (found in review by Ark, 2026-11-20). In memory only.
+HASH_CACHE_ENTRIES = 256
 
 ATTACHMENT_KINDS = ("file", "image", "voice")
 _MAX_FIELD_CHARS = 128
@@ -269,6 +275,8 @@ class FileRequests:
         self._asked_by: Dict[str, List[float]] = {}  # requester -> request times (holder side)
         # (requester, path) -> when this node last offered it that file (holder side)
         self._served: Dict[tuple, float] = {}
+        # (resolved path, size, mtime_ns) -> its SHA-256 (holder side); HASH_CACHE_ENTRIES
+        self._hashes: "OrderedDict[Tuple[str, int, int], str]" = OrderedDict()
 
     # --- shared ------------------------------------------------------------
 
@@ -694,7 +702,8 @@ class FileRequests:
         await self._emit(request, STATE_RECEIVING, transfer_id=transfer_id, node_id=node_id)
 
     async def offer_refused(self, request: OpenRequest, reason: str) -> None:
-        """This node's own firewall refused the offer that answers the request."""
+        """This node refused the offer that answers the request: its firewall, or a
+        sender no longer in the group's roster (`not_a_member`)."""
         await self._emit(request, STATE_FAILED, reason=reason)
 
     async def received(self, request_id: Optional[str], attachment: Dict[str, Any],
@@ -855,21 +864,31 @@ class FileRequests:
                     folders.append(folder)
         return folders
 
-    @staticmethod
-    async def _bytes_are_the_records(att: Dict[str, Any], path: Path) -> bool:
+    async def _bytes_are_the_records(self, att: Dict[str, Any], path: Path) -> bool:
         """Whether the file at `path` hashes to the attachment's `hash`; True when it has none.
 
         Hashed in a worker thread: a file may be gigabytes, and the event loop
-        carries every other peer meanwhile.
+        carries every other peer meanwhile. Hashed once while its size and
+        mtime stay the same (`HASH_CACHE_ENTRIES`).
         """
         expected = _real_hash(att.get("hash"))
         if not expected:
             return True
         from .file_transfer_manager import HASH_READ_BLOCK_BYTES, hash_file_in_one_pass
         try:
-            actual, _ = await asyncio.to_thread(
-                hash_file_in_one_pass, path, HASH_READ_BLOCK_BYTES,
-                with_sha256=True, with_chunk_crcs=False)
+            stat = path.stat()
+            key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+            actual = self._hashes.get(key)
+            if actual is None:
+                actual, _ = await asyncio.to_thread(
+                    hash_file_in_one_pass, path, HASH_READ_BLOCK_BYTES,
+                    with_sha256=True, with_chunk_crcs=False)
+                if isinstance(actual, str):
+                    self._hashes[key] = actual
+                    while len(self._hashes) > HASH_CACHE_ENTRIES:
+                        self._hashes.popitem(last=False)
+            else:
+                self._hashes.move_to_end(key)
         except OSError as e:
             logger.warning("Could not hash %s before serving it: %s", path.name, e)
             return False

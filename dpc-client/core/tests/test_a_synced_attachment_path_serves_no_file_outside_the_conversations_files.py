@@ -24,6 +24,10 @@ Zcode's medium finding in the same review: a group FILE_OFFER checked only the
 format of the group id, so an unknown group, or a sender outside its roster,
 had a monitor and `conversations/<group>/files` created for it.
 
+Ark's review, 2026-11-20: such an offer is answered (FILE_CANCEL `not_a_member`,
+the word of group_access.py), not dropped, so its sender is not left waiting;
+and a holder hashes an unchanged file once, not on every FILE_REQUEST.
+
 Over the in-process network of test_a_group_file_crosses_a_full_mesh_once, with
 the real FileTransferManager, FileRequests, offer handler and, on the holder,
 the real ConversationMonitor.
@@ -345,7 +349,7 @@ def _offer(group_id, sender):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["unknown_group", "sender_not_a_member"])
-async def test_a_group_offer_from_outside_the_roster_creates_no_folder(tmp_path, case):
+async def test_a_group_offer_from_outside_the_roster_is_refused_and_creates_no_folder(tmp_path, case):
     net = _RequestNetwork()
     x_id, s_id, m_id = _ids(3)
     x = _make_node(net, tmp_path, x_id, [s_id], [x_id, m_id])
@@ -362,9 +366,40 @@ async def test_a_group_offer_from_outside_the_roster_creates_no_folder(tmp_path,
     assert x.monitors == {}, "no monitor was made for it"
     assert not any(p.name.startswith(FOREIGN_GROUP) for p in tmp_path.rglob("*")), \
         "no folder was made for it"
-    assert [f for f in net.frames if f[2] in ("FILE_ACCEPT", "FILE_CANCEL")] == []
+    answers = [f for f in net.frames if f[2] in ("FILE_ACCEPT", "FILE_CANCEL")]
+    assert len(answers) == 1, answers
+    (to, frm, command, payload) = answers[0]
+    assert (to, frm, command) == (s_id, x_id, "FILE_CANCEL"), answers
+    assert payload == {"transfer_id": "t-1", "reason": "not_a_member"},         "one word for both cases, as every group door answers"
     assert x.manager.active_transfers == {}
     assert x.api.events == []
+
+
+@pytest.mark.asyncio
+async def test_an_offer_answering_a_request_from_a_member_since_removed_ends_that_offer(tmp_path):
+    """C asked S while S was a member; S left the roster before its offer came."""
+    from dpc_client_core.managers.file_request import OpenRequest
+    net = _RequestNetwork()
+    x_id, s_id, m_id = _ids(3)
+    x = _make_node(net, tmp_path, x_id, [s_id], [x_id, m_id])
+    _make_node(net, tmp_path, s_id, [x_id], [s_id])
+    offer = _offer(GROUP, s_id)
+    request = OpenRequest(request_id="r-1", conversation_id=GROUP, group_id=GROUP,
+                          message_id="m-1", filename=offer["filename"],
+                          size_bytes=offer["size_bytes"], file_hash=offer["hash"],
+                          candidates=[s_id])
+    x.manager.file_requests._open[request.request_id] = request
+
+    await net.wire(s_id).send_message_to_peer(
+        x_id, {"command": "FILE_OFFER", "payload": dict(offer, request_id="r-1")})
+    await net.settle()
+
+    assert not net.errors, net.errors
+    assert [(f[2], f[3]) for f in net.frames if f[0] == s_id] == [
+        ("FILE_CANCEL", {"transfer_id": "t-1", "reason": "not_a_member"})]
+    assert [(e["state"], e.get("reason")) for e in x.api.named("file_request_status")] == [
+        ("failed", "not_a_member")]
+    assert x.manager.active_transfers == {} and x.monitors == {}
 
 
 @pytest.mark.asyncio
@@ -386,3 +421,59 @@ async def test_a_members_group_offer_is_still_taken(tmp_path):
         "command": "FILE_CANCEL", "payload": {"transfer_id": "t-1", "reason": "user_cancelled"}})
     await net.settle()
     assert x.manager.active_transfers == {}
+
+
+# --- a holder hashes an unchanged file once --------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_holder_hashes_an_unchanged_file_once_and_a_changed_one_again(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from dpc_client_core.managers import file_transfer_manager as ftm
+    from dpc_client_core.managers.file_request import FileRequests
+
+    real = ftm.hash_file_in_one_pass
+    hashed = []
+
+    def spy(path, *args, **kw):
+        hashed.append(Path(path).name)
+        return real(path, *args, **kw)
+
+    monkeypatch.setattr(ftm, "hash_file_in_one_pass", spy)
+    requests = FileRequests(SimpleNamespace())
+    data = b"the bytes the author sent, 32 b."
+    held = tmp_path / "report.bin"
+    held.write_bytes(data)
+    att = _att("report.bin", data, held)
+
+    assert await requests._bytes_are_the_records(att, held)
+    assert await requests._bytes_are_the_records(att, held)
+    assert hashed == ["report.bin"], "two requests for an unchanged file hash it once"
+
+    # The same size, another mtime: read again, and found not to be the record's.
+    held.write_bytes(b"other bytes of the very same len")
+    st = held.stat()
+    os.utime(held, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+    assert not await requests._bytes_are_the_records(att, held)
+    assert hashed == ["report.bin", "report.bin"], "a changed file is hashed again"
+
+    # Another size: read again too.
+    held.write_bytes(data + b"!")
+    assert not await requests._bytes_are_the_records(att, held)
+    assert len(hashed) == 3
+
+
+@pytest.mark.asyncio
+async def test_the_hash_cache_is_bounded(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from dpc_client_core.managers import file_request
+    from dpc_client_core.managers.file_request import FileRequests
+
+    monkeypatch.setattr(file_request, "HASH_CACHE_ENTRIES", 3)
+    requests = FileRequests(SimpleNamespace())
+    for i in range(5):
+        data = f"file {i}".encode()
+        path = tmp_path / f"f{i}.bin"
+        path.write_bytes(data)
+        assert await requests._bytes_are_the_records(_att(path.name, data, path), path)
+    assert len(requests._hashes) == 3
+    assert [Path(k[0]).name for k in requests._hashes] == ["f2.bin", "f3.bin", "f4.bin"]
