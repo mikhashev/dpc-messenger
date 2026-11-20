@@ -1,0 +1,114 @@
+"""The `mp.capabilities/1` report (SPEC §7) says what the music service can do now. Its
+engine part comes from a pluggable probe. Today's probe answers "engine adapter not
+built", so `generate_from_text` is unsupported and a proposed job comes back
+`unsupported` with that reason. Once an engine is installed (stopped is enough: DPC
+starts it), the job type is supported and a job queues.
+"""
+
+from dpc_client_core.music import job_schemas as js
+from dpc_client_core.music.capabilities import EngineStatus, MusicCapabilities, adapter_not_built_probe
+from dpc_client_core.music.jobs import MusicJobStore
+from tests._music_jobs_helpers import from_text_params, installed_probe, store_at
+
+
+def test_today_the_engine_is_reported_as_not_built_and_nothing_claims_it():
+    report = MusicCapabilities().report()
+    assert report["schema"] == "mp.capabilities/1"
+    assert report["engine"]["state"] == "not_built"
+    assert report["engine"]["available"] is False
+    assert report["engine"]["reason"] == "engine adapter not built"
+    assert report["job_types"]["generate_from_text"] == {"status": "unsupported", "reason": "engine adapter not built"}
+    assert report["features"]["text2music"]["status"] == "unsupported"
+    assert all(v["status"] != "supported" for v in report["job_types"].values())
+
+
+def test_every_job_type_and_edit_action_is_listed_with_a_status_and_a_reason():
+    report = MusicCapabilities(installed_probe).report()
+    assert set(report["job_types"]) == set(js.JOB_TYPES)
+    assert set(report["actions"]) == set(js.EDIT_ACTIONS)
+    for block in (report["job_types"], report["actions"], report["features"]):
+        for name, st in block.items():
+            assert st["status"] in ("supported", "planned", "unsupported"), name
+            assert st["reason"].strip(), name
+    assert report["job_types"]["generate_from_text"]["status"] == "supported"
+    for planned in ("edit", "generate_similar", "generate_from_lyrics", "cover", "transcribe", "qc", "generate_from_melody"):
+        assert report["job_types"][planned]["status"] == "planned"
+    assert report["job_types"]["voice_clone"]["status"] == "unsupported"
+
+
+def test_the_limits_are_the_slice_one_decisions():
+    limits = MusicCapabilities().report()["limits"]
+    assert limits["max_track_s"] == 600
+    g = limits["generate_from_text"]
+    assert g["variants"] == {"min": 1, "max": 4, "default": 2}
+    assert g["duration_s"] == {"min": 10, "max": 600, "default": 120}
+    assert (g["seed"]["min"], g["seed"]["max"]) == (0, 2 ** 32 - 1)
+    assert (g["dit_model"], g["dit_quant"], g["inference_steps"]) == ("turbo", "Q8", 8)
+    assert (g["engine_output"], g["library_format"]) == ("wav24", "flac")
+    assert g["engine"] == "ace-step-1.5:text2music"
+
+
+def test_the_report_names_the_discard_classes_and_that_a_reason_is_needed():
+    decisions = MusicCapabilities().report()["take_decisions"]
+    assert decisions["discard_needs_reason"] is True
+    assert [c["id"] for c in decisions["failure_classes"]] == list(js.FAILURE_CLASSES)
+    assert all(c["meaning"] for c in decisions["failure_classes"])
+
+
+def test_the_qa_block_lists_the_spec_fields_and_says_qa_is_not_built():
+    qa = MusicCapabilities().report()["qa"]
+    assert qa["fields"] == ["integrated_lufs", "true_peak_dbtp", "loudness_delta_lu", "seam_start_jump_db",
+                            "seam_end_jump_db", "seam_click_score", "clipped_samples", "lyrics_wer"]
+    assert set(qa["advisory"]) <= set(qa["fields"])
+    assert qa["status"] == "planned"
+
+
+def test_a_job_proposed_while_the_engine_is_not_built_comes_back_unsupported(tmp_path):
+    store = MusicJobStore(tmp_path)
+    store.open()
+    job = store.create_job("generate_from_text", from_text_params())
+    assert job["state"] == "unsupported"
+    assert job["state_reason"] == "engine adapter not built"
+    assert [h["state"] for h in job["history"]] == ["queued", "unsupported"]
+    js.validate_job(job)
+
+
+def test_a_planned_job_type_comes_back_unsupported_with_planned_in_the_reason(tmp_path):
+    job = store_at(tmp_path).create_job("cover", {"caption": "punk"}, track_id="trk_0123456789abcdef",
+                                        base_version_id="ver_0123456789abcdef")
+    assert job["state"] == "unsupported" and job["state_reason"].startswith("planned, not built:")
+
+
+def test_an_installed_engine_lets_a_job_queue(tmp_path):
+    job = store_at(tmp_path).create_job("generate_from_text", from_text_params())
+    assert job["state"] == "queued" and job["state_reason"] is None
+
+
+def test_the_probe_is_read_again_on_every_report():
+    answers = iter([adapter_not_built_probe(), installed_probe()])
+    caps = MusicCapabilities(lambda: next(answers))
+    assert caps.report()["job_types"]["generate_from_text"]["status"] == "unsupported"
+    assert caps.report()["job_types"]["generate_from_text"]["status"] == "supported"
+
+
+def test_a_probe_that_raises_or_answers_nonsense_reports_an_error_engine():
+    def broken():
+        raise RuntimeError("port closed")
+
+    for probe in (broken, lambda: {"state": "running"}):
+        report = MusicCapabilities(probe).report()
+        assert report["engine"]["state"] == "error" and report["engine"]["available"] is False
+        assert report["job_types"]["generate_from_text"]["status"] == "unsupported"
+
+
+def test_only_stopped_starting_and_running_engines_are_available():
+    for state in ("not_built", "not_installed", "error"):
+        assert EngineStatus(state=state, reason="x").available is False
+    for state in ("stopped", "starting", "running"):
+        assert EngineStatus(state=state, reason="x").available is True
+    try:
+        EngineStatus(state="sleeping", reason="x")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown engine state was accepted")
