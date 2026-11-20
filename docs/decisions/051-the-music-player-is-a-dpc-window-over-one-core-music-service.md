@@ -15,7 +15,8 @@ session: "AI Studio group chat (group-60aff6110f02), 2026-11-19 03:17-05:33 — 
 
 # ADR-051 — The music player is a DPC window over one core music service
 
-> **Proposed, 2026-11-19. Draft by CC; nothing is built.** Mike asked for this record at
+> **Proposed 2026-11-19, accepted; Phase 0 and the listener part of Phase 1 are built on dev
+> (2026-11-20, see Implementation Status).** Mike asked for this record at
 > 05:31 in the AI Studio group chat, "following the template". Only the points under
 > **Decided** are Mike's. Everything under **Not decided** and **Open Questions** is open
 > or is a proposal, and needs his yes. This file is self-contained, so it can move to
@@ -285,7 +286,8 @@ timestamps lie outside them and are worth one read by Mike before acceptance.
 
 ### Not decided
 
-Each item needs Mike's yes or a measurement. None is built.
+Each item needs Mike's yes or a measurement. Where an item is built in practice, a dated
+implementation note under it says so (N1, N6); the rest are not built.
 
 - **N1. The phase plan 0 → 1 → 2 → 3** (CC's proposal, `docs/dpc-integration.html`).
   Mike asked what Phase 0 contains. He has **not** said go (Q2).
@@ -305,6 +307,12 @@ Each item needs Mike's yes or a measurement. None is built.
     clone.
 
   The epic's older child order ("Order B") is also CC's recommendation, not Mike's.
+
+  *Implementation note (2026-11-20):* the core library, the window and mini-player, the
+  lyrics chain with Transcribe, and audio into a 1:1 agent chat are built on local `dev`
+  (Implementation Status). SoundCloud/Yandex is postponed (Q6). Phase 2 is not started;
+  the GPU card (EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-SO-AN-IDLE-ENGINE-KEEPS-THE-CARD-THEY-NEED,
+  N11) is what unblocks it.
 - **N2. The repaint engine.** The proposal is ACE-Step 1.5 API repaint, settled by a
   one-evening spike, with Resonant as the fallback (SPEC §12 decision 2).
 - **N3. lego / complete** (own voice plus arrangement, instrument part to song). These
@@ -315,6 +323,11 @@ Each item needs Mike's yes or a measurement. None is built.
   NO-SINGING-VOICE-CLONE-IS-CHOSEN-SO-A-SONG-CANNOT-BE-SUNG-IN-THE-MUSICIANS-OWN-VOICE).
 - **N6. The folder watcher**: the Python `watchdog` package (unverified, and not a core
   dependency today) or polling of size and mtime.
+  *Implementation note (2026-11-20): implemented as polling, so no longer undecided in
+  practice.* Every `[music] poll_interval_s` (default 60 s, written to a fresh
+  `config.ini` by `b712712a`) each watched folder is walked and compared by path, size and
+  mtime; there are no OS file events and no `watchdog` dependency
+  (`music/library.py`, docstring and the poll loop).
 - **N7. The tag reader**: which library to use and its licence. `Observed`: there is no
   mutagen, tinytag or eyed3 in `dpc-client/core/pyproject.toml`. It may be the same
   library as N12.
@@ -351,6 +364,16 @@ Each item needs Mike's yes or a measurement. None is built.
     on Linux? The Linux VoicePlayer path already depends on it while the CSP line says it
     should be blocked, so the run either confirms the CSP or shows that Tauri does not
     apply it as read. One run informs N8 and N9 without code.
+  - *Implementation note (2026-11-20): N8 stays open; Mike is thinking.* Until he decides,
+    the window plays only files under `~/.dpc`: `convertFileSrc` on Windows, and on Linux
+    a `blob:` read through the fs plugin, because `asset:` does not play audio in
+    WebKitGTK; any other path shows "not playable yet" (`trackPlaybackUrl`,
+    `ui/src/lib/utils/musicPlayer.ts`). On 2026-11-20 CC, Zcode, Forge and Ark all
+    recommended option (i): a local HTTP endpoint with `Range`/206, a token in the URL
+    plus an `Origin` allowlist, keyed by `track_id`, with a CSP `media-src` change.
+    Widening the Tauri asset scope was raised as a fourth path; it does not play audio on
+    Linux WebKitGTK. Forge's cost argument against (ii) `blob:`: the whole file sits in
+    webview memory for every playing track. None of this is a decision.
 - **N9. Web delivery**: core proxies (fetches and caches) the stream, or open web
   `https:` is added to `media-src`. `Observed`: `media-src` allows only
   `https://asset.localhost` among https origins (`tauri.conf.json:27`); there is no open
@@ -706,29 +729,39 @@ New code and files touched. Paths are relative to `dpc-client/`.
 
 ## Implementation Status
 
-Accepted by Mike on 2026-11-19 (08:21). Built so far: the group-file fix. The cards are in `dpc-messenger/backlog.md` (gitignored). All are
-open, filed 2026-11-19 unless a date is given. Card names are kept as filed (D19).
+Accepted by Mike on 2026-11-19 (08:21). **Status as of 2026-11-20**, read from the code on
+branch `dev` at `4c58a1d4`. Built: the group-file fix (pushed), and on local `dev`, **not
+pushed yet** (`git log origin/dev..dev`), the core music library, the window and
+mini-player, the lyrics chain with Transcribe, and audio into a 1:1 agent chat. Phase 2
+is not started; the GPU card unblocks it. The cards are in `dpc-messenger/backlog.md`
+(gitignored); a card's heading there can still say open after part of it is built, so the
+Status column describes the code. Cards were filed 2026-11-19 unless a date is given.
+Card names are kept as filed (D19).
 
 | Task (card id) | Status | Commit |
 |---|---|---|
 | Epic: THE-AI-MUSIC-PLAYER-RUNS-ONLY-AS-A-SIMULATED-BROWSER-PROTOTYPE-AND-DPC-HAS-NO-PLACE-TO-HOST-IT | Open | — |
 | B1: AN-AGENT-CANNOT-POST-A-FILE-INTO-ITS-OWN-CHAT-AND-THE-CHAT-HAS-NO-AUDIO-ATTACHMENT-TYPE (title kept; dated correction per D19 in the body) | Pending | — |
 | B2: NO-MUSIC-JOB-RUNNER-EXISTS-SO-A-COMMENT-OR-A-GENERATE-REQUEST-CANNOT-BECOME-A-TAKE | Pending | — |
-| Library: THE-MUSIC-PLAYER-HAS-NO-LIBRARY-OR-PLAYLIST-SO-PLAIN-LISTENING-IS-NOT-ITS-DEFAULT-MODE | Pending | — |
-| B3: THE-MUSIC-PLAYER-HAS-NO-DPC-COMPONENT-SO-COMMENTS-LYRICS-TAKES-AND-AB-REVIEW-EXIST-ONLY-IN-THE-PROTOTYPE | Pending | — |
-| Lyrics: A-TRACK-HAS-NO-LYRICS-CHAIN-SO-TAGS-LRC-LRCLIB-AND-TRANSCRIBE-ARE-NOT-TRIED-IN-ORDER | Pending | — |
+| Library: THE-MUSIC-PLAYER-HAS-NO-LIBRARY-OR-PLAYLIST-SO-PLAIN-LISTENING-IS-NOT-ITS-DEFAULT-MODE | Core built, local `dev`, not pushed: `core/dpc_client_core/music/` (watched folders indexed in place and polled, N6; track identity by `track_id` plus an audio-payload hash, Q4 layers 1-3 and 5; playlists; `local_api` commands; `[music] poll_interval_s` in a fresh `config.ini`). Queue, shuffle and repeat live in the window (B3 row) | `1cdce551`, `aa61925b`, `6f797e02`, `22d73fd0`, `b712712a` |
+| B3: THE-MUSIC-PLAYER-HAS-NO-DPC-COMPONENT-SO-COMMENTS-LYRICS-TAKES-AND-AB-REVIEW-EXIST-ONLY-IN-THE-PROTOTYPE | Window part built, local `dev`, not pushed: the Music Player button beside AGENTS MAP, a floating window that minimises to a mini-player, the mini-player with its own width and its own place (`ui/src/lib/components/music/MusicPlayer.svelte`). Only files under `~/.dpc` play until N8 is decided. Comments, waveform, takes and A/B are not started | `32900e82`, `8bebfb6a`, `ec79687d`, `2457aa7c` |
+| Lyrics: A-TRACK-HAS-NO-LYRICS-CHAIN-SO-TAGS-LRC-LRCLIB-AND-TRANSCRIBE-ARE-NOT-TRIED-IN-ORDER | Built, local `dev`, not pushed: sidecar `.lrc`, then tags, then the local LRCLIB cache, with lrclib.net only on an explicit lookup (D6 note); manual lyrics; Transcribe only when the person asks, which unloads the Whisper model it loaded and records provider and model (`music/lyrics.py`, `MusicLyrics.svelte`) | `cb9af8a1`, `74c2de84`, `a94c7943` (chain); `3672ee23`, `7fd6a407` (Transcribe) |
+| Transcribe quality (2026-11-20): TRANSCRIBED-LYRICS-CARRY-WHISPER-HALLUCINATIONS-AND-MERGE-LONG-SEGMENTS-INTO-ONE-LINE | Open | — |
+| Button title (2026-11-20): THE-MUSIC-PLAYER-BUTTON-CUTS-A-LONG-TRACK-TITLE-INSTEAD-OF-SCROLLING-IT | Open | — |
+| Mini-player place (2026-11-20): THE-MINI-PLAYER-FIT-TO-A-SMALLER-SCREEN-MOVES-ITS-SAVED-PLACE-FOR-GOOD | Open | — |
+| Whisper switch (2026-11-20): THE-VOICE-WHISPER-SWITCH-CAN-UNLOAD-THE-MODEL-UNDER-A-RUNNING-TRANSCRIPTION | Open | — |
 | Tools: DPC-AGENTS-HAVE-NO-MUSIC-TOOLS-SO-THEY-CANNOT-DRIVE-THE-PLAYER-THE-WAY-THEY-DRIVE-COMFYUI | Pending | — |
-| Microphone: IN-AN-AGENT-CHAT-THE-MICROPHONE-ONLY-DICTATES-SO-A-HUMMED-MELODY-NEVER-REACHES-THE-AGENT-AS-AUDIO | Pending | — |
+| Microphone: IN-AN-AGENT-CHAT-THE-MICROPHONE-ONLY-DICTATES-SO-A-HUMMED-MELODY-NEVER-REACHES-THE-AGENT-AS-AUDIO | Built for 1:1 agent chats, local `dev`, not pushed: a recording (Dictate or Send as audio) or a paperclip file reaches the agent as an audio `file` attachment with its path in context; length measured, picked file capped, a refusal or an unconfirmed send (180 s) gives the draft back. Groups keep ADR-032 Part B dictation (Q3) | `b5c31fcd`, `3f2c6600`, `cc1c1e87`, `d218c432` |
 | Audio input: THE-LLAMA-SERVER-PROVIDER-SENDS-ONLY-IMAGES-SO-AN-AUDIO-MODEL-LIKE-MUSIC-FLAMINGO-CANNOT-BE-A-DPC-ENGINE | Pending | — |
 | QC: A-TAKE-ARRIVES-WITH-NO-QUALITY-CHECK-SO-TAKES-CANNOT-BE-RANKED-BEFORE-THE-PERSONS-AB | Pending | — |
 | Spike: NOBODY-HAS-RUN-ACE-STEP-REPAINT-ON-AN-OWN-TRACK-SO-THE-REGION-EDIT-ENGINE-IS-UNCHOSEN | Pending (needs weights and the card, on Mike's go) | — |
 | B4: REGION-EDIT-JOBS-HAVE-NO-ENGINE-SO-REGENERATE-REGION-AND-FIX-SEAM-ANSWER-UNSUPPORTED | Blocked by the spike | — |
 | YuE2: DPC-CANNOT-CALL-AN-MCP-SERVER-SO-YUE2-STUDIO-COVER-AND-LYRICS-TO-SONG-HAVE-NO-WAY-IN (scope now HTTP/CLI, D13) | Pending | — |
 | Clone: NO-SINGING-VOICE-CLONE-IS-CHOSEN-SO-A-SONG-CANNOT-BE-SUNG-IN-THE-MUSICIANS-OWN-VOICE | Research | — |
-| Streaming: THE-MUSIC-PLAYER-CANNOT-PLAY-OR-SAVE-SOUNDCLOUD-AND-YANDEX-MUSIC-TRACKS-SO-LISTENER-MODE-IS-LOCAL-ONLY (`backlog.md:132`) | Pending (on the board; the first draft's "not on the board yet" was stale, Zcode and Ark) | — |
+| Streaming: THE-MUSIC-PLAYER-CANNOT-PLAY-OR-SAVE-SOUNDCLOUD-AND-YANDEX-MUSIC-TRACKS-SO-LISTENER-MODE-IS-LOCAL-ONLY (`backlog.md:132`) | Postponed (Mike, 2026-11-20: later, no rush); the `yt-dlp` path is not started. On the board (the first draft's "not on the board yet" was stale, Zcode and Ark) | — |
 | Group file, agents-only (bug, MEDIUM): A-FILE-SENT-TO-A-GROUP-WITH-ONLY-AGENTS-VANISHES-AND-THE-UI-IS-TOLD-SUCCESS (`backlog.md:121`, filed by CC on Mike's request) | Fixed on Mike's verb (07:58), observed live by Mike after a restart and closed 2026-11-19; follow-up: one message for a file and its text, audio plays inline | `3837b3a5`, `3f2de3c7`, `dd446110` |
 | Group file (dependency, 2026-08-11): GROUP-IMAGE-AND-FILE-ECHO-STILL-WAITS-ON-THE-TRANSFER (ADR-032 phase 3, `backlog.md:8393`) | Files half fixed by `3837b3a5` | `3837b3a5` |
-| GPU (dependency, 2026-11-06): EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-SO-AN-IDLE-ENGINE-KEEPS-THE-CARD-THEY-NEED | Waiting on Mike's option (N11) | — |
+| GPU (dependency, 2026-11-06): EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-SO-AN-IDLE-ENGINE-KEEPS-THE-CARD-THEY-NEED | Waiting on Mike's option (N11); it is what unblocks Phase 2, which is not started | — |
 | Whisper residency (related, 2026-08-20): THE-WHISPER-ALIAS-IS-THE-BACKENDS-LAST-STANDING-CUDA-RESIDENT (`backlog.md:7212`) | Open; bears on swaps per run | — |
 | Prototype and spec (ai-studio `experiments/music-player/`) | Exists, simulated, untracked | — |
 
@@ -830,6 +863,8 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
 - **Q6. Streaming card.** Filed (`backlog.md:132`); Forge votes to keep it. Still open:
   the outbound path (N9) and account handling, stated as security choices in that card.
   — CC, on Mike's verb
+  *Implementation note (2026-11-20):* SoundCloud/Yandex through `yt-dlp` is postponed
+  (Mike: later, no rush); nothing is built and `yt-dlp` is not a core dependency.
 - **Q7. Axis.** Forge suggests `honesty` instead of `network`: the record's honesty rules
   ("`unsupported` with its reason", never a simulated result, WER as advisory) fit it, and
   two axes are the limit. **Decided by Mike (2026-11-19 07:39): "more from personal to
