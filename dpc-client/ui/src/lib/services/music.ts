@@ -415,7 +415,11 @@ function attachDiagnostics(a: HTMLAudioElement): void {
 function ensureAudio(): HTMLAudioElement | null {
     if (audio || typeof Audio === 'undefined') return audio;
     const a = new Audio();
-    a.preload = 'metadata';
+    // WebKitGTK with preload='metadata' fetches only the header and then feeds the
+    // element on demand: duration stays 0 and forward seeks are refused (Linux node,
+    // WebKitGTK 2.50.4, 2026-11-20). 'auto' downloads the whole track first, as the
+    // chat VoicePlayer does, and gives full duration and seekable. Tracks are a few MB.
+    a.preload = isLinuxWebview() && !detectWindows() ? 'auto' : 'metadata';
     a.volume = get(musicPlayback).volume;
     attachDiagnostics(a);
     a.addEventListener('play', () => musicPlayback.update(s => ({ ...s, playing: true })));
