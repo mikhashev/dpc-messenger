@@ -284,6 +284,31 @@ timestamps lie outside them and are worth one read by Mike before acceptance.
   so the correction lives in dated notes in each body. Phase 0 in
   `docs/dpc-integration.html` will be corrected to this decision.
 
+### Decided (Mike's calls, 2026-11-20, AI Studio group chat, on the external review v2)
+
+Times are UTC from the group chat, where the group discussed Golova's critical review v2
+of the spec and the integration pages. Only what Mike said is listed here; the group's
+consensus proposals from the same discussion are in SPEC (marked "[P] (review v2,
+consensus 2026-11-20)") and are not decisions.
+
+- **D20. Region edits keep the source length** (05:03). For `remove_region` and the
+  region replace (`regenerate_region`), the received take's length must equal the
+  source's; otherwise the lyric timings break (SPEC §13). Proposed by Ark, backed by CC;
+  Mike: "I am for this rule too". So `remove_region` removes the sound, not the time.
+  `extend_ending` stays as it is (SPEC §4, §6, §12 decision 23).
+- **D21. A generated take is registered once** (05:04). The review's double registration
+  ("join Generated" versus `open_music_take_as_track`) is resolved when takes move into
+  core: one entry into the library, one event producer, a test against a repeat. Until
+  then the docs keep the note as the rule to implement (SPEC §3 flows 10 and 21, §12
+  decision 24).
+- **D22. Checked live, no separate stem spike** (05:04). Instead of a separate one-phrase
+  stem spike, everything is checked live in the already-working player as features are
+  added (SPEC §12 decision 25).
+- **D23. QC ranking is off by default** (05:05) until the QC judge is chosen (SPEC §12
+  decision 12, listed below under "Also open from SPEC §12"). Today nothing can execute
+  the rubric (SPEC §8.1, §12 decision 26). A consequence noted by CC, not said by Mike:
+  the agent's "ranks the takes by QC" in Q1's flow waits for the same switch.
+
 ### Not decided
 
 Each item needs Mike's yes or a measurement. Where an item is built in practice, a dated
@@ -437,7 +462,7 @@ implementation note under it says so (N1, N6); the rest are not built.
 - **Also open from SPEC §12**, not in the caller's list: where takes live (5), the HTTP
   service versus `local_api` commands only (6), two media elements versus WebAudio
   buffers for A/B (7), tags versus sidecar precedence (8, 11), QC thresholds and which
-  judge to install first (12), a version tree for sibling takes (14), the Listen-view
+  judge to install first (12; until then ranking is off, D23), a version tree for sibling takes (14), the Listen-view
   defaults (17), and the build order 1 → 2 → 3 of the modes (19).
 
 ### Rationale
@@ -885,7 +910,7 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
 
 ## Authors
 
-- **Mike**: Decision (D1-D19)
+- **Mike**: Decision (D1-D23)
 - **CC**: Spec, prototype, cards, this draft and its revision after review
 - **Zcode, Forge, Ark** (reviews, 2026-11-19 06:03, 06:04 and 06:33, AI Studio group
   chat): Zcode re-checked the code references by subagent at `95acf009`, found the D5
