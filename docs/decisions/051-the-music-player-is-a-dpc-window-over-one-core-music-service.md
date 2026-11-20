@@ -397,10 +397,13 @@ consensus 2026-11-20)") and are not decisions.
 - **D32. Discard requires a reason** (2026-11-21, #159 (b); SPEC §12 decision 35). Asked by
   CC: "is a reason mandatory on Discard?" Mike: "да, как написать текстом так и выбрать из
   списка" (yes, both writing it as text and picking it from a list). So Discard, and also
-  None of these, needs a reason: free text, a pick from a list, or both. Mike did not name
-  the list; the candidates are the failure classes (prep / sel / struct / opt / transport /
-  listen, EVOLUTION section 6, CC's reading of Ark's abbreviations) and the reason codes
-  (section 7); offering both is CC's proposal. Whether Discard keeps a `rejected` record
+  None of these, needs a reason: free text, a pick from a list, or both. **The list** (Mike,
+  #169, 2026-11-21): "ну я думаю его можно будет формировать как словарь по мере моего
+  ручного заполнения" (it can be built as a dictionary as I fill it in by hand). So the list
+  is a dictionary that grows from the reasons the person types; it starts empty and is not
+  written in advance. CC's proposal [P]: it lives in the job store, is deduplicated
+  case-insensitively and ordered by use. An optional failure class (EVOLUTION section 6) can
+  be attached to an entry; a class is never required to save a reason. Whether Discard keeps a `rejected` record
   instead of removing the library entry is **not** decided (EVOLUTION section 14).
 
 - **D33. Blind A/B is not in slice 1** (2026-11-21, #159 (c); SPEC §12 decision 37). CC
