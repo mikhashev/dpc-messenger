@@ -284,7 +284,7 @@ timestamps lie outside them and are worth one read by Mike before acceptance.
   so the correction lives in dated notes in each body. Phase 0 in
   `docs/dpc-integration.html` will be corrected to this decision.
 
-### Decided (Mike's calls, 2026-11-20, AI Studio group chat, on the external review v2)
+### Decided (Mike's calls, 2026-11-20, AI Studio group chat, on the external review v2 and the review of its written decisions)
 
 Times are UTC from the group chat, where the group discussed Golova's critical review v2
 of the spec and the integration pages. Only what Mike said is listed here; the group's
@@ -308,6 +308,29 @@ consensus 2026-11-20)") and are not decisions.
   decision 12, listed below under "Also open from SPEC §12"). Today nothing can execute
   the rubric (SPEC §8.1, §12 decision 26). A consequence noted by CC, not said by Mike:
   the agent's "ranks the takes by QC" in Q1's flow waits for the same switch.
+- **D24. `remove_region` near the end of the track may cut with shift** (05:53). The
+  question was the silent tail that decision D20 leaves when a removal lies near the end
+  (SPEC §12 decision 27). Mike chose option (b): as an explicit exception, on the
+  person's word, `remove_region` near the end of the track may cut with shift and re-time
+  the lyrics; the default stays D20 (keep the length). Mike added: "the tail can really be
+  quiet for 1-5 seconds", so a natural quiet tail of up to about 5 s is normal and the
+  listen-to-the-tail gate does not flag it by itself; it flags a cut-off last phrase or a
+  longer tail (SPEC §8). How the exception is asked for and how the lyrics are re-timed
+  is not specified yet.
+- **D25. The pair report and the external-player rule are adopted** (05:53). Forge's
+  table (requested vs received length, seam window, loudness of control vs edit, planned
+  vs sung words) and the rule "on a live complaint about sound, first play the same file
+  in an external player and say where it reproduced" are accepted (SPEC §8). The ASR
+  caveat stays: the planned-vs-sung row has false hits on instrumental passages, where ASR
+  invents text, and does not measure stress.
+- **D26. "Checked live" also replaces the repaint spike** (05:53). Mike answered "yes, I
+  think we will check it" to whether D22 also drops the one-evening repaint spike of N2.
+  The repaint engine is checked live in the working player as B4 lands (SPEC §12
+  decisions 2 and 28). Consequence raised by Ark, not a decision: the known-good /
+  known-bad control pair for the seam metrics was parked in that spike and now has no
+  owner. **Not decided, a condition (Forge proposed, CC backed; Mike did not rule on it):**
+  if stem separation turns out to damage the vocal during the live checks, the repair
+  path does not become a second edit option; it returns to Mike's decision.
 
 ### Not decided
 
@@ -328,8 +351,8 @@ implementation note under it says so (N1, N6); the rest are not built.
     counts the card swaps in one full run. A musician run can need ACE-Step, Whisper (the
     WER pass) and Flamingo, and each change of tenant is a swap under ADR-044 with its own
     cost (see Consequences).
-  - Phase 3, musician: the repaint spike, B4, melody to song, lego/complete, and the
-    clone.
+  - Phase 3, musician: the repaint spike (since D26 no separate spike: checked live), B4,
+    melody to song, lego/complete, and the clone.
 
   The epic's older child order ("Order B") is also CC's recommendation, not Mike's.
 
@@ -338,8 +361,10 @@ implementation note under it says so (N1, N6); the rest are not built.
   (Implementation Status). SoundCloud/Yandex is postponed (Q6). Phase 2 is not started;
   the GPU card (EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-SO-AN-IDLE-ENGINE-KEEPS-THE-CARD-THEY-NEED,
   N11) is what unblocks it.
-- **N2. The repaint engine.** The proposal is ACE-Step 1.5 API repaint, settled by a
-  one-evening spike, with Resonant as the fallback (SPEC §12 decision 2).
+- **N2. The repaint engine.** The proposal is ACE-Step 1.5 API repaint, with Resonant as
+  the fallback (SPEC §12 decision 2). It was to be settled by a one-evening spike; since
+  D26 (2026-11-20 05:53) it is checked live in the working player as B4 lands, with no
+  separate spike.
 - **N3. lego / complete** (own voice plus arrangement, instrument part to song). These
   are ACE-Step 1.5 base-model tasks per its README and are untested by us.
 - **N4. Music Flamingo on raw humming** is untested. It does not transcribe notes and it
@@ -780,7 +805,7 @@ Card names are kept as filed (D19).
 | Audio input: THE-LLAMA-SERVER-PROVIDER-SENDS-ONLY-IMAGES-SO-AN-AUDIO-MODEL-LIKE-MUSIC-FLAMINGO-CANNOT-BE-A-DPC-ENGINE | Pending | — |
 | QC: A-TAKE-ARRIVES-WITH-NO-QUALITY-CHECK-SO-TAKES-CANNOT-BE-RANKED-BEFORE-THE-PERSONS-AB | Pending | — |
 | Spike: NOBODY-HAS-RUN-ACE-STEP-REPAINT-ON-AN-OWN-TRACK-SO-THE-REGION-EDIT-ENGINE-IS-UNCHOSEN | Pending (needs weights and the card, on Mike's go) | — |
-| B4: REGION-EDIT-JOBS-HAVE-NO-ENGINE-SO-REGENERATE-REGION-AND-FIX-SEAM-ANSWER-UNSUPPORTED | Blocked by the spike | — |
+| B4: REGION-EDIT-JOBS-HAVE-NO-ENGINE-SO-REGENERATE-REGION-AND-FIX-SEAM-ANSWER-UNSUPPORTED | Blocked by the repaint engine (checked live since D26, no separate spike) | — |
 | YuE2: DPC-CANNOT-CALL-AN-MCP-SERVER-SO-YUE2-STUDIO-COVER-AND-LYRICS-TO-SONG-HAVE-NO-WAY-IN (scope now HTTP/CLI, D13) | Pending | — |
 | Clone: NO-SINGING-VOICE-CLONE-IS-CHOSEN-SO-A-SONG-CANNOT-BE-SUNG-IN-THE-MUSICIANS-OWN-VOICE | Research | — |
 | Streaming: THE-MUSIC-PLAYER-CANNOT-PLAY-OR-SAVE-SOUNDCLOUD-AND-YANDEX-MUSIC-TRACKS-SO-LISTENER-MODE-IS-LOCAL-ONLY (`backlog.md:132`) | Postponed (Mike, 2026-11-20: later, no rush); the `yt-dlp` path is not started. On the board (the first draft's "not on the board yet" was stale, Zcode and Ark) | — |
@@ -910,7 +935,7 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
 
 ## Authors
 
-- **Mike**: Decision (D1-D23)
+- **Mike**: Decision (D1-D26)
 - **CC**: Spec, prototype, cards, this draft and its revision after review
 - **Zcode, Forge, Ark** (reviews, 2026-11-19 06:03, 06:04 and 06:33, AI Studio group
   chat): Zcode re-checked the code references by subagent at `95acf009`, found the D5
