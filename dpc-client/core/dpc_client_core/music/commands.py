@@ -707,6 +707,31 @@ class MusicCommandsMixin:
             return _error(exc)
 
     @slow_command
+    async def list_music_discard_reasons(self, prefix: Any = None, limit: Any = None) -> Dict[str, Any]:
+        """The Discard-reason dictionary: what the person typed, most used first."""
+        try:
+            pre = _opt_str(prefix, "prefix", "invalid_params")
+            if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+                raise _bad("invalid_params", "limit", "a positive integer")
+            store = await self._music_jobs()
+            reasons = await asyncio.to_thread(lambda: store.list_reasons(pre, 50 if limit is None else limit))
+            return {"status": "ok", "reasons": reasons}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
+    async def set_music_discard_reason_class(self, key: Any = None, reason_class: Any = None) -> Dict[str, Any]:
+        """Attach a failure class to a dictionary entry (null clears it)."""
+        try:
+            k = _need_str(key, "key", "invalid_params")
+            cls = _opt_str(reason_class, "reason_class", "invalid_params")
+            store = await self._music_jobs()
+            reason = await asyncio.to_thread(store.set_reason_class, k, cls)
+            return {"status": "ok", "reason": reason}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
     async def get_music_track(self, track_id: str) -> Dict[str, Any]:
         """The library entry and its `mp.track/1` (null while the duration is unknown).
         Slow: it waits on ffprobe for the duration, sample rate and channels."""
@@ -825,6 +850,8 @@ MUSIC_COMMANDS = (
     "keep_music_take",
     "discard_music_take",
     "reject_all_music_takes",
+    "list_music_discard_reasons",
+    "set_music_discard_reason_class",
     "list_music_playlists",
     "create_music_playlist",
     "update_music_playlist",

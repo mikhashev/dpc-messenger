@@ -75,6 +75,7 @@ logger = logging.getLogger(__name__)
 JOBS_DIR = "jobs"
 JOB_FILE = "job.json"
 PAYLOAD_DIR = "payload"
+REASONS_FILE = "reasons.json"
 RESTART_REASON = "interrupted by restart"
 CANCEL_REASON = "cancelled by the person"
 WAITING_FOR_CARD = "waiting for the card"
@@ -159,6 +160,7 @@ class MusicJobStore:
         self._takes: Dict[str, List[dict]] = {}
         self._take_job: Dict[str, str] = {}
         self._by_key: Dict[str, str] = {}
+        self._reasons: Dict[str, dict] = {}
         self._loaded = False
 
     # -- storage -----------------------------------------------------------------
@@ -251,9 +253,101 @@ class MusicJobStore:
                     if job.get("idempotency_key"):
                         self._by_key[job["idempotency_key"]] = job["id"]
             self._reindex_takes()
+            self._reasons = self._load_reasons()
             self._loaded = True
             for job_id in list(self._jobs):
                 self._after_restart(job_id)
+
+    # -- the Discard-reason dictionary (SPEC 35, ADR-051 D32) ----------------------
+
+    @property
+    def reasons_path(self) -> Path:
+        return self.root / REASONS_FILE
+
+    def _load_reasons(self) -> Dict[str, dict]:
+        path = self.reasons_path
+        if not path.is_file():
+            return {}
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(doc, dict) or doc.get("schema") != js.REASONS_SCHEMA \
+                    or not isinstance(doc.get("entries"), list):
+                raise SchemaError("mp.reasons/1", "not an mp.reasons/1 document")
+            out: Dict[str, dict] = {}
+            for entry in doc["entries"]:
+                entry.setdefault("reason_class", None)
+                js.validate_reason_entry(entry)
+                out[entry["key"]] = entry
+            return out
+        except (OSError, ValueError, SchemaError, TypeError, AttributeError):
+            logger.warning("music: %s is unreadable; set aside, the dictionary starts empty", path, exc_info=True)
+            self._set_aside(path, "corrupt")
+            return {}
+
+    def _save_reasons(self) -> None:
+        doc = {"schema": js.REASONS_SCHEMA, "entries": list(self._reasons.values())}
+        atomic_write_text(self.reasons_path, json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
+
+    def _reason_class_for(self, text: Optional[str], cls: Optional[str]) -> Optional[str]:
+        """The class a take gets: the one the call gave, else the one the typed reason's
+        dictionary entry carries."""
+        if cls is not None or text is None:
+            return cls
+        entry = self._reasons.get(js.reason_key(text))
+        return entry["reason_class"] if entry else None
+
+    def _note_reason(self, text: Optional[str], cls: Optional[str]) -> None:
+        """Record or bump the entry of a typed reason. A class the call gives is attached
+        to an entry that has none (once); an entry's class is never overwritten here."""
+        if text is None:
+            return
+        key = js.reason_key(text)
+        at = self._now()
+        entry = self._reasons.get(key)
+        if entry is None:
+            entry = {"text": " ".join(text.split()), "key": key, "uses": 0,
+                     "first_used_at": at, "last_used_at": at, "reason_class": None}
+            self._reasons[key] = entry
+        entry["uses"] += 1
+        entry["last_used_at"] = at
+        if entry["reason_class"] is None and cls is not None:
+            entry["reason_class"] = cls
+        try:
+            self._save_reasons()
+        except OSError:
+            logger.warning("music: could not save %s; the dictionary is kept in memory", self.reasons_path,
+                           exc_info=True)
+
+    def list_reasons(self, prefix: Optional[str] = None, limit: int = 50) -> List[dict]:
+        """The dictionary, most used first, then most recently used. `prefix` is matched
+        case-insensitively against the normalized key."""
+        if prefix is not None and not isinstance(prefix, str):
+            raise MusicJobError("invalid_params", "prefix must be text", field="prefix")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise MusicJobError("invalid_params", "limit must be a positive integer", field="limit")
+        with self._lock:
+            self._ready()
+            want = js.reason_key(prefix) if prefix is not None else ""
+            rows = [e for e in self._reasons.values() if e["key"].startswith(want)]
+            rows.sort(key=lambda e: e["last_used_at"], reverse=True)
+            rows.sort(key=lambda e: e["uses"], reverse=True)
+            return copy.deepcopy(rows[:limit])
+
+    def set_reason_class(self, key: str, reason_class: Optional[str]) -> dict:
+        """Attach a failure class to an entry, or clear it with None. Takes already
+        decided keep the class they were given."""
+        try:
+            cls = js.check_reason_class(reason_class)
+        except js.ParamsError as exc:
+            raise MusicJobError("invalid_params", exc.message, field=exc.field)
+        with self._lock:
+            self._ready()
+            entry = self._reasons.get(js.reason_key(key)) if isinstance(key, str) else None
+            if entry is None:
+                raise MusicJobError("not_found", f"no discard reason {key!r}", field="key")
+            entry["reason_class"] = cls
+            self._save_reasons()
+            return copy.deepcopy(entry)
 
     def _after_restart(self, job_id: str) -> None:
         job = self._jobs[job_id]
@@ -743,14 +837,16 @@ class MusicJobStore:
         with self._lock:
             self._ready()
             job_id, _ = self._take(take_id)
+            eff = self._reason_class_for(text, cls)
 
             def change(job: dict) -> None:
                 take = next(t for t in self._takes[job_id] if t["id"] == take_id)
                 self._check_decidable(job, take)
-                self._reject(take, text, cls)
+                self._reject(take, text, eff)
                 job["updated_at"] = take["decided_at"]
                 self._settle_job(job, self._takes[job_id])
             self._change(job_id, change)
+            self._note_reason(text, cls)
             return copy.deepcopy(self._take(take_id)[1])
 
     def reject_all_takes(self, job_id: str, *, reason_text: Optional[str] = None,
@@ -759,17 +855,22 @@ class MusicJobStore:
         and the job becomes `rejected`. Only in `review`: once a take is kept the job is
         `accepted`, and the other takes are discarded one by one."""
         text, cls = self._reason(reason_text, reason_class)
+        with self._lock:
+            self._ready()
+            eff = self._reason_class_for(text, cls)
 
-        def change(job: dict) -> None:
-            takes = self._takes[job_id]
-            if job["state"] != js.REVIEW:
-                raise MusicJobError("illegal_transition", f"job {job_id} is {job['state']}, not in review")
-            for t in takes:
-                if t["decision"] == js.PENDING:
-                    self._reject(t, text, cls)
-            job["updated_at"] = self._now()
-            self._settle_job(job, takes)
-        return self._change(job_id, change)
+            def change(job: dict) -> None:
+                takes = self._takes[job_id]
+                if job["state"] != js.REVIEW:
+                    raise MusicJobError("illegal_transition", f"job {job_id} is {job['state']}, not in review")
+                for t in takes:
+                    if t["decision"] == js.PENDING:
+                        self._reject(t, text, eff)
+                job["updated_at"] = self._now()
+                self._settle_job(job, takes)
+            job = self._change(job_id, change)
+            self._note_reason(text, cls)
+            return job
 
     @staticmethod
     def _reason(reason_text: Any, reason_class: Any) -> tuple:

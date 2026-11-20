@@ -363,6 +363,38 @@ def check_reason(reason_text: Any, reason_class: Any) -> tuple:
     return text, cls
 
 
+REASONS_SCHEMA = "mp.reasons/1"
+_REASON_ENTRY_KEYS = ("text", "key", "uses", "first_used_at", "last_used_at", "reason_class")
+
+
+def reason_key(text: str) -> str:
+    """The dictionary key of a typed Discard reason: whitespace trimmed and collapsed,
+    case-folded, so "Muddy  mix " and "muddy mix" are one entry."""
+    return " ".join(text.split()).casefold()
+
+
+def check_reason_class(reason_class: Any) -> Optional[str]:
+    """A failure class from `FAILURE_CLASSES`, or None; `ParamsError` otherwise."""
+    if reason_class is not None and reason_class not in FAILURE_CLASSES:
+        raise ParamsError("reason_class",
+                          f"reason_class must be one of {', '.join(FAILURE_CLASSES)} or null, got {reason_class!r}")
+    return reason_class
+
+
+def validate_reason_entry(entry: Any) -> None:
+    """Raise `SchemaError` unless `entry` is one dictionary entry of `reasons.json`."""
+    s = "mp.reasons/1 entry"
+    _expect(s, isinstance(entry, Mapping) and set(entry) <= set(_REASON_ENTRY_KEYS)
+            and all(k in entry for k in _REASON_ENTRY_KEYS[:5]), "an entry needs text, key, uses and the two times")
+    _expect(s, _is_str(entry["text"]) and bool(entry["text"].strip()), "'text' must be non-blank text")
+    _expect(s, entry["key"] == reason_key(entry["text"]), "'key' must be the normalized text")
+    _expect(s, isinstance(entry["uses"], int) and not isinstance(entry["uses"], bool) and entry["uses"] >= 1,
+            "'uses' must be a positive integer")
+    _expect(s, _is_str(entry["first_used_at"]) and _is_str(entry["last_used_at"]), "the times must be strings")
+    cls = entry.get("reason_class")
+    _expect(s, cls is None or cls in FAILURE_CLASSES, "'reason_class' must be a failure class or null")
+
+
 def validate_take(take: Any) -> None:
     """Raise `SchemaError` unless `take` is an `mp.take/1` the core may write."""
     s = TAKE

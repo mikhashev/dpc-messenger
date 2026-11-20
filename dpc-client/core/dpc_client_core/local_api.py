@@ -146,6 +146,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "get_music_capabilities", "get_music_engine_status", "start_music_engine", "stop_music_engine",
     "propose_music_job", "get_music_job", "list_music_jobs", "cancel_music_job",
     "list_music_takes", "keep_music_take", "discard_music_take", "reject_all_music_takes",
+    "list_music_discard_reasons", "set_music_discard_reason_class",
     "list_music_playlists", "create_music_playlist", "update_music_playlist", "delete_music_playlist",
     # The lyrics chain (ADR-051 D6): .lrc sidecar, tags, LRCLIB; transcribe; manual edits
     "get_music_lyrics", "save_music_lyrics", "lookup_music_lyrics_lrclib", "transcribe_music_lyrics",
