@@ -11,7 +11,7 @@ The one route is ``GET`` / ``HEAD`` ``/music/track/{track_id}?t=<token>``:
 
 - **Keyed by `track_id`, never by a path.** The id is looked up in the library
   (`MusicLibrary.get_track_path`); the URL carries no path and any query key other than
-  `t` is refused (400). An unknown, missing or fileless track is 404. The file must also
+  `t` (and the optional `ranges`, below) is refused (400). An unknown, missing or fileless track is 404. The file must also
   have one of the library's own audio extensions (`identity.AUDIO_EXTENSIONS`) and be a
   regular file, so even a hand-edited `library.json` cannot make this serve a key file.
 - **A token.** `secrets.token_urlsafe(32)`, made when the listener is created, held in
@@ -33,6 +33,14 @@ The one route is ``GET`` / ``HEAD`` ``/music/track/{track_id}?t=<token>``:
   malformed one answers 200 with the whole file (RFC 9110 lets a server ignore `Range`).
   **A multi-range request (`bytes=0-1,5-6`) is answered 200 with the whole file**, never
   `multipart/byteranges`: no media element asks for it, and ignoring is allowed.
+- **No-Range mode, `&ranges=0`** (the one optional query key; the value is `0` or `1`,
+  anything else is 400; absent means `1`). The `Range` and `If-Range` headers are ignored:
+  the answer is always 200 with the whole file, `Content-Length`, `Content-Type`, and
+  **no `Accept-Ranges`** (never 206 or 416), still streamed in `CHUNK_BYTES` reads. It
+  exists for the Linux webview: WebKitGTK 2.50 streams a Range-capable source
+  progressively, reports `duration` 0, and rejects a forward seek beyond what it has
+  buffered, while on a plain 200 source it fetches the whole file and knows the duration
+  and a full `seekable`. HEAD answers the same headers without a body.
 - **Every answer to a track request carries `Content-Length`** (the span's byte count, set
   before the headers go out) and never `Transfer-Encoding: chunked`: aiohttp's
   `StreamResponse` is chunked unless `content_length` is set, and a chunked answer reads
@@ -73,6 +81,7 @@ LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 CHUNK_BYTES = 256 * 1024
 ROUTE = "/music/track/{track_id}"
 TOKEN_PARAM = "t"
+RANGES_PARAM = "ranges"  # optional: "0" answers the whole file and no Accept-Ranges
 
 # The DPC webview's own origins: Tauri 2 on Linux and macOS (`tauri://localhost`), on
 # Windows (`http://tauri.localhost`, or `https://` with `useHttpsScheme`), and the Vite
@@ -215,10 +224,14 @@ class MusicStreamServer:
             logger.warning("music stream: refused %s %s, %s token", request.method, request.path,
                            "no" if not presented else "a wrong")
             return self._refuse(403, "token required")
-        extra = sorted(set(request.query.keys()) - {TOKEN_PARAM})
+        extra = sorted(set(request.query.keys()) - {TOKEN_PARAM, RANGES_PARAM})
         if extra:
             logger.warning("music stream: refused %s %s, unknown query keys %s", request.method, request.path, extra)
             return self._refuse(400, "unknown query parameter")
+        ranges = request.query.getall(RANGES_PARAM, [])
+        if len(ranges) > 1 or (ranges and ranges[0] not in ("0", "1")):
+            logger.warning("music stream: refused %s %s, bad ranges value", request.method, request.path)
+            return self._refuse(400, "ranges must be 0 or 1")
         return await handler(request)
 
     @staticmethod
@@ -266,7 +279,8 @@ class MusicStreamServer:
             size = st.st_size
             etag = f'"{size:x}-{st.st_mtime_ns:x}"'
             last_modified = email.utils.formatdate(st.st_mtime, usegmt=True)
-            range_header = request.headers.get("Range")
+            ranges_on = request.query.get(RANGES_PARAM, "1") != "0"
+            range_header = request.headers.get("Range") if ranges_on else None  # `ranges=0`: ignored
             if_range = request.headers.get("If-Range")
             if range_header and if_range and if_range.strip() not in (etag, last_modified):
                 range_header = None  # the validator is stale: the whole file, not a slice of it
@@ -275,11 +289,12 @@ class MusicStreamServer:
                 "ETag": etag,
                 "Last-Modified": last_modified,
                 "Content-Type": MIME_BY_EXTENSION.get(path.suffix.lower(), "application/octet-stream"),
-                "Accept-Ranges": "bytes",
                 "Cache-Control": "no-store",
                 "X-Content-Type-Options": "nosniff",
                 **self._origin_headers(request),
             }
+            if ranges_on:
+                headers["Accept-Ranges"] = "bytes"
             if span == UNSATISFIABLE:
                 headers["Content-Range"] = f"bytes */{size}"
                 return web.Response(status=416, headers=headers)

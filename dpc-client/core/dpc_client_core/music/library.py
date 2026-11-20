@@ -287,6 +287,10 @@ class MusicLibrary:
         self._queue: Deque[str] = deque()
         self._queued: Set[str] = set()
         self._verify: Dict[str, Tuple[str, str]] = {}
+        # Hashed entries with no duration (scanned before ffprobe was there): a rescan
+        # that finds ffprobe now re-probes each of them once per process, with no re-hash.
+        self._reprobe: Set[str] = set()
+        self._reprobed: Set[str] = set()
         self._wake: Optional[asyncio.Event] = None
         self._idle: Optional[asyncio.Event] = None
         self._scan_lock: Optional[asyncio.Lock] = None
@@ -687,6 +691,15 @@ class MusicLibrary:
                 if tools is None:
                     tools = self._tools or await asyncio.to_thread(MediaTools.discover)
                 path = e["path"]
+                if track_id in self._reprobe:
+                    self._reprobe.discard(track_id)
+                    if e.get("hash_state") == "done":
+                        meta = await asyncio.to_thread(probe_metadata, Path(path), tools)
+                        current = self._entries.get(track_id)
+                        if current is not None and path_key(current.get("path") or "") == path_key(path):
+                            self._apply_probe(current, meta)
+                        continue
+                    # Not hashed (changed meanwhile): the full pass below reads it.
                 try:
                     ident = await asyncio.to_thread(identify, Path(path), tools)
                 except OSError as exc:
@@ -704,6 +717,23 @@ class MusicLibrary:
                 self._apply_identity(track_id, path, ident)
             self._wake.clear()
             self._idle.set()
+
+    def _apply_probe(self, e: dict, meta: Dict[str, Any]) -> None:
+        """Fill what a late ffprobe found on a hashed entry: the duration, and the tags
+        the scan could not read (the title only while it is still the file name)."""
+        changed = False
+        if e.get("duration_s") is None and meta.get("duration_s") is not None:
+            e["duration_s"] = round(float(meta["duration_s"]), 3)
+            changed = True
+        for key in ("artist", "album"):
+            if not e.get(key) and meta.get(key):
+                e[key] = meta[key]
+                changed = True
+        if meta.get("title") and e.get("title") == Path(e["path"]).stem:
+            e["title"] = meta["title"]
+            changed = True
+        if changed:
+            self._mark_dirty()
 
     async def wait_hashed(self, timeout: float = 60.0) -> None:
         """Wait until the hash queue is empty (tests, and a caller that needs ids final)."""
@@ -945,19 +975,30 @@ class MusicLibrary:
                 return copy.deepcopy(folder)
             if folder_id not in self._folders:
                 raise MusicLibraryError("unknown_folder", f"no watched folder {folder_id}")
-            self._apply_scan(folder, found, alt_stats, failed=failed)
+            reprobe = False
+            if any(self._wants_reprobe(e) for e in self._entries.values() if e.get("folder_id") == folder_id):
+                tools = self._tools or await asyncio.to_thread(MediaTools.discover)
+                reprobe = bool(tools.ffprobe)  # only when ffprobe can answer now
+            self._apply_scan(folder, found, alt_stats, failed=failed, reprobe=reprobe)
             self._mark_dirty()
             return copy.deepcopy(folder)
 
     async def rescan_all(self) -> List[dict]:
         return [await self.rescan_folder(fid) for fid in list(self._folders)]
 
+    def _wants_reprobe(self, e: dict) -> bool:
+        """A present, hashed entry with no duration that was not re-probed in this process."""
+        return (not e.get("missing") and e.get("hash_state") == "done" and e.get("duration_s") is None
+                and bool(e.get("path")) and e["id"] not in self._reprobed)
+
     def _apply_scan(self, folder: dict, found: List[Tuple[str, int, int]], alt_stats: Dict[str, Tuple[int, int]],
-                    *, failed: Optional[List[Tuple[str, str]]] = None) -> None:
+                    *, failed: Optional[List[Tuple[str, str]]] = None, reprobe: bool = False) -> None:
         """Reconcile one walk. With `failed` non-empty the walk was partial: new and
         changed files are still taken in, but nothing is marked missing or dropped
         from `alt_paths`, the counts and `last_scan_at` keep the last full scan, and
-        the folder is `unavailable` until a walk completes."""
+        the folder is `unavailable` until a walk completes. With `reprobe` (ffprobe is
+        available now) an unchanged entry that has no duration is probed again, once per
+        process and without hashing: its mtime did not change, so nothing else would."""
         folder_id = folder["id"]
         fkey = path_key(folder["path"])
         found_by_key = {path_key(p): (p, size, mtime) for p, size, mtime in found}
@@ -976,6 +1017,10 @@ class MusicLibrary:
             if e is not None:
                 stat_text = {"size_bytes": size, "mtime": _mtime_text(mtime)}
                 if e.get("file_stat") == stat_text and e.get("hash_state") != "error":
+                    if reprobe and self._wants_reprobe(e):
+                        self._reprobed.add(e["id"])
+                        self._reprobe.add(e["id"])
+                        self._enqueue(e["id"])
                     continue
                 if e.get("hash_state") == "done":
                     if e["id"] not in self._verify:

@@ -493,7 +493,7 @@ async function startAt(queue: QueueState, index: number, autoplay: boolean): Pro
     {
         const env = await getPlaybackEnv();
         const platform = env.isLinux ? 'linux' : env.isWindows ? 'windows' : 'macos-or-other';
-        dlogEvent('source', `source #${token} ${id} ${entryOf(id)?.source?.name ?? ''} via=${source.via} mime=${source.mime || 'none'} bytes=${source.bytes ?? 'n/a'} platform=${platform}${source.fallback ? ` fallback=${source.fallback}` : ''}`);
+        dlogEvent('source', `source #${token} ${id} ${entryOf(id)?.source?.name ?? ''} via=${source.via} mime=${source.mime || 'none'} bytes=${source.bytes ?? 'n/a'}${source.via === 'http' ? ` ranges=${source.ranges === false ? 0 : 1}` : ''} platform=${platform}${source.fallback ? ` fallback=${source.fallback}` : ''}`);
     }
     seekRequested = null;
     releaseSource();

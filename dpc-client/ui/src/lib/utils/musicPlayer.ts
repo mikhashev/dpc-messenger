@@ -342,8 +342,10 @@ export function nextPlaylistName(playlists: readonly Playlist[]): string {
  *
  * - The core's track stream (`dpc_client_core/music/stream.py`): loopback HTTP with
  *   `Range` and a token, keyed by track id; `media-src` names `http://127.0.0.1:9996`.
- *   **Linux** always uses it: WebKitGTK plays no audio from `asset:`, and treats a
- *   `blob:` as a live stream (duration 0, no seeking forward).
+ *   **Linux** always uses it, with `&ranges=0` (a plain whole-file 200, no Accept-Ranges;
+ *   `[music] stream_ranges_linux` turns Range back on): WebKitGTK plays no audio from
+ *   `asset:`, treats a `blob:` as a live stream (duration 0, no seeking forward), and on a
+ *   Range source reports duration 0 and refuses forward seeks it has not buffered.
  * - **Windows and macOS** keep `convertFileSrc` (`asset:`) for a file under `~/.dpc`, the
  *   asset scope; a file elsewhere uses the stream.
  * - Fallback when the stream info cannot be had: Linux reads a file under `~/.dpc` into
@@ -357,6 +359,8 @@ export interface StreamInfo {
     base_url: string;
     /** The stream's per-process token. Never logged. */
     token: string;
+    /** `[music] stream_ranges_linux`: true makes Linux ask for HTTP Range; absent or false, no Range. */
+    ranges_linux?: boolean;
 }
 
 export interface PlaybackEnv {
@@ -381,6 +385,8 @@ export type PlaybackProblem = 'missing' | 'no-file' | 'outside-dpc' | 'web' | 'n
 
 export type PlaybackSource =
     | { ok: true; url: string; via: 'asset' | 'blob' | 'http'; release: () => void; mime?: string; bytes?: number;
+        /** For `via: 'http'`: whether the stream URL allows HTTP Range (false: `ranges=0`, a plain whole-file 200). */
+        ranges?: boolean;
         /** Why the stream was not used when it would have been (Linux fell back to `blob:`). */
         fallback?: string }
     | { ok: false; problem: PlaybackProblem; reason: string };
@@ -473,8 +479,9 @@ export function isLoopbackStreamBase(base: unknown): base is string {
 }
 
 /** The `<audio>` URL of a track on the core's stream: keyed by its library id, never a path. */
-export function streamTrackUrl(info: StreamInfo, trackId: string): string {
-    return `${info.base_url}/music/track/${encodeURIComponent(trackId)}?t=${encodeURIComponent(info.token)}`;
+export function streamTrackUrl(info: StreamInfo, trackId: string, ranges = true): string {
+    const url = `${info.base_url}/music/track/${encodeURIComponent(trackId)}?t=${encodeURIComponent(info.token)}`;
+    return ranges ? url : `${url}&ranges=0`;
 }
 
 /** Whether the track can be asked to play at all, without reading anything. With the
@@ -509,7 +516,10 @@ export async function trackPlaybackUrl(entry: LibraryEntry | null | undefined, e
                 if (!isLoopbackStreamBase(info?.base_url) || typeof info?.token !== 'string' || !info.token) {
                     throw new Error('the core gave no loopback stream address');
                 }
-                return { ok: true, url: streamTrackUrl(info, entry!.id), via: 'http', release: () => {}, mime: trackMime(entry) };
+                // Linux without Range (unless `[music] stream_ranges_linux`): WebKitGTK reports
+                // duration 0 and refuses forward seeks on a Range source, and handles a plain 200.
+                const ranges = !env.isLinux || info.ranges_linux === true;
+                return { ok: true, url: streamTrackUrl(info, entry!.id, ranges), via: 'http', release: () => {}, mime: trackMime(entry), ranges };
             } catch (e) {
                 fallback = `stream unavailable: ${e instanceof Error ? e.message : String(e)}`;
             }

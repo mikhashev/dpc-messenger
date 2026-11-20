@@ -682,6 +682,7 @@ describe('the playback source with the core track stream (ADR-051 N8, D28)', () 
         source: { kind: 'local', name: 'night-bus.flac', uri: 'file:///x', mime: 'audio/flac' }, ...extra,
     });
     const URL_1 = 'http://127.0.0.1:9996/music/track/trk_0000000000000001?t=tok%2Fen%2B%3D';
+    const URL_NO_RANGE = `${URL_1}&ranges=0`;
     const linux = (over: Partial<PlaybackEnv> = {}): PlaybackEnv => ({
         tauri: true, home: '/home/mike', isWindows: false, isLinux: true,
         readHomeFile: vi.fn(async () => new Uint8Array([1, 2, 3])),
@@ -704,6 +705,26 @@ describe('the playback source with the core track stream (ADR-051 N8, D28)', () 
         expect(streamTrackUrl(INFO, 'a/../b')).toBe('http://127.0.0.1:9996/music/track/a%2F..%2Fb?t=tok%2Fen%2B%3D');
     });
 
+    it('ranges=false adds the one extra query key; the default URL is unchanged', () => {
+        expect(streamTrackUrl(INFO, 'trk_0000000000000001', false)).toBe(URL_NO_RANGE);
+        expect(streamTrackUrl(INFO, 'trk_0000000000000001', true)).toBe(URL_1);
+    });
+
+    it('Linux asks for ranges=0 unless the core says [music] stream_ranges_linux is on; Windows and macOS never do', async () => {
+        const e = entry('/home/mike/Music/night-bus.flac');
+        expect(await trackPlaybackUrl(e, linux())).toMatchObject({ ok: true, url: URL_NO_RANGE, ranges: false });
+        expect(await trackPlaybackUrl(e, linux({ streamInfo: async () => ({ ...INFO, ranges_linux: false }) })))
+            .toMatchObject({ url: URL_NO_RANGE, ranges: false });
+        expect(await trackPlaybackUrl(e, linux({ streamInfo: async () => ({ ...INFO, ranges_linux: true }) })))
+            .toMatchObject({ url: URL_1, ranges: true });
+        const w = await trackPlaybackUrl(entry('D:\Music\a.flac'), win({ streamInfo: async () => ({ ...INFO, ranges_linux: false }) }));
+        const m = await trackPlaybackUrl(entry('/Users/mike/Music/a.flac'), mac({ streamInfo: async () => ({ ...INFO, ranges_linux: false }) }));
+        for (const r of [w, m]) {
+            expect(r).toMatchObject({ ok: true, via: 'http', ranges: true });
+            expect(r.ok && r.url).not.toContain('ranges');
+        }
+    });
+
     it('only a loopback http base is a stream', () => {
         expect(isLoopbackStreamBase('http://127.0.0.1:9996')).toBe(true);
         expect(isLoopbackStreamBase('http://[::1]:9996')).toBe(true);
@@ -715,7 +736,7 @@ describe('the playback source with the core track stream (ADR-051 N8, D28)', () 
     it('on Linux a track under ~/.dpc plays from the stream, with nothing read into a blob', async () => {
         const env = linux();
         const r = await trackPlaybackUrl(entry('/home/mike/.dpc/music/take.flac'), env);
-        expect(r).toMatchObject({ ok: true, via: 'http', url: URL_1, mime: 'audio/flac' });
+        expect(r).toMatchObject({ ok: true, via: 'http', url: URL_NO_RANGE, mime: 'audio/flac', ranges: false });
         expect(r.ok && r.fallback).toBeFalsy();
         expect(env.readHomeFile).not.toHaveBeenCalled();
     });
@@ -724,7 +745,7 @@ describe('the playback source with the core track stream (ADR-051 N8, D28)', () 
         const e = entry('/home/mike/Music/night-bus.flac');
         const env = linux();
         expect(playbackProblem(e, env)).toBeNull();
-        expect(await trackPlaybackUrl(e, env)).toMatchObject({ ok: true, via: 'http', url: URL_1 });
+        expect(await trackPlaybackUrl(e, env)).toMatchObject({ ok: true, via: 'http', url: URL_NO_RANGE });
     });
 
     it('on Windows and macOS a track under ~/.dpc stays on asset:, and the stream is not asked', async () => {
@@ -738,7 +759,7 @@ describe('the playback source with the core track stream (ADR-051 N8, D28)', () 
     });
 
     it('on Windows and macOS a track outside ~/.dpc, which asset: cannot reach, plays from the stream', async () => {
-        expect(await trackPlaybackUrl(entry('D:\\Music\\night-bus.flac'), win())).toMatchObject({ ok: true, via: 'http', url: URL_1 });
+        expect(await trackPlaybackUrl(entry('D:\\Music\\night-bus.flac'), win())).toMatchObject({ ok: true, via: 'http', url: URL_1, ranges: true });
         expect(await trackPlaybackUrl(entry('/Users/mike/Music/night-bus.flac'), mac())).toMatchObject({ ok: true, via: 'http', url: URL_1 });
     });
 

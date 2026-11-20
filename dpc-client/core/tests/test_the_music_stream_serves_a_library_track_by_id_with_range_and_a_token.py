@@ -359,3 +359,100 @@ async def test_a_track_answer_carries_validators_and_a_stale_if_range_gets_the_w
     status, h, body = await _raw(server, [
         f"GET /music/track/trk_abc?t={TOKEN} HTTP/1.1", "Range: bytes=10-19", 'If-Range: "stale"'])
     assert status.split()[1] == "200" and body == BODY and "content-range" not in h
+
+
+# -- no-Range mode (`&ranges=0`, the Linux webview) ---------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("range_line", [None, "Range: bytes=100-199", "Range: bytes=-50", f"Range: bytes={SIZE + 5}-"])
+async def test_ranges_0_answers_200_with_the_whole_file_and_no_accept_ranges(server, method, range_line):
+    lines = [f"{method} /music/track/trk_abc?t={TOKEN}&ranges=0 HTTP/1.1"] + ([range_line] if range_line else [])
+    status_line, headers, body = await _raw(server, lines)
+    assert status_line.split()[1] == "200"
+    assert headers["content-length"] == str(SIZE)
+    assert "transfer-encoding" not in headers
+    assert "accept-ranges" not in headers and "content-range" not in headers
+    assert headers["content-type"] == "audio/mpeg"
+    assert headers["cache-control"] == "no-store"
+    assert (body == b"") == (method == "HEAD")
+    if method == "GET":
+        assert body == BODY
+
+
+@pytest.mark.asyncio
+async def test_ranges_0_ignores_if_range_and_ranges_1_is_the_default_mode(server):
+    status_line, headers, body = await _raw(server, [
+        f"GET /music/track/trk_abc?t={TOKEN}&ranges=0 HTTP/1.1", "Range: bytes=10-19", 'If-Range: "x"'])
+    assert status_line.split()[1] == "200" and body == BODY
+    status_line, headers, body = await _raw(server, [
+        f"GET /music/track/trk_abc?t={TOKEN}&ranges=1 HTTP/1.1", "Range: bytes=10-19"])
+    assert status_line.split()[1] == "206" and body == BODY[10:20] and headers["accept-ranges"] == "bytes"
+
+
+@pytest.mark.asyncio
+async def test_ranges_0_streams_a_file_larger_than_one_chunk_whole(tmp_path):
+    from dpc_client_core.music.stream import CHUNK_BYTES
+    big = bytes((i * 7) % 251 for i in range(CHUNK_BYTES * 2 + 1234))
+    path = tmp_path / "long.flac"
+    path.write_bytes(big)
+    s = MusicStreamServer(lambda tid: path if tid == "trk_long" else None, port=0, token=TOKEN)
+    await s.start()
+    try:
+        status, headers, body = await _get(s, "/music/track/trk_long", headers={"Range": "bytes=5-9"},
+                                           query={"ranges": "0"})
+        assert status == 200 and body == big and "Accept-Ranges" not in headers
+        assert headers["Content-Length"] == str(len(big))
+    finally:
+        await s.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_file_in_no_range_mode_is_200_with_a_zero_length(tmp_path):
+    path = tmp_path / "empty.mp3"
+    path.write_bytes(b"")
+    s = MusicStreamServer(lambda tid: path if tid == "trk_e" else None, port=0, token=TOKEN)
+    await s.start()
+    try:
+        status, headers, body = await _get(s, "/music/track/trk_e", query={"ranges": "0"})
+        assert status == 200 and body == b"" and headers["Content-Length"] == "0"
+    finally:
+        await s.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["2", "", "true", "00", "-1"])
+async def test_a_bad_ranges_value_is_400_and_so_is_a_repeated_one(server, bad):
+    status, _, body = await _get(server, "/music/track/trk_abc", query={"ranges": bad})
+    assert status == 400 and body != BODY
+    status_line, _, body = await _raw(server, [f"GET /music/track/trk_abc?t={TOKEN}&ranges=0&ranges=1 HTTP/1.1"])
+    assert status_line.split()[1] == "400" and body != BODY
+
+
+@pytest.mark.asyncio
+async def test_ranges_does_not_open_the_door_to_other_keys_or_skip_the_token(server):
+    assert (await _get(server, "/music/track/trk_abc", query={"ranges": "0", "path": "/etc/passwd"}))[0] == 400
+    assert (await _get(server, "/music/track/trk_abc", token=None, query={"ranges": "0"}))[0] == 403
+    assert (await _get(server, "/music/track/trk_abc", token="wrong", query={"ranges": "0"}))[0] == 403
+    assert (await _get(server, "/music/track/trk_abc", query={"ranges": "0"}, headers={"Origin": "https://evil.example"}))[0] == 403
+    assert (await _get(server, "/music/track/trk_abc", query={"ranges": "0"}, headers={"Host": "evil.example"}))[0] == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value,expected", [(None, False), ("false", False), ("true", True), ("1", True), ("garbage", False)])
+async def test_the_stream_info_says_whether_linux_may_ask_for_ranges(tmp_path, value, expected):
+    class _S(_Settings):
+        def get(self, section, key, fallback=None):
+            if (section, key) == ("music", "stream_ranges_linux"):
+                return fallback if value is None else value
+            return super().get(section, key, fallback)
+
+    class _Svc(MusicCommandsMixin):
+        def __init__(self):
+            self.settings = _S(tmp_path / "dpc", "0")
+    svc = _Svc()
+    try:
+        await svc.start_music_stream()
+        assert (await svc.get_music_stream_info())["ranges_linux"] is expected
+    finally:
+        await svc.stop_music_stream()

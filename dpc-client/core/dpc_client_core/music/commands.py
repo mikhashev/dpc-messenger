@@ -50,7 +50,7 @@ transcriptions under its load lock and refuses the unload while any is running.
 **The track stream** (`get_music_stream_info`, ADR-051 N8 decided as option (i), D28):
 `start_music_stream` opens `music/stream.py`'s loopback listener on `[music] stream_port`
 (default 9996), which serves a library track's bytes by `track_id` with HTTP `Range`, a
-per-process token and an `Origin` allowlist. The command hands the UI `{base_url, token}`.
+per-process token and an `Origin` allowlist. The command hands the UI `{base_url, token, ranges_linux}`.
 """
 
 from __future__ import annotations
@@ -274,6 +274,12 @@ class MusicCommandsMixin:
         logger.warning("[music] stream_port %r is not a port; using %d", raw, DEFAULT_STREAM_PORT)
         return DEFAULT_STREAM_PORT
 
+    def _music_stream_ranges_linux(self) -> bool:
+        """`[music] stream_ranges_linux`: the Linux UI asks the stream for `Range` only when
+        true; the default (false) asks for `ranges=0`, a plain whole-file 200."""
+        raw = self.settings.get("music", "stream_ranges_linux", "false")
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
     def _music_track_path(self, track_id: str) -> Optional[Path]:
         library = self._music_library_instance
         return library.get_track_path(track_id) if library is not None else None
@@ -308,7 +314,7 @@ class MusicCommandsMixin:
             await server.stop()
 
     async def get_music_stream_info(self) -> Dict[str, Any]:
-        """Where the webview reads a track's bytes: `{base_url, token}`; a track's URL is
+        """Where the webview reads a track's bytes: `{base_url, token, ranges_linux}`; a track's URL is
         `{base_url}/music/track/{track_id}?t={token}`. Answered only through this
         authenticated door, so the token never reaches another page. `stream_unavailable`
         when the listener is not running (the UI falls back)."""
@@ -316,7 +322,7 @@ class MusicCommandsMixin:
         if server is None or not server.is_running:
             return {"status": "error", "code": "stream_unavailable",
                     "message": self._music_stream_problem or "the music track stream is not running"}
-        return {"status": "ok", **server.info()}
+        return {"status": "ok", **server.info(), "ranges_linux": self._music_stream_ranges_linux()}
 
     # -- folders -----------------------------------------------------------------
 

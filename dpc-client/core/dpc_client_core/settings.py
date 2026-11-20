@@ -316,6 +316,7 @@ class Settings:
         self._config['music'] = {
             'poll_interval_s': '60',  # How often the music library re-reads its watched folders, in seconds (ADR-051; polling, no OS file events)
             'stream_port': '9996',  # The loopback port the player reads track bytes from (ADR-051 N8, 127.0.0.1 only, token-guarded). The app's CSP media-src names 9996, so another port also needs tauri.conf.json changed and the app rebuilt
+            'stream_ranges_linux': 'false',  # Whether the Linux player asks the track stream for HTTP Range (true) or a plain whole-file 200 (false, default). WebKitGTK 2.50 reports no duration and refuses forward seeks on a Range source and handles the plain one; turn on only to test. Windows and macOS always use Range
             'lrclib_enabled': 'true'  # Allow the explicit "Find on LRCLIB" lookup (sends artist, title, album and duration to lrclib.net); false hides it. The automatic lyrics chain never goes online
         }
 
