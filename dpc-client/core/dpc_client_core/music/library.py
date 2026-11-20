@@ -20,6 +20,10 @@ methods (ADR-051 D11, "one service with two front doors").
 
 Files in watched folders are only read (`rb`); tags are never written.
 
+**Generated takes** (ADR-051 D21) enter through `register_generated` only: once, by the
+same identity (path, then audio hash), with `origin: "generated"` set there and nowhere
+else; the "Generated" smart list is derived from that field on read.
+
 **Change detection** is polling (ADR-051 N6 left `watchdog` versus polling open; polling
 is portable and adds no dependency): every `poll_interval_s` each folder with
 `watch: true` is walked and compared by path, size and mtime. The walk runs in a thread.
@@ -69,7 +73,7 @@ import unicodedata
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 from . import schemas
 from .identity import AUDIO_EXTENSIONS, MIME_BY_EXTENSION, Identity, MediaTools, identify, probe_metadata
@@ -265,12 +269,16 @@ class MusicLibrary:
         tools: Optional[MediaTools] = None,
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
         save_delay_s: float = DEFAULT_SAVE_DELAY_S,
+        on_added: Optional[Callable[[dict], None]] = None,
     ):
         self.dpc_home = Path(dpc_home_dir)
         self.root = music_dir_of(dpc_home_dir)
         self._tools = tools
         self.poll_interval_s = max(float(poll_interval_s), MIN_POLL_INTERVAL_S)
         self.save_delay_s = save_delay_s
+        # The one "added" event producer (ADR-051 D21): called with a copy of the entry,
+        # synchronously, once per generated take that enters the library.
+        self.on_added = on_added
         self._entries: Dict[str, dict] = {}
         self._folders: Dict[str, dict] = {}
         self._playlists: Dict[str, dict] = {}
@@ -1039,6 +1047,105 @@ class MusicLibrary:
         folder["state_reason"] = (
             f"no file-event watcher; polled every {self.poll_interval_s:g} s" if folder["watch"] else None
         )
+
+    # -- generated takes ---------------------------------------------------------
+
+    def _find_by_path(self, key: str) -> Optional[dict]:
+        """The present entry that holds this path, as its path or one of its `alt_paths`
+        (the same lookup `_apply_scan` makes), whatever its origin."""
+        for e in self._entries.values():
+            if e.get("missing") or not e.get("path"):
+                continue
+            if path_key(e["path"]) == key or any(path_key(a) == key for a in e.get("alt_paths") or []):
+                return e
+        return None
+
+    def _new_generated_entry(self, path: str, job_id: str, lineage: Optional[dict], size: int, mtime_ns: int) -> dict:
+        p = Path(path)
+        entry = {
+            "schema": schemas.LIBRARY_ENTRY,
+            "id": _new_id("trk_"),
+            "title": p.stem,
+            "source": {
+                "kind": "generated", "name": p.name, "uri": p.as_uri(),
+                "size_bytes": size, "mime": MIME_BY_EXTENSION.get(p.suffix.lower()),
+                "lineage": {**copy.deepcopy(lineage or {}), "job_id": job_id},
+            },
+            "source_hash": f"path:{path_key(path)}",
+            "content_hash": None,
+            "duration_s": None,
+            "added_at": _now(),
+            "persist": "full",
+            "placeholder": None,
+            "origin": "generated",
+            "path": path,
+            "folder_id": None,
+            "alt_paths": [],
+            "file_stat": {"size_bytes": size, "mtime": _mtime_text(mtime_ns)},
+            "hash_state": "pending",
+            "missing": False,
+            "hash_kind": None,
+            "artist": None,
+            "album": None,
+        }
+        self._entries[entry["id"]] = entry
+        return entry
+
+    async def register_generated(self, path: str, *, job_id: str, lineage: Optional[dict] = None) -> dict:
+        """Put a generated take's file into the library, once (ADR-051 D21), and return
+        its entry. This is the only way a take enters the library: `origin: "generated"`
+        is set here and nowhere else, and the "Generated" smart list is derived from it.
+
+        Idempotent, by the identity the library already uses: a path the library holds
+        (as a path or an `alt_paths` entry, any origin) returns that entry; a new path
+        with the audio hash of a known entry is that entry (a missing one is relinked, a
+        present one gets the path in `alt_paths`), as `_resolve` does for a scan. An
+        existing entry is returned as it is: its `origin` is never changed, so a file a
+        folder scan took in first stays `origin: "folder"`, and a later scan of a
+        watched folder that holds a generated file keeps the one entry and its origin
+        (`_apply_scan` matches it by path, and `file_stat` and the hash are set here).
+        `on_added` is called only for a new entry. Raises `MusicLibraryError`
+        (`invalid_path`, `invalid_job`, `not_a_file`, `not_audio`, `unreadable`)."""
+        if not isinstance(path, str) or not path.strip() or not Path(path).is_absolute():
+            raise MusicLibraryError("invalid_path", f"an absolute file path is required: {path!r}")
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise MusicLibraryError("invalid_job", "a job id is required")
+        if lineage is not None and not isinstance(lineage, dict):
+            raise MusicLibraryError("invalid_lineage", "lineage must be an object")
+        p = Path(os.path.normpath(path))
+        if p.suffix.lower() not in AUDIO_EXTENSIONS:
+            raise MusicLibraryError("not_audio", f"not an audio file: {p}")
+        key = path_key(str(p))
+        existing = self._find_by_path(key)
+        if existing is not None:
+            return copy.deepcopy(existing)
+        tools = self._tools or await asyncio.to_thread(MediaTools.discover)
+        try:
+            ident = await asyncio.to_thread(identify, p, tools)
+        except OSError as exc:
+            raise MusicLibraryError("unreadable", f"cannot read {p}: {exc}")
+        # From here to the insert there is no await: a second call, or a scan, that took
+        # the path while this one hashed is found now, and nothing is added twice.
+        existing = self._find_by_path(key)
+        if existing is not None:
+            return copy.deepcopy(existing)
+        stat = (ident.size_bytes, ident.mtime_ns)
+        e = self._new_generated_entry(str(p), job_id.strip(), lineage, *stat)
+        present, missing = self._same_audio(e, (ident.hash_kind, ident.content_hash))
+        other = present[0] if present else (missing[0] if missing else None)
+        self._resolve(e, ident, stat)
+        if other is None:
+            result = e
+            if self.on_added is not None:
+                try:
+                    self.on_added(copy.deepcopy(result))
+                except Exception:
+                    logger.exception("music: the on_added listener failed for %s", result["id"])
+        else:
+            result = self._entries[other["id"]]
+        snapshot = copy.deepcopy(result)
+        await self.flush()
+        return snapshot
 
     # -- library -----------------------------------------------------------------
 
