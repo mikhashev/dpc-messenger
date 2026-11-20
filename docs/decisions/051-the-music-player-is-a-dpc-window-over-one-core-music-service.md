@@ -235,7 +235,8 @@ timestamps lie outside them and are worth one read by Mike before acceptance.
 - **D12. No ComfyUI in the player's path** (05:00-05:01): "ComfyUI is an external tool we
   already integrate with, but I don't want to tie the music player to ComfyUI." The
   service reaches each engine directly, through an adapter behind one runner interface:
-  - the **ACE-Step 1.5 API server**, for text2music, cover, repaint, and lego/complete;
+  - the **ACE-Step 1.5 API server**, for text2music, cover, repaint, and lego/complete
+    (*2026-11-21: the engine actually chosen is acestep.cpp, run and supervised by DPC; D30*);
   - **YuE2-Studio** over its HTTP API (`/synth`, `/job`, `/health` on yue-server) or its
     CLI;
   - **Music Flamingo** through DPC's own `llama-server` (ADR-040).
@@ -350,7 +351,7 @@ consensus 2026-11-20)") and are not decisions.
   shows "not playable yet"). Options (ii) `blob:` and (iii) copy-in are not chosen. The
   CSP `media-src` change and the first-step experiment of N8 belong to the implementation
   (SPEC §12 decision 30).
-  *Implementation note (2026-11-20): built on `dev` in `9bb7599d`, not pushed; checked by
+  *Implementation note (2026-11-20): built on `dev` in `9bb7599d`, pushed (on `origin/dev`, checked 2026-11-21); checked by
   tests, not yet in the Linux window.* Asked for after the Linux node measured the `blob:`
   path as a live stream (`loadedmetadata duration=0.00`, `seekable` only what had played).
   See the N8 entry for the shape.
@@ -371,6 +372,54 @@ consensus 2026-11-20)") and are not decisions.
   A/B from slice 1; a mandatory reason + failure class on Discard (a `rejected` status
   instead of removing the entry, which would change SPEC decision 35); the style battery;
   graph per song; agent notes; the true-peak export policy; the `N_delta` warning.
+  *Update 2026-11-21: Mike answered two of these in #159, see D32 (a reason on Discard is
+  mandatory) and D33 (blind A/B comes later). The `rejected`-status part, the style battery,
+  graph per song, agent notes, the true-peak policy and the `N_delta` warning remain open.*
+
+- **D30. DPC supervises the acestep.cpp server** (2026-11-21, #159 (a), 19:33; SPEC §12
+  decision 31). Asked by CC: "does DPC itself manage the acestep.cpp server?" Mike: "да, мы
+  же обсуждали уже это" (yes, we already discussed this). The engine is acestep.cpp (Mike's
+  choice 2026-11-20, built from source, recipe `experiments/music-player/engine/acestep-cpp/BUILD.md`
+  in ai-studio). DPC starts, stops and watches the server, takes models from
+  `~/.dpc/models/music/ace-step/` (D14) and binds it to loopback. This replaces the earlier
+  "Mike starts ACE-Step himself, DPC only connects" (2026-11-20 09:56). The settings keys,
+  port and restart policy are CC's proposal, not Mike's. Backlog:
+  DPC-DOES-NOT-START-OR-WATCH-THE-ACESTEP-CPP-SERVER-SO-NO-MUSIC-JOB-CAN-REACH-AN-ENGINE.
+
+- **D31. Slice 1 engine settings and output format** (SPEC §12 decision 34; defaults accepted
+  by Mike 2026-11-20 09:56, engine line rewritten 2026-11-21). acestep.cpp turbo, Q8, 8 steps.
+  The engine writes **wav24** (it has no FLAC) and DPC converts it to FLAC for the library.
+  **The wav24 + FLAC plan is the group's consensus after Mike chose acestep.cpp, not a
+  recorded word of Mike's.** DPC records `synth_batch_size` and the batch index per take: a
+  measurement of 2026-11-21 showed the batch size changes the audio for the same seed
+  (PROVENANCE section 2). It replaces the earlier "ACE-Step API, `audio_format: flac`".
+
+- **D32. Discard requires a reason** (2026-11-21, #159 (b); SPEC §12 decision 35). Asked by
+  CC: "is a reason mandatory on Discard?" Mike: "да, как написать текстом так и выбрать из
+  списка" (yes, both writing it as text and picking it from a list). So Discard, and also
+  None of these, needs a reason: free text, a pick from a list, or both. Mike did not name
+  the list; the candidates are the failure classes (prep / sel / struct / opt / transport /
+  listen, EVOLUTION section 6, CC's reading of Ark's abbreviations) and the reason codes
+  (section 7); offering both is CC's proposal. Whether Discard keeps a `rejected` record
+  instead of removing the library entry is **not** decided (EVOLUTION section 14).
+
+- **D33. Blind A/B is not in slice 1** (2026-11-21, #159 (c); SPEC §12 decision 37). CC
+  proposed "later; slice 1 gets a plain A/B with level matching". Mike: "ок позже" (ok,
+  later). Slice 1 has the plain, level-matched A/B; blind A/B comes in a later slice.
+
+- **D34. The library needs hide and delete** (2026-11-21, #159; SPEC §12 decision 38). **The
+  requirement is Mike's:** raw engine outputs duplicated tracks in the library; he wrote
+  "это плохо что есть такое, так же нужна возможность как то удалять или скрывать потом
+  файлы сами (уже в UI я вижу очень много файлов лишних)" (it is bad that this exists; a way
+  to delete or hide files myself is also needed; the UI already shows many extra files).
+  **The specifics are CC's proposal, not decisions:** Hide is reversible and leaves the file
+  untouched; Remove from library applies only to entries whose file is missing; Delete file
+  applies only to files under `~/.dpc/music/generated/`; the person's own folders are never
+  deleted from, only hidden. Being built; backlog card
+  THE-MUSIC-LIBRARY-HAS-NO-WAY-TO-HIDE-OR-DELETE-A-TRACK-SO-RAW-ENGINE-OUTPUTS-AND-DUPLICATES-CLUTTER-IT.
+
+  *Numbering: ADR D30-D34 mirror SPEC §12 decisions 31, 34, 35, 37, 38 in that order. SPEC
+  decisions 32 (GPU card) and 33 (song from own text) have no ADR entry yet.*
 
 ### Not decided
 
@@ -424,7 +473,7 @@ implementation note under it says so (N1, N6); the rest are not built.
 - **N8. How core serves bytes to the webview.** *Resolved 2026-11-20 by Mike, D28: option
   (i), a local server with `Range`, a token and an `Origin` allowlist, keyed by `track_id`.
   Implementation deferred; checks use files inside `~/.dpc/music`.*
-  - *Implementation note (2026-11-20): built in `9bb7599d` (on `dev`, not pushed), tests
+  - *Implementation note (2026-11-20): built in `9bb7599d` (on `dev`, pushed), tests
     only; the Linux window check is open (Confirmation).* What was built:
     - **A dedicated listener, not the 9998 file server**: `core/dpc_client_core/music/stream.py`,
       aiohttp (the stack the gateway already uses), bound to `127.0.0.1` only (any other
@@ -873,10 +922,12 @@ Card names are kept as filed (D19).
 |---|---|---|
 | Epic: THE-AI-MUSIC-PLAYER-RUNS-ONLY-AS-A-SIMULATED-BROWSER-PROTOTYPE-AND-DPC-HAS-NO-PLACE-TO-HOST-IT | Open | — |
 | B1: AN-AGENT-CANNOT-POST-A-FILE-INTO-ITS-OWN-CHAT-AND-THE-CHAT-HAS-NO-AUDIO-ATTACHMENT-TYPE (title kept; dated correction per D19 in the body) | Pending | — |
-| B2: NO-MUSIC-JOB-RUNNER-EXISTS-SO-A-COMMENT-OR-A-GENERATE-REQUEST-CANNOT-BECOME-A-TAKE | Pending | — |
+| B2: NO-MUSIC-JOB-RUNNER-EXISTS-SO-A-COMMENT-OR-A-GENERATE-REQUEST-CANNOT-BECOME-A-TAKE | In progress: step 1 (job store + capabilities) started 2026-11-21 on Mike's "начинай" (#159 (d)) | — |
+| Engine supervision (2026-11-21): DPC-DOES-NOT-START-OR-WATCH-THE-ACESTEP-CPP-SERVER-SO-NO-MUSIC-JOB-CAN-REACH-AN-ENGINE | Open; DPC supervises the server (D30) | — |
+| Library hide/delete (2026-11-21): THE-MUSIC-LIBRARY-HAS-NO-WAY-TO-HIDE-OR-DELETE-A-TRACK-SO-RAW-ENGINE-OUTPUTS-AND-DUPLICATES-CLUTTER-IT | In progress (D34) | — |
 | Library: THE-MUSIC-PLAYER-HAS-NO-LIBRARY-OR-PLAYLIST-SO-PLAIN-LISTENING-IS-NOT-ITS-DEFAULT-MODE | Core built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): `core/dpc_client_core/music/` (watched folders indexed in place and polled, N6; track identity by `track_id` plus an audio-payload hash, Q4 layers 1-3 and 5; playlists; `local_api` commands; `[music] poll_interval_s` in a fresh `config.ini`). Queue, shuffle and repeat live in the window (B3 row) | `1cdce551`, `aa61925b`, `6f797e02`, `22d73fd0`, `b712712a` |
 | B3: THE-MUSIC-PLAYER-HAS-NO-DPC-COMPONENT-SO-COMMENTS-LYRICS-TAKES-AND-AB-REVIEW-EXIST-ONLY-IN-THE-PROTOTYPE | Window part built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): the Music Player button beside AGENTS MAP, a floating window that minimises to a mini-player, the mini-player with its own width and its own place (`ui/src/lib/components/music/MusicPlayer.svelte`). Since `9bb7599d` any library track plays through the N8 stream (next row). Comments, waveform, takes and A/B are not started | `32900e82`, `8bebfb6a`, `ec79687d`, `2457aa7c` |
-| Byte serving (N8, D28; 2026-11-20, no card) | Built, on `dev`, not pushed: a loopback track stream with `Range`, a per-process token and an `Origin` allowlist, keyed by `track_id` (`core/dpc_client_core/music/stream.py`, `get_music_stream_info`, CSP `media-src http://127.0.0.1:9996`); Linux plays every track from it, Windows and macOS the files outside `~/.dpc`. Tests only; the Linux window check is open (Confirmation) | `9bb7599d` |
+| Byte serving (N8, D28; 2026-11-20, no card) | Built, on `dev`, pushed (`9bb7599d` is on `origin/dev`, checked 2026-11-21): a loopback track stream with `Range`, a per-process token and an `Origin` allowlist, keyed by `track_id` (`core/dpc_client_core/music/stream.py`, `get_music_stream_info`, CSP `media-src http://127.0.0.1:9996`); Linux plays every track from it, Windows and macOS the files outside `~/.dpc`. Tests only; the Linux window check is open (Confirmation) | `9bb7599d` |
 | Lyrics: A-TRACK-HAS-NO-LYRICS-CHAIN-SO-TAGS-LRC-LRCLIB-AND-TRANSCRIBE-ARE-NOT-TRIED-IN-ORDER | Built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): sidecar `.lrc`, then tags, then the local LRCLIB cache, with lrclib.net only on an explicit lookup (D6 note); manual lyrics; Transcribe only when the person asks, which unloads the Whisper model it loaded and records provider and model (`music/lyrics.py`, `MusicLyrics.svelte`) | `cb9af8a1`, `74c2de84`, `a94c7943` (chain); `3672ee23`, `7fd6a407` (Transcribe) |
 | Transcribe quality (2026-11-20): TRANSCRIBED-LYRICS-CARRY-WHISPER-HALLUCINATIONS-AND-MERGE-LONG-SEGMENTS-INTO-ONE-LINE | Open | — |
 | Button title (2026-11-20): THE-MUSIC-PLAYER-BUTTON-CUTS-A-LONG-TRACK-TITLE-INSTEAD-OF-SCROLLING-IT | Open | — |
