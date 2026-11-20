@@ -350,6 +350,10 @@ consensus 2026-11-20)") and are not decisions.
   shows "not playable yet"). Options (ii) `blob:` and (iii) copy-in are not chosen. The
   CSP `media-src` change and the first-step experiment of N8 belong to the implementation
   (SPEC §12 decision 30).
+  *Implementation note (2026-11-20): built on `dev` in `9bb7599d`, not pushed; checked by
+  tests, not yet in the Linux window.* Asked for after the Linux node measured the `blob:`
+  path as a live stream (`loadedmetadata duration=0.00`, `seekable` only what had played).
+  See the N8 entry for the shape.
 
 ### Not decided
 
@@ -403,6 +407,40 @@ implementation note under it says so (N1, N6); the rest are not built.
 - **N8. How core serves bytes to the webview.** *Resolved 2026-11-20 by Mike, D28: option
   (i), a local server with `Range`, a token and an `Origin` allowlist, keyed by `track_id`.
   Implementation deferred; checks use files inside `~/.dpc/music`.*
+  - *Implementation note (2026-11-20): built in `9bb7599d` (on `dev`, not pushed), tests
+    only; the Linux window check is open (Confirmation).* What was built:
+    - **A dedicated listener, not the 9998 file server**: `core/dpc_client_core/music/stream.py`,
+      aiohttp (the stack the gateway already uses), bound to `127.0.0.1` only (any other
+      host is refused at construction), port `[music] stream_port`, default `9996`. The
+      9998 server was not grown: it is a single-threaded `TCPServer`, so one held media
+      connection would block voice playback, and it reads whole files and sends CORS `*`.
+    - **One route**, `GET`/`HEAD /music/track/{track_id}?t=<token>`. The id is resolved by
+      `MusicLibrary.get_track_path`; there is no path parameter and any query key but `t`
+      is 400. Unknown, missing, fileless, non-regular files and files without one of the
+      library's audio extensions are 404. So any library entry plays wherever its file is
+      (a watched folder in `~/Music`, a generated take), and nothing else does.
+    - **Range**: `bytes=a-b`, `a-`, `-n` answer 206 with `Content-Range`; a start past the
+      end is 416 with `bytes */size`; no `Range`, a malformed one or **several ranges answer
+      200 with the whole file**. Read in 256 KiB chunks; `Cache-Control: no-store`.
+    - **Token**: `secrets.token_urlsafe(32)`, made per core process, held in memory,
+      compared in constant time (403 when missing or wrong), handed to the UI only by the
+      new `local_api` command `get_music_stream_info` (`{base_url, token}`). Not the
+      `.ws_token`, which opens every command and would then sit in media URLs.
+    - **Host and `Origin`**: the `Host` header must be the listener's own
+      (`127.0.0.1:<port>` or `localhost:<port>`, against DNS rebinding); an `Origin`, when
+      sent, must be `tauri://localhost`, `http(s)://tauri.localhost` or the dev server
+      (`http://localhost:1420`, `http://127.0.0.1:1420`), else 403; an allowed one is echoed
+      with `Vary: Origin`, never `*`. A media request without `Origin` rests on the token.
+    - **CSP**: `media-src` gains exactly `http://127.0.0.1:9996`
+      (`ui/src-tauri/tauri.conf.json:27`). The port is fixed because the CSP is static; a
+      taken port leaves the stream off, logged, and the command answers
+      `stream_unavailable`. Another port needs the CSP changed and the app rebuilt.
+    - **UI** (`trackPlaybackUrl`, `ui/src/lib/utils/musicPlayer.ts`): Linux plays every
+      track from the stream; Windows and macOS keep `asset:` for files under `~/.dpc` and
+      use the stream for files outside it, which `asset:` cannot reach. Without stream info,
+      Linux falls back to `blob:` for `~/.dpc` files and a file outside `~/.dpc` stays "not
+      playable yet". The `[music] source ... via=http|asset|blob` log line names the source
+      and any `fallback=` reason.
   - `Observed`: the Tauri asset scope is only `$HOME/.dpc/**`
     (`ui/src-tauri/tauri.conf.json:28-33`), so a file in `~/Music` cannot go through
     `convertFileSrc`. Indexing folders in place, with core serving the bytes, is CC's
@@ -444,7 +482,8 @@ implementation note under it says so (N1, N6); the rest are not built.
     plus an `Origin` allowlist, keyed by `track_id`, with a CSP `media-src` change.
     Widening the Tauri asset scope was raised as a fourth path; it does not play audio on
     Linux WebKitGTK. Forge's cost argument against (ii) `blob:`: the whole file sits in
-    webview memory for every playing track. None of this was a decision when written; Mike then chose (i), D28.
+    webview memory for every playing track. None of this was a decision when written; Mike then chose (i), D28,
+    built in `9bb7599d` (note above).
 - **N9. Web delivery**: core proxies (fetches and caches) the stream, or open web
   `https:` is added to `media-src`. `Observed`: `media-src` allows only
   `https://asset.localhost` among https origins (`tauri.conf.json:27`); there is no open
@@ -675,7 +714,9 @@ real app, not in the prototype.
 - [ ] **Byte serving first step (N8, N9).** A `http://localhost:9998/files/…` audio URL is
   tried in the Tauri window on Windows and on Linux, and the result (plays or not, seeks
   or not) is written down when the N8 endpoint (option (i), D28; deferred) is built. The endpoint serves
-  `Range` and seeking works on a long track.
+  `Range` and seeking works on a long track. *2026-11-20: the endpoint is built
+  (`9bb7599d`, port 9996, N8 note); what remains is the window check on Linux: a long
+  track shows its full duration at once and a seek forward plays.*
 - [ ] **Window (B3).** In DPC, open a local track, leave a region comment, send it, watch
   the job reach review, A/B a take at the seam and accept it as v2. Reopening the track
   brings back the comments, lyrics and versions. The Music Player button opens the window,
@@ -781,7 +822,8 @@ New code and files touched. Paths are relative to `dpc-client/`.
   (`run_supervised` at `:983`): any engine DPC starts goes through the registry (ADR-046
   point 5), under a named category with a VRAM probe (N11).
 - `core/dpc_client_core/file_server.py` (`:22-79`): only if N8 chooses to grow it
-  (`Range`, a token, the folders it may serve).
+  (`Range`, a token, the folders it may serve). *2026-11-20: not grown; N8 is a separate
+  listener, `core/dpc_client_core/music/stream.py` (`9bb7599d`).*
 - `ui/src/lib/components/MusicPlayer.svelte` (new), `Sidebar.svelte` (the button beside
   `:992`), `utils/windowGeometry.ts` (reused).
 - `ui/src/lib/components/ChatMessageList.svelte` (`:445`): the `audio/*` file row as a
@@ -816,7 +858,8 @@ Card names are kept as filed (D19).
 | B1: AN-AGENT-CANNOT-POST-A-FILE-INTO-ITS-OWN-CHAT-AND-THE-CHAT-HAS-NO-AUDIO-ATTACHMENT-TYPE (title kept; dated correction per D19 in the body) | Pending | — |
 | B2: NO-MUSIC-JOB-RUNNER-EXISTS-SO-A-COMMENT-OR-A-GENERATE-REQUEST-CANNOT-BECOME-A-TAKE | Pending | — |
 | Library: THE-MUSIC-PLAYER-HAS-NO-LIBRARY-OR-PLAYLIST-SO-PLAIN-LISTENING-IS-NOT-ITS-DEFAULT-MODE | Core built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): `core/dpc_client_core/music/` (watched folders indexed in place and polled, N6; track identity by `track_id` plus an audio-payload hash, Q4 layers 1-3 and 5; playlists; `local_api` commands; `[music] poll_interval_s` in a fresh `config.ini`). Queue, shuffle and repeat live in the window (B3 row) | `1cdce551`, `aa61925b`, `6f797e02`, `22d73fd0`, `b712712a` |
-| B3: THE-MUSIC-PLAYER-HAS-NO-DPC-COMPONENT-SO-COMMENTS-LYRICS-TAKES-AND-AB-REVIEW-EXIST-ONLY-IN-THE-PROTOTYPE | Window part built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): the Music Player button beside AGENTS MAP, a floating window that minimises to a mini-player, the mini-player with its own width and its own place (`ui/src/lib/components/music/MusicPlayer.svelte`). Only files under `~/.dpc` play until the N8 endpoint (decided in D28, deferred) is built. Comments, waveform, takes and A/B are not started | `32900e82`, `8bebfb6a`, `ec79687d`, `2457aa7c` |
+| B3: THE-MUSIC-PLAYER-HAS-NO-DPC-COMPONENT-SO-COMMENTS-LYRICS-TAKES-AND-AB-REVIEW-EXIST-ONLY-IN-THE-PROTOTYPE | Window part built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): the Music Player button beside AGENTS MAP, a floating window that minimises to a mini-player, the mini-player with its own width and its own place (`ui/src/lib/components/music/MusicPlayer.svelte`). Since `9bb7599d` any library track plays through the N8 stream (next row). Comments, waveform, takes and A/B are not started | `32900e82`, `8bebfb6a`, `ec79687d`, `2457aa7c` |
+| Byte serving (N8, D28; 2026-11-20, no card) | Built, on `dev`, not pushed: a loopback track stream with `Range`, a per-process token and an `Origin` allowlist, keyed by `track_id` (`core/dpc_client_core/music/stream.py`, `get_music_stream_info`, CSP `media-src http://127.0.0.1:9996`); Linux plays every track from it, Windows and macOS the files outside `~/.dpc`. Tests only; the Linux window check is open (Confirmation) | `9bb7599d` |
 | Lyrics: A-TRACK-HAS-NO-LYRICS-CHAIN-SO-TAGS-LRC-LRCLIB-AND-TRANSCRIBE-ARE-NOT-TRIED-IN-ORDER | Built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): sidecar `.lrc`, then tags, then the local LRCLIB cache, with lrclib.net only on an explicit lookup (D6 note); manual lyrics; Transcribe only when the person asks, which unloads the Whisper model it loaded and records provider and model (`music/lyrics.py`, `MusicLyrics.svelte`) | `cb9af8a1`, `74c2de84`, `a94c7943` (chain); `3672ee23`, `7fd6a407` (Transcribe) |
 | Transcribe quality (2026-11-20): TRANSCRIBED-LYRICS-CARRY-WHISPER-HALLUCINATIONS-AND-MERGE-LONG-SEGMENTS-INTO-ONE-LINE | Open | — |
 | Button title (2026-11-20): THE-MUSIC-PLAYER-BUTTON-CUTS-A-LONG-TRACK-TITLE-INSTEAD-OF-SCROLLING-IT | Open | — |
