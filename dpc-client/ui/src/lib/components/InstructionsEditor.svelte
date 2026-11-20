@@ -1435,13 +1435,28 @@
   .edit-select:focus {
     outline: none;
     border-color: #007acc;
-    background: #222;
+    background-color: #222;
     box-shadow: 0 0 0 3px rgba(0, 122, 204, 0.1);
   }
 
   .edit-input,
   .edit-select {
     flex: 1;
+  }
+
+  /* WebKitGTK (Linux) paints its light GTK menulist over the author background
+     unless native appearance is dropped, leaving light text on a near-white box.
+     background-color, not the shorthand, so the arrow image survives (the :focus
+     rule above uses background-color for the same reason). */
+  .edit-select {
+    color-scheme: dark;
+    -webkit-appearance: none;
+    appearance: none;
+    background-color: #1a1a1a;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23aaa'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    padding-right: 24px;
   }
 
   .btn {
@@ -1729,15 +1744,23 @@
     font-weight: 500;
   }
 
+  /* Same WebKitGTK fix as .edit-select: drop native appearance, own the arrow. */
   .wizard-select {
     padding: 0.75rem;
-    background: #1a1a1a;
+    padding-right: 24px;
     border: 2px solid #3a3a3a;
     border-radius: 6px;
     color: #e0e0e0;
     font-size: 0.95rem;
     font-family: inherit;
     transition: border-color 0.2s;
+    color-scheme: dark;
+    -webkit-appearance: none;
+    appearance: none;
+    background-color: #1a1a1a;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23aaa'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
   }
 
   .wizard-select:focus {

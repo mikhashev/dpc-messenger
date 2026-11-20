@@ -1378,6 +1378,19 @@
   .btn-small.btn-cancel { background: #757575; }
   .inline-input-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
   .inline-input { flex: 1; min-width: 8rem; padding: 0.25rem 0.5rem; font-size: 0.85rem; border: 1px solid #555; border-radius: 4px; background: #2a2a2a; color: #e0e0e0; }
+  /* WebKitGTK (Linux) paints its light GTK menulist over the author background
+     unless native appearance is dropped, leaving light text on a near-white box.
+     background-color, not the shorthand, so the arrow image survives. */
+  select.inline-input {
+    color-scheme: dark;
+    -webkit-appearance: none;
+    appearance: none;
+    background-color: #2a2a2a;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23aaa'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    padding-right: 24px;
+  }
   .btn-icon-small { background: none; border: none; cursor: pointer; font-size: 1.5rem; color: #999; line-height: 1; }
   .btn-icon-small:hover { color: #f44336; }
 

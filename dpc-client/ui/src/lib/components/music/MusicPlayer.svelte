@@ -1151,6 +1151,19 @@
     font: inherit;
     font-size: 13px;
   }
+  /* WebKitGTK (Linux) paints its light GTK menulist over the author background
+     unless native appearance is dropped, leaving light text on a near-white box.
+     background-color, not the shorthand, so the arrow image survives. */
+  .list-select, .add-to {
+    color-scheme: dark;
+    -webkit-appearance: none;
+    appearance: none;
+    background-color: var(--bg-primary, #14161a);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23aaa'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    padding-right: 24px;
+  }
   .list-select { flex: 1 1 180px; min-width: 0; }
   .text-input { flex: 1 1 160px; min-width: 0; }
   .add-to { max-width: 130px; }

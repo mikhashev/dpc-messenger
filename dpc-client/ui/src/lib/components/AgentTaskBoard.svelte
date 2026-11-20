@@ -699,12 +699,21 @@
     font-size: 11px;
     font-family: monospace;
     color: var(--text-muted, #6c7086);
-    background: transparent;
     border: 1px solid var(--border-color, #444);
     border-radius: 3px;
     padding: 2px 4px;
+    padding-right: 18px;
     cursor: pointer;
     max-width: 180px;
+    /* WebKitGTK (Linux) paints its light GTK menulist unless native appearance
+       is dropped; background-color, not the shorthand, keeps the arrow image. */
+    color-scheme: dark;
+    -webkit-appearance: none;
+    appearance: none;
+    background-color: transparent;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23aaa'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 5px center;
   }
 
   .agent-select:focus {
@@ -1004,6 +1013,20 @@
     border: 1px solid var(--border-color, #444);
     border-radius: 4px;
     color: var(--text-primary, #cdd6f4);
+  }
+
+  /* WebKitGTK (Linux) paints its light GTK menulist over the author background
+     unless native appearance is dropped, leaving light text on a near-white box.
+     background-color, not the shorthand, so the arrow image survives. */
+  .form-row select {
+    color-scheme: dark;
+    -webkit-appearance: none;
+    appearance: none;
+    background-color: var(--bg-input, #11111b);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23aaa'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    padding-right: 24px;
   }
 
   .form-actions {

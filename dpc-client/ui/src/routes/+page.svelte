@@ -2024,11 +2024,20 @@
   .group-effort-select {
     font-size: 0.8rem;
     color: #ddd;
-    background: #2a2a2a;
     border: 1px solid #444;
     border-radius: 3px;
     padding: 1px 4px;
+    padding-right: 18px;
     cursor: pointer;
+    /* WebKitGTK (Linux) paints its light GTK menulist unless native appearance
+       is dropped; background-color, not the shorthand, keeps the arrow image. */
+    color-scheme: dark;
+    -webkit-appearance: none;
+    appearance: none;
+    background-color: #2a2a2a;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23aaa'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 5px center;
   }
 
   .collapse-indicator {
