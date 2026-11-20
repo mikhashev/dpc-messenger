@@ -36,6 +36,9 @@ import {
     stepQueue,
     throttle,
     trackPlaybackUrl,
+    trackMime,
+    isConcreteAudioMime,
+    formatRanges,
     type LibraryEntry,
     type PlaybackEnv,
     type Playlist,
@@ -424,6 +427,40 @@ describe('the mini-player bar keeps its own corner', () => {
     });
 });
 
+describe('trackMime, isConcreteAudioMime, formatRanges', () => {
+    const e = (path: string | null, mime?: string | null, name = ''): LibraryEntry => ({
+        id: 'trk_1', title: 't', duration_s: 1, origin: 'folder', path, missing: false,
+        source: { kind: 'local', name, uri: '', mime },
+    });
+    it('derives the type from the extension without case, from the path or the source name', () => {
+        const cases: Array<[string, string]> = [
+            ['a.mp3', 'audio/mpeg'], ['a.MP3', 'audio/mpeg'], ['a.flac', 'audio/flac'], ['a.wav', 'audio/wav'],
+            ['a.ogg', 'audio/ogg'], ['a.oga', 'audio/ogg'], ['a.opus', 'audio/ogg'], ['a.m4a', 'audio/mp4'],
+            ['a.mp4', 'audio/mp4'], ['a.aac', 'audio/mp4'], ['a.webm', 'audio/webm'], ['a.xyz', ''], ['noext', ''],
+        ];
+        for (const [file, mime] of cases) {
+            expect(trackMime(e('C:\\Users\\m\\.dpc\\music\\' + file, null))).toBe(mime);
+            expect(trackMime(e(null, undefined, file))).toBe(mime);
+        }
+        expect(trackMime(null)).toBe('');
+    });
+    it('keeps a recorded concrete type and rejects wildcards and non-audio', () => {
+        expect(trackMime(e('/x/a.mp3', 'audio/x-mpeg'))).toBe('audio/x-mpeg');
+        expect(trackMime(e('/x/a.mp3', 'audio/*'))).toBe('audio/mpeg');
+        expect(trackMime(e('/x/a.mp3', 'video/mp4'))).toBe('audio/mpeg');
+        expect(isConcreteAudioMime('audio/ogg; codecs=opus')).toBe(true);
+        expect(isConcreteAudioMime('audio/*')).toBe(false);
+        expect(isConcreteAudioMime(null)).toBe(false);
+    });
+    it('formats ranges, and survives a throwing or missing TimeRanges', () => {
+        const r = { length: 2, start: (i: number) => [0, 40][i], end: (i: number) => [12.34, 60.06][i] };
+        expect(formatRanges(r)).toBe('0.0-12.3,40.0-60.1');
+        expect(formatRanges({ length: 0, start: () => 0, end: () => 0 })).toBe('none');
+        expect(formatRanges(null)).toBe('none');
+        expect(formatRanges({ length: 1, start: () => { throw new Error('x'); }, end: () => 0 })).toBe('unreadable');
+    });
+});
+
 describe('the playback source (ADR-051 N8 open: only ~/.dpc plays today)', () => {
     const entry = (path: string | null, extra: Partial<LibraryEntry> = {}): LibraryEntry => ({
         id: 'trk_0000000000000001', title: 'Night bus', duration_s: 200, origin: 'folder', path, missing: false,
@@ -468,6 +505,24 @@ describe('the playback source (ADR-051 N8 open: only ~/.dpc plays today)', () =>
         expect(readHomeFile).toHaveBeenCalledWith('.dpc/music/take.wav');
         if (r.ok) r.release();
         expect(env.revokeObjectURL).toHaveBeenCalledWith('blob:abc');
+    });
+
+    it('on Linux the blob gets a real MIME type: the recorded one, else by extension, never audio/*', async () => {
+        const typeOf = async (e: LibraryEntry) => {
+            let seen = '';
+            const env = linux({ createObjectURL: (b: Blob) => { seen = b.type; return 'blob:t'; } });
+            const r = await trackPlaybackUrl(e, env);
+            expect(r).toMatchObject({ ok: true, bytes: 3 });
+            return { seen, mime: r.ok ? r.mime : undefined };
+        };
+        const mp3 = (mime: string | null | undefined) => entry('/home/mike/.dpc/music/song.mp3', { source: { kind: 'local', name: 'song.mp3', uri: 'file:///x', mime } });
+        expect(await typeOf(mp3('audio/mpeg'))).toEqual({ seen: 'audio/mpeg', mime: 'audio/mpeg' });
+        expect(await typeOf(mp3(null))).toEqual({ seen: 'audio/mpeg', mime: 'audio/mpeg' });
+        expect(await typeOf(mp3(undefined))).toEqual({ seen: 'audio/mpeg', mime: 'audio/mpeg' });
+        expect(await typeOf(mp3('audio/*'))).toEqual({ seen: 'audio/mpeg', mime: 'audio/mpeg' });
+        expect(await typeOf(mp3(''))).toEqual({ seen: 'audio/mpeg', mime: 'audio/mpeg' });
+        expect(await typeOf(entry('/home/mike/.dpc/music/x.xyz', { source: { kind: 'local', name: 'x.xyz', uri: '', mime: 'audio/*' } })))
+            .toEqual({ seen: '', mime: '' });
     });
 
     it('on Linux a read that fails is a clear "cannot", not a throw', async () => {

@@ -15,7 +15,8 @@ const h = vi.hoisted(() => {
     /** Per track id, a gate the next source read of that track waits on. */
     const gates = new Map<string, Promise<void>>();
     (globalThis as any).window = { localStorage: storage };
-    return { writes, store, storage, gates };
+    const logLines: string[] = [];
+    return { writes, store, storage, gates, logLines };
 });
 
 vi.mock('$lib/coreService', () => {
@@ -26,6 +27,10 @@ vi.mock('$lib/coreService', () => {
         removeMusicFolder: unavailable, rescanMusicFolder: unavailable, updateMusicPlaylist: unavailable,
     };
 });
+
+vi.mock('$lib/logger', () => ({
+    log: { debug: (_ctx: string, msg: string) => { h.logLines.push(msg); }, info() {}, warn() {}, error() {} },
+}));
 
 vi.mock('$lib/utils/attachmentSrc', () => ({ detectWindows: () => true }));
 
@@ -50,7 +55,11 @@ class FakeAudio extends EventTarget {
     paused = true;
     currentTime = 0;
     duration = NaN;
-    error: { code: number } | null = null;
+    error: { code: number; message?: string } | null = null;
+    readyState = 4;
+    networkState = 1;
+    buffered = { length: 1, start: () => 0, end: () => 12.34 };
+    seekable = { length: 1, start: () => 0, end: () => 100 };
     private attrs = new Map<string, string>();
     constructor() {
         super();
@@ -151,6 +160,39 @@ describe('a superseded load is not heard', () => {
         await next;
         await settle();
         expect(state(m)).toMatchObject({ current: 'b', loadedId: 'b' });
+    });
+});
+
+describe('the audio diagnostics in the log', () => {
+    it('logs the source, the seek request, seeking/seeked and an error, and never a timeupdate', async () => {
+        const m = await freshService(['a'], 0);
+        const audio = FakeAudio.last!;
+        expect(h.logLines.some(l => /^source #\d+ a a\.mp3 via=blob mime=none bytes=n\/a platform=windows/.test(l))).toBe(true);
+
+        h.logLines.length = 0;
+        audio.fire('timeupdate');
+        audio.fire('timeupdate');
+        expect(h.logLines).toEqual([]);
+
+        m.seekTo(42.5, 'slider');
+        expect(h.logLines[0]).toMatch(/^seek request \(slider\) target=42\.50 from=\d/);
+        expect(h.logLines[0]).toContain('readyState=4 networkState=1 buffered=0.0-12.3 seekable=0.0-100.0');
+        audio.fire('seeking');
+        audio.fire('seeked');
+        expect(h.logLines[1]).toMatch(/^seeking #\d+ a requested=42\.50 actual=42\.50/);
+        expect(h.logLines[2]).toMatch(/^seeked #\d+ a requested=42\.50 actual=42\.50 delta=0\.00/);
+
+        audio.error = { code: 4, message: 'Failed to open' };
+        audio.fire('error');
+        expect(h.logLines.at(-1)).toMatch(/^error #\d+ a code=4 message="Failed to open"/);
+    });
+
+    it('folds a stalled burst into one line per second, with a count', async () => {
+        await freshService(['a'], 0);
+        const audio = FakeAudio.last!;
+        h.logLines.length = 0;
+        for (let i = 0; i < 5; i++) audio.fire('stalled');
+        expect(h.logLines.filter(l => l.startsWith('stalled'))).toHaveLength(1);
     });
 });
 

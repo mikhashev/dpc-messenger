@@ -26,6 +26,7 @@ import {
     updateMusicPlaylist,
 } from '$lib/coreService';
 import { detectWindows } from '$lib/utils/attachmentSrc';
+import { log } from '$lib/logger';
 import {
     EMPTY_QUEUE,
     MUSIC_UNAVAILABLE_TEXT,
@@ -33,6 +34,7 @@ import {
     currentId,
     cycleRepeat,
     enqueue,
+    formatRanges,
     loadMusicPreferences,
     onTrackEnded,
     playbackProblem,
@@ -86,6 +88,8 @@ export async function loadMusicLibrary(quiet = false): Promise<void> {
     if (loading) return;
     loading = true;
     if (!quiet) musicLibrary.update(l => ({ ...l, status: l.status === 'ready' ? 'ready' : 'loading', message: '' }));
+    const heldId = get(musicPlayback).loadedId;
+    const heldBefore = entryOf(heldId);
     try {
         const [lib, pls, fol] = await Promise.all([
             listMusicLibrary(), listMusicPlaylists(), listMusicFolders(),
@@ -106,8 +110,22 @@ export async function loadMusicLibrary(quiet = false): Promise<void> {
             playlists: ((pls as any).data.playlists ?? []) as Playlist[],
             folders: ((fol as any).data.folders ?? []) as MusicFolder[],
         });
+        noteRefresh(heldId, heldBefore);
     } finally {
         loading = false;
+    }
+}
+
+/** The library refresh never touches the audio element, `currentTime`, the queue or
+ *  `loadedId` (it only replaces the store). When it changes the loaded track's entry in a way
+ *  that matters for playback, say so in the log, so a playback glitch is not blamed on it. */
+function noteRefresh(heldId: string | null, before: LibraryEntry | null): void {
+    if (!heldId) return;
+    const after = entryOf(heldId);
+    if (!after) {
+        dlog(`refresh: the loaded track ${heldId} is no longer in the library; playback is not touched`);
+    } else if (before && (before.path !== after.path || !!before.missing !== !!after.missing || before.source?.mime !== after.source?.mime)) {
+        dlog(`refresh: the loaded track ${heldId} changed (path ${before.path === after.path ? 'same' : 'moved'}, missing ${!!before.missing}->${!!after.missing}, mime ${before.source?.mime ?? 'none'}->${after.source?.mime ?? 'none'}); playback is not touched`);
     }
 }
 
@@ -320,11 +338,75 @@ let loadToken = 0;
 let audioToken = -1;
 const current = () => audioToken === loadToken;
 
+// -- diagnostics -----------------------------------------------------------------
+// One compact debug line per media event, to ui.log through the console relay
+// (grep for "[music]" in ~/.dpc/logs/ui.log). `timeupdate` is never logged. Events that can
+// repeat (waiting, stalled, suspend, ...) are cut to one line per second per kind with a
+// count of what was folded; seeks and errors are always logged (the relay caps at 50/s).
+
+function dlog(message: string): void {
+    try {
+        log.debug('music', message);
+    } catch { /* a log line never breaks playback */ }
+}
+
+const NEVER_FOLDED = new Set(['seek', 'seeking', 'seeked', 'error', 'ended', 'loadedmetadata', 'source']);
+const FOLD_MS = 1000;
+const lastLogged = new Map<string, { at: number; folded: number }>();
+
+function dlogEvent(kind: string, message: string): void {
+    if (!NEVER_FOLDED.has(kind)) {
+        const now = Date.now();
+        const last = lastLogged.get(kind);
+        if (last && now - last.at < FOLD_MS) {
+            last.folded++;
+            return;
+        }
+        const folded = last?.folded ?? 0;
+        lastLogged.set(kind, { at: now, folded: 0 });
+        if (folded) message += ` (+${folded} folded)`;
+    }
+    dlog(message);
+}
+
+/** The element's state at this moment, for a log line. */
+function snapshot(a: HTMLAudioElement): string {
+    return `t=${(a.currentTime ?? 0).toFixed(2)} readyState=${a.readyState} networkState=${a.networkState} ` +
+        `buffered=${formatRanges(a.buffered)} seekable=${formatRanges(a.seekable)} paused=${a.paused}`;
+}
+
+/** The last seek asked for (by the slider or a key), to compare with where the element lands. */
+let seekRequested: number | null = null;
+let uaLogged = false;
+
+function attachDiagnostics(a: HTMLAudioElement): void {
+    const tag = () => `#${audioToken} ${get(musicPlayback).loadedId ?? '-'}`;
+    for (const type of ['waiting', 'stalled', 'suspend', 'playing', 'pause', 'play', 'emptied', 'abort']) {
+        a.addEventListener(type, () => dlogEvent(type, `${type} ${tag()} ${snapshot(a)}`));
+    }
+    a.addEventListener('loadedmetadata', () => {
+        dlogEvent('loadedmetadata', `loadedmetadata ${tag()} duration=${Number.isFinite(a.duration) ? a.duration.toFixed(2) : a.duration} ${snapshot(a)}`);
+    });
+    a.addEventListener('seeking', () => {
+        dlogEvent('seeking', `seeking ${tag()} requested=${seekRequested?.toFixed(2) ?? 'none'} actual=${a.currentTime.toFixed(2)} ${snapshot(a)}`);
+    });
+    a.addEventListener('seeked', () => {
+        const delta = seekRequested == null ? 'n/a' : (a.currentTime - seekRequested).toFixed(2);
+        dlogEvent('seeked', `seeked ${tag()} requested=${seekRequested?.toFixed(2) ?? 'none'} actual=${a.currentTime.toFixed(2)} delta=${delta} ${snapshot(a)}`);
+    });
+    a.addEventListener('ended', () => dlogEvent('ended', `ended ${tag()} ${snapshot(a)}`));
+    a.addEventListener('error', () => {
+        if (!a.getAttribute('src')) return;
+        dlogEvent('error', `error ${tag()} code=${a.error?.code ?? 'none'} message=${JSON.stringify(a.error?.message ?? '')} ${snapshot(a)}`);
+    });
+}
+
 function ensureAudio(): HTMLAudioElement | null {
     if (audio || typeof Audio === 'undefined') return audio;
     const a = new Audio();
     a.preload = 'metadata';
     a.volume = get(musicPlayback).volume;
+    attachDiagnostics(a);
     a.addEventListener('play', () => musicPlayback.update(s => ({ ...s, playing: true })));
     a.addEventListener('pause', () => musicPlayback.update(s => ({ ...s, playing: false })));
     a.addEventListener('timeupdate', () => {
@@ -378,6 +460,7 @@ async function startAt(queue: QueueState, index: number, autoplay: boolean): Pro
         return false;
     }
     if (!source.ok) {
+        dlogEvent('source', `source #${token} ${id} failed: ${source.problem}: ${source.reason}`);
         stopAudio();
         musicPlayback.update(s => ({ ...s, loadedId: null, playing: false, loadingTrack: false }));
         say(`"${titleOf(id)}": ${source.reason}.`);
@@ -390,6 +473,16 @@ async function startAt(queue: QueueState, index: number, autoplay: boolean): Pro
         say('This webview has no audio element.');
         return false;
     }
+    if (!uaLogged) {
+        uaLogged = true;
+        dlogEvent('source', `webview ${typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown'}`);
+    }
+    {
+        const env = await getPlaybackEnv();
+        const platform = env.isLinux ? 'linux' : env.isWindows ? 'windows' : 'macos-or-other';
+        dlogEvent('source', `source #${token} ${id} ${entryOf(id)?.source?.name ?? ''} via=${source.via} mime=${source.mime || 'none'} bytes=${source.bytes ?? 'n/a'} platform=${platform}`);
+    }
+    seekRequested = null;
     releaseSource();
     releaseSource = source.release;
     a.loop = get(musicPlayback).repeat === 'one';
@@ -562,15 +655,18 @@ export function cycleRepeatMode(): void {
         : repeat === 'all' ? 'Repeat: all (the queue wraps around).' : 'Repeat: off.');
 }
 
-export function seekTo(seconds: number): void {
+export function seekTo(seconds: number, origin: 'slider' | 'key' | 'ui' = 'ui'): void {
     if (!audio || !get(musicPlayback).loadedId) return;
     const d = Number.isFinite(audio.duration) ? audio.duration : Infinity;
-    audio.currentTime = Math.max(0, Math.min(d, seconds));
+    const target = Math.max(0, Math.min(d, seconds));
+    seekRequested = target;
+    dlogEvent('seek', `seek request (${origin}) target=${target.toFixed(2)} from=${audio.currentTime.toFixed(2)} ${snapshot(audio)}`);
+    audio.currentTime = target;
 }
 
 export function seekBy(delta: number): void {
     if (!audio) return;
-    seekTo(audio.currentTime + delta);
+    seekTo(audio.currentTime + delta, 'key');
 }
 
 const rememberVolume = throttle(remember, VOLUME_SAVE_MS);

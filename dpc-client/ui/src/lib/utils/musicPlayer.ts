@@ -374,7 +374,7 @@ export interface PlaybackEnv {
 export type PlaybackProblem = 'missing' | 'no-file' | 'outside-dpc' | 'web' | 'no-desktop' | 'read-failed';
 
 export type PlaybackSource =
-    | { ok: true; url: string; via: 'asset' | 'blob'; release: () => void }
+    | { ok: true; url: string; via: 'asset' | 'blob'; release: () => void; mime?: string; bytes?: number }
     | { ok: false; problem: PlaybackProblem; reason: string };
 
 export const OUTSIDE_DPC_TEXT = 'Not playable yet (outside the DPC folder)';
@@ -383,6 +383,52 @@ export const WEB_TEXT = 'Not playable yet (web tracks wait on a decision)';
 export const NO_DESKTOP_TEXT = 'Not playable here: playback needs the desktop app';
 
 const DPC_DIR = '.dpc';
+
+/** The MIME type of an audio file by its extension (what the core's library also
+ *  records for a folder track). Never a wildcard. */
+const AUDIO_MIME_BY_EXTENSION: Record<string, string> = {
+    mp3: 'audio/mpeg',
+    flac: 'audio/flac',
+    wav: 'audio/wav',
+    ogg: 'audio/ogg',
+    oga: 'audio/ogg',
+    opus: 'audio/ogg',
+    m4a: 'audio/mp4',
+    mp4: 'audio/mp4',
+    aac: 'audio/mp4',
+    webm: 'audio/webm',
+};
+
+/** A concrete `audio/<subtype>` (no `*`; parameters after `;` are allowed). */
+export function isConcreteAudioMime(mime: unknown): mime is string {
+    return typeof mime === 'string' && /^audio\/[a-z0-9][a-z0-9.+-]*(\s*;.*)?$/i.test(mime.trim());
+}
+
+/** The MIME type to give a `Blob` of this track: the one the library recorded when it is a
+ *  real audio type, else one derived from the file extension, else '' (no type). A wildcard
+ *  such as `audio/*` is not a type, and WebKitGTK's GStreamer pipeline types the `blob:` by it. */
+export function trackMime(entry: LibraryEntry | null | undefined): string {
+    const recorded = entry?.source?.mime;
+    if (isConcreteAudioMime(recorded)) return recorded.trim();
+    const name = entry?.path || entry?.source?.name || '';
+    const base = name.split(/[\\/]/).pop() ?? '';
+    const dot = base.lastIndexOf('.');
+    const ext = dot >= 0 ? base.slice(dot + 1).toLowerCase() : '';
+    return AUDIO_MIME_BY_EXTENSION[ext] ?? '';
+}
+
+/** `TimeRanges` as "0.0-12.3,40.0-60.1" for a log line; "none" when empty, "unreadable" on a throw. */
+export function formatRanges(r: { length: number; start(i: number): number; end(i: number): number } | null | undefined): string {
+    try {
+        if (!r || !r.length) return 'none';
+        const parts: string[] = [];
+        for (let i = 0; i < Math.min(r.length, 8); i++) parts.push(`${r.start(i).toFixed(1)}-${r.end(i).toFixed(1)}`);
+        if (r.length > 8) parts.push(`+${r.length - 8} more`);
+        return parts.join(',');
+    } catch {
+        return 'unreadable';
+    }
+}
 
 /** A path as forward-slash segments: no `\\?\` prefix, no empty or `.` segments.
  *  Null when it climbs (`..`), since the scope check would not see where it lands. */
@@ -441,15 +487,16 @@ export async function trackPlaybackUrl(entry: LibraryEntry | null | undefined, e
         }
         try {
             const bytes = await env.readHomeFile(relative);
-            const blob = new Blob([bytes as BlobPart], { type: entry!.source?.mime || 'audio/*' });
+            const mime = trackMime(entry);
+            const blob = new Blob([bytes as BlobPart], mime ? { type: mime } : {});
             const url = env.createObjectURL(blob);
-            return { ok: true, url, via: 'blob', release: () => env.revokeObjectURL?.(url) };
+            return { ok: true, url, via: 'blob', release: () => env.revokeObjectURL?.(url), mime, bytes: bytes.byteLength };
         } catch (e) {
             return { ok: false, problem: 'read-failed', reason: `Could not read the file: ${e instanceof Error ? e.message : String(e)}` };
         }
     }
     if (!env.convertFileSrc) return { ok: false, problem: 'no-desktop', reason: NO_DESKTOP_TEXT };
-    return { ok: true, url: env.convertFileSrc(path), via: 'asset', release: () => {} };
+    return { ok: true, url: env.convertFileSrc(path), via: 'asset', release: () => {}, mime: trackMime(entry) };
 }
 
 // -- display ---------------------------------------------------------------------

@@ -526,8 +526,18 @@
     cur ? `${p.playing ? 'Playing' : loaded ? 'Paused' : 'Up next'}: ${cur.title}` : `${$musicLibrary.entries.length} tracks`,
   );
 
-  function onSeek(e: Event) {
-    seekTo(parseFloat((e.currentTarget as HTMLInputElement).value));
+  // The slider only moves the thumb while it is dragged; the seek is made once, on release
+  // (`change`). Seeking on every `input` made a flush-and-reseek of the media pipeline
+  // for each 0.1 s step of a drag, and each `timeupdate` wrote the playing position back
+  // over the thumb under the person's finger.
+  let scrub = $state<number | null>(null);
+  function onScrub(e: Event) {
+    scrub = parseFloat((e.currentTarget as HTMLInputElement).value);
+  }
+  function onSeekCommit(e: Event) {
+    const v = parseFloat((e.currentTarget as HTMLInputElement).value);
+    scrub = null;
+    if (Number.isFinite(v)) seekTo(v, 'slider');
   }
 
   function onVolume(e: Event) {
@@ -717,15 +727,17 @@
               </div>
               {#if curProblem}<p class="muted small">{curProblem.reason}</p>{/if}
               <div class="seek-row">
-                <span class="time">{formatTime(loaded ? p.currentTime : 0)}</span>
+                <span class="time">{formatTime(loaded ? (scrub ?? p.currentTime) : 0)}</span>
                 <input
                   class="seek"
                   type="range"
                   min="0"
                   max={shownDuration || 0}
                   step="0.1"
-                  value={loaded ? p.currentTime : 0}
-                  oninput={onSeek}
+                  value={loaded ? (scrub ?? p.currentTime) : 0}
+                  oninput={onScrub}
+                  onchange={onSeekCommit}
+                  onblur={() => (scrub = null)}
                   disabled={!loaded}
                   aria-label="Position in the track"
                 />
