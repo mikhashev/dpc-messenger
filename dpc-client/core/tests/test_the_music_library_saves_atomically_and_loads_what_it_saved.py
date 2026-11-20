@@ -106,3 +106,26 @@ def test_the_library_lives_under_the_dpc_home_it_is_given(tmp_path):
     assert lib.library_path == tmp_path / "elsewhere" / "music" / "library.json"
     assert os.path.basename(lib.folders_path) == "folders.json"
     assert os.path.basename(lib.playlists_path) == "playlists.json"
+
+
+@pytest.mark.asyncio
+async def test_opening_makes_the_music_folder_when_it_is_missing(tmp_path):
+    home = tmp_path / "dpc"
+    assert not (home / "music").exists()
+
+    lib = _library(home)
+    await lib.open()
+    try:
+        assert (home / "music").is_dir()
+        assert lib.list_entries() == []
+        assert lib.list_folders() == []
+    finally:
+        await lib.stop()
+
+    again = _library(home)
+    await again.open()
+    try:
+        assert (home / "music").is_dir()
+        assert again.list_entries() == []
+    finally:
+        await again.stop()

@@ -329,6 +329,16 @@ class MusicLibrary:
             self._dirty = True  # `open()` schedules the save
         self._loaded = True
 
+    def _create_root_and_load(self) -> None:
+        """Make `<DPC home>/music/` if it is missing, then `load()`. Blocking; `open()`
+        calls it in a thread. Only the root is made: `lyrics/` and `files/` stay lazy.
+        A home that cannot be written is logged and the library still loads."""
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.warning("music: could not create %s", self.root, exc_info=True)
+        self.load()
+
     def _apply_folder_limit(self) -> bool:
         """Keep at most `MAX_FOLDERS` folders active: the first by `added_at`. The rest
         (a hand-edited `folders.json`) stay in the file, `unavailable` with a reason,
@@ -460,7 +470,7 @@ class MusicLibrary:
         """Load the files and start the hash worker (no polling)."""
         self._ensure_primitives()
         if not self._loaded:
-            await asyncio.to_thread(self.load)
+            await asyncio.to_thread(self._create_root_and_load)
             for e in self._entries.values():
                 if e.get("hash_state") == "pending" and not e.get("missing"):
                     self._enqueue(e["id"])
