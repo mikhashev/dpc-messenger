@@ -28,7 +28,7 @@ describe('hiding and removing tracks', () => {
         expect(missingEntries(all).map(x => x.id)).toEqual(['c', 'd']);
     });
 
-    it('offers Delete file only from the core's deletable flag', () => {
+    it('offers Delete file only from the deletable flag the core sets', () => {
         const owned = { origin: 'folder', folder_id: 'mf_1', deletable: true };
         expect(canDeleteFile(e('a', owned))).toBe(true);
         expect(canDeleteFile(e('a', { ...owned, missing: true }))).toBe(false);
