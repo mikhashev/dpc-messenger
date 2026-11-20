@@ -47,8 +47,11 @@ The one route is ``GET`` / ``HEAD`` ``/music/track/{track_id}?t=<token>``:
   as a live stream of unknown length to a media pipeline. `ETag` and `Last-Modified` come
   from the open file's `fstat`; an `If-Range` that does not match them answers the whole
   file (RFC 9110 14.5).
+- In `ranges=0` mode the headers mirror the 9998 file server instead (see the comment in
+  `_track`): `Cache-Control: private, max-age=3600`, no `ETag`, `Last-Modified` or
+  `nosniff`, and `Connection: close`.
 - The body is streamed in `CHUNK_BYTES` reads, never read whole. `Cache-Control:
-  no-store`, because the URL carries the token. There is no directory listing and no
+  no-store` (`ranges=1`), because the URL carries the token. There is no directory listing and no
   other route (404), and other methods are 405.
 
 The port is fixed, `[music] stream_port` (default `DEFAULT_STREAM_PORT`), because the
@@ -277,22 +280,41 @@ class MusicStreamServer:
             if not stat.S_ISREG(st.st_mode):
                 return self._refuse(404, "no such track")
             size = st.st_size
-            etag = f'"{size:x}-{st.st_mtime_ns:x}"'
-            last_modified = email.utils.formatdate(st.st_mtime, usegmt=True)
             ranges_on = request.query.get(RANGES_PARAM, "1") != "0"
-            range_header = request.headers.get("Range") if ranges_on else None  # `ranges=0`: ignored
-            if_range = request.headers.get("If-Range")
-            if range_header and if_range and if_range.strip() not in (etag, last_modified):
-                range_header = None  # the validator is stale: the whole file, not a slice of it
-            span = parse_range(range_header, size)
-            headers = {
-                "ETag": etag,
-                "Last-Modified": last_modified,
-                "Content-Type": MIME_BY_EXTENSION.get(path.suffix.lower(), "application/octet-stream"),
-                "Cache-Control": "no-store",
-                "X-Content-Type-Options": "nosniff",
-                **self._origin_headers(request),
-            }
+            content_type = MIME_BY_EXTENSION.get(path.suffix.lower(), "application/octet-stream")
+            if ranges_on:
+                etag = f'"{size:x}-{st.st_mtime_ns:x}"'
+                last_modified = email.utils.formatdate(st.st_mtime, usegmt=True)
+                range_header = request.headers.get("Range")
+                if_range = request.headers.get("If-Range")
+                if range_header and if_range and if_range.strip() not in (etag, last_modified):
+                    range_header = None  # the validator is stale: the whole file, not a slice of it
+                span = parse_range(range_header, size)
+                headers = {
+                    "ETag": etag,
+                    "Last-Modified": last_modified,
+                    "Content-Type": content_type,
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                    **self._origin_headers(request),
+                }
+            else:
+                # `ranges=0` deliberately mirrors the 9998 file server's answer (Python
+                # `http.server`), which WebKitGTK 2.50.4 plays with the full `duration` and
+                # `seekable` where the stricter answer (`no-store`, validators, `nosniff`,
+                # keep-alive) left `duration` 0. Measured on the Linux node; do not "clean
+                # it up". `Range`, `If-Range` and `If-None-Match` are ignored (always 200,
+                # whole file), no ETag/Last-Modified/nosniff, cacheable for the session
+                # (`private`: the token is per core session), and the connection closes
+                # after the body (the nearest to 9998's HTTP/1.0). 9998 also sends
+                # `Access-Control-Allow-Origin: *`; we deliberately do not: an allowed
+                # Origin is echoed, as everywhere else.
+                span = None
+                headers = {
+                    "Content-Type": content_type,
+                    "Cache-Control": "private, max-age=3600",
+                    **self._origin_headers(request),
+                }
             if ranges_on:
                 headers["Accept-Ranges"] = "bytes"
             if span == UNSATISFIABLE:
@@ -307,6 +329,8 @@ class MusicStreamServer:
             response = web.StreamResponse(status=status, headers=headers)
             # Before `prepare`: without it aiohttp answers `Transfer-Encoding: chunked`.
             response.content_length = length
+            if not ranges_on:
+                response.force_close()  # `Connection: close`, and the socket closes after the body
             await response.prepare(request)
             if request.method == "HEAD" or length == 0:
                 await response.write_eof()

@@ -300,13 +300,13 @@ def test_the_webview_csp_lets_media_load_from_the_default_stream_port_and_nothin
 
 # -- Content-Length, never chunked (what a media pipeline needs to size the stream) ---------
 
-async def _raw(server, request_lines, *, read_body=True):
+async def _raw(server, request_lines, *, read_body=True, connection="close"):
     """One HTTP/1.1 request on a raw socket; the status line, the headers as a lowercase
     dict, and the body. Nothing between us and what the server put on the wire."""
     reader, writer = await asyncio.open_connection(server.host, server.port)
     try:
         host = f"{server.host}:{server.port}"
-        head = "\r\n".join([*request_lines, f"Host: {host}", "Connection: close", "", ""])
+        head = "\r\n".join([*request_lines, f"Host: {host}", f"Connection: {connection}", "", ""])
         writer.write(head.encode("ascii"))
         await writer.drain()
         raw = await reader.read(-1)
@@ -374,7 +374,8 @@ async def test_ranges_0_answers_200_with_the_whole_file_and_no_accept_ranges(ser
     assert "transfer-encoding" not in headers
     assert "accept-ranges" not in headers and "content-range" not in headers
     assert headers["content-type"] == "audio/mpeg"
-    assert headers["cache-control"] == "no-store"
+    assert headers["cache-control"] == "private, max-age=3600"
+    assert not {"etag", "last-modified", "x-content-type-options"} & set(headers)
     assert (body == b"") == (method == "HEAD")
     if method == "GET":
         assert body == BODY
@@ -456,3 +457,30 @@ async def test_the_stream_info_says_whether_linux_may_ask_for_ranges(tmp_path, v
         assert (await svc.get_music_stream_info())["ranges_linux"] is expected
     finally:
         await svc.stop_music_stream()
+
+
+@pytest.mark.asyncio
+async def test_ranges_0_mirrors_the_9998_headers_and_closes_a_keep_alive_connection(server):
+    """WebKitGTK plays the 9998 file server's answer with a full duration; see `_track`."""
+    status_line, headers, body = await _raw(server, [
+        f"GET /music/track/trk_abc?t={TOKEN}&ranges=0 HTTP/1.1", "Range: bytes=10-19",
+        'If-Range: "x"', 'If-None-Match: "x"', "Origin: tauri://localhost"], connection="keep-alive")
+    assert status_line.split()[1] == "200" and body == BODY  # returned: the server closed the socket
+    assert headers["connection"].lower() == "close"
+    assert headers["content-length"] == str(SIZE) and "transfer-encoding" not in headers
+    assert headers["cache-control"] == "private, max-age=3600"
+    assert not {"etag", "last-modified", "x-content-type-options", "accept-ranges"} & set(headers)
+    assert headers["access-control-allow-origin"] == "tauri://localhost"
+
+
+@pytest.mark.asyncio
+async def test_ranges_0_never_sends_a_wildcard_origin(server):
+    _, headers, _ = await _raw(server, [f"GET /music/track/trk_abc?t={TOKEN}&ranges=0 HTTP/1.1"])
+    assert "access-control-allow-origin" not in headers
+
+
+@pytest.mark.asyncio
+async def test_ranges_1_headers_are_unchanged(server):
+    _, headers, _ = await _raw(server, [f"GET /music/track/trk_abc?t={TOKEN}&ranges=1 HTTP/1.1"])
+    assert headers["cache-control"] == "no-store" and headers["x-content-type-options"] == "nosniff"
+    assert "etag" in headers and "last-modified" in headers and headers["accept-ranges"] == "bytes"
