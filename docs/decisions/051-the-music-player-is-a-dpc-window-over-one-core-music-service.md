@@ -331,6 +331,15 @@ consensus 2026-11-20)") and are not decisions.
   owner. **Not decided, a condition (Forge proposed, CC backed; Mike did not rule on it):**
   if stem separation turns out to damage the vocal during the live checks, the repair
   path does not become a second edit option; it returns to Mike's decision.
+- **D27. Seam metrics are advisory pointers, never gates** (08:07). The question was
+  whether the `> 1.5 dB` seam check stays a gate for any edit (SPEC §12 decision 29).
+  Mike chose **advisory**: the seam metrics (`seam_start_jump_db`, `seam_end_jump_db`,
+  `seam_click_score`) are pointers ("where to listen") everywhere and never gate or reject
+  a take. The deterministic gates are only the unarguable ones: length (requested /
+  engine window / received), clipping, true peak, silence outside the edit zone, and
+  silence instead of the edit (SPEC §8). Measurements behind it (Ark, Forge, not
+  decisions): the absolute jump fires on untouched audio and cannot separate a known-bad
+  splice from a good short crossfade.
 
 ### Not decided
 
@@ -704,7 +713,8 @@ real app, not in the prototype.
   audio and not vision, and refuses an image call with a reason. The gateway either
   carries the audio part or the record says the judge does not go through it (N14).
 - [ ] **Region edit (B4).** A region comment returns two takes whose seam numbers are
-  within the thresholds or flagged, and accepting one creates v2 without touching v1.
+  shown as advisory pointers (D27), not gates, and accepting one creates v2 without
+  touching v1.
 - [ ] **YuE2.** A cover job on a track with lyrics returns `new_track` takes titled "Cover
   of". Without lyrics it is refused with `missing_lyrics`.
 - [ ] **No ComfyUI, no MCP (D12, D13).** No module under the music service imports the
@@ -935,7 +945,7 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
 
 ## Authors
 
-- **Mike**: Decision (D1-D26)
+- **Mike**: Decision (D1-D27)
 - **CC**: Spec, prototype, cards, this draft and its revision after review
 - **Zcode, Forge, Ark** (reviews, 2026-11-19 06:03, 06:04 and 06:33, AI Studio group
   chat): Zcode re-checked the code references by subagent at `95acf009`, found the D5
