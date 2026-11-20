@@ -144,6 +144,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "list_music_playlists", "create_music_playlist", "update_music_playlist", "delete_music_playlist",
     # The lyrics chain (ADR-051 D6): .lrc sidecar, tags, LRCLIB; transcribe; manual edits
     "get_music_lyrics", "save_music_lyrics", "lookup_music_lyrics_lrclib", "transcribe_music_lyrics",
+    # The track stream (ADR-051 N8): its loopback base URL and token, for the <audio> element
+    "get_music_stream_info",
     "list_strata_models",
     "install_strata_model",
     # The process registry (ADR-046 point 8): what runs now, who started it

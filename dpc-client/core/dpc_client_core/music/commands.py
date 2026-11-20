@@ -46,6 +46,11 @@ dropped; on MLX mlx_whisper's cached model is dropped). A model that was already
 when the run started (voice auto-transcribe keeps it warm) stays loaded, and so does one
 another transcription is using at that moment: the provider counts its running
 transcriptions under its load lock and refuses the unload while any is running.
+
+**The track stream** (`get_music_stream_info`, ADR-051 N8 decided as option (i), D28):
+`start_music_stream` opens `music/stream.py`'s loopback listener on `[music] stream_port`
+(default 9996), which serves a library track's bytes by `track_id` with HTTP `Range`, a
+per-process token and an `Origin` allowlist. The command hands the UI `{base_url, token}`.
 """
 
 from __future__ import annotations
@@ -57,6 +62,7 @@ from typing import Any, Dict, List, Optional
 from ..local_api import slow_command
 from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
 from .lyrics import MusicLyrics
+from .stream import DEFAULT_STREAM_PORT, MusicStreamServer
 
 LOCAL_WHISPER_TYPE = "local_whisper"
 DEFAULT_LOCAL_TRANSCRIPTION_MAX_MB = 25
@@ -252,6 +258,66 @@ class MusicCommandsMixin:
         if self._music_library_instance is not None:
             await self._music_library_instance.stop()
 
+    # -- the track stream (ADR-051 N8, D28) ------------------------------------------
+
+    _music_stream_instance: Optional[MusicStreamServer] = None
+    _music_stream_problem: Optional[str] = None
+
+    def _music_stream_port(self) -> int:
+        raw = self.settings.get("music", "stream_port", str(DEFAULT_STREAM_PORT))
+        try:
+            port = int(str(raw).strip())
+            if 0 <= port <= 65535:
+                return port
+        except (TypeError, ValueError):
+            pass
+        logger.warning("[music] stream_port %r is not a port; using %d", raw, DEFAULT_STREAM_PORT)
+        return DEFAULT_STREAM_PORT
+
+    def _music_track_path(self, track_id: str) -> Optional[Path]:
+        library = self._music_library_instance
+        return library.get_track_path(track_id) if library is not None else None
+
+    async def start_music_stream(self) -> None:
+        """Open the loopback track stream (`music/stream.py`); called at service start,
+        after the library. A taken port is logged and leaves the stream off: the UI is
+        told `stream_unavailable` and falls back. Never raises."""
+        if self._music_stream_instance is not None and self._music_stream_instance.is_running:
+            return
+        port = self._music_stream_port()
+        server = MusicStreamServer(self._music_track_path, port=port)
+        try:
+            await server.start()
+        except OSError as exc:
+            self._music_stream_problem = (
+                f"the music track stream could not listen on 127.0.0.1:{port} ({exc}); "
+                f"free the port or set [music] stream_port (the app's CSP media-src must name the same port)")
+            logger.error("music: %s", self._music_stream_problem)
+            return
+        except Exception as exc:
+            self._music_stream_problem = f"the music track stream did not start: {exc}"
+            logger.exception("music: the track stream did not start")
+            return
+        self._music_stream_instance = server
+        self._music_stream_problem = None
+
+    async def stop_music_stream(self) -> None:
+        """Close the track stream; called at shutdown."""
+        server, self._music_stream_instance = self._music_stream_instance, None
+        if server is not None:
+            await server.stop()
+
+    async def get_music_stream_info(self) -> Dict[str, Any]:
+        """Where the webview reads a track's bytes: `{base_url, token}`; a track's URL is
+        `{base_url}/music/track/{track_id}?t={token}`. Answered only through this
+        authenticated door, so the token never reaches another page. `stream_unavailable`
+        when the listener is not running (the UI falls back)."""
+        server = self._music_stream_instance
+        if server is None or not server.is_running:
+            return {"status": "error", "code": "stream_unavailable",
+                    "message": self._music_stream_problem or "the music track stream is not running"}
+        return {"status": "ok", **server.info()}
+
     # -- folders -----------------------------------------------------------------
 
     async def list_music_folders(self) -> Dict[str, Any]:
@@ -408,4 +474,5 @@ MUSIC_COMMANDS = (
     "save_music_lyrics",
     "lookup_music_lyrics_lrclib",
     "transcribe_music_lyrics",
+    "get_music_stream_info",
 )

@@ -335,26 +335,30 @@ export function nextPlaylistName(playlists: readonly Playlist[]): string {
     return `Playlist ${n}`;
 }
 
-// -- the playback source (ADR-051 N8, open) --------------------------------------
+// -- the playback source (ADR-051 N8, option (i), D28) -----------------------------
 
 /**
- * Where the webview may read a track's bytes from today.
+ * Where the webview reads a track's bytes from.
  *
- * ADR-051 N8 (how core serves bytes to the webview) is Mike's open decision:
- * - the Tauri asset scope is `$HOME/.dpc/**` only (`tauri.conf.json`), so a file in
- *   `~/Music` cannot go through `convertFileSrc`;
- * - the 9998 file server serves only `~/.dpc/conversations/<peer>/files/`;
- * - `media-src` allows `blob:` and `asset:` but not `http://localhost:*` nor web `https:`.
- *
- * So, without widening the scope or the CSP:
- * - a file under `~/.dpc` plays through `convertFileSrc` (an `asset:` URL);
- * - on Linux the `asset:` protocol does not play audio in WebKitGTK (the note in
- *   VoicePlayer.svelte), so the file is read through the fs plugin, whose scope is the
- *   same `$HOME/.dpc/**`, into a `blob:` URL (the whole file in webview memory);
- * - any other path is "not playable yet (outside the DPC folder)", and a web track is
- *   "not playable yet" until N9 is decided.
+ * - The core's track stream (`dpc_client_core/music/stream.py`): loopback HTTP with
+ *   `Range` and a token, keyed by track id; `media-src` names `http://127.0.0.1:9996`.
+ *   **Linux** always uses it: WebKitGTK plays no audio from `asset:`, and treats a
+ *   `blob:` as a live stream (duration 0, no seeking forward).
+ * - **Windows and macOS** keep `convertFileSrc` (`asset:`) for a file under `~/.dpc`, the
+ *   asset scope; a file elsewhere uses the stream.
+ * - Fallback when the stream info cannot be had: Linux reads a file under `~/.dpc` into
+ *   a `blob:` URL; a file outside `~/.dpc` is "not playable yet (outside the DPC folder)".
+ *   The source and any fallback reason are in the `[music] source ... via=` log line.
+ * - A web track is "not playable yet" until N9 is decided.
  * Changing this is one place: `trackPlaybackUrl`.
  */
+export interface StreamInfo {
+    /** `http://127.0.0.1:<port>`, from the core. */
+    base_url: string;
+    /** The stream's per-process token. Never logged. */
+    token: string;
+}
+
 export interface PlaybackEnv {
     /** Running in the Tauri desktop app. */
     tauri: boolean;
@@ -369,12 +373,16 @@ export interface PlaybackEnv {
     /** `URL.createObjectURL`. */
     createObjectURL?: (blob: Blob) => string;
     revokeObjectURL?: (url: string) => void;
+    /** The core's track stream (`get_music_stream_info`); rejects when it is unavailable. */
+    streamInfo?: () => Promise<StreamInfo>;
 }
 
 export type PlaybackProblem = 'missing' | 'no-file' | 'outside-dpc' | 'web' | 'no-desktop' | 'read-failed';
 
 export type PlaybackSource =
-    | { ok: true; url: string; via: 'asset' | 'blob'; release: () => void; mime?: string; bytes?: number }
+    | { ok: true; url: string; via: 'asset' | 'blob' | 'http'; release: () => void; mime?: string; bytes?: number;
+        /** Why the stream was not used when it would have been (Linux fell back to `blob:`). */
+        fallback?: string }
     | { ok: false; problem: PlaybackProblem; reason: string };
 
 export const OUTSIDE_DPC_TEXT = 'Not playable yet (outside the DPC folder)';
@@ -459,8 +467,19 @@ export function dpcRelativePath(path: string | null | undefined, home: string | 
     return p.slice(h.length).join('/');
 }
 
-/** Whether the track can be asked to play at all, without reading anything. */
-export function playbackProblem(entry: LibraryEntry | null | undefined, env: Pick<PlaybackEnv, 'tauri' | 'home' | 'isWindows'>):
+/** Only a loopback `http://127.0.0.1:<port>` (or `[::1]`) base is used as a stream. */
+export function isLoopbackStreamBase(base: unknown): base is string {
+    return typeof base === 'string' && /^http:\/\/(127\.0\.0\.1|\[::1\]):\d{1,5}$/.test(base);
+}
+
+/** The `<audio>` URL of a track on the core's stream: keyed by its library id, never a path. */
+export function streamTrackUrl(info: StreamInfo, trackId: string): string {
+    return `${info.base_url}/music/track/${encodeURIComponent(trackId)}?t=${encodeURIComponent(info.token)}`;
+}
+
+/** Whether the track can be asked to play at all, without reading anything. With the
+ *  core's stream on offer (`env.streamInfo`), a file outside `~/.dpc` is in reach too. */
+export function playbackProblem(entry: LibraryEntry | null | undefined, env: Pick<PlaybackEnv, 'tauri' | 'home' | 'isWindows'> & Partial<Pick<PlaybackEnv, 'streamInfo'>>):
     { problem: PlaybackProblem; reason: string } | null {
     if (!entry) return { problem: 'missing', reason: 'Not in the library any more' };
     if (entry.missing) return { problem: 'missing', reason: MISSING_TEXT };
@@ -468,7 +487,7 @@ export function playbackProblem(entry: LibraryEntry | null | undefined, env: Pic
     if (!entry.path) return { problem: 'no-file', reason: 'This entry has no file' };
     if (!env.tauri) return { problem: 'no-desktop', reason: NO_DESKTOP_TEXT };
     // An unknown home is treated as outside: nothing proves the path is in the scope.
-    if (dpcRelativePath(entry.path, env.home, env.isWindows) === null) {
+    if (!env.streamInfo && dpcRelativePath(entry.path, env.home, env.isWindows) === null) {
         return { problem: 'outside-dpc', reason: OUTSIDE_DPC_TEXT };
     }
     return null;
@@ -480,17 +499,35 @@ export async function trackPlaybackUrl(entry: LibraryEntry | null | undefined, e
     const blocked = playbackProblem(entry, env);
     if (blocked) return { ok: false, ...blocked };
     const path = entry!.path!;
-    const relative = dpcRelativePath(path, env.home, env.isWindows)!;
+    const relative = dpcRelativePath(path, env.home, env.isWindows);
+    let fallback: string | undefined;
+    // Linux always, elsewhere only what the asset scope cannot reach (see PlaybackEnv).
+    if (env.isLinux || relative === null) {
+        if (env.streamInfo) {
+            try {
+                const info = await env.streamInfo();
+                if (!isLoopbackStreamBase(info?.base_url) || typeof info?.token !== 'string' || !info.token) {
+                    throw new Error('the core gave no loopback stream address');
+                }
+                return { ok: true, url: streamTrackUrl(info, entry!.id), via: 'http', release: () => {}, mime: trackMime(entry) };
+            } catch (e) {
+                fallback = `stream unavailable: ${e instanceof Error ? e.message : String(e)}`;
+            }
+        }
+        if (relative === null) {
+            return { ok: false, problem: 'outside-dpc', reason: fallback ? `${OUTSIDE_DPC_TEXT}: the track ${fallback}` : OUTSIDE_DPC_TEXT };
+        }
+    }
     if (env.isLinux) {
         if (!env.readHomeFile || !env.createObjectURL) {
             return { ok: false, problem: 'read-failed', reason: 'Cannot read the file in this webview' };
         }
         try {
-            const bytes = await env.readHomeFile(relative);
+            const bytes = await env.readHomeFile(relative!); // null returned above
             const mime = trackMime(entry);
             const blob = new Blob([bytes as BlobPart], mime ? { type: mime } : {});
             const url = env.createObjectURL(blob);
-            return { ok: true, url, via: 'blob', release: () => env.revokeObjectURL?.(url), mime, bytes: bytes.byteLength };
+            return { ok: true, url, via: 'blob', release: () => env.revokeObjectURL?.(url), mime, bytes: bytes.byteLength, fallback };
         } catch (e) {
             return { ok: false, problem: 'read-failed', reason: `Could not read the file: ${e instanceof Error ? e.message : String(e)}` };
         }

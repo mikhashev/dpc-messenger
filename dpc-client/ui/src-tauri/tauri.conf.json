@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:* ws://localhost:* https://fonts.googleapis.com https://fonts.gstatic.com; media-src 'self' mediastream: blob: https://asset.localhost asset:;",
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:* ws://localhost:* https://fonts.googleapis.com https://fonts.gstatic.com; media-src 'self' mediastream: blob: https://asset.localhost asset: http://127.0.0.1:9996;",
       "assetProtocol": {
         "enable": true,
         "scope": [

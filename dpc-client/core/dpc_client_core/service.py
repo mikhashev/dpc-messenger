@@ -1511,6 +1511,9 @@ class CoreService(MusicCommandsMixin):
         # The music library (ADR-051): loads its folders and starts polling them;
         # a failure is logged and leaves the commands answering with an error.
         await self.start_music_library()
+        # Its loopback track stream (ADR-051 N8): a taken port is logged and the UI
+        # falls back; it never stops the start.
+        await self.start_music_stream()
 
         # Local engines (llama-server, Strata) live on this loop; a start reached
         # from an agent tool's per-call loop is forwarded here. A missing pin is
@@ -1838,6 +1841,10 @@ class CoreService(MusicCommandsMixin):
         if device_context_stop is not None:
             device_context_stop.set()
 
+        try:
+            await self.stop_music_stream()
+        except Exception:
+            logger.exception("music: the track stream did not stop cleanly")
         # The music library stops polling and hashing and writes what is pending,
         # before the registry refuses the ffmpeg probes it may still be running.
         try:

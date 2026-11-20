@@ -36,6 +36,8 @@ import {
     stepQueue,
     throttle,
     trackPlaybackUrl,
+    streamTrackUrl,
+    isLoopbackStreamBase,
     trackMime,
     isConcreteAudioMime,
     formatRanges,
@@ -461,7 +463,7 @@ describe('trackMime, isConcreteAudioMime, formatRanges', () => {
     });
 });
 
-describe('the playback source (ADR-051 N8 open: only ~/.dpc plays today)', () => {
+describe('the playback source without the core track stream (only ~/.dpc plays)', () => {
     const entry = (path: string | null, extra: Partial<LibraryEntry> = {}): LibraryEntry => ({
         id: 'trk_0000000000000001', title: 'Night bus', duration_s: 200, origin: 'folder', path, missing: false,
         source: { kind: 'local', name: 'night-bus.flac', uri: 'file:///x', mime: 'audio/flac' }, ...extra,
@@ -669,5 +671,100 @@ describe('throttle (the volume write)', () => {
         t.cancel();
         c.advance(1000);
         expect(fn).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe('the playback source with the core track stream (ADR-051 N8, D28)', () => {
+    const INFO = { base_url: 'http://127.0.0.1:9996', token: 'tok/en+=' };
+    const entry = (path: string | null, extra: Partial<LibraryEntry> = {}): LibraryEntry => ({
+        id: 'trk_0000000000000001', title: 'Night bus', duration_s: 200, origin: 'folder', path, missing: false,
+        source: { kind: 'local', name: 'night-bus.flac', uri: 'file:///x', mime: 'audio/flac' }, ...extra,
+    });
+    const URL_1 = 'http://127.0.0.1:9996/music/track/trk_0000000000000001?t=tok%2Fen%2B%3D';
+    const linux = (over: Partial<PlaybackEnv> = {}): PlaybackEnv => ({
+        tauri: true, home: '/home/mike', isWindows: false, isLinux: true,
+        readHomeFile: vi.fn(async () => new Uint8Array([1, 2, 3])),
+        createObjectURL: () => 'blob:abc', revokeObjectURL: vi.fn(),
+        streamInfo: vi.fn(async () => INFO), ...over,
+    });
+    const win = (over: Partial<PlaybackEnv> = {}): PlaybackEnv => ({
+        tauri: true, home: 'C:\\Users\\mike', isWindows: true, isLinux: false,
+        convertFileSrc: (p) => `http://asset.localhost/${encodeURIComponent(p)}`,
+        streamInfo: vi.fn(async () => INFO), ...over,
+    });
+    const mac = (over: Partial<PlaybackEnv> = {}): PlaybackEnv => ({
+        tauri: true, home: '/Users/mike', isWindows: false, isLinux: false,
+        convertFileSrc: (p) => `asset://localhost/${encodeURIComponent(p)}`,
+        streamInfo: vi.fn(async () => INFO), ...over,
+    });
+
+    it('the stream URL is keyed by the track id with the token, both encoded, and no path', () => {
+        expect(streamTrackUrl(INFO, 'trk_0000000000000001')).toBe(URL_1);
+        expect(streamTrackUrl(INFO, 'a/../b')).toBe('http://127.0.0.1:9996/music/track/a%2F..%2Fb?t=tok%2Fen%2B%3D');
+    });
+
+    it('only a loopback http base is a stream', () => {
+        expect(isLoopbackStreamBase('http://127.0.0.1:9996')).toBe(true);
+        expect(isLoopbackStreamBase('http://[::1]:9996')).toBe(true);
+        for (const bad of ['http://evil.example:9996', 'https://127.0.0.1:9996', 'http://127.0.0.1:9996/x', 'http://127.0.0.1.evil:1', '', null]) {
+            expect(isLoopbackStreamBase(bad)).toBe(false);
+        }
+    });
+
+    it('on Linux a track under ~/.dpc plays from the stream, with nothing read into a blob', async () => {
+        const env = linux();
+        const r = await trackPlaybackUrl(entry('/home/mike/.dpc/music/take.flac'), env);
+        expect(r).toMatchObject({ ok: true, via: 'http', url: URL_1, mime: 'audio/flac' });
+        expect(r.ok && r.fallback).toBeFalsy();
+        expect(env.readHomeFile).not.toHaveBeenCalled();
+    });
+
+    it('on Linux a track in a watched folder outside ~/.dpc plays from the stream too', async () => {
+        const e = entry('/home/mike/Music/night-bus.flac');
+        const env = linux();
+        expect(playbackProblem(e, env)).toBeNull();
+        expect(await trackPlaybackUrl(e, env)).toMatchObject({ ok: true, via: 'http', url: URL_1 });
+    });
+
+    it('on Windows and macOS a track under ~/.dpc stays on asset:, and the stream is not asked', async () => {
+        const w = win();
+        expect(await trackPlaybackUrl(entry('C:\\Users\\mike\\.dpc\\music\\take.wav'), w))
+            .toMatchObject({ ok: true, via: 'asset', url: `http://asset.localhost/${encodeURIComponent('C:\\Users\\mike\\.dpc\\music\\take.wav')}` });
+        expect(w.streamInfo).not.toHaveBeenCalled();
+        const m = mac();
+        expect(await trackPlaybackUrl(entry('/Users/mike/.dpc/music/take.wav'), m)).toMatchObject({ ok: true, via: 'asset' });
+        expect(m.streamInfo).not.toHaveBeenCalled();
+    });
+
+    it('on Windows and macOS a track outside ~/.dpc, which asset: cannot reach, plays from the stream', async () => {
+        expect(await trackPlaybackUrl(entry('D:\\Music\\night-bus.flac'), win())).toMatchObject({ ok: true, via: 'http', url: URL_1 });
+        expect(await trackPlaybackUrl(entry('/Users/mike/Music/night-bus.flac'), mac())).toMatchObject({ ok: true, via: 'http', url: URL_1 });
+    });
+
+    it('on Linux, when the stream info fails, a track under ~/.dpc falls back to a blob: and says why', async () => {
+        const env = linux({ streamInfo: vi.fn(async () => { throw new Error('the port was taken'); }) });
+        const r = await trackPlaybackUrl(entry('/home/mike/.dpc/music/take.flac'), env);
+        expect(r).toMatchObject({ ok: true, via: 'blob', url: 'blob:abc' });
+        expect(r.ok && r.fallback).toBe('stream unavailable: the port was taken');
+        expect(env.readHomeFile).toHaveBeenCalledWith('.dpc/music/take.flac');
+    });
+
+    it('a stream address that is not loopback is not used: the fallback applies', async () => {
+        const env = linux({ streamInfo: async () => ({ base_url: 'http://evil.example:9996', token: 'x' }) });
+        const r = await trackPlaybackUrl(entry('/home/mike/.dpc/music/take.flac'), env);
+        expect(r).toMatchObject({ ok: true, via: 'blob' });
+        expect(r.ok && r.fallback).toContain('no loopback stream address');
+    });
+
+    it('when the stream info fails, a track outside ~/.dpc is "not playable yet" with the reason', async () => {
+        const failing = vi.fn(async () => { throw new Error('stream_unavailable'); });
+        for (const [env, path] of [
+            [linux({ streamInfo: failing }), '/home/mike/Music/a.flac'],
+            [win({ streamInfo: failing }), 'D:\\Music\\a.flac'],
+        ] as const) {
+            const r = await trackPlaybackUrl(entry(path), env);
+            expect(r).toMatchObject({ ok: false, problem: 'outside-dpc' });
+            expect(!r.ok && r.reason).toBe(`${OUTSIDE_DPC_TEXT}: the track stream unavailable: stream_unavailable`);
+        }
     });
 });

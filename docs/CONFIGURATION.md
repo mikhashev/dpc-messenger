@@ -750,7 +750,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **34 sections, 187 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **34 sections, 188 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -995,6 +995,7 @@ An empty default means the key is written blank and the feature stays off until 
 | Key | Default | Notes |
 |---|---|---|
 | `poll_interval_s` | `60` | How often the music library re-reads its watched folders, in seconds (ADR-051; polling, no OS file events) |
+| `stream_port` | `9996` | The loopback port the player reads track bytes from (ADR-051 N8, 127.0.0.1 only, token-guarded). The app's CSP media-src names 9996, so another port also needs tauri.conf.json changed and the app rebuilt |
 | `lrclib_enabled` | `true` | Allow the explicit "Find on LRCLIB" lookup (sends artist, title, album and duration to lrclib.net); false hides it. The automatic lyrics chain never goes online |
 
 #### `[oauth]`

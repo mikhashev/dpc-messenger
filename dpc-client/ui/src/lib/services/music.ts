@@ -58,6 +58,7 @@ import {
     type MusicFolder,
     type PlaybackEnv,
     type Playlist,
+    type StreamInfo,
     type QueueState,
     type RepeatMode,
     type StepResult,
@@ -236,10 +237,19 @@ async function readEnv(): Promise<PlaybackEnv> {
             const { readFile, BaseDirectory } = await import('@tauri-apps/plugin-fs');
             return readFile(relative, { baseDir: BaseDirectory.Home });
         };
+        env.streamInfo = fetchStreamInfo;
     } catch (e) {
         console.warn('[music] the Tauri API did not load; nothing can play', e);
     }
     return env;
+}
+
+/** The core's track stream address and token (ADR-051 N8), asked at every track start:
+ *  the token is the core process's, so a restarted core is picked up. */
+async function fetchStreamInfo(): Promise<StreamInfo> {
+    const answer = await callMusic<StreamInfo>(sendCommand, 'get_music_stream_info');
+    if (!answer.ok) throw new Error(answer.message);
+    return answer.data;
 }
 
 /** The playback environment, read once. */
@@ -480,7 +490,7 @@ async function startAt(queue: QueueState, index: number, autoplay: boolean): Pro
     {
         const env = await getPlaybackEnv();
         const platform = env.isLinux ? 'linux' : env.isWindows ? 'windows' : 'macos-or-other';
-        dlogEvent('source', `source #${token} ${id} ${entryOf(id)?.source?.name ?? ''} via=${source.via} mime=${source.mime || 'none'} bytes=${source.bytes ?? 'n/a'} platform=${platform}`);
+        dlogEvent('source', `source #${token} ${id} ${entryOf(id)?.source?.name ?? ''} via=${source.via} mime=${source.mime || 'none'} bytes=${source.bytes ?? 'n/a'} platform=${platform}${source.fallback ? ` fallback=${source.fallback}` : ''}`);
     }
     seekRequested = null;
     releaseSource();

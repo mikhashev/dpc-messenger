@@ -1167,7 +1167,7 @@ class MusicLibrary:
 
     def get_track_path(self, track_id: str) -> Optional[Path]:
         """Where the track's bytes are now, or None when it is missing or has no file.
-        For byte serving later (ADR-051 N8 is open)."""
+        The track stream serves these bytes by `track_id` (`music/stream.py`, ADR-051 N8)."""
         e = self._entries.get(track_id)
         if e is None or e.get("missing") or not e.get("path"):
             return None

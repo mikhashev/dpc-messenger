@@ -15,10 +15,9 @@
   closed. Keyboard shortcuts (Space, N, P, Shift+S, Shift+R, arrows to seek, Alt+Up /
   Alt+Down to move a playlist row) work only while focus is inside the window.
 
-  The playback source: a track plays only when its file is under ~/.dpc (the Tauri
-  asset and fs scope). Any other path shows "Not playable yet (outside the DPC
-  folder)"; how core serves those bytes is ADR-051 N8, Mike's open decision. The one
-  place that decides is `trackPlaybackUrl` in utils/musicPlayer.ts.
+  The playback source: the core's loopback track stream (ADR-051 N8, D28) on Linux and
+  for files outside ~/.dpc, `asset:` for files under ~/.dpc on Windows and macOS. The
+  one place that decides is `trackPlaybackUrl` in utils/musicPlayer.ts.
 
   Under Now playing sits the Lyrics area (MusicLyrics.svelte): the lyrics chain of
   the core (.lrc sidecar, file tags, LRCLIB, manual edit) for the current track.
