@@ -3,7 +3,8 @@
 `MusicCommandsMixin` is mixed into `CoreService`; `local_api` dispatches a command by
 `getattr(core_service, command)`, so each `async def` here is one command, and each
 must also be in `local_api.ALLOWED_COMMANDS`. The agent door (`music_*` tools) will
-call the same `MusicLibrary` methods.
+call the same `MusicLibrary` methods; the job commands (propose, keep, discard, ...) have no
+agent tool (ADR-051 Q1: agents get no keep/discard).
 
 Every answer is `{"status": "ok", ...}` or `{"status": "error", "code", "message"}`.
 
@@ -55,11 +56,14 @@ per-process token and an `Origin` allowlist. The command hands the UI `{base_url
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..local_api import slow_command
+from .capabilities import MusicCapabilities
+from .jobs import MusicJobError, MusicJobStore
 from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
 from .lyrics import MusicLyrics
 from .stream import DEFAULT_STREAM_PORT, MusicStreamServer
@@ -77,8 +81,36 @@ _FALSE = ("0", "false", "no", "off", "")
 def _error(exc: Exception) -> Dict[str, Any]:
     if isinstance(exc, MusicLibraryError):
         return {"status": "error", "code": exc.code, "message": exc.message}
+    if isinstance(exc, MusicJobError):
+        return {"status": "error", "code": exc.code, "message": exc.message, "field": exc.field}
     logger.exception("music command failed")
     return {"status": "error", "code": "internal", "message": str(exc)}
+
+
+def _bad(code: str, field: str, what: str) -> MusicJobError:
+    return MusicJobError(code, f"{field} must be {what}", field=field)
+
+
+def _need_str(value: Any, field: str, code: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise _bad(code, field, "a non-empty string")
+    return value
+
+
+def _opt_str(value: Any, field: str, code: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _bad(code, field, "a string or null")
+    return value
+
+
+def _opt_str_list(value: Any, field: str, code: str) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise _bad(code, field, "a list of strings or null")
+    return value
 
 
 class MusicCommandsMixin:
@@ -86,6 +118,8 @@ class MusicCommandsMixin:
 
     _music_library_instance: Optional[MusicLibrary] = None
     _music_lyrics_instance: Optional[MusicLyrics] = None
+    _music_jobs_instance: Optional[MusicJobStore] = None
+    _music_jobs_lock: Optional[asyncio.Lock] = None
 
     def _music_poll_interval_s(self) -> float:
         raw = self.settings.get("music", "poll_interval_s", str(DEFAULT_POLL_INTERVAL_S))
@@ -369,20 +403,20 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
-    async def music_hide_track(self, track_id: str) -> Dict[str, Any]:
+    async def hide_music_track(self, track_id: str) -> Dict[str, Any]:
         """Hide a track: reversible, the file is untouched."""
         try:
             return {"status": "ok", "entry": await (await self._music()).set_hidden(track_id, True)}
         except Exception as exc:
             return _error(exc)
 
-    async def music_unhide_track(self, track_id: str) -> Dict[str, Any]:
+    async def unhide_music_track(self, track_id: str) -> Dict[str, Any]:
         try:
             return {"status": "ok", "entry": await (await self._music()).set_hidden(track_id, False)}
         except Exception as exc:
             return _error(exc)
 
-    async def music_remove_missing(self, track_id: Optional[str] = None) -> Dict[str, Any]:
+    async def remove_missing_music_tracks(self, track_id: Optional[str] = None) -> Dict[str, Any]:
         """Drop one missing entry (`track_id`), or all of them, from the library and
         the playlists. A present entry is refused."""
         try:
@@ -390,11 +424,142 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
-    async def music_delete_generated_file(self, track_id: str) -> Dict[str, Any]:
+    async def delete_generated_music_file(self, track_id: str) -> Dict[str, Any]:
         """Delete a DPC-made file under `music/generated/` (and its .json sidecar) and
         drop its entry. Anything else is refused; this is not Keep / Discard."""
         try:
             return {"status": "ok", **await (await self._music()).delete_generated_file(track_id)}
+        except Exception as exc:
+            return _error(exc)
+
+    # -- jobs and takes (no agent tool: ADR-051 Q1) ----------------------------------
+
+    async def _music_jobs(self) -> MusicJobStore:
+        """The lazily built job store; two first calls open it once."""
+        if self._music_jobs_instance is not None:
+            return self._music_jobs_instance
+        if self._music_jobs_lock is None:
+            self._music_jobs_lock = asyncio.Lock()
+        async with self._music_jobs_lock:
+            if self._music_jobs_instance is None:
+                store = MusicJobStore(self.settings.dpc_home_dir, capabilities=MusicCapabilities())
+                await asyncio.to_thread(store.open)
+                self._music_jobs_instance = store
+        return self._music_jobs_instance
+
+    async def _music_hide_for_discard(self, take: Dict[str, Any]) -> Dict[str, Any]:
+        """Decision 35: Discard removes the library entry (hides it); the file stays. A
+        failure here never undoes the take's decision."""
+        track_id = take.get("library_track_id")
+        if not track_id:
+            return {"library_hidden": False, "library_reason": "the take has no library entry"}
+        try:
+            await (await self._music()).set_hidden(track_id, True)
+            return {"library_hidden": True}
+        except MusicLibraryError as exc:
+            return {"library_hidden": False, "library_reason": exc.message}
+        except Exception as exc:
+            logger.exception("music: hiding the discarded take's library entry failed")
+            return {"library_hidden": False, "library_reason": str(exc)}
+
+    async def get_music_capabilities(self) -> Dict[str, Any]:
+        try:
+            store = await self._music_jobs()
+            return {"status": "ok", "capabilities": store.capabilities.report()}
+        except Exception as exc:
+            return _error(exc)
+
+    async def propose_music_job(self, type: Any = None, params: Any = None, track_id: Any = None,
+                                base_version_id: Any = None, comment_id: Any = None, action: Any = None,
+                                region: Any = None, prompt: Any = None,
+                                idempotency_key: Any = None) -> Dict[str, Any]:
+        try:
+            job_type = _need_str(type, "type", "invalid_type")
+            if not isinstance(params, dict):
+                raise _bad("invalid_params", "params", "an object")
+            if region is not None and not isinstance(region, dict):
+                raise _bad("invalid_params", "region", "an object or null")
+            strs = {k: _opt_str(v, k, "invalid_params") for k, v in (
+                ("track_id", track_id), ("base_version_id", base_version_id), ("comment_id", comment_id),
+                ("action", action), ("prompt", prompt), ("idempotency_key", idempotency_key))}
+            store = await self._music_jobs()
+            job = await asyncio.to_thread(lambda: store.create_job(job_type, params, region=region, **strs))
+            return {"status": "ok", "job": job}
+        except Exception as exc:
+            return _error(exc)
+
+    async def get_music_job(self, job_id: Any = None) -> Dict[str, Any]:
+        try:
+            jid = _need_str(job_id, "job_id", "invalid_job_id")
+            store = await self._music_jobs()
+            return {"status": "ok", "job": await asyncio.to_thread(store.get_job, jid)}
+        except Exception as exc:
+            return _error(exc)
+
+    async def list_music_jobs(self, states: Any = None, job_type: Any = None) -> Dict[str, Any]:
+        try:
+            st = _opt_str_list(states, "states", "invalid_states")
+            jt = _opt_str(job_type, "job_type", "invalid_type")
+            store = await self._music_jobs()
+            jobs = await asyncio.to_thread(lambda: store.list_jobs(states=st, job_type=jt))
+            return {"status": "ok", "jobs": jobs}
+        except Exception as exc:
+            return _error(exc)
+
+    async def cancel_music_job(self, job_id: Any = None, reason: Any = None) -> Dict[str, Any]:
+        try:
+            jid = _need_str(job_id, "job_id", "invalid_job_id")
+            why = _opt_str(reason, "reason", "invalid_reason")
+            store = await self._music_jobs()
+            return {"status": "ok", "job": await asyncio.to_thread(store.cancel_job, jid, why)}
+        except Exception as exc:
+            return _error(exc)
+
+    async def list_music_takes(self, job_id: Any = None) -> Dict[str, Any]:
+        try:
+            jid = _need_str(job_id, "job_id", "invalid_job_id")
+            store = await self._music_jobs()
+            return {"status": "ok", "takes": await asyncio.to_thread(store.list_takes, jid)}
+        except Exception as exc:
+            return _error(exc)
+
+    async def keep_music_take(self, take_id: Any = None) -> Dict[str, Any]:
+        """Keep: the take is the person's. The library is not touched."""
+        try:
+            tid = _need_str(take_id, "take_id", "invalid_take_id")
+            store = await self._music_jobs()
+            take = await asyncio.to_thread(store.keep_take, tid)
+            job = await asyncio.to_thread(store.get_job, take["job_id"])
+            return {"status": "ok", "take": take, "job": job}
+        except Exception as exc:
+            return _error(exc)
+
+    async def discard_music_take(self, take_id: Any = None, reason_text: Any = None,
+                                 reason_class: Any = None) -> Dict[str, Any]:
+        try:
+            tid = _need_str(take_id, "take_id", "invalid_take_id")
+            text = _opt_str(reason_text, "reason_text", "invalid_reason")
+            cls = _opt_str(reason_class, "reason_class", "invalid_reason")
+            store = await self._music_jobs()
+            take = await asyncio.to_thread(lambda: store.discard_take(tid, reason_text=text, reason_class=cls))
+            job = await asyncio.to_thread(store.get_job, take["job_id"])
+            return {"status": "ok", "take": take, "job": job, **await self._music_hide_for_discard(take)}
+        except Exception as exc:
+            return _error(exc)
+
+    async def reject_all_music_takes(self, job_id: Any = None, reason_text: Any = None,
+                                     reason_class: Any = None) -> Dict[str, Any]:
+        try:
+            jid = _need_str(job_id, "job_id", "invalid_job_id")
+            text = _opt_str(reason_text, "reason_text", "invalid_reason")
+            cls = _opt_str(reason_class, "reason_class", "invalid_reason")
+            store = await self._music_jobs()
+            job = await asyncio.to_thread(lambda: store.reject_all_takes(jid, reason_text=text, reason_class=cls))
+            takes = await asyncio.to_thread(store.list_takes, jid)
+            for take in takes:
+                if take.get("decision") == "rejected":
+                    take.update(await self._music_hide_for_discard(take))
+            return {"status": "ok", "job": job, "takes": takes}
         except Exception as exc:
             return _error(exc)
 
@@ -501,6 +666,19 @@ MUSIC_COMMANDS = (
     "rescan_music_folder",
     "list_music_library",
     "get_music_track",
+    "hide_music_track",
+    "unhide_music_track",
+    "remove_missing_music_tracks",
+    "delete_generated_music_file",
+    "get_music_capabilities",
+    "propose_music_job",
+    "get_music_job",
+    "list_music_jobs",
+    "cancel_music_job",
+    "list_music_takes",
+    "keep_music_take",
+    "discard_music_take",
+    "reject_all_music_takes",
     "list_music_playlists",
     "create_music_playlist",
     "update_music_playlist",

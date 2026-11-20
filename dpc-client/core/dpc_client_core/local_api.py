@@ -141,7 +141,10 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # The music library (ADR-051 Phase 0): watched folders, tracks, playlists
     "list_music_folders", "add_music_folder", "remove_music_folder", "rescan_music_folder",
     "list_music_library", "get_music_track",
-    "music_hide_track", "music_unhide_track", "music_remove_missing", "music_delete_generated_file",
+    "hide_music_track", "unhide_music_track", "remove_missing_music_tracks", "delete_generated_music_file",
+    # Music jobs and takes (ADR-051): propose, watch, keep / discard. No agent tool.
+    "get_music_capabilities", "propose_music_job", "get_music_job", "list_music_jobs", "cancel_music_job",
+    "list_music_takes", "keep_music_take", "discard_music_take", "reject_all_music_takes",
     "list_music_playlists", "create_music_playlist", "update_music_playlist", "delete_music_playlist",
     # The lyrics chain (ADR-051 D6): .lrc sidecar, tags, LRCLIB; transcribe; manual edits
     "get_music_lyrics", "save_music_lyrics", "lookup_music_lyrics_lrclib", "transcribe_music_lyrics",
