@@ -335,7 +335,7 @@ consensus 2026-11-20)") and are not decisions.
   whether the `> 1.5 dB` seam check stays a gate for any edit (SPEC §12 decision 29).
   Mike chose **advisory**: the seam metrics (`seam_start_jump_db`, `seam_end_jump_db`,
   `seam_click_score`) are pointers ("where to listen") everywhere and never gate or reject
-  a take. The deterministic gates are only the unarguable ones: length (requested /
+  a take. The deterministic gates, as worded in the option Mike picked (CC and Forge; true peak added from the pair report), are only the unarguable ones: length (requested /
   engine window / received), clipping, true peak, silence outside the edit zone, and
   silence instead of the edit (SPEC §8). Measurements behind it (Ark, Forge, not
   decisions): the absolute jump fires on untouched audio and cannot separate a known-bad
