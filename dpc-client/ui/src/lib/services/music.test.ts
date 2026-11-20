@@ -253,3 +253,41 @@ describe('the volume is written at most every VOLUME_SAVE_MS, and once on releas
         expect(volumes()).toEqual([0.9, 0.5, 0.25]);
     });
 });
+
+
+describe('waitForDuration', () => {
+    const fake = (duration: number) => {
+        const et = new EventTarget() as EventTarget & { duration: number };
+        et.duration = duration;
+        return et;
+    };
+
+    it('resolves ok at once when the duration is already known', async () => {
+        const m = await import('./music');
+        expect(await m.waitForDuration(fake(12) as any, 50)).toBe('ok');
+    });
+
+    it('waits for loadedmetadata / durationchange to bring a finite duration', async () => {
+        const m = await import('./music');
+        const el = fake(NaN);
+        const p = m.waitForDuration(el as any, 1000);
+        el.duration = 0;
+        el.dispatchEvent(new Event('durationchange'));
+        el.duration = 7.5;
+        el.dispatchEvent(new Event('loadedmetadata'));
+        expect(await p).toBe('ok');
+    });
+
+    it('times out when no duration arrives', async () => {
+        const m = await import('./music');
+        expect(await m.waitForDuration(fake(0) as any, 20)).toBe('timeout');
+    });
+
+    it('stops waiting when the request went stale', async () => {
+        const m = await import('./music');
+        let stale = false;
+        const p = m.waitForDuration(fake(0) as any, 5000, () => stale);
+        stale = true;
+        expect(await p).toBe('stale');
+    });
+});

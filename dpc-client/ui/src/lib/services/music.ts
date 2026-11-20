@@ -348,6 +348,7 @@ let loadToken = 0;
  *  queue a second time, and a late `timeupdate` would show the old track's time. */
 let audioToken = -1;
 const current = () => audioToken === loadToken;
+const DURATION_WAIT_MS = 4000;
 
 // -- diagnostics -----------------------------------------------------------------
 // One compact debug line per media event, to ui.log through the console relay
@@ -465,6 +466,35 @@ function stopAudio() {
     releaseSource = () => {};
 }
 
+/** Resolve once `el` reports a finite duration > 0 (checked now, then on `loadedmetadata` /
+ *  `durationchange`), after `timeoutMs`, or when `isStale()` turns true (a newer track
+ *  request; polled every 100 ms). Never rejects. */
+export function waitForDuration(
+    el: Pick<HTMLAudioElement, 'duration' | 'addEventListener' | 'removeEventListener'>,
+    timeoutMs: number,
+    isStale: () => boolean = () => false,
+): Promise<'ok' | 'timeout' | 'stale'> {
+    const ready = () => Number.isFinite(el.duration) && el.duration > 0;
+    if (ready()) return Promise.resolve('ok');
+    return new Promise(resolve => {
+        const finish = (r: 'ok' | 'timeout' | 'stale') => {
+            clearTimeout(timer);
+            clearInterval(poll);
+            el.removeEventListener('loadedmetadata', check);
+            el.removeEventListener('durationchange', check);
+            resolve(r);
+        };
+        const check = () => {
+            if (isStale()) finish('stale');
+            else if (ready()) finish('ok');
+        };
+        const timer = setTimeout(() => finish('timeout'), timeoutMs);
+        const poll = setInterval(() => { if (isStale()) finish('stale'); }, 100);
+        el.addEventListener('loadedmetadata', check);
+        el.addEventListener('durationchange', check);
+    });
+}
+
 /** Make `queue` the queue and load its track at `index`; play it when `autoplay`. */
 async function startAt(queue: QueueState, index: number, autoplay: boolean): Promise<boolean> {
     const q = { ...queue, index };
@@ -494,8 +524,10 @@ async function startAt(queue: QueueState, index: number, autoplay: boolean): Pro
         uaLogged = true;
         dlogEvent('source', `webview ${typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown'}`);
     }
+    let platformIsLinux = false;
     {
         const env = await getPlaybackEnv();
+        platformIsLinux = env.isLinux;
         const platform = env.isLinux ? 'linux' : env.isWindows ? 'windows' : 'macos-or-other';
         dlogEvent('source', `source #${token} ${id} ${entryOf(id)?.source?.name ?? ''} via=${source.via} mime=${source.mime || 'none'} bytes=${source.bytes ?? 'n/a'}${source.via === 'http' ? ` ranges=${source.ranges === false ? 0 : 1}` : ''} platform=${platform}${source.fallback ? ` fallback=${source.fallback}` : ''}`);
     }
@@ -508,6 +540,14 @@ async function startAt(queue: QueueState, index: number, autoplay: boolean): Pro
     musicPlayback.update(s => ({ ...s, loadedId: id, loadingTrack: false }));
     if (autoplay) {
         try {
+            if (platformIsLinux) {
+                // WebKitGTK reports duration=0 and refuses forward seeks when play() follows
+                // src at once; waiting for the duration first fixes both (Zcode, 2026-11-20).
+                const t0 = Date.now();
+                const r = await waitForDuration(a, DURATION_WAIT_MS, () => token !== loadToken);
+                dlogEvent('source', `waited ${Date.now() - t0}ms for duration before play (${r === 'ok' ? 'ok' : 'timeout'})`);
+                if (token !== loadToken) return true;
+            }
             await a.play();
         } catch (e) {
             if (token === loadToken) say(`Could not start "${titleOf(id)}": ${e instanceof Error ? e.message : String(e)}`);
