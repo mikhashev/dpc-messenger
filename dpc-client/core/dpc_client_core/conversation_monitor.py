@@ -93,6 +93,26 @@ def rechain(messages: List[Dict[str, Any]]) -> None:
         prev_hash = m["chain_hash"]
 
 
+def _names_a_file_here(path: Any) -> bool:
+    """Whether `path` names anything on this disk (a file or a folder)."""
+    try:
+        return Path(path).exists()
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _plain_file_name(name: Any) -> bool:
+    """Whether `name` is one path component: no folder, no drive, not `.` or `..`."""
+    if not isinstance(name, str) or name.strip(". ") == "":
+        return False
+    try:
+        candidate = Path(name)
+    except (TypeError, ValueError):
+        return False
+    return (candidate.name == name and not candidate.drive and not candidate.anchor
+            and "/" not in name and "\\" not in name)
+
+
 def attachment_matches(att: Dict[str, Any], filename: Optional[str],
                        size_bytes: Optional[int], file_hash: Optional[str]) -> bool:
     """Same file: same name, then the hash when both sides have a real one,
@@ -3122,7 +3142,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         return archive_count
 
     def _remap_attachment_paths(self, attachments: List[Dict[str, Any]],
-                                record: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+                                record: Optional[Dict[str, Any]] = None,
+                                descriptions: bool = True) -> List[Dict[str, Any]]:
         """Remap file paths in attachments from peer's filesystem to local filesystem.
 
         Also, for an attachment that arrives with a record (`record`), what
@@ -3130,10 +3151,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         it is dropped and computed again on use; a `file_description` is kept
         only when it is the record's (`description_fits_record`, the author
         alone in a one-to-one chat) and its signature does not fail here.
+        `descriptions=False` leaves both to the caller.
 
         When importing chat history, voice/file attachments may have file_path
         that points to the peer's filesystem (e.g., C:\\Users\\...\\file.webm on Windows).
-        This method checks if the file exists locally and remaps the path.
+        A path is kept only when it is a file inside this conversation's own
+        `files` folder; any other is looked up there by name.
 
         Args:
             attachments: List of attachment dicts (may contain file_path)
@@ -3148,19 +3171,36 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         # Resolved from the bare id, this looked in a folder that did not exist
         # and left every synced screenshot pointing at the sender's disk.
         conv_dir = self._get_conversation_dir()
-        subdirs = (conv_dir / "files" / "screenshots", conv_dir / "files")
+        files_dirs = [conv_dir / "files"]
+        for extra in conversation_paths.store_files_dirs(conv_dir.parent, self.conversation_id):
+            if extra not in files_dirs:
+                files_dirs.append(extra)
+        subdirs = [d for fd in files_dirs for d in (fd / "screenshots", fd)]
 
         remapped = []
         for attachment in attachments:
+            if not isinstance(attachment, dict):
+                remapped.append(attachment)
+                continue
             att = dict(attachment)
-            att.pop("file_verdict", None)
-            if "file_description" in att and not self._keeps_file_description(
-                    att["file_description"], record):
-                logger.warning("Dropped a file description that is not record %s's",
-                               (record or {}).get("id"))
-                att.pop("file_description", None)
+            if descriptions:
+                att.pop("file_verdict", None)
+                if "file_description" in att and not self._keeps_file_description(
+                        att["file_description"], record):
+                    logger.warning("Dropped a file description that is not record %s's",
+                                   (record or {}).get("id"))
+                    att.pop("file_description", None)
             peer_path = att.get("file_path") or ""
-            if peer_path and Path(peer_path).exists():
+            # Ours only inside this conversation's own `files` folder, symlinks
+            # followed (card A-SYNCED-ATTACHMENT-PATH-CAN-MAKE-THIS-NODE-SERVE-
+            # ANY-FILE-ON-ITS-DISK). Existing was the test, so a member's record
+            # naming `~/.dpc/node.key` was kept as this node's file, offered to
+            # whoever asked (FILE_REQUEST) and opened by the UI. A file this
+            # node wrote outside the store (a one-to-one file sent from where it
+            # lay) is no longer "ours" when it comes back in a sync; a registry
+            # of the paths this node wrote (option B of the card) would let such
+            # a path through here and in `FileRequests._served_attachment`.
+            if peer_path and conversation_paths.is_file_inside(peer_path, files_dirs):
                 remapped.append(att)  # already ours
                 continue
             names = []
@@ -3168,15 +3208,39 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 names.append(os.path.basename(str(peer_path).replace("\\", "/")))
             if att.get("filename") and att["filename"] not in names:
                 names.append(att["filename"])
+            # Held to the same folders: a `filename` of `../../node.key`, or an
+            # absolute one that discards the folder it is joined to, finds
+            # nothing.
             local = next(
-                (d / n for n in names for d in subdirs if n and (d / n).is_file()), None
+                (d / n for n in names for d in subdirs
+                 if n and conversation_paths.is_file_inside(d / n, files_dirs)),
+                None,
             )
             if local is not None:
                 att["file_path"] = str(local)
                 logger.debug(f"Remapped attachment path: {peer_path or '<none>'} -> {local}")
+            elif peer_path and _names_a_file_here(peer_path):
+                # A file on this disk outside the conversation's files: never
+                # this record's. It is pointed at where the file would land
+                # here, so the record still reads "not on this node" and can be
+                # asked for (FILE_REQUEST). A name that cannot be one, or one
+                # whose place holds something the check above refused (a link
+                # out of the folder), drops the path.
+                name = next((n for n in names if _plain_file_name(n)), "")
+                landing = conv_dir / "files" / name if name else None
+                if landing is not None and not _names_a_file_here(landing):
+                    att["file_path"] = str(landing)
+                else:
+                    att.pop("file_path", None)
+                logger.warning(
+                    "Attachment %s of record %s named a file on this disk outside %s; "
+                    "the path is not kept",
+                    name or "?", (record or {}).get("id"), conv_dir,
+                )
             elif peer_path:
                 # Kept as it came: the UI falls back to the thumbnail, and the
-                # transfer that brings the file may still be on its way.
+                # transfer that brings the file may still be on its way. Being
+                # no file here, it is neither served nor opened.
                 logger.warning(
                     "Attachment %s not found locally under %s; keeping the sender's path",
                     names[0] if names else "?", conv_dir,
@@ -4361,11 +4425,21 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if message.get("attachments") and message.get("sender_node_id") != self._local_node_id():
             message = dict(message, attachments=self._remap_attachment_paths(message["attachments"], message))
         elif message.get("attachments"):
-            # A record claiming this node's id skips the remap, and a legacy one
-            # is stored unchecked: a `file_verdict` on it is whoever exported
-            # it, and a planted `verified` would be taken as this node's
-            # (`file_request._held_description`). The verdict is local only.
+            # A record claiming this node's id keeps its description as it is,
+            # and a legacy one is stored unchecked: a `file_verdict` on it is
+            # whoever exported it, and a planted `verified` would be taken as
+            # this node's (`file_request._held_description`). The verdict is
+            # local only.
             message = without_file_verdicts(message)
+            # Its path is checked all the same: the id is whatever the exporter
+            # wrote, and skipping the check for it let any member plant a path
+            # to any file on this disk (card A-SYNCED-ATTACHMENT-PATH-CAN-MAKE-
+            # THIS-NODE-SERVE-ANY-FILE-ON-ITS-DISK). Our own records never come
+            # through here: `add_message` writes them, and a merge skips an id
+            # already held.
+            if isinstance(message.get("attachments"), list):
+                message = dict(message, attachments=self._remap_attachment_paths(
+                    message["attachments"], message, descriptions=False))
 
         # Add to history, re-chained for this node. A foreign index and hash
         # appended verbatim broke the local chain permanently: the loader

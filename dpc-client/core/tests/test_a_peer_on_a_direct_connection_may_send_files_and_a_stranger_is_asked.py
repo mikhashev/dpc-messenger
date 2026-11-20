@@ -113,6 +113,10 @@ class _Node:
             local_api=api,
             llm_manager=SimpleNamespace(providers={}),
             peer_metadata={PEER: {"name": "Stranger"}},
+            # Every group asked about is held with the peer on its roster: a
+            # group offer from outside the roster never reaches the firewall.
+            group_manager=SimpleNamespace(
+                get_group=lambda g: SimpleNamespace(members=[SELF, PEER])),
         )
         # The editor's own save path, bound to this stand-in: a copy would
         # answer for a save nobody ships.

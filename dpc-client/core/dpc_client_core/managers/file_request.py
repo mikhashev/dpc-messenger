@@ -76,6 +76,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..conversation_paths import is_file_inside, store_files_dirs
+
 logger = logging.getLogger(__name__)
 
 FILE_REQUEST = "FILE_REQUEST"
@@ -132,6 +134,11 @@ def file_is_here(file_path: Any) -> bool:
     A record synced from another node carries that node's absolute path
     (`C:\\Users\\...` on Linux, `/home/...` on Windows); on this machine it is
     no file. A string the OS cannot even form a path from is no file either.
+
+    Whether the file may be shown, not whether it may be served: a holder
+    serves only a file inside the conversation's own `files` folder
+    (`FileRequests._served_attachment`), and a synced record's path is held to
+    that folder when it arrives (`ConversationMonitor._remap_attachment_paths`).
     """
     if not isinstance(file_path, str) or not file_path:
         return False
@@ -792,11 +799,20 @@ class FileRequests:
             conversation_id = node_id  # the one-to-one chat with the requester, nothing else
         monitor = self._monitor(conversation_id)
         records = getattr(monitor, "message_history", None) or []
+        folders = self._files_dirs(conversation_id, monitor)
 
         def here(att):
+            # Inside this conversation's own `files` folder, symlinks followed,
+            # not merely on this disk: a synced record's path is whatever its
+            # exporter wrote, and it made this node serve `~/.dpc/node.key`
+            # (card A-SYNCED-ATTACHMENT-PATH-CAN-MAKE-THIS-NODE-SERVE-ANY-FILE-
+            # ON-ITS-DISK). A file this node sent from outside the store (a
+            # one-to-one file sent from where it lay) is not served again; a
+            # registry of the paths this node wrote (option B of the card)
+            # would be asked here as well.
             return (isinstance(att, dict) and att.get("type") in ATTACHMENT_KINDS
                     and attachment_matches(att, filename, size, file_hash)
-                    and file_is_here(att.get("file_path")))
+                    and is_file_inside(att.get("file_path"), folders))
 
         for record in records:
             if record.get("id") != message_id:
@@ -812,6 +828,52 @@ class FileRequests:
                     if here(att) and att.get("hash") == file_hash:
                         return record, att, Path(att["file_path"])
         return None
+
+    def _files_dirs(self, conversation_id: str, monitor) -> List[Path]:
+        """The `files` folders this node keeps the conversation's files in.
+
+        Every store of the conversation under the conversations folder the
+        monitor uses and under the one downloads land in (the same folder,
+        `~/.dpc/conversations`, unless a test or a caller moved one of them).
+        """
+        bases: List[Path] = []
+        folders: List[Path] = []
+        get_dir = getattr(monitor, "_get_conversation_dir", None)
+        if callable(get_dir):
+            try:
+                conv_dir = Path(get_dir())
+                folders.append(conv_dir / "files")
+                bases.append(conv_dir.parent)
+            except (OSError, ValueError, TypeError):
+                pass
+        storage = getattr(self.manager, "storage_base_path", None)
+        if isinstance(storage, Path):
+            bases.append(storage)
+        for base in bases:
+            for folder in store_files_dirs(base, conversation_id):
+                if folder not in folders:
+                    folders.append(folder)
+        return folders
+
+    @staticmethod
+    async def _bytes_are_the_records(att: Dict[str, Any], path: Path) -> bool:
+        """Whether the file at `path` hashes to the attachment's `hash`; True when it has none.
+
+        Hashed in a worker thread: a file may be gigabytes, and the event loop
+        carries every other peer meanwhile.
+        """
+        expected = _real_hash(att.get("hash"))
+        if not expected:
+            return True
+        from .file_transfer_manager import HASH_READ_BLOCK_BYTES, hash_file_in_one_pass
+        try:
+            actual, _ = await asyncio.to_thread(
+                hash_file_in_one_pass, path, HASH_READ_BLOCK_BYTES,
+                with_sha256=True, with_chunk_crcs=False)
+        except OSError as e:
+            logger.warning("Could not hash %s before serving it: %s", path.name, e)
+            return False
+        return isinstance(actual, str) and actual.lower() == expected.lower()
 
     async def _decline(self, node_id: str, request_id: str, reason: str, **extra) -> None:
         try:
@@ -847,6 +909,14 @@ class FileRequests:
         # After the lookup, never before: only a requester this node may serve
         # meets the wait, so `busy` here tells nobody else what this node holds.
         wait = self._same_file_wait(node_id, path)
+        if wait is None and not await self._bytes_are_the_records(att, path):
+            # The file in the folder is not the one the record names (replaced,
+            # or a record that points at another file of that name): the same
+            # answer as no file at all.
+            logger.warning("FILE_REQUEST %s from %s: %s does not hash to its record's hash; "
+                           "not served", request_id[:8], node_id[:20], att.get("filename"))
+            await self._decline(node_id, request_id, NOT_HELD_REASON)
+            return
         if wait is not None:
             logger.info("FILE_REQUEST %s from %s: %s was offered to it within %ds; busy",
                         request_id[:8], node_id[:20], att.get("filename"), int(SAME_FILE_INTERVAL_S))

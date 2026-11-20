@@ -46,10 +46,11 @@ Cross-platform notes, because each of these breaks a naive fix differently:
 """
 
 import logging
+import os
 import re
 import shutil
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,54 @@ def resolve_store_dir(
     if base.resolve() not in chosen.resolve().parents:
         raise ValueError(f"store path for {conversation_id!r} would leave {base}")
     return chosen
+
+
+def store_files_dirs(base: Path, conversation_id: str) -> List[Path]:
+    """The `files` folder of every store this conversation has under `base`.
+
+    Every store, not only the canonical one: a one-to-one file lands in the bare
+    `{node_id}/files` (`FileTransferManager._get_peer_storage_path`) whatever
+    folder the monitor's history is in. Only folders that exist: nothing can be
+    inside one that does not. An unsafe id has none.
+    """
+    if not is_safe_conversation_id(conversation_id):
+        return []
+    return [d / "files" for d in existing_store_dirs(base, conversation_id)]
+
+
+def is_file_inside(path: Any, folders: Iterable[Path]) -> bool:
+    """Whether `path` is a regular file somewhere under one of `folders`.
+
+    Both sides are resolved first, every symlink and `..` followed, so a link
+    inside `files/` that points out of it is outside, and a folder reached
+    through a link is compared as the place it is. Compared as resolved paths
+    and their `parents`, never as string prefixes (`files-old` is not inside
+    `files`); `normcase` makes the comparison case-insensitive on Windows only.
+    On macOS a path spelled with another case than the folder fails the check,
+    which refuses rather than allows. A path the OS cannot form, or one that
+    does not exist, is not inside anything.
+
+    Card A-SYNCED-ATTACHMENT-PATH-CAN-MAKE-THIS-NODE-SERVE-ANY-FILE-ON-ITS-DISK:
+    a synced record's `file_path` was taken as this node's whenever it existed,
+    and this node then served `~/.dpc/node.key` to whoever asked for it.
+    """
+    if not isinstance(path, (str, os.PathLike)) or not str(path):
+        return False
+    try:
+        target = Path(path).resolve(strict=True)
+        if not target.is_file():
+            return False
+    except (OSError, ValueError, RuntimeError):
+        return False
+    parents = {os.path.normcase(str(p)) for p in target.parents}
+    for folder in folders:
+        try:
+            resolved = Path(folder).resolve(strict=True)
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if os.path.normcase(str(resolved)) in parents:
+            return True
+    return False
 
 
 def split_stores(

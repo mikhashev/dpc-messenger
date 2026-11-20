@@ -112,6 +112,21 @@ class FileOfferHandler(MessageHandler):
             )
             return None
 
+        # A well-formed id is not yet a group: an unknown one, or one the
+        # sender is not in, created a monitor and `conversations/<group>/files`
+        # for whatever arrived (Zcode's review of card A-SYNCED-ATTACHMENT-PATH-
+        # CAN-MAKE-THIS-NODE-SERVE-ANY-FILE-ON-ITS-DISK). The rule every group
+        # handler keeps (`may_share_group`); dropped, not answered, as
+        # GROUP_HISTORY_RESPONSE drops an answer from outside the roster.
+        from .group_access import may_share_group
+        if group_id and not may_share_group(
+                getattr(self.service, "group_manager", None), group_id, sender_node_id):
+            self.logger.warning(
+                f"Ignoring offer {transfer_id} from {sender_node_id} for group {group_id}: "
+                f"unknown group or sender is not a member"
+            )
+            return None
+
         file_transfer_manager = self.service.file_transfer_manager
 
         # An offer that answers this node's own FILE_REQUEST (managers/file_request.py):

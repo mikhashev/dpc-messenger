@@ -256,14 +256,21 @@ async def test_a_file_already_here_is_not_requested(root):
 
 
 @pytest.mark.asyncio
-async def test_a_one_to_one_file_is_found_by_its_hash_and_completes_the_requesters_record(root):
+@pytest.mark.parametrize("where", ["store", "outside"])
+async def test_a_one_to_one_file_is_found_by_its_hash_and_completes_the_requesters_record(
+        root, where):
+    """Served from the chat's own `files` folder only (card A-SYNCED-ATTACHMENT-PATH-
+    CAN-MAKE-THIS-NODE-SERVE-ANY-FILE-ON-ITS-DISK, option A): a file this node keeps
+    outside its store, as a one-to-one file sent from where it lay, is `not_held`
+    until a registry of the paths this node wrote (option B) exists."""
     net = _RequestNetwork()
     a_id, c_id = _ids(3)[0], _ids(3)[2]
     a = _make_node(net, root, a_id, [c_id], [a_id, c_id])
     c = _make_node(net, root, c_id, [a_id], [a_id, c_id])
     data = b"%PDF one to one"
     digest = hashlib.sha256(data).hexdigest()
-    kept = root / a_id / "sent" / "report.pdf"
+    folder = a.service._get_or_create_conversation_monitor(c_id)._get_conversation_dir() / "files"
+    kept = (folder if where == "store" else root / a_id / "sent") / "report.pdf"
     kept.parent.mkdir(parents=True)
     kept.write_bytes(data)
     att = {"type": "file", "filename": "report.pdf", "size_bytes": len(data), "hash": digest,
@@ -280,6 +287,10 @@ async def test_a_one_to_one_file_is_found_by_its_hash_and_completes_the_requeste
     final = await _outcome(net, c, answer["request_id"])
 
     assert not net.errors, net.errors
+    if where == "outside":
+        assert final["state"] == "not_held", final
+        assert net.offers_to(c_id) == []
+        return
     assert final["state"] == "received", final
     (record,) = c.monitors[a_id].message_history
     assert Path(record["attachments"][0]["file_path"]).read_bytes() == data

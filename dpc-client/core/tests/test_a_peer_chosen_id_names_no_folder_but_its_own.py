@@ -176,8 +176,13 @@ def _offer_node(tmp_path):
         local_api=api,
         storage_base_path=tmp_path,
     )
+    # The good group is held, with the sender on its roster: an offer for a
+    # group this node does not hold is dropped before any folder is made.
+    held = SimpleNamespace(members=[SELF, PEER])
     service = SimpleNamespace(file_transfer_manager=manager, p2p_manager=wire,
-                              peer_metadata={}, local_api=api)
+                              peer_metadata={}, local_api=api,
+                              group_manager=SimpleNamespace(
+                                  get_group=lambda g: held if g == GOOD_GROUP else None))
     return manager, wire, FileOfferHandler(service)
 
 

@@ -107,15 +107,46 @@ def test_the_merge_path_itself_rebases_the_path():
     assert monitor.message_history[-1]["attachments"][0]["file_path"] == str(local)
 
 
-def test_our_own_records_are_not_touched():
-    """A local path already points at a file; a remap could only lose it."""
+def test_a_record_claiming_our_id_is_held_to_the_store_like_any_other():
+    """It used to skip the remap and keep any path as it came: the id is
+    whatever the exporter wrote, so a member could plant a path to any file
+    on this disk and have it served (card A-SYNCED-ATTACHMENT-PATH-CAN-MAKE-
+    THIS-NODE-SERVE-ANY-FILE-ON-ITS-DISK). Our own records never arrive by a
+    merge: `add_message` writes them, and a merge skips an id already held."""
     monitor = _monitor()
-    elsewhere = str(Path.home() / "somewhere" / "paste_1788443154187.png")
-    _local_copy(monitor)
+    elsewhere = Path.home() / "somewhere" / "paste_1788443154187.png"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_bytes(b"a file on this disk, outside the store")
+    local = _local_copy(monitor)
 
     monitor.add_message_with_id({
         "id": "mine", "role": "user", "content": "", "sender_node_id": ME,
-        "attachments": [_attachment(file_path=elsewhere)],
+        "attachments": [_attachment(file_path=str(elsewhere))],
     })
 
-    assert monitor.message_history[-1]["attachments"][0]["file_path"] == elsewhere
+    assert monitor.message_history[-1]["attachments"][0]["file_path"] == str(local)
+
+
+def test_a_path_inside_the_store_is_kept_as_it_came():
+    monitor = _monitor()
+    local = _local_copy(monitor)
+
+    remapped = monitor._remap_attachment_paths([_attachment(file_path=str(local))])
+
+    assert remapped[0]["file_path"] == str(local)
+
+
+def test_a_file_on_this_disk_outside_the_store_is_not_kept_and_stays_requestable():
+    """No copy in the store: the record points where the file would land here,
+    which is no file, so the UI offers to request it and nothing serves it."""
+    monitor = _monitor()
+    outside = Path.home() / ".dpc" / "node.key"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_bytes(b"key")
+
+    remapped = monitor._remap_attachment_paths([_attachment(type="file", filename="node.key",
+                                                            file_path=str(outside))])
+
+    landing = monitor._get_conversation_dir() / "files" / "node.key"
+    assert remapped[0]["file_path"] == str(landing)
+    assert not landing.exists()

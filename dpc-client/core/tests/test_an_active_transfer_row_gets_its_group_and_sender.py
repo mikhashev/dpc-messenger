@@ -53,8 +53,12 @@ def _node(tmp_path):
         local_api=api,
         storage_base_path=tmp_path,
     )
+    # The group is held and the hop is on its roster: a group offer from
+    # outside the roster is dropped before anything else.
+    roster = SimpleNamespace(members=[US, HOP, AUTHOR])
     service = SimpleNamespace(file_transfer_manager=manager, p2p_manager=wire,
-                              peer_metadata={HOP: {"name": "Bob"}}, local_api=api)
+                              peer_metadata={HOP: {"name": "Bob"}}, local_api=api,
+                              group_manager=SimpleNamespace(get_group=lambda g: roster))
     return manager, api, FileOfferHandler(service)
 
 
