@@ -804,7 +804,11 @@ def format_message(i: int, msg: dict, node_id: str = None) -> str:
         ts = ts.split("T")[1][:8]
     preview = content.replace("\n", "\n       ")
     hint = _depth_hint(_reply_mention_depth(msg, node_id if node_id is not None else _get_node_id()))
-    return f"  [{i + 1}] {ts} {sender}{hint}: {preview}"
+    # The group's own number (msg_index), the #N the chat window shows, so a
+    # reader can cite the same message a human cites. [i] is only the window slot.
+    num = msg.get("msg_index")
+    num = f"#{num} " if isinstance(num, int) and not isinstance(num, bool) and num > 0 else ""
+    return f"  [{i + 1}] {num}{ts} {sender}{hint}: {preview}"
 
 
 def _build_parser() -> argparse.ArgumentParser:
