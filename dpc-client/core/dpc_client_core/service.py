@@ -429,18 +429,29 @@ _RECORDING_EXTENSIONS = {"mpeg": "mp3", "x-wav": "wav", "wave": "wav"}
 # The cap on a picked file when the rules name none: the default of
 # `file_transfer.max_size_mb`, the cap the P2P voice send applies (send_voice_message).
 AGENT_CHAT_FILE_DEFAULT_MAX_MB = 100
+# The cap on a file sent to a group (send_group_file) or to one peer (send_file)
+# when the rules have no top-level `file_transfer.max_size_mb`: the receivers'
+# `proved_connection` default, so the sender refuses no more than a receiver
+# would. The paperclip keeps AGENT_CHAT_FILE_DEFAULT_MAX_MB: a UI convenience,
+# not transport.
+SENDER_FILE_DEFAULT_MAX_MB = 1000
 
 
-def file_transfer_cap_mb(rules: Any) -> float:
+def file_transfer_cap_mb(rules: Any, default_mb: Optional[float] = None) -> float:
     """The rules' `file_transfer.max_size_mb`, the cap a file this node sends or
-    keeps from a picker is held to: the paperclip of a 1:1 agent chat. A bool, a non-number, NaN, an infinity or a value
-    of 0 or less falls back to AGENT_CHAT_FILE_DEFAULT_MAX_MB: the editor refuses
-    such a value, json.loads accepts NaN/Infinity, and none of them means "no cap"."""
+    keeps from a picker is held to: the paperclip of a 1:1 agent chat, a group
+    file and a one-to-one file. A bool, a non-number, NaN, an infinity or a value
+    of 0 or less falls back to `default_mb` (AGENT_CHAT_FILE_DEFAULT_MAX_MB when
+    None): the editor refuses such a value, json.loads accepts NaN/Infinity, and
+    none of them means "no cap". A send of a file to a group or a peer passes
+    SENDER_FILE_DEFAULT_MAX_MB."""
+    if default_mb is None:
+        default_mb = AGENT_CHAT_FILE_DEFAULT_MAX_MB
     section = rules.get("file_transfer", {}) if isinstance(rules, dict) else {}
-    cap = section.get("max_size_mb", AGENT_CHAT_FILE_DEFAULT_MAX_MB) if isinstance(section, dict) else None
+    cap = section.get("max_size_mb", default_mb) if isinstance(section, dict) else None
     if (isinstance(cap, bool) or not isinstance(cap, (int, float))
             or not math.isfinite(cap) or cap <= 0):
-        return AGENT_CHAT_FILE_DEFAULT_MAX_MB
+        return default_mb
     return cap
 
 
@@ -8369,6 +8380,17 @@ class CoreService(MusicCommandsMixin):
             if not path.exists():
                 return {"status": "error", "message": f"File not found: {file_path}"}
 
+            # The rules' cap, before any copy, hash, signature, record or offer
+            # (A-GROUP-FILE-SEND-HAS-NO-SIZE-CAP-ON-THE-SENDER). The receiver holds
+            # the offer to its own limit as well (FileTransferManager.
+            # _file_transfer_decision); this is the sender's early, clear refusal,
+            # not a security boundary.
+            refusal = file_transfer_cap_refusal(
+                path.stat().st_size,
+                file_transfer_cap_mb(self.file_transfer_manager.firewall.rules, SENDER_FILE_DEFAULT_MAX_MB))
+            if refusal:
+                return {"status": "error", "message": refusal}
+
             # Keep the file in the group's own folder, where a member's copy of a
             # group file lands too (FileTransferManager._incoming_destination), so
             # the record's path outlives the place it was picked from. A name
@@ -9374,7 +9396,20 @@ class CoreService(MusicCommandsMixin):
             logger.error("Error tracking outgoing message in conversation monitor: %s", e, exc_info=True)
 
     async def send_file(self, node_id: str, file_path: str, file_size_bytes: int = None, text: str = ""):
-        """Delegated to P2PCoordinator. `text`: what the person wrote with the file, one message with it."""
+        """Delegated to P2PCoordinator. `text`: what the person wrote with the file, one message with it.
+
+        Held first to the rules' `file_transfer.max_size_mb` (SENDER_FILE_DEFAULT_MAX_MB
+        when absent or invalid), as a group file is (`send_group_file`). The
+        receiver applies its own limit to the offer (FileTransferManager.
+        _file_transfer_decision); this is the sender's early, clear refusal, not a
+        security boundary. A missing file is left to the coordinator's not-found."""
+        path = Path(file_path)
+        if path.is_file():
+            refusal = file_transfer_cap_refusal(
+                path.stat().st_size,
+                file_transfer_cap_mb(self.file_transfer_manager.firewall.rules, SENDER_FILE_DEFAULT_MAX_MB))
+            if refusal:
+                raise ValueError(refusal)
         return await self.p2p_coordinator.send_file(node_id, file_path, file_size_bytes, text=text)
 
     @slow_command
