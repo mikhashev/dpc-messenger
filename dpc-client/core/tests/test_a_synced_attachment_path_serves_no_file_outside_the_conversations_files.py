@@ -403,6 +403,35 @@ async def test_an_offer_answering_a_request_from_a_member_since_removed_ends_tha
 
 
 @pytest.mark.asyncio
+async def test_a_not_a_member_answer_that_cannot_be_sent_still_ends_the_request(tmp_path):
+    """Card ADR-047-REVIEW-LEFTOVERS-WAIT-WITHOUT-A-CARD, item 11: the FILE_CANCEL
+    is best effort, as `_send_file_cancel` and `refuse_group_access` are."""
+    from dpc_client_core.managers.file_request import OpenRequest
+    from dpc_client_core.message_handlers.file_offer_handler import FileOfferHandler
+    net = _RequestNetwork()
+    x_id, s_id, m_id = _ids(3)
+    x = _make_node(net, tmp_path, x_id, [s_id], [x_id, m_id])
+    offer = _offer(GROUP, s_id)
+    request = OpenRequest(request_id="r-1", conversation_id=GROUP, group_id=GROUP,
+                          message_id="m-1", filename=offer["filename"],
+                          size_bytes=offer["size_bytes"], file_hash=offer["hash"],
+                          candidates=[s_id])
+    x.manager.file_requests._open[request.request_id] = request
+
+    async def dropped(node_id, message):
+        raise ConnectionError("the peer is gone")
+    x.service.p2p_manager.send_message_to_peer = dropped
+
+    result = await FileOfferHandler(x.service).handle(s_id, dict(offer, request_id="r-1"))
+
+    assert result is None
+    assert request.declined == {s_id: "not_a_member"}
+    assert [(e["state"], e.get("reason")) for e in x.api.named("file_request_status")] == [
+        ("failed", "not_a_member")]
+    assert x.manager.active_transfers == {} and x.monitors == {}
+
+
+@pytest.mark.asyncio
 async def test_a_members_group_offer_is_still_taken(tmp_path):
     net = _RequestNetwork()
     x_id, s_id = _ids(2)

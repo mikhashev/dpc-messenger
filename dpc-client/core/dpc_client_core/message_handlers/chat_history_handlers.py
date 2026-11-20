@@ -171,6 +171,23 @@ class ChatHistoryResponseHandler(MessageHandler):
         else:
             self.logger.info(f"Received {len(messages)} messages from {sender_node_id} for {conversation_id} (request_id: {request_id})")
 
+        # A group answer reaches this handler only by claiming a question this
+        # node put as a GROUP_HISTORY_REQUEST (group_handler.py notes those in
+        # the same registry; REQUEST_CHAT_HISTORY is only ever sent for a 1:1
+        # chat), so the sender was a member when asked and may have left the
+        # roster since. Same rule and same order as GROUP_HISTORY_RESPONSE:
+        # checked before the claim and before any monitor or folder exists,
+        # and dropped rather than refused out loud, since it is an answer.
+        is_group = bool(conversation_id) and conversation_id.startswith("group-")
+        if is_group and not may_share_group(self.service.group_manager, conversation_id,
+                                            sender_node_id):
+            self.logger.warning(
+                "Discarding chat history from %s for group %s: "
+                "unknown group or sender is not a member",
+                sender_node_id[:20], conversation_id,
+            )
+            return None
+
         # This handler replaces the whole local history, so an answer is only
         # worth that much if we asked the question. Unclaimed, it lets any
         # connected peer overwrite a conversation it was never part of.

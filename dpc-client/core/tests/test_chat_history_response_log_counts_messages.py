@@ -8,6 +8,7 @@ defaulted to 0 and was trusted as if it were the real length. The fix logs
 """
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -51,9 +52,17 @@ class _LocalApi:
         self.events.append((name, data))
 
 
+class _GroupManager:
+    """ALICE is on GROUP's roster: a group answer is taken only from a member."""
+
+    def get_group(self, group_id):
+        return SimpleNamespace(members=[ALICE, BOB]) if group_id == GROUP else None
+
+
 class _Service:
     def __init__(self, monitor):
         self.conversation_monitors = {GROUP: monitor}
+        self.group_manager = _GroupManager()
         self.local_api = _LocalApi()
         self.history_requests = HistoryRequestRegistry()
         # No knowledge_service needed: the monitor is already present.

@@ -410,3 +410,68 @@ async def test_when_every_peer_online_is_old_the_requester_says_nobody_answered(
     assert sorted(final["silent"]) == sorted([a.me, b.me])
     assert net.offers_to(c.me) == []
     assert not net.errors, net.errors
+
+
+# --- (6) an offer this node refuses moves the request on at once -------------------
+#
+# Card ADR-047-REVIEW-LEFTOVERS-WAIT-WITHOUT-A-CARD, item 1: a refused offer
+# (firewall, or `not_a_member`) used to end the request `failed` on the spot,
+# while the request itself went on waiting `answer_timeout_s` for the refused
+# holder before asking the next one.
+
+DENIAL = "Files from this peer are not allowed"
+
+
+def _firewall_refuses(node, refused):
+    from dpc_client_core.managers.file_transfer_manager import (
+        FILE_TRANSFER_DENY, FileTransferDecision,
+    )
+    real = node.manager._file_transfer_decision
+
+    async def decision(sender, *args, **kwargs):
+        if sender == refused:
+            return FileTransferDecision(FILE_TRANSFER_DENY, DENIAL, "node")
+        return await real(sender, *args, **kwargs)
+    node.manager._file_transfer_decision = decision
+
+
+@pytest.mark.asyncio
+async def test_an_offer_the_firewall_refuses_asks_the_next_holder_at_once(root):
+    net = _RequestNetwork()
+    a, b, c, sent = await _a_file_sent_while_c_was_away(net, root)
+    (rec,) = records(c)
+    _firewall_refuses(c, a.me)
+    # Far longer than the test may take: the next ask must not wait it out.
+    c.manager.file_requests.answer_timeout_s = 60.0
+
+    answer = await CoreService.request_attachment(c.service, GROUP, rec["id"])
+    assert answer["asking"][0] == a.me
+    final = await _outcome(net, c, answer["request_id"], limit_s=5.0)
+
+    assert not net.errors, net.errors
+    assert final["state"] == "received", final
+    assert [f[0] for f in net.named(FILE_REQUEST)] == [a.me, b.me]
+    assert [o[1] for o in net.offers_to(c.me)] == [a.me, b.me]
+    states = [s["state"] for s in _statuses(c)]
+    assert "failed" not in states, "the refusal of A did not end the request B then served"
+    assert Path(records(c)[0]["attachments"][0]["file_path"]).is_file()
+
+
+@pytest.mark.asyncio
+async def test_with_the_only_holder_refused_the_request_ends_failed_with_the_reason(root):
+    net = _RequestNetwork()
+    a, b, c, sent = await _a_file_sent_while_c_was_away(net, root)
+    (rec,) = records(c)
+    c.service.p2p_coordinator = SimpleNamespace(get_connected_peers=lambda: [a.me])
+    _firewall_refuses(c, a.me)
+    c.manager.file_requests.answer_timeout_s = 60.0
+
+    answer = await CoreService.request_attachment(c.service, GROUP, rec["id"])
+    assert answer["asking"] == [a.me]
+    final = await _outcome(net, c, answer["request_id"], limit_s=5.0)
+
+    assert not net.errors, net.errors
+    assert final["state"] == "failed", final
+    assert final["reason"] == DENIAL
+    assert final["refused_by"] == [a.me]
+    assert [s["state"] for s in _statuses(c)] == ["requesting", "failed"]

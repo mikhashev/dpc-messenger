@@ -228,6 +228,66 @@ async def test_a_request_is_answered_once(group_manager):
     assert monitor.message_history == [{"id": "peer-1", "content": "first"}]
 
 
+class _Knowledge:
+    """Records the monitor (and so the `conversations/<group>` folder) it is asked to make."""
+
+    def __init__(self):
+        self.made = []
+
+    def _get_or_create_conversation_monitor(self, key):
+        self.made.append(key)
+        return _Monitor()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["sender_not_a_member", "unknown_group"])
+async def test_a_claimed_group_answer_from_a_non_member_creates_no_monitor_or_folder(
+        group_manager, case):
+    """Card ADR-047-REVIEW-LEFTOVERS-WAIT-WITHOUT-A-CARD, item 7.
+
+    A group answer reaches CHAT_HISTORY_RESPONSE only by claiming a question this
+    node put (a GROUP_HISTORY_REQUEST shares the registry), so the peer was asked;
+    it may have left the roster since. The claim alone made the monitor and its
+    folder; GROUP_HISTORY_RESPONSE already asked `may_share_group` first.
+    """
+    manager, group = group_manager
+    service = _Service(manager)
+    service.knowledge_service = _Knowledge()
+    handler = ChatHistoryResponseHandler(service)
+    group_id = group.group_id if case == "sender_not_a_member" else "group-0000000000ff"
+    service.history_requests.note(OUTSIDER, group_id, "req-1")
+
+    await handler.handle(OUTSIDER, {
+        "conversation_id": group_id,
+        "request_id": "req-1",
+        "messages": [{"id": "peer-1", "content": "from outside the roster"}],
+        "total_count": 1,
+    })
+
+    assert service.knowledge_service.made == [], "no monitor, so no folder, was made"
+    assert service.conversation_monitors == {}
+    assert service.local_api.events == []
+    assert service.p2p_manager.sent == [], "an answer is dropped, not refused out loud"
+
+
+@pytest.mark.asyncio
+async def test_a_claimed_group_answer_from_a_member_still_makes_its_monitor(group_manager):
+    manager, group = group_manager
+    service = _Service(manager)
+    service.knowledge_service = _Knowledge()
+    handler = ChatHistoryResponseHandler(service)
+    service.history_requests.note(MEMBER, group.group_id, "req-1")
+
+    await handler.handle(MEMBER, {
+        "conversation_id": group.group_id,
+        "request_id": "req-1",
+        "messages": [{"id": "peer-1", "content": "what was said"}],
+        "total_count": 1,
+    })
+
+    assert service.knowledge_service.made == [group.group_id]
+
+
 # --- door 3: who may read, or rewrite, a group's history ------------------
 #
 # The three GROUP_HISTORY_* handlers and the group branch of the 1:1 request

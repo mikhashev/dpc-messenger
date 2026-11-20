@@ -126,16 +126,25 @@ class FileOfferHandler(MessageHandler):
                 f"Refused offer {transfer_id} from {sender_node_id} for group {group_id}: "
                 f"unknown group or sender is not a member"
             )
-            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
-                "command": "FILE_CANCEL",
-                "payload": {"transfer_id": transfer_id, "reason": NOT_A_MEMBER_REASON},
-            })
+            # Best effort, as `_send_file_cancel` and `refuse_group_access`: a
+            # peer that dropped meanwhile must not keep the refusal from ending
+            # this node's own request below.
+            try:
+                await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                    "command": "FILE_CANCEL",
+                    "payload": {"transfer_id": transfer_id, "reason": NOT_A_MEMBER_REASON},
+                })
+            except Exception as e:  # noqa: BLE001 - the refusal stands without its answer
+                self.logger.warning(
+                    f"Could not send FILE_CANCEL ({NOT_A_MEMBER_REASON}) for {transfer_id} "
+                    f"to {sender_node_id}: {e}"
+                )
             # A member removed since this node asked it for the file.
             file_requests = getattr(self.service.file_transfer_manager, "file_requests", None)
             open_request = (file_requests.open_request_for_offer(sender_node_id, payload)
                             if file_requests is not None else None)
             if open_request is not None:
-                await file_requests.offer_refused(open_request, NOT_A_MEMBER_REASON)
+                await file_requests.offer_refused(open_request, sender_node_id, NOT_A_MEMBER_REASON)
             return None
 
         file_transfer_manager = self.service.file_transfer_manager
@@ -201,7 +210,8 @@ class FileOfferHandler(MessageHandler):
                 "payload": cancel_payload
             })
             if open_request is not None:
-                await file_requests.offer_refused(open_request, str(denial_reason or "firewall_denied"))
+                await file_requests.offer_refused(
+                    open_request, sender_node_id, str(denial_reason or "firewall_denied"))
             return None
 
         # A group file this node already has comes back on every relay of a

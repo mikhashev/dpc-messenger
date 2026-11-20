@@ -75,7 +75,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..conversation_paths import is_file_inside, store_files_dirs
 
@@ -239,6 +239,9 @@ class OpenRequest:
     record_sender: Optional[str] = None
     created: float = field(default_factory=time.monotonic)
     declined: Dict[str, str] = field(default_factory=dict)  # node -> reason
+    # The nodes whose offer this node refused (`offer_refused`); their reason
+    # in `declined` is the refusal's own word or sentence.
+    refused: Set[str] = field(default_factory=set)
     retry_after: Dict[str, float] = field(default_factory=dict)  # busy node -> seconds it named
     next_candidate: int = 0        # the index in `candidates` asked next
     asking: Optional[str] = None   # the peer whose answer is awaited now
@@ -489,7 +492,14 @@ class FileRequests:
 
     async def _end_without_file(self, request: OpenRequest) -> None:
         reasons = set(request.declined.values())
-        if request.silent:
+        refused = [n for n in request.declined if n in request.refused]
+        if refused:
+            # A holder offered the file and this node refused it (firewall, or
+            # a sender no longer on the roster): the one outcome the user can
+            # act on, so it is named even when another peer stayed silent.
+            await self._emit(request, STATE_FAILED, reason=request.declined[refused[0]],
+                             refused_by=refused)
+        elif request.silent:
             await self._emit(request, STATE_NO_ANSWER, silent=list(request.silent))
         elif BUSY_REASON in reasons:
             busy = [n for n, r in request.declined.items() if r == BUSY_REASON]
@@ -515,6 +525,7 @@ class FileRequests:
         reason = payload.get("reason")
         reason = reason if reason in (NOT_HELD_REASON, BUSY_REASON) else NOT_HELD_REASON
         request.declined[node_id] = reason
+        request.refused.discard(node_id)  # its latest word stands, not an earlier refusal
         wait = payload.get("retry_after_sec")
         if (reason == BUSY_REASON and isinstance(wait, (int, float))
                 and not isinstance(wait, bool) and wait > 0):
@@ -701,10 +712,26 @@ class FileRequests:
         request.answered.set()
         await self._emit(request, STATE_RECEIVING, transfer_id=transfer_id, node_id=node_id)
 
-    async def offer_refused(self, request: OpenRequest, reason: str) -> None:
-        """This node refused the offer that answers the request: its firewall, or a
-        sender no longer in the group's roster (`not_a_member`)."""
-        await self._emit(request, STATE_FAILED, reason=reason)
+    async def offer_refused(self, request: OpenRequest, node_id: str, reason: str) -> None:
+        """This node refused the offer `node_id` made for the request: its firewall,
+        or a sender no longer in the group's roster (`not_a_member`).
+
+        The holder counts as declined with `reason`, and the request asks its
+        next peer at once instead of waiting out `answer_timeout_s`; when no
+        peer is left, `_end_without_file` reports the refusal. An offer that
+        came after the request had already ended (its wait for this peer ran
+        out) ends it again, so the refusal is still reported.
+        """
+        logger.warning("FILE_REQUEST %s: the offer %s made was refused here (%s)",
+                       request.request_id[:8], node_id[:20], reason)
+        request.declined[node_id] = reason
+        request.refused.add(node_id)
+        if node_id in request.silent:
+            request.silent.remove(node_id)
+        if request.asking == node_id:
+            request.answered.set()
+        elif not request.transfer_id and (request.task is None or request.task.done()):
+            await self._end_without_file(request)
 
     async def received(self, request_id: Optional[str], attachment: Dict[str, Any],
                        attachment_index: Optional[int] = None) -> None:
