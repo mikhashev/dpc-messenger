@@ -341,6 +341,16 @@ consensus 2026-11-20)") and are not decisions.
   decisions): the absolute jump fires on untouched audio and cannot separate a known-bad
   splice from a good short crossfade.
 
+- **D28. N8 is resolved: a local server with `Range`, a token and an `Origin` allowlist,
+  keyed by `track_id`; implementation deferred** (09:01). Mike took the reviewers' option
+  (i) of N8 ("ok, let it be so, but we'll do it later; for now everything added to
+  dpc/music plays and that is enough for the checks"). So the byte-serving endpoint is
+  decided and **not built**: until it is, the window plays only files under `~/.dpc`, and
+  **the checks use files inside `~/.dpc/music`** (a file in a watched folder elsewhere
+  shows "not playable yet"). Options (ii) `blob:` and (iii) copy-in are not chosen. The
+  CSP `media-src` change and the first-step experiment of N8 belong to the implementation
+  (SPEC §12 decision 30).
+
 ### Not decided
 
 Each item needs Mike's yes or a measurement. Where an item is built in practice, a dated
@@ -390,7 +400,9 @@ implementation note under it says so (N1, N6); the rest are not built.
 - **N7. The tag reader**: which library to use and its licence. `Observed`: there is no
   mutagen, tinytag or eyed3 in `dpc-client/core/pyproject.toml`. It may be the same
   library as N12.
-- **N8. How core serves bytes to the webview.**
+- **N8. How core serves bytes to the webview.** *Resolved 2026-11-20 by Mike, D28: option
+  (i), a local server with `Range`, a token and an `Origin` allowlist, keyed by `track_id`.
+  Implementation deferred; checks use files inside `~/.dpc/music`.*
   - `Observed`: the Tauri asset scope is only `$HOME/.dpc/**`
     (`ui/src-tauri/tauri.conf.json:28-33`), so a file in `~/Music` cannot go through
     `convertFileSrc`. Indexing folders in place, with core serving the bytes, is CC's
@@ -423,7 +435,7 @@ implementation note under it says so (N1, N6); the rest are not built.
     on Linux? The Linux VoicePlayer path already depends on it while the CSP line says it
     should be blocked, so the run either confirms the CSP or shows that Tauri does not
     apply it as read. One run informs N8 and N9 without code.
-  - *Implementation note (2026-11-20): N8 stays open; Mike is thinking.* Until he decides,
+  - *Implementation note (2026-11-20, earlier; superseded by D28 at 09:01): N8 stays open; Mike is thinking.* Until the endpoint is built,
     the window plays only files under `~/.dpc`: `convertFileSrc` on Windows, and on Linux
     a `blob:` read through the fs plugin, because `asset:` does not play audio in
     WebKitGTK; any other path shows "not playable yet" (`trackPlaybackUrl`,
@@ -432,7 +444,7 @@ implementation note under it says so (N1, N6); the rest are not built.
     plus an `Origin` allowlist, keyed by `track_id`, with a CSP `media-src` change.
     Widening the Tauri asset scope was raised as a fourth path; it does not play audio on
     Linux WebKitGTK. Forge's cost argument against (ii) `blob:`: the whole file sits in
-    webview memory for every playing track. None of this is a decision.
+    webview memory for every playing track. None of this was a decision when written; Mike then chose (i), D28.
 - **N9. Web delivery**: core proxies (fetches and caches) the stream, or open web
   `https:` is added to `media-src`. `Observed`: `media-src` allows only
   `https://asset.localhost` among https origins (`tauri.conf.json:27`); there is no open
@@ -662,7 +674,7 @@ real app, not in the prototype.
 
 - [ ] **Byte serving first step (N8, N9).** A `http://localhost:9998/files/…` audio URL is
   tried in the Tauri window on Windows and on Linux, and the result (plays or not, seeks
-  or not) is written down before an N8 option is chosen. Whatever option wins serves
+  or not) is written down when the N8 endpoint (option (i), D28; deferred) is built. The endpoint serves
   `Range` and seeking works on a long track.
 - [ ] **Window (B3).** In DPC, open a local track, leave a region comment, send it, watch
   the job reach review, A/B a take at the seam and accept it as v2. Reopening the track
@@ -804,7 +816,7 @@ Card names are kept as filed (D19).
 | B1: AN-AGENT-CANNOT-POST-A-FILE-INTO-ITS-OWN-CHAT-AND-THE-CHAT-HAS-NO-AUDIO-ATTACHMENT-TYPE (title kept; dated correction per D19 in the body) | Pending | — |
 | B2: NO-MUSIC-JOB-RUNNER-EXISTS-SO-A-COMMENT-OR-A-GENERATE-REQUEST-CANNOT-BECOME-A-TAKE | Pending | — |
 | Library: THE-MUSIC-PLAYER-HAS-NO-LIBRARY-OR-PLAYLIST-SO-PLAIN-LISTENING-IS-NOT-ITS-DEFAULT-MODE | Core built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): `core/dpc_client_core/music/` (watched folders indexed in place and polled, N6; track identity by `track_id` plus an audio-payload hash, Q4 layers 1-3 and 5; playlists; `local_api` commands; `[music] poll_interval_s` in a fresh `config.ini`). Queue, shuffle and repeat live in the window (B3 row) | `1cdce551`, `aa61925b`, `6f797e02`, `22d73fd0`, `b712712a` |
-| B3: THE-MUSIC-PLAYER-HAS-NO-DPC-COMPONENT-SO-COMMENTS-LYRICS-TAKES-AND-AB-REVIEW-EXIST-ONLY-IN-THE-PROTOTYPE | Window part built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): the Music Player button beside AGENTS MAP, a floating window that minimises to a mini-player, the mini-player with its own width and its own place (`ui/src/lib/components/music/MusicPlayer.svelte`). Only files under `~/.dpc` play until N8 is decided. Comments, waveform, takes and A/B are not started | `32900e82`, `8bebfb6a`, `ec79687d`, `2457aa7c` |
+| B3: THE-MUSIC-PLAYER-HAS-NO-DPC-COMPONENT-SO-COMMENTS-LYRICS-TAKES-AND-AB-REVIEW-EXIST-ONLY-IN-THE-PROTOTYPE | Window part built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): the Music Player button beside AGENTS MAP, a floating window that minimises to a mini-player, the mini-player with its own width and its own place (`ui/src/lib/components/music/MusicPlayer.svelte`). Only files under `~/.dpc` play until the N8 endpoint (decided in D28, deferred) is built. Comments, waveform, takes and A/B are not started | `32900e82`, `8bebfb6a`, `ec79687d`, `2457aa7c` |
 | Lyrics: A-TRACK-HAS-NO-LYRICS-CHAIN-SO-TAGS-LRC-LRCLIB-AND-TRANSCRIBE-ARE-NOT-TRIED-IN-ORDER | Built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): sidecar `.lrc`, then tags, then the local LRCLIB cache, with lrclib.net only on an explicit lookup (D6 note); manual lyrics; Transcribe only when the person asks, which unloads the Whisper model it loaded and records provider and model (`music/lyrics.py`, `MusicLyrics.svelte`) | `cb9af8a1`, `74c2de84`, `a94c7943` (chain); `3672ee23`, `7fd6a407` (Transcribe) |
 | Transcribe quality (2026-11-20): TRANSCRIBED-LYRICS-CARRY-WHISPER-HALLUCINATIONS-AND-MERGE-LONG-SEGMENTS-INTO-ONE-LINE | Open | — |
 | Button title (2026-11-20): THE-MUSIC-PLAYER-BUTTON-CUTS-A-LONG-TRACK-TITLE-INSTEAD-OF-SCROLLING-IT | Open | — |
@@ -945,7 +957,7 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
 
 ## Authors
 
-- **Mike**: Decision (D1-D27)
+- **Mike**: Decision (D1-D28)
 - **CC**: Spec, prototype, cards, this draft and its revision after review
 - **Zcode, Forge, Ark** (reviews, 2026-11-19 06:03, 06:04 and 06:33, AI Studio group
   chat): Zcode re-checked the code references by subagent at `95acf009`, found the D5
