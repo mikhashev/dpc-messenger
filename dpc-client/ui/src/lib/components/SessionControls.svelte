@@ -2,6 +2,7 @@
 <!-- Displays token counter, new session button, end session button, and markdown toggle -->
 
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import { nonDialogTokens, hasComponentBreakdown, nonDialogLabel } from '$lib/utils/nonDialogTokens';
 
   // Props (Svelte 5 runes mode)
@@ -10,6 +11,8 @@
     isAIChat,
     isPeerConnected,
     isTelegramChat = false,
+    isP2PChat = false,
+    leadingActions,
     tokenUsed = 0,
     tokenLimit = 0,
     windowUnknown = false,
@@ -39,6 +42,11 @@
     isAIChat: boolean;
     isPeerConnected: boolean;
     isTelegramChat?: boolean;
+    /** A chat with another person's node (the chat id is that node's id). */
+    isP2PChat?: boolean;
+    /** Controls the page owns (Block, Auto Transcribe) drawn first in the same
+     *  row as the buttons, so a person-to-person header is one row, not two. */
+    leadingActions?: Snippet;
     tokenUsed?: number;
     tokenLimit?: number;
     windowUnknown?: boolean;
@@ -133,6 +141,13 @@
       : "Everything in the prompt that is not the dialogue.\nNot a measurement: the API's count of the whole prompt minus a 4-chars-per-token estimate of the dialogue, floored at zero — so in a small chat it is mostly the estimate's error, and 0 means the estimate came out larger than the measurement."
   );
 
+  // The flag is one global choice (the page keeps it in localStorage) and the
+  // message list renders by it in every chat; a person-to-person chat needs the
+  // switch as much as an AI or group chat does.
+  let showMarkdownToggle = $derived(
+    isAIChat || showForChatId?.startsWith('group-') || isP2PChat
+  );
+
   let agentsTooltip = $derived(
     contextAgents && contextAgents.length > 0
       ? contextAgents.map((a) => `${a.name}: ${a.tokens.toLocaleString()} / ${a.limit.toLocaleString()} (${a.percent}%)`).join('\n')
@@ -194,6 +209,7 @@
 {/if}
 
 <div class="chat-actions">
+  {@render leadingActions?.()}
   <button class="btn-new-chat" onclick={() => onNewSession(showForChatId)} title="Start fresh conversation (current history archived)">
     New Session
   </button>
@@ -210,7 +226,7 @@
       Extract Knowledge
     {/if}
   </button>
-  {#if isAIChat || showForChatId?.startsWith('group-')}
+  {#if showMarkdownToggle}
     <button
       class="btn-markdown-toggle"
       class:active={enableMarkdown}

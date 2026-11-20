@@ -1156,24 +1156,6 @@
               {/if}
             </h2>
           </button>
-          <!-- Block / Unblock beside the peer's name, hidden with the rest when the header is folded -->
-          {#if isP2PChat && !chatHeaderCollapsed}
-              {#if $blockedNodeIds.includes(activeChatId)}
-                <button
-                  type="button"
-                  class="peer-block-btn"
-                  title="Unblock this peer: it may connect again, but groups and firewall rules it was removed from are not restored"
-                  onclick={() => handleUnblockPeer(activeChatId)}
-                >Unblock</button>
-              {:else}
-                <button
-                  type="button"
-                  class="peer-block-btn"
-                  title="Block this peer: ends the connection, removes it from groups and deletes the firewall rules that name it"
-                  onclick={() => handleBlockPeer(activeChatId)}
-                >Block</button>
-              {/if}
-          {/if}
           </div>
 
           <!-- Group topic display (v0.19.0) - inside title section for proper positioning -->
@@ -1225,28 +1207,6 @@
             </div>
           {/if}
 
-          <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI or group chats — groups have it in Settings) -->
-          {#if !chatHeaderCollapsed && !$aiChats.has(activeChatId) && activeChatId !== 'local_ai' && !activeChatId.startsWith('group-')}
-            <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
-              <input
-                type="checkbox"
-                bind:checked={autoTranscribeEnabled}
-                onchange={() => voicePanelComp?.saveAutoTranscribeSetting()}
-                disabled={whisperModelLoading}
-              />
-              <span>Auto Transcribe</span>
-              {#if whisperModelLoading}
-                <span class="whisper-loading-indicator" title="Loading Whisper model...">⏳</span>
-              {/if}
-              {#if whisperModelLoadError}
-                <span class="whisper-error-indicator" title={whisperModelLoadError}>⚠️</span>
-              {/if}
-            </label>
-            {#if voiceMemoryNote($nodeStatus)}
-              <p class="voice-memory-note">{voiceMemoryNote($nodeStatus)}</p>
-            {/if}
-          {/if}
-
           <!-- Telegram bot integration status (v0.14.0+) - P2P chats only -->
           {#if isP2PChat && !chatHeaderCollapsed}
             <TelegramStatus conversationId={activeChatId} />
@@ -1280,6 +1240,7 @@
             isAIChat={isActuallyAIChat}
             isPeerConnected={isPeerConnected}
             isTelegramChat={isTelegramChat}
+            {isP2PChat}
             tokenUsed={effectiveTokenUsage.used}
             tokenLimit={effectiveTokenUsage.limit}
             windowUnknown={currentTokenUsage.windowUnknown ?? false}
@@ -1304,7 +1265,52 @@
             onCancelExtraction={handleCancelExtraction}
             onToggleSleep={handleToggleSleep}
             onGroupSleep={handleGroupSleep}
-          />
+          >
+            <!-- Drawn first in SessionControls' own button row, so a person-to-person
+                 header is one row of controls (Block, Auto Transcribe, New Session,
+                 Extract Knowledge, Markdown), not a badge stacked over a pill. -->
+            {#snippet leadingActions()}
+              <!-- Block / Unblock: person-to-person chats only, folded away with the rest of the header -->
+              {#if isP2PChat}
+                {#if $blockedNodeIds.includes(activeChatId)}
+                  <button
+                    type="button"
+                    class="peer-block-btn"
+                    title="Unblock this peer: it may connect again, but groups and firewall rules it was removed from are not restored"
+                    onclick={() => handleUnblockPeer(activeChatId)}
+                  >Unblock</button>
+                {:else}
+                  <button
+                    type="button"
+                    class="peer-block-btn"
+                    title="Block this peer: ends the connection, removes it from groups and deletes the firewall rules that name it"
+                    onclick={() => handleBlockPeer(activeChatId)}
+                  >Block</button>
+                {/if}
+              {/if}
+              <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI or group chats — groups have it in Settings) -->
+              {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai' && !activeChatId.startsWith('group-')}
+                <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
+                  <input
+                    type="checkbox"
+                    bind:checked={autoTranscribeEnabled}
+                    onchange={() => voicePanelComp?.saveAutoTranscribeSetting()}
+                    disabled={whisperModelLoading}
+                  />
+                  <span>Auto Transcribe</span>
+                  {#if whisperModelLoading}
+                    <span class="whisper-loading-indicator" title="Loading Whisper model...">⏳</span>
+                  {/if}
+                  {#if whisperModelLoadError}
+                    <span class="whisper-error-indicator" title={whisperModelLoadError}>⚠️</span>
+                  {/if}
+                </label>
+                {#if voiceMemoryNote($nodeStatus)}
+                  <p class="voice-memory-note">{voiceMemoryNote($nodeStatus)}</p>
+                {/if}
+              {/if}
+            {/snippet}
+          </SessionControls>
         {/if}
       </div>
 
@@ -1942,6 +1948,8 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    /* A peer title carries the full node id: let it break rather than run under the controls. */
+    overflow-wrap: anywhere;
   }
 
   .chat-header-toggle {
@@ -1974,12 +1982,24 @@
     min-width: 0;
   }
 
+  /* Block and Auto Transcribe sit in SessionControls' .chat-actions row (flex,
+     align-items: center, wrap). They take the buttons' metrics (0.9rem text,
+     6px radius, 1rem side padding) and stretch to the row's height. Block is a
+     button like its neighbours, so their padding less its 1px border gives it
+     the same height. Auto Transcribe is a label in the body font, whose
+     line-height differs per engine and font, so it keeps less vertical padding
+     than the buttons: it never sets the row's height, the buttons do, and the
+     stretch brings it up to theirs. */
   .peer-block-btn {
     flex: 0 0 auto;
-    padding: 0.2rem 0.6rem;
+    align-self: stretch;
+    box-sizing: border-box;
+    padding: calc(0.6rem - 1px) 1rem;
     background: #fff3cd;
     color: #856404;
-    font-size: 0.8rem;
+    font-size: 0.9rem;
+    font-weight: 500;
+    white-space: nowrap;
     border: 1px solid #ffc107;
     border-radius: 6px;
     cursor: pointer;
@@ -2051,13 +2071,16 @@
   /* Auto Transcribe Toggle (v0.13.2+) */
   .auto-transcribe-toggle {
     display: flex;
+    flex: 0 0 auto;
+    align-self: stretch;
+    box-sizing: border-box;
     align-items: center;
     gap: 0.5rem;
-    font-size: 14px;
+    font-size: 0.9rem;
     color: #555;
     cursor: pointer;
-    padding: 0.5rem 0.75rem;
-    margin-left: auto;
+    padding: 0.3rem 1rem;
+    border: 1px solid transparent;
     background: #f5f5f5;
     border-radius: 6px;
     transition: all 0.2s ease;
@@ -2096,10 +2119,14 @@
     color: #ff9800;
   }
 
-  /* The voice-memory extra is missing: one line under the toggle, aligned with it
-     (the title section is a column, so auto on the left pushes it right). */
+  /* The voice-memory extra is missing: a line of its own under the control row
+     (full width and ordered last inside the wrapping .chat-actions), right-aligned
+     like the controls above it. */
   .voice-memory-note {
-    margin: 0 0 0 auto;
+    flex: 0 0 100%;
+    order: 1;
+    margin: 0;
+    text-align: right;
     font-size: 12px;
     color: #856404;
   }
