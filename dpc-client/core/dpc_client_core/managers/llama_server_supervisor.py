@@ -1253,10 +1253,11 @@ def take_card_queue_place(alias: str) -> None:
 #
 # DPC's wait in front of one local alias's slot: who sends calls into the engine next (point 1). Not
 # the card queue, which decides which alias holds the card, and not the run gate. A call first waits
-# for its model to be on the card, then for the slot (point 5); llama-server only until Strata gets
-# its save at a switch (point 10). Keyed by alias as `_CARD_QUEUE` is, so a settings save that
-# replaces a supervisor keeps it; in memory, written only on the owner loop. A waiter takes the slot
-# itself when it asks at the card queue's rate, so a grant never lands on a waiter that has gone.
+# for its model to be on the card, then for the slot (point 5); the same on llama-server and Strata
+# aliases, though only llama-server saves at a switch. Keyed by alias as `_CARD_QUEUE` is, so a
+# settings save that replaces a supervisor keeps it; in memory, written only on the owner loop. A
+# waiter takes the slot itself when it asks at the card queue's rate, so a grant never lands on a
+# waiter that has gone.
 
 # A peer goes in between two calls of a turn at its deadline less this (point 8): the write ceiling
 # plus the switch margin, so the save before its call has room.
@@ -1533,9 +1534,9 @@ async def in_the_slot_queue(provider: Any, peer_id: Optional[str] = None):
     """A peer's or a gateway call's place in the slot queue, taken at its door before the peer door's
     semaphore (point 8): whoever sits on the semaphore then holds its slot and waits for nothing
     behind it. A peer's place is a one-call grant whose deadline counts from here; a gateway call
-    stands by its hold. Nothing for an alias that is not llama-server's."""
+    stands by its hold. Nothing for an alias whose supervisor is not a local engine's."""
     sup = getattr(provider, "supervisor", None)
-    if not isinstance(sup, LlamaServerSupervisor) or sup.ENGINE != LlamaServerSupervisor.ENGINE:
+    if not isinstance(sup, LlamaServerSupervisor):
         yield
         return
     place = token = None
@@ -5175,9 +5176,8 @@ class LlamaServerSupervisor:
         """Wait in this alias's slot queue until this call may go into the engine (points 2 to 9), on
         the owner loop, after the card and before the last-call record and the switch (point 5). True
         when it may; False when it has the slot but the child went meanwhile: the caller asks
-        `ensure_running` again and keeps the slot (point 4). Strata passes as today (point 10)."""
-        if self.ENGINE != LlamaServerSupervisor.ENGINE:
-            return True
+        `ensure_running` again and keeps the slot (point 4). The same on Strata, which saves nothing
+        at the hand-over (`kv_at_a_switch` returns at once there)."""
         alias = self.alias
         line = _slot_line(alias)
         try:

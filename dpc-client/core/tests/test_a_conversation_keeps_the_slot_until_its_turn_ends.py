@@ -1,7 +1,8 @@
 """The slot queue: a conversation keeps the slot until its turn ends (ADR-044, amendment of
 2026-11-17, "the slot queue", point 12).
 
-DPC's wait in front of one llama-server alias's slot. An agent's turn holds the slot from its
+DPC's wait in front of one local alias's slot, the same on a llama-server alias and a Strata one
+(Mike's call, 2026-11-20); only llama-server saves the outgoing conversation at a hand-over. An agent's turn holds the slot from its
 first call until its `accepted_request` hold leaves the alias; the next conversation waits, and
 when the slot passes, the outgoing conversation is saved to the KV snapshots folder before the
 incoming call is sent. The turn's own calls pass (a description, the pre-analysis, a tool thread
@@ -30,13 +31,16 @@ from dpc_client_core.managers.llama_server_supervisor import carrying_card_hold,
 from tests.test_a_callers_run_of_calls_keeps_its_alias_busy_for_the_window import (
     _gateway, _peer_door, _query_over,
 )
-from tests.test_one_local_engine_holds_the_card import _llama, _strata, card  # noqa: F401
+from dpc_client_core.providers import StrataProvider
+from tests.test_one_local_engine_holds_the_card import _fake_child, _llama, card  # noqa: F401
+from tests.test_strata_supervisor import _install
 from tests.test_the_last_engine_call_names_owner_peer_or_gateway_from_the_calls_own_context import (
     FakeCompletions, llama, wire,
 )
 
 ALIAS = "qwen27"
 OTHER = "qwen9"
+STRATA = "flash"
 SYSTEM = "you are a helper"
 TURN_1 = [{"role": "user", "content": "list the files"}]
 IMAGE = {"mime_type": "image/png", "base64": "aGVsbG8="}
@@ -187,6 +191,25 @@ async def engine_on(tmp_path, alias=ALIAS, **cfg):
     p = llama(alias)
     wire(p, sup=sup, completions=Completions(engine))
     return p, sup, engine, folder
+
+
+async def strata_on(tmp_path, alias=STRATA):
+    """The same engine double over a real Strata supervisor and provider. Strata saves nothing at a
+    hand-over, so `engine.events` carries no "save" and no "restore" unless the code asked for one."""
+    folder = tmp_path / f"kv-{alias}"
+    p = StrataProvider(alias, {
+        "type": "strata", "alias": alias, "model": "qwen3.8-flash-next-iq2_xs",
+        "strata_install_dir": str(_install(tmp_path)), "strata_base_config": "strata-base.json",
+        "conversation_cache_mib": 10240, "context_window": 200000,
+        "engine_watch_interval_s": 3600, "vram_release_timeout_s": 0.05,
+    })
+    sup = p.supervisor
+    _fake_child(sup)
+    await sup.ensure_running()
+    sup._kv_engine_fresh = False  # the empty-engine restore is not this file's case
+    engine = Engine(sup, folder, alias)
+    wire(p, sup=sup, completions=Completions(engine))
+    return p, sup, engine
 
 
 class Turn:
@@ -628,16 +651,152 @@ async def test_a_return_after_a_peer_restores_its_snapshot_on_a_one_slot_alias_w
 
 
 @pytest.mark.asyncio
-async def test_a_strata_call_passes_the_slot_queue_as_today(tmp_path):
-    """Point 10: Strata joins in the commit that gives it the save at a switch; until then two
-    turns on a Strata alias pass at once and nothing stands in its slot queue."""
-    strata = _strata(tmp_path)
-    await strata.ensure_running()
-    async with base_mod.card_held_for(strata.alias, "accepted_request", agent_id="a1", conversation_id="c1"):
-        assert await asyncio.wait_for(strata._take_the_slot(), 1) is True
-        async with base_mod.card_held_for(strata.alias, "accepted_request", agent_id="a2", conversation_id="c2"):
-            assert await asyncio.wait_for(strata._take_the_slot(), 1) is True
-    assert strata.alias not in base_mod.slot_queue()
+async def test_b_waits_for_a_s_turn_on_a_strata_alias_as_on_llama_server(tmp_path, caplog):
+    p, sup, engine = await strata_on(tmp_path)
+    a, b = Turn(p, "a1", "c1", STRATA), Turn(p, "a2", "c2", STRATA)
+    engine.hold("c1")
+    a_first = a.call()
+    await until(lambda: "request:c1" in engine.events)
+    with caplog.at_level(logging.INFO, logger=SUP_LOG):
+        b_first = b.call()
+        await until(lambda: waiting(STRATA) == ["agent"])
+        assert holder(STRATA) == "agent"
+        engine.release("c1")
+        await a_first
+        await asyncio.wait_for(a.call(), 5)  # A's later round goes before B's first call
+        assert "request:c2" not in engine.events
+        await a.end()
+        await asyncio.wait_for(b_first, 5)
+    # Nothing is saved or restored at the hand-over: Strata's own cache keeps A's conversation.
+    assert engine.events == ["request:c1", "end:c1", "request:c1", "end:c1", "request:c2", "end:c2"]
+    assert lines(caplog, f"slot queue[{STRATA}]: agent a2 conversation c2 waits, 0 ahead; "
+                         f"the slot is held by agent a1 conversation c1 for")
+    assert lines(caplog, f"slot queue[{STRATA}]: the slot passes from agent a1 conversation c1 (held")
+    assert not lines(caplog, "evicted unsaved")
+    await b.end()
+    assert STRATA not in base_mod.slot_queue()
+
+
+@pytest.mark.asyncio
+async def test_a_persons_stop_takes_a_turn_out_of_the_slot_queue_of_a_strata_alias(tmp_path):
+    p, sup, engine = await strata_on(tmp_path)
+    a, b = Turn(p, "a1", "c1", STRATA), Turn(p, "a2", "c2", STRATA)
+    await asyncio.wait_for(a.call(), 5)
+    b_first = b.call()
+    await until(lambda: waiting(STRATA) == ["agent"])
+    base_mod.leave_card_queue("c2")
+    with pytest.raises(RuntimeError) as stopped:
+        await asyncio.wait_for(b_first, 5)
+    assert isinstance(base_mod.engine_refusal_in(stopped.value), base_mod.TakenOutOfTheSlotQueue)
+    assert waiting(STRATA) == [] and "request:c2" not in engine.events
+    await a.end()
+    await b.end()
+
+
+@pytest.mark.asyncio
+async def test_a_named_background_call_is_skipped_while_a_turn_holds_the_slot_of_a_strata_alias(tmp_path):
+    p, sup, engine = await strata_on(tmp_path)
+    a = Turn(p, "a1", "c1", STRATA)
+    await asyncio.wait_for(a.call(), 5)
+    with pytest.raises(RuntimeError) as skipped:
+        with base_mod.a_background_call("skill_reflection"):
+            await asyncio.wait_for(p.generate_response("reflect"), 1)
+    assert isinstance(base_mod.engine_refusal_in(skipped.value), base_mod.BackgroundCallSkipped)
+    assert "request:background" not in engine.events
+    await a.end()
+
+
+@pytest.mark.asyncio
+async def test_the_owners_chat_goes_in_between_two_calls_of_a_turn_on_a_strata_alias(tmp_path):
+    p, sup, engine = await strata_on(tmp_path)
+    a, b = Turn(p, "a1", "c1", STRATA), Turn(p, "a2", "c2", STRATA)
+    await asyncio.wait_for(a.call(), 5)
+    engine.hold("c1")
+    a_second = a.call()
+    await until(lambda: engine.events.count("request:c1") == 2)
+    b_first = b.call()
+    await until(lambda: waiting(STRATA) == ["agent"])
+    first = asyncio.ensure_future(chat(p, "chat1"))
+    await until(lambda: going_in_between(STRATA) == "owner")
+    await still_waits(lambda: "request:chat1" in engine.events)  # A's call in the engine first
+    engine.release("c1")
+    await asyncio.wait_for(a_second, 5)
+    await asyncio.wait_for(first, 5)
+    await asyncio.wait_for(a.call(), 5)
+    assert engine.events[-6:] == ["request:c1", "end:c1", "request:chat1", "end:chat1", "request:c1", "end:c1"]
+    assert "save" not in engine.events and "restore" not in engine.events
+    assert holder(STRATA) == "agent" and waiting(STRATA) == ["agent"] and not b_first.done()
+    await a.end()
+    await asyncio.wait_for(b_first, 5)
+    await b.end()
+
+
+@pytest.mark.asyncio
+async def test_a_peer_waits_for_a_turn_on_a_strata_alias_and_nothing_is_evicted_unsaved(tmp_path, peer_time, caplog):
+    p, sup, engine = await strata_on(tmp_path)
+    a = Turn(p, "a1", "c1", STRATA)
+    await asyncio.wait_for(a.call(), 5)
+    peer = asyncio.ensure_future(a_peers_call(p))
+    await until(lambda: waiting(STRATA) == ["peer"])
+    assert "request:peer" not in engine.events
+    with caplog.at_level(logging.INFO, logger=SUP_LOG):
+        await a.end()
+        await asyncio.wait_for(peer, 5)
+    assert engine.events == ["request:c1", "end:c1", "request:peer", "end:peer"]
+    assert not lines(caplog, "evicted unsaved")
+
+
+@pytest.mark.asyncio
+async def test_a_peer_at_its_deadline_goes_in_between_two_calls_of_a_turn_on_a_strata_alias(
+        tmp_path, clock, peer_time, caplog):
+    p, sup, engine = await strata_on(tmp_path)
+    a, b = Turn(p, "a1", "c1", STRATA), Turn(p, "a2", "c2", STRATA)
+    await asyncio.wait_for(a.call(), 5)
+    engine.hold("c1")
+    a_second = a.call()
+    await until(lambda: engine.events.count("request:c1") == 2)
+    b_first = b.call()
+    await until(lambda: waiting(STRATA) == ["agent"])
+    arrival = clock.now
+    peer = asyncio.ensure_future(a_peers_call(p))
+    await until(lambda: waiting(STRATA) == ["agent", "peer"])
+    # The save's allowance is taken off the deadline here too, though Strata saves nothing.
+    clock.now = arrival + 1200 - ALLOWANCE
+    await until(lambda: waiting(STRATA) == ["agent"])
+    with caplog.at_level(logging.INFO, logger=SUP_LOG):
+        engine.release("c1")
+        await asyncio.wait_for(a_second, 5)
+        await asyncio.wait_for(peer, 5)
+        await asyncio.wait_for(a.call(), 5)
+    assert engine.events[-6:] == ["request:c1", "end:c1", "request:peer", "end:peer", "request:c1", "end:c1"]
+    assert "save" not in engine.events and "restore" not in engine.events
+    assert not lines(caplog, "evicted unsaved")
+    assert holder(STRATA) == "agent" and waiting(STRATA) == ["agent"] and not b_first.done()
+    await a.end()
+    await asyncio.wait_for(b_first, 5)
+    await b.end()
+
+
+@pytest.mark.asyncio
+async def test_a_peer_through_the_door_and_a_gateway_call_wait_behind_a_turn_on_a_strata_alias(tmp_path, peer_time):
+    p, sup, engine = await strata_on(tmp_path)
+    providers = {STRATA: p}
+    coord, svc = _peer_door(tmp_path, providers)
+    gateway = _gateway(tmp_path, providers, inference_lock=coord._peer_inference_lock)
+    a = Turn(p, "a1", "c1", STRATA)
+    await asyncio.wait_for(a.call(), 5)
+    door = asyncio.ensure_future(coord.handle_inference_request(DOOR_PEER, uuid.uuid4().hex, "ping", provider=STRATA))
+    await until(lambda: waiting(STRATA) == ["peer"])
+    assert not coord._peer_inference_lock.locked()  # a peer in the slot queue holds no semaphore
+    via_gateway = asyncio.ensure_future(gateway.complete(STRATA, "ping"))
+    await until(lambda: sorted(waiting(STRATA)) == ["gateway", "peer"])
+    assert not door.done() and not via_gateway.done()
+    await a.end()
+    await asyncio.wait_for(door, 5)
+    assert (await asyncio.wait_for(via_gateway, 5)).text == "ok"
+    # The owner's own work goes before a peer (point 6): the gateway call first.
+    sent = [e for e in engine.events if e.startswith("request:")]
+    assert sent == ["request:c1", "request:gateway", "request:peer"]
 
 
 # --- a peer's deadline, and going in between -------------------------------------------------------------
