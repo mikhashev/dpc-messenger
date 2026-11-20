@@ -73,6 +73,9 @@ class LocalWhisperProvider(AIProvider):
         self.model_loaded = False
         self._load_lock = asyncio.Lock()
         self._detected_device = None
+        # Transcriptions running on the loaded model now: counted under `_load_lock`
+        # by `transcribe`, so `unload_if_idle` never pulls the model from under one.
+        self._active_transcriptions = 0
 
         logger.info(f"LocalWhisperProvider '{alias}' initialized (model={self.model_name}, device={self.device})")
 
@@ -312,6 +315,7 @@ class LocalWhisperProvider(AIProvider):
             if self.pipeline == "mlx":
                 if hasattr(self, 'whisper_model'):
                     del self.whisper_model
+                self._release_mlx_model()
                 logger.info("MLX Whisper model references cleared")
 
             elif self.pipeline is not None:
@@ -349,6 +353,46 @@ class LocalWhisperProvider(AIProvider):
             logger.error(f"Error unloading Whisper model: {e}", exc_info=True)
             self.pipeline = None
             self.model_loaded = False
+
+    @staticmethod
+    def _release_mlx_model() -> None:
+        """Drop mlx_whisper's own cached model (it keeps the last one loaded in
+        `ModelHolder`), then MLX's buffer cache. Best effort: either may be absent in
+        a given mlx / mlx_whisper version, and neither exists off Apple Silicon."""
+        try:
+            from mlx_whisper.transcribe import ModelHolder
+        except Exception:
+            ModelHolder = None
+        if ModelHolder is not None:
+            if hasattr(ModelHolder, "model"):
+                ModelHolder.model = None
+            if hasattr(ModelHolder, "model_path"):
+                ModelHolder.model_path = None
+        gc.collect()
+        try:
+            import mlx.core as mx
+        except Exception:
+            return
+        clear = getattr(mx, "clear_cache", None) or getattr(getattr(mx, "metal", None), "clear_cache", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:
+                logger.debug("MLX clear_cache failed", exc_info=True)
+
+    async def unload_if_idle(self) -> bool:
+        """Unload the model unless a transcription is using it now. True when it was
+        unloaded by this call. Holds `_load_lock`, so a transcription that starts
+        meanwhile waits and then loads the model again."""
+        async with self._load_lock:
+            if not self.model_loaded:
+                return False
+            if self._active_transcriptions > 0:
+                logger.info("Whisper model '%s' kept loaded: %d transcription(s) still running",
+                            self.model_name, self._active_transcriptions)
+                return False
+            await asyncio.to_thread(self._unload_model)
+            return not self.model_loaded
 
     async def unload_model_async(self) -> None:
         async with self._load_lock:
@@ -504,11 +548,18 @@ class LocalWhisperProvider(AIProvider):
         return segments
 
     async def transcribe(self, audio_path: str) -> Dict[str, Any]:
-        if not self.model_loaded:
-            async with self._load_lock:
-                if not self.model_loaded:
-                    await asyncio.to_thread(self._load_model)
+        # The lock is taken even when the model is loaded, so the use is counted
+        # atomically with the load and an unload in progress is waited for.
+        async with self._load_lock:
+            if not self.model_loaded:
+                await asyncio.to_thread(self._load_model)
+            self._active_transcriptions += 1
+        try:
+            return await self._transcribe_loaded(audio_path)
+        finally:
+            self._active_transcriptions -= 1
 
+    async def _transcribe_loaded(self, audio_path: str) -> Dict[str, Any]:
         # Clear CUDA cache before transcription to free fragmented memory
         # (MLX transcribes without torch, so its absence is not an error here)
         try:

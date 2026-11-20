@@ -37,6 +37,15 @@ existing transcription the way a voice message does, with the same provider choi
 
 Whisper is an in-process model, not a local engine, so the ADR-044 card queue does not
 gate it; the provider's lock and its CUDA out-of-memory message are the gates it has.
+
+**Unload after the run** (Mike, 2026-11-20): the person picks CPU or GPU in the provider's
+`device`; whichever it is, a Transcribe run that loaded the model unloads it when the run
+ends, with success or an error (`provider.unload_if_idle()`: on CUDA the weights go to the
+CPU, are dropped and `torch.cuda.empty_cache()` frees the ~3 GB; on CPU the pipeline is
+dropped; on MLX mlx_whisper's cached model is dropped). A model that was already loaded
+when the run started (voice auto-transcribe keeps it warm) stays loaded, and so does one
+another transcription is using at that moment: the provider counts its running
+transcriptions under its load lock and refuses the unload while any is running.
 """
 
 from __future__ import annotations
@@ -178,6 +187,7 @@ class MusicCommandsMixin:
                 "too_large",
                 f"the file is {size_mb:.1f} MB, over the local transcription limit of {limit:g} MB "
                 f"([local_transcription] max_file_size_mb)")
+        loaded_before = self._music_whisper_loaded(provider)
         try:
             result = await provider.transcribe(str(path))
         except Exception as exc:
@@ -198,10 +208,37 @@ class MusicCommandsMixin:
                     f"Model '{missing.model_name}' is not downloaded yet. Confirm the download in the "
                     f"D-PC Messenger app, then press Transcribe again.") from exc
             raise MusicLibraryError("transcription_failed", f"local Whisper ({alias}): {exc}") from exc
+        finally:
+            # Success, an error or a cancel: the run is over, so a model it loaded goes.
+            await self._music_unload_whisper(provider, loaded_before)
         if not isinstance(result, dict):
             raise MusicLibraryError("transcription_failed", f"local Whisper ({alias}) gave no result")
         return {**result, "provider": result.get("provider") or LOCAL_WHISPER_TYPE,
                 "model": getattr(provider, "model_name", None) or result.get("model")}
+
+    @staticmethod
+    def _music_whisper_loaded(provider: Any) -> bool:
+        is_loaded = getattr(provider, "is_model_loaded", None)
+        if not callable(is_loaded):
+            return True  # cannot tell: treat as someone else's, never unload it
+        try:
+            return bool(is_loaded())
+        except Exception:
+            return True
+
+    async def _music_unload_whisper(self, provider: Any, loaded_before: bool) -> None:
+        """Unload the model after a run that loaded it, unless it is in use (see the
+        module docstring). A failed unload is logged; it never changes the run's answer."""
+        if loaded_before:
+            return
+        unload = getattr(provider, "unload_if_idle", None)
+        if not callable(unload):
+            return
+        try:
+            if await unload():
+                logger.info("music: unloaded the Whisper model after the Transcribe run")
+        except Exception:
+            logger.exception("music: unloading the Whisper model after Transcribe failed")
 
     async def start_music_library(self) -> None:
         """Load the library and start watching its folders; called at service start."""

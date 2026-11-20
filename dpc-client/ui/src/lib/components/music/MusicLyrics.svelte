@@ -18,7 +18,8 @@
 
   "Transcribe" is the chain's explicit step 4: the core runs DPC's speech-to-text on the
   track's file (transcribeMusicLyrics) and stores the lines with source "transcribe",
-  shown as "transcribed". Opening a track never runs it. Over the person's own lyrics it
+  shown as "transcribed", with the provider and model the record keeps
+  (`transcription: {provider, model}`) beside the badge. Opening a track never runs it. Over the person's own lyrics it
   asks first (confirmAsync) before it sends overwrite_manual. A run can outlast the
   command's timeout; the panel then follows it through getMusicLyrics (runTranscribe).
 -->
@@ -303,6 +304,15 @@
     return `${names[s.step] ?? s.step}: ${state}${s.detail ? ` (${s.detail})` : ''}`;
   }
 
+  // What transcribed the stored lyrics (`mp.lyrics/1` `transcription`, only on source
+  // "transcribe"; records written before it have none, and then nothing is shown).
+  let transcribedBy = $derived.by(() => {
+    const t = lyrics?.source === 'transcribe'
+      ? (lyrics as Lyrics & { transcription?: { provider: string | null; model: string | null } }).transcription
+      : undefined;
+    return t ? [t.provider, t.model].filter(Boolean).join(' · ') : '';
+  });
+
   let emptyText = $derived(
     lrclib && lrclib.result !== 'synced' && lrclib.result !== 'plain'
       ? lrclibOutcomeText(lrclib)
@@ -317,6 +327,7 @@
     <span id="lyrics-label" class="section-label">LYRICS</span>
     {#if entry}
       <span class="tag" class:none={!lyrics} title="Where these lyrics came from">source: {lyricsBadge(lyrics)}</span>
+      {#if transcribedBy}<span class="muted tiny transcribed-by" title="The provider and model that transcribed these lyrics">{transcribedBy}</span>{/if}
     {/if}
     <span class="head-actions">
       <button type="button" class="small-btn" onclick={() => (expanded = !expanded)} disabled={!entry} aria-expanded={expanded}>
@@ -463,6 +474,7 @@
   .head-actions { margin-left: auto; display: flex; gap: 4px; }
   .tag { font-size: 11px; padding: 1px 6px; border-radius: 5px; background: #1d2a3d; color: #b6d4ff; white-space: nowrap; }
   .tag.none { background: #31353d; color: #c9d1d9; }
+  .transcribed-by { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .compact { display: flex; flex-direction: column; gap: 2px; text-align: center; }
   .line { margin: 0; min-height: 1.3em; font-size: 13px; color: var(--text-secondary, #a9b0bb); overflow-wrap: anywhere; }

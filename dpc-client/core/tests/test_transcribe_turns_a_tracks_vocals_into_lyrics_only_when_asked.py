@@ -516,3 +516,51 @@ async def test_the_command_round_trips_over_a_real_library(tmp_path, monkeypatch
     finally:
         await service.stop_music_library()
     assert sorted(p.name for p in music.iterdir()) == ["Band - Song.mp3"]
+
+
+# -- the stored record names what transcribed it (Mike, 2026-11-20) ---------------------
+
+@pytest.mark.asyncio
+async def test_the_stored_record_keeps_the_provider_and_model(tmp_path, audio):
+    svc = make(tmp_path, FakeLibrary(audio), FakeTranscriber())
+    answer = await svc.transcribe(TRACK_ID)
+    assert answer["lyrics"]["transcription"] == {"provider": "local_whisper",
+                                                 "model": "openai/whisper-large-v3-turbo"}
+    on_disk = json.loads(stored_file(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk["transcription"] == answer["lyrics"]["transcription"]
+    # Read back through a fresh instance: the record validates and round-trips.
+    again = await make(tmp_path, FakeLibrary(audio), FakeTranscriber()).get(TRACK_ID)
+    assert again["from_store"] is True and again["lyrics"] == on_disk
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_names_no_model_is_stored_as_null(tmp_path, audio):
+    svc = make(tmp_path, FakeLibrary(audio), FakeTranscriber({"text": "one", "provider": "openai"}))
+    answer = await svc.transcribe(TRACK_ID)
+    assert answer["lyrics"]["transcription"] == {"provider": "openai", "model": None}
+
+
+@pytest.mark.asyncio
+async def test_a_record_written_before_the_key_still_loads(tmp_path, audio):
+    old = {"schema": "mp.lyrics/1", "track_hash": "sha256:aa", "source": "transcribe", "language": "en",
+           "lines": [{"t_start": 1.0, "t_end": 2.0, "text": "old"}], "updated_at": "2026-11-19T00:00:00.000Z"}
+    path = stored_file(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(old), encoding="utf-8")
+    got = await make(tmp_path, FakeLibrary(audio), FakeTranscriber()).get(TRACK_ID)
+    assert got["from_store"] is True and got["lyrics"] == old
+
+
+def test_the_schema_holds_the_transcription_key_to_its_shape():
+    from dpc_client_core.music import schemas
+    base = {"schema": "mp.lyrics/1", "track_hash": "h", "source": "transcribe",
+            "lines": [{"t_start": 0.0, "text": "a"}]}
+    schemas.validate_lyrics(base)
+    schemas.validate_lyrics({**base, "transcription": {"provider": "local_whisper", "model": None}})
+    for bad in ({**base, "source": "manual", "transcription": {"provider": "p", "model": "m"}},
+                {**base, "transcription": {"provider": "p"}},
+                {**base, "transcription": {"provider": "p", "model": "m", "device": "cuda"}},
+                {**base, "transcription": {"provider": 3, "model": "m"}},
+                {**base, "transcription": "local_whisper"}):
+        with pytest.raises(schemas.SchemaError):
+            schemas.validate_lyrics(bad)

@@ -41,11 +41,12 @@ for it (the player's badge reads "transcribed"). The answer carries `transcripti
 the provider and model the result names, the language, the segment count and whether
 the lines are timed. Sung vocals over music are often misheard and segment times are
 Whisper's chunk times, not an alignment to the words: nothing here claims more.
-`mp.lyrics/1` has no key for the provider or model (its keys are closed), so they are
-in the answer and the log, not in the stored record. Over manual or edited lyrics the
-action is refused (`overwrite_manual_required`, before anything runs) unless the caller
-passes `overwrite_manual`; if the person saves their own lyrics while a transcription
-runs, the result comes back as `candidate` and theirs are kept.
+The stored record keeps the provider and model too, as `transcription: {provider,
+model}` (Mike, 2026-11-20; each a string or null, the key only on `source:
+"transcribe"`, and optional so records written before it still load). Over manual or
+edited lyrics the action is refused (`overwrite_manual_required`, before anything
+runs) unless the caller passes `overwrite_manual`; if the person saves their own lyrics
+while a transcription runs, the result comes back as `candidate` and theirs are kept.
 
 **Storage.** Lyrics live at `<DPC home>/music/lyrics/<track_id>.json` as `mp.lyrics/1`,
 written atomically. Nothing is ever written next to the person's audio: the sidecar and
@@ -276,7 +277,7 @@ def lines_from_text(text: str) -> Tuple[List[dict], bool, Optional[str]]:
 
 def make_lyrics(track_hash: str, source: str, lines: List[dict], *, synced: bool = True,
                 language: Optional[str] = None, edited: bool = False,
-                lrclib: Optional[dict] = None) -> dict:
+                lrclib: Optional[dict] = None, transcription: Optional[dict] = None) -> dict:
     record: Dict[str, Any] = {
         "schema": schemas.LYRICS,
         "track_hash": track_hash,
@@ -291,6 +292,8 @@ def make_lyrics(track_hash: str, source: str, lines: List[dict], *, synced: bool
         record["edited"] = True
     if lrclib is not None:
         record["lrclib"] = dict(lrclib)
+    if transcription is not None:
+        record["transcription"] = {"provider": transcription.get("provider"), "model": transcription.get("model")}
     schemas.validate_lyrics(record)
     return record
 
@@ -344,10 +347,13 @@ def transcript_lyrics(track_hash: str, result: Any) -> Tuple[dict, Dict[str, Any
             "no_speech", "the transcription found no words in this track (it may be instrumental)")
     language = result.get("language")
     language = language.strip() if isinstance(language, str) and language.strip() not in ("", "unknown") else None
-    record = make_lyrics(track_hash, TRANSCRIBE_SOURCE, lines, synced=synced, language=language)
+    provider = str(result["provider"]) if result.get("provider") else None
+    model = str(result["model"]) if result.get("model") else None
+    record = make_lyrics(track_hash, TRANSCRIBE_SOURCE, lines, synced=synced, language=language,
+                         transcription={"provider": provider, "model": model})
     info: Dict[str, Any] = {
-        "provider": str(result["provider"]) if result.get("provider") else None,
-        "model": str(result["model"]) if result.get("model") else None,
+        "provider": provider,
+        "model": model,
         "language": language,
         "duration_s": _finite(result.get("duration")),
         "segments": len(lines) if synced else 0,

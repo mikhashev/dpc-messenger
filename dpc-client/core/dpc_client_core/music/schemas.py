@@ -240,9 +240,12 @@ def validate_track(track: Any) -> None:
 
 LYRICS_SOURCES = ("lrc", "tags", "lrclib", "transcribe", "manual")
 _LYRICS_REQUIRED = ("schema", "track_hash", "source", "lines")
-_LYRICS_KEYS = set(_LYRICS_REQUIRED) | {"language", "synced", "edited", "job_id", "lrclib", "updated_at"}
+_LYRICS_KEYS = set(_LYRICS_REQUIRED) | {"language", "synced", "edited", "job_id", "lrclib", "transcription",
+                                        "updated_at"}
 _LYRICS_LINE_KEYS = {"t_start", "t_end", "text"}
 _LRCLIB_KEYS = {"id", "artist_name", "track_name", "album_name", "duration", "synced"}
+# What ran a `source: "transcribe"` record (Mike, 2026-11-20); optional, so older records load.
+_TRANSCRIPTION_KEYS = {"provider", "model"}
 
 
 def validate_lyrics(lyrics: Any) -> None:
@@ -289,6 +292,13 @@ def validate_lyrics(lyrics: Any) -> None:
         _expect(s, rec["album_name"] is None or _is_str(rec["album_name"]), "'lrclib.album_name' must be a string or null")
         _expect(s, rec["duration"] is None or _is_number(rec["duration"]), "'lrclib.duration' must be a number or null")
         _expect(s, isinstance(rec["synced"], bool), "'lrclib.synced' must be a boolean")
+    if "transcription" in lyrics:
+        rec = lyrics["transcription"]
+        _expect(s, lyrics["source"] == "transcribe", "'transcription' is only on lyrics with source 'transcribe'")
+        _expect(s, isinstance(rec, Mapping) and set(rec) == _TRANSCRIPTION_KEYS,
+                f"'transcription' must have exactly the keys {sorted(_TRANSCRIPTION_KEYS)}")
+        _expect(s, all(rec[k] is None or _is_str(rec[k]) for k in _TRANSCRIPTION_KEYS),
+                "'transcription.provider' and 'transcription.model' must be strings or null")
 
 
 VALIDATORS: Dict[str, Any] = {
