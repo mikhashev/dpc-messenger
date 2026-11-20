@@ -33,6 +33,12 @@ The one route is ``GET`` / ``HEAD`` ``/music/track/{track_id}?t=<token>``:
   malformed one answers 200 with the whole file (RFC 9110 lets a server ignore `Range`).
   **A multi-range request (`bytes=0-1,5-6`) is answered 200 with the whole file**, never
   `multipart/byteranges`: no media element asks for it, and ignoring is allowed.
+- **Every answer to a track request carries `Content-Length`** (the span's byte count, set
+  before the headers go out) and never `Transfer-Encoding: chunked`: aiohttp's
+  `StreamResponse` is chunked unless `content_length` is set, and a chunked answer reads
+  as a live stream of unknown length to a media pipeline. `ETag` and `Last-Modified` come
+  from the open file's `fstat`; an `If-Range` that does not match them answers the whole
+  file (RFC 9110 14.5).
 - The body is streamed in `CHUNK_BYTES` reads, never read whole. `Cache-Control:
   no-store`, because the URL carries the token. There is no directory listing and no
   other route (404), and other methods are 405.
@@ -47,6 +53,7 @@ the same port in `tauri.conf.json` `media-src` and a rebuilt app.
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import logging
 import os
 import re
@@ -257,8 +264,16 @@ class MusicStreamServer:
             if not stat.S_ISREG(st.st_mode):
                 return self._refuse(404, "no such track")
             size = st.st_size
-            span = parse_range(request.headers.get("Range"), size)
+            etag = f'"{size:x}-{st.st_mtime_ns:x}"'
+            last_modified = email.utils.formatdate(st.st_mtime, usegmt=True)
+            range_header = request.headers.get("Range")
+            if_range = request.headers.get("If-Range")
+            if range_header and if_range and if_range.strip() not in (etag, last_modified):
+                range_header = None  # the validator is stale: the whole file, not a slice of it
+            span = parse_range(range_header, size)
             headers = {
+                "ETag": etag,
+                "Last-Modified": last_modified,
                 "Content-Type": MIME_BY_EXTENSION.get(path.suffix.lower(), "application/octet-stream"),
                 "Accept-Ranges": "bytes",
                 "Cache-Control": "no-store",
@@ -275,6 +290,7 @@ class MusicStreamServer:
                 headers["Content-Range"] = f"bytes {start}-{end}/{size}"
             length = max(0, end - start + 1)
             response = web.StreamResponse(status=status, headers=headers)
+            # Before `prepare`: without it aiohttp answers `Transfer-Encoding: chunked`.
             response.content_length = length
             await response.prepare(request)
             if request.method == "HEAD" or length == 0:

@@ -41,6 +41,7 @@ import {
     trackMime,
     isConcreteAudioMime,
     formatRanges,
+    resolveDuration,
     type LibraryEntry,
     type PlaybackEnv,
     type Playlist,
@@ -766,5 +767,28 @@ describe('the playback source with the core track stream (ADR-051 N8, D28)', () 
             expect(r).toMatchObject({ ok: false, problem: 'outside-dpc' });
             expect(!r.ok && r.reason).toBe(`${OUTSIDE_DPC_TEXT}: the track stream unavailable: stream_unavailable`);
         }
+    });
+});
+
+describe('resolveDuration', () => {
+    it('takes the element duration when it is plausible', () => {
+        expect(resolveDuration(204.88, 204.9, 10)).toBe(204.88);
+        expect(resolveDuration(180, null, 10)).toBe(180);
+    });
+    it('falls back to the library duration when the element reports 0, NaN or Infinity', () => {
+        expect(resolveDuration(0, 204.9, 0)).toBe(204.9);
+        expect(resolveDuration(NaN, 204.9, 5)).toBe(204.9);
+        expect(resolveDuration(Infinity, 204.9, 5)).toBe(204.9);
+        expect(resolveDuration(undefined, 204.9, 5)).toBe(204.9);
+    });
+    it('rejects an element duration below the position or under half the library figure', () => {
+        expect(resolveDuration(3.2, 204.9, 13)).toBe(204.9);
+        expect(resolveDuration(3.2, 204.9, 0)).toBe(204.9);
+    });
+    it('is 0 when nothing is known, and never below the current time', () => {
+        expect(resolveDuration(0, null, 0)).toBe(0);
+        expect(resolveDuration(0, 0, NaN)).toBe(0);
+        expect(resolveDuration(5, null, 13)).toBe(13);
+        expect(resolveDuration(0, 10, 13)).toBe(13);
     });
 });

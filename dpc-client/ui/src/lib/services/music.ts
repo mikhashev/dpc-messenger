@@ -35,6 +35,7 @@ import {
     cycleRepeat,
     enqueue,
     formatRanges,
+    resolveDuration,
     loadMusicPreferences,
     onTrackEnded,
     playbackProblem,
@@ -423,7 +424,9 @@ function ensureAudio(): HTMLAudioElement | null {
         if (current()) musicPlayback.update(s => ({ ...s, currentTime: a.currentTime }));
     });
     const takeDuration = () => {
-        if (current() && Number.isFinite(a.duration)) musicPlayback.update(s => ({ ...s, duration: a.duration }));
+        if (!current()) return;
+        const d = resolveDuration(a.duration, entryOf(get(musicPlayback).loadedId)?.duration_s, a.currentTime);
+        if (d > 0) musicPlayback.update(s => (s.duration === d ? s : { ...s, duration: d }));
     };
     a.addEventListener('loadedmetadata', takeDuration);
     a.addEventListener('durationchange', takeDuration);
@@ -667,10 +670,16 @@ export function cycleRepeatMode(): void {
 
 export function seekTo(seconds: number, origin: 'slider' | 'key' | 'ui' = 'ui'): void {
     if (!audio || !get(musicPlayback).loadedId) return;
-    const d = Number.isFinite(audio.duration) ? audio.duration : Infinity;
+    // The element's duration may be 0 or a bogus partial one (WebKitGTK); the library's
+    // figure stands then. A target past `seekable` is still attempted, and logged.
+    const d = resolveDuration(audio.duration, entryOf(get(musicPlayback).loadedId)?.duration_s, audio.currentTime) || Infinity;
     const target = Math.max(0, Math.min(d, seconds));
     seekRequested = target;
-    dlogEvent('seek', `seek request (${origin}) target=${target.toFixed(2)} from=${audio.currentTime.toFixed(2)} ${snapshot(audio)}`);
+    const sk = audio.seekable;
+    let seekableEnd = 0;
+    try { seekableEnd = sk && sk.length ? sk.end(sk.length - 1) : 0; } catch { /* unreadable */ }
+    const beyond = target > seekableEnd + 0.5 ? ' beyond-seekable' : '';
+    dlogEvent('seek', `seek request (${origin}) target=${target.toFixed(2)} from=${audio.currentTime.toFixed(2)}${beyond} ${snapshot(audio)}`);
     audio.currentTime = target;
 }
 

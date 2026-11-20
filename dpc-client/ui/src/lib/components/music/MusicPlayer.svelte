@@ -63,6 +63,7 @@
     playbackProblem,
     repeatLabel,
     resizeMiniWidth,
+    resolveDuration,
     restoreMusicPlayer,
     trackSubtitle,
     type LibraryEntry,
@@ -520,7 +521,7 @@
   let cur = $derived($musicCurrentEntry);
   let curProblem = $derived(cur ? problemOf(cur) : null);
   let loaded = $derived(!!p.loadedId && p.loadedId === currentId(p.queue));
-  let shownDuration = $derived(loaded && p.duration > 0 ? p.duration : (cur?.duration_s ?? 0));
+  let shownDuration = $derived(resolveDuration(loaded && p.duration > 0 ? p.duration : null, cur?.duration_s, loaded ? p.currentTime : 0));
   let summary = $derived(
     cur ? `${p.playing ? 'Playing' : loaded ? 'Paused' : 'Up next'}: ${cur.title}` : `${$musicLibrary.entries.length} tracks`,
   );

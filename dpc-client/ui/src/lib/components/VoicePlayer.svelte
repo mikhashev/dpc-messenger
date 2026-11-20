@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { log } from '$lib/logger';
 
   // Detect if running in Tauri (check in onMount when window is ready)
   let isTauri = $state(false);
@@ -159,8 +160,47 @@
     if (isPlaying) {
       audioElement.pause();
     } else {
-      audioElement.play();
+      // play() rejects (NotSupportedError, NotAllowedError, AbortError, ...); without
+      // a catch that was an unhandled rejection and no trace in ui.log.
+      audioElement.play().catch((e: unknown) => {
+        const err = e as { name?: string; message?: string } | null;
+        log.warn('voice', `play() rejected name=${err?.name ?? 'unknown'} message=${JSON.stringify(err?.message ?? String(e))} ${voiceSnapshot()}`);
+      });
     }
+  }
+
+  // Compact media diagnostics, to ui.log through the console relay (grep "[voice]").
+  // `timeupdate` is never logged; events that repeat are cut to one line per second per
+  // kind, seeks and errors always. Same shape as the `[music]` lines.
+  const voiceId = Math.random().toString(36).slice(2, 6);
+  const lastVoiceLog = new Map<string, { at: number; folded: number }>();
+  const VOICE_NEVER_FOLDED = new Set(['loadedmetadata', 'seeking', 'seeked', 'error', 'ended']);
+
+  function voiceSnapshot(): string {
+    const a = audioElement;
+    if (!a) return 'no-element';
+    const ranges = (r: TimeRanges) => {
+      try {
+        if (!r.length) return 'none';
+        return Array.from({ length: Math.min(r.length, 4) }, (_, i) => `${r.start(i).toFixed(1)}-${r.end(i).toFixed(1)}`).join(',');
+      } catch { return 'unreadable'; }
+    };
+    return `t=${a.currentTime.toFixed(2)} readyState=${a.readyState} networkState=${a.networkState} ` +
+      `buffered=${ranges(a.buffered)} seekable=${ranges(a.seekable)} paused=${a.paused}`;
+  }
+
+  function voiceLog(kind: string, extra = '') {
+    try {
+      let suffix = '';
+      if (!VOICE_NEVER_FOLDED.has(kind)) {
+        const now = Date.now();
+        const last = lastVoiceLog.get(kind);
+        if (last && now - last.at < 1000) { last.folded++; return; }
+        if (last?.folded) suffix = ` (+${last.folded} folded)`;
+        lastVoiceLog.set(kind, { at: now, folded: 0 });
+      }
+      log.debug('voice', `${kind} #${voiceId} ${extra}${extra ? ' ' : ''}${voiceSnapshot()}${suffix}`);
+    } catch { /* a log line never breaks playback */ }
   }
 
   function handleSeek(e: Event) {
@@ -216,9 +256,24 @@
       if (Number.isFinite(d) && d > 0) measuredDuration = d;
     };
 
+    const diagnosticKinds = ['waiting', 'stalled', 'suspend', 'playing', 'play', 'pause', 'emptied', 'abort', 'seeking', 'seeked', 'ended'];
+    const diagnosticHandlers = diagnosticKinds.map((kind) => [kind, () => voiceLog(kind)] as const);
+    const handleLoadedMetadata = () => {
+      const d = audioElement?.duration;
+      voiceLog('loadedmetadata', `duration=${Number.isFinite(d) ? d.toFixed(2) : d}`);
+    };
+    const handleError = () => {
+      const a = audioElement;
+      if (!a || !a.getAttribute('src')) return;
+      voiceLog('error', `code=${a.error?.code ?? 'none'} message=${JSON.stringify(a.error?.message ?? '')}`);
+    };
+
     // Create audio element (initially without src)
     audioElement = new Audio();
     audioElement.volume = volume;
+    for (const [kind, h] of diagnosticHandlers) audioElement.addEventListener(kind, h);
+    audioElement.addEventListener('loadedmetadata', handleLoadedMetadata);
+    audioElement.addEventListener('error', handleError);
     audioElement.addEventListener('timeupdate', handleTimeUpdate);
     audioElement.addEventListener('play', handlePlay);
     audioElement.addEventListener('pause', handlePause);
@@ -228,6 +283,9 @@
 
     return () => {
       if (audioElement) {
+        for (const [kind, h] of diagnosticHandlers) audioElement.removeEventListener(kind, h);
+        audioElement.removeEventListener('loadedmetadata', handleLoadedMetadata);
+        audioElement.removeEventListener('error', handleError);
         audioElement.removeEventListener('loadedmetadata', handleDuration);
         audioElement.removeEventListener('durationchange', handleDuration);
         audioElement.removeEventListener('timeupdate', handleTimeUpdate);

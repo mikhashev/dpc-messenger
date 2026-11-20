@@ -548,6 +548,27 @@ export function formatTime(seconds: number | null | undefined): string {
     return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
 }
 
+/** The duration the player shows and seeks against. The media element's own duration
+ *  wins when it is plausible; it is not when it is 0, NaN or Infinity (WebKitGTK reports
+ *  0 for a stream it cannot size), smaller than the position already played, or under
+ *  half the library's figure (a pipeline that reports only what it has read so far). Then
+ *  the library's `duration_s` (ffprobe) stands. The result is never below `currentTime`
+ *  and is 0 only when nothing is known. */
+export function resolveDuration(
+    elementDuration: number | null | undefined,
+    libraryDuration: number | null | undefined,
+    currentTime = 0,
+): number {
+    const valid = (n: number | null | undefined): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
+    const lib = valid(libraryDuration) ? libraryDuration : 0;
+    const pos = valid(currentTime) ? currentTime : 0;
+    let d = 0;
+    if (valid(elementDuration) && elementDuration >= pos && !(lib > 0 && elementDuration < lib / 2)) d = elementDuration;
+    else if (lib > 0) d = lib;
+    else if (valid(elementDuration)) d = elementDuration;
+    return Math.max(d, pos);
+}
+
 /** The short tag of a track's origin: folder, gen, rec, web, import. */
 export function originTag(entry: LibraryEntry): string {
     switch (entry.origin) {

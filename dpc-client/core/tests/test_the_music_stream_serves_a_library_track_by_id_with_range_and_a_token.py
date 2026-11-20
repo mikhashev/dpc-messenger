@@ -2,6 +2,7 @@
 track's bytes by `track_id` only, with `Range` (206/416), a token and an `Origin`
 allowlist (`dpc_client_core/music/stream.py`)."""
 
+import asyncio
 import socket
 
 import aiohttp
@@ -295,3 +296,66 @@ def test_the_webview_csp_lets_media_load_from_the_default_stream_port_and_nothin
     [media] = [d.strip() for d in csp.split(";") if d.strip().startswith("media-src")]
     assert f"http://127.0.0.1:{DEFAULT_STREAM_PORT}" in media.split()
     assert "http://127.0.0.1:*" not in media and "http://localhost:*" not in media and " * " not in f" {media} "
+
+
+# -- Content-Length, never chunked (what a media pipeline needs to size the stream) ---------
+
+async def _raw(server, request_lines, *, read_body=True):
+    """One HTTP/1.1 request on a raw socket; the status line, the headers as a lowercase
+    dict, and the body. Nothing between us and what the server put on the wire."""
+    reader, writer = await asyncio.open_connection(server.host, server.port)
+    try:
+        host = f"{server.host}:{server.port}"
+        head = "\r\n".join([*request_lines, f"Host: {host}", "Connection: close", "", ""])
+        writer.write(head.encode("ascii"))
+        await writer.drain()
+        raw = await reader.read(-1)
+    finally:
+        writer.close()
+    head_bytes, _, body = raw.partition(b"\r\n\r\n")
+    lines = head_bytes.decode("latin-1").split("\r\n")
+    headers = {}
+    for line in lines[1:]:
+        name, _, value = line.partition(":")
+        headers[name.strip().lower()] = value.strip()
+    return lines[0], headers, body
+
+
+@pytest.mark.asyncio
+async def test_an_open_ended_range_is_206_with_content_length_and_not_chunked(server):
+    """The browser's first media request is `Range: bytes=0-`."""
+    status_line, headers, body = await _raw(
+        server, [f"GET /music/track/trk_abc?t={TOKEN} HTTP/1.1", "Range: bytes=0-"])
+    assert status_line.split()[1] == "206"
+    assert headers["content-range"] == f"bytes 0-{SIZE - 1}/{SIZE}"
+    assert headers["content-length"] == str(SIZE)
+    assert "transfer-encoding" not in headers
+    assert headers["accept-ranges"] == "bytes"
+    assert headers["content-type"] == "audio/mpeg"
+    assert body == BODY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("range_line,status", [(None, "200"), ("Range: bytes=100-199", "206"), ("Range: bytes=-50", "206")])
+async def test_every_track_answer_has_content_length_and_is_not_chunked(server, method, range_line, status):
+    lines = [f"{method} /music/track/trk_abc?t={TOKEN} HTTP/1.1"] + ([range_line] if range_line else [])
+    status_line, headers, body = await _raw(server, lines)
+    assert status_line.split()[1] == status
+    assert "transfer-encoding" not in headers
+    assert int(headers["content-length"]) == (SIZE if status == "200" else (100 if "100-199" in range_line else 50))
+    assert headers["accept-ranges"] == "bytes"
+    assert headers["content-type"] == "audio/mpeg"
+    assert (body == b"") == (method == "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_a_track_answer_carries_validators_and_a_stale_if_range_gets_the_whole_file(server):
+    _, headers, _ = await _raw(server, [f"HEAD /music/track/trk_abc?t={TOKEN} HTTP/1.1"])
+    assert headers["etag"].startswith('"') and headers["last-modified"].endswith("GMT")
+    status, h, body = await _raw(server, [
+        f"GET /music/track/trk_abc?t={TOKEN} HTTP/1.1", "Range: bytes=10-19", f"If-Range: {headers['etag']}"])
+    assert status.split()[1] == "206" and body == BODY[10:20]
+    status, h, body = await _raw(server, [
+        f"GET /music/track/trk_abc?t={TOKEN} HTTP/1.1", "Range: bytes=10-19", 'If-Range: "stale"'])
+    assert status.split()[1] == "200" and body == BODY and "content-range" not in h
