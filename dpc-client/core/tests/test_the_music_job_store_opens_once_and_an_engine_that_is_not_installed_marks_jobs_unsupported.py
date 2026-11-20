@@ -1,5 +1,6 @@
 """The service builds one job store, opened once even under concurrent first calls; with
-no engine adapter built the capabilities say so and a proposed job is `unsupported`.
+no acestep.cpp binary or models under the DPC home the capabilities say `not_installed`,
+name what is missing, and a proposed job is `unsupported`.
 """
 
 import asyncio
@@ -28,12 +29,15 @@ async def test_the_store_opens_once_under_concurrent_first_calls(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_today_the_engine_is_not_built_and_a_proposed_job_is_unsupported(tmp_path):
+async def test_with_no_engine_installed_a_proposed_job_is_unsupported(tmp_path):
     service = Service(tmp_path / "dpc")
     caps = (await service.get_music_capabilities())["capabilities"]
-    assert caps["engine"]["state"] == "not_built"
+    assert caps["engine"]["state"] == "not_installed"
+    assert caps["engine"]["supervised"] is True
+    assert "ace-server" in caps["engine"]["reason"]
+    assert "acestep-v15-turbo-Q8_0.gguf" in caps["engine"]["reason"]
     proposed = await service.propose_music_job(type="generate_from_text", params=from_text_params())
     assert proposed["status"] == "ok"
     job = proposed["job"]
     assert job["state"] == "unsupported"
-    assert "engine adapter not built" in str(job)
+    assert "binary is missing" in job["state_reason"]

@@ -61,6 +61,11 @@ ALLOWED: Dict[Tuple[str, str], Dict[str, Optional[str]]] = {
         "reason": "as the llama-server supervisor: a log file, CTRL_BREAK, and the child "
                   "registered at _spawn (ADR-046 point 5)",
     },
+    ("dpc_client_core/music/acestep.py", "AceStepServer._spawn"): {
+        "reason": "as the llama-server supervisor: the acestep.cpp server streams to a log file "
+                  "and is stopped with CTRL_BREAK / SIGTERM; it registers its child at _spawn "
+                  "and reports its end (ADR-046 point 5, ADR-051 D30)",
+    },
     ("dpc_client_core/job_object.py", "_launch_explorer"): {
         "reason": "a hand-off whose purpose is to leave the backend's kill-on-close job: "
                   "explorer.exe passes the URL to the running shell and exits at once, and "

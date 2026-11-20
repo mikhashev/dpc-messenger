@@ -215,7 +215,8 @@ _OLD_STOP_FIELD = "stop_reason"  # read from an older file, never written
 STOP_VALUES = ("idle_unload", "ui_stop", "engine_died", "failed_start", "browser_closed", "swap")
 LAUNCHER_KINDS = ("tool", "subsystem")
 # A subsystem's launcher is one of these words; a tool's is the tool's name.
-SUBSYSTEMS = ("strata", "llamacpp_server", "browser", "device_probe", "git_helper")
+# `acestep_server` is the music engine DPC supervises (ADR-051 D30, `music/acestep.py`).
+SUBSYSTEMS = ("strata", "llamacpp_server", "browser", "device_probe", "git_helper", "acestep_server")
 # What the backend's stop still lets be born (ADR-046 point 7), and only when its
 # caller says so (`while_stopping`): the stop itself runs one device probe,
 # Strata's VRAM check after its engine. A device probe only reads the machine, is
@@ -273,8 +274,9 @@ PEAK_WRITE_RISE = 0.25
 PEAK_WRITE_MIN_MB = 64.0
 PEAK_WRITE_MIN_VRAM_MIB = 256.0
 PEAK_WRITE_MIN_INTERVAL_S = 10.0
-# The subsystems whose VRAM is read: the two local engines (provider types).
-ENGINES = ("strata", "llamacpp_server")
+# The subsystems whose VRAM is read: the two local engines (provider types) and the
+# music engine (`acestep_server`).
+ENGINES = ("strata", "llamacpp_server", "acestep_server")
 _MB = 1024 * 1024
 # The peaks whose rise rewrites the state file, each with its floor.
 _PEAK_FLOORS = (

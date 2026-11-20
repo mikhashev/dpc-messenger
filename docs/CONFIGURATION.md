@@ -750,7 +750,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **34 sections, 189 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **34 sections, 194 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -998,6 +998,11 @@ An empty default means the key is written blank and the feature stays off until 
 | `stream_port` | `9996` | The loopback port the player reads track bytes from (ADR-051 N8, 127.0.0.1 only, token-guarded). The app's CSP media-src names 9996, so another port also needs tauri.conf.json changed and the app rebuilt |
 | `stream_ranges_linux` | `false` | Whether the Linux player asks the track stream for HTTP Range (true) or a plain whole-file 200 (false, default). WebKitGTK 2.50 reports no duration and refuses forward seeks on a Range source and handles the plain one; turn on only to test. Windows and macOS always use Range |
 | `lrclib_enabled` | `true` | Allow the explicit "Find on LRCLIB" lookup (sends artist, title, album and duration to lrclib.net); false hides it. The automatic lyrics chain never goes online |
+| `acestep_binary` | *(empty)* | The acestep.cpp server DPC starts for music jobs (ADR-051 D30). Empty = <DPC home>/engines/acestep.cpp/build/ace-server(.exe), or the first one found a few folders down in that build folder |
+| `acestep_models_dir` | *(empty)* | The ACE-Step GGUF folder. Empty = <DPC home>/models/music/ace-step. Needs acestep-5Hz-lm-4B-Q8_0, acestep-v15-turbo-Q8_0, Qwen3-Embedding-0.6B-Q8_0 and vae-BF16 (.gguf) |
+| `acestep_port` | `9995` | The loopback port of the acestep.cpp server (always 127.0.0.1). 0 = a free port at each start |
+| `acestep_idle_stop_s` | `300` | Stop the acestep.cpp server after this many idle seconds to free the GPU card; 0 = as soon as a job ends |
+| `acestep_device` | *(empty)* | Passed to acestep.cpp as --device (CUDA0, Vulkan0, MTL0, CPU). Empty = the engine picks the best device |
 
 #### `[oauth]`
 

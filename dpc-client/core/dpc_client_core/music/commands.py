@@ -52,6 +52,18 @@ transcriptions under its load lock and refuses the unload while any is running.
 `start_music_stream` opens `music/stream.py`'s loopback listener on `[music] stream_port`
 (default 9996), which serves a library track's bytes by `track_id` with HTTP `Range`, a
 per-process token and an `Origin` allowlist. The command hands the UI `{base_url, token, ranges_linux}`.
+
+**The engine and the runner** (ADR-051 D30, SPEC §12 decisions 31-34): `music/acestep.py`
+supervises the acestep.cpp server (settings `[music] acestep_binary`, `acestep_models_dir`,
+`acestep_port`, `acestep_idle_stop_s`, `acestep_device`), and its `status()` is the job
+store's engine probe, so the capabilities report the real state and a `generate_from_text`
+job is queued only when the engine is installed. `music/runner.py` runs queued jobs one at a
+time; `start_music_jobs` starts it at service start (resuming queued jobs) and
+`stop_music_jobs` stops it and the server at shutdown. Each change the runner makes is
+broadcast as `music_job_updated` `{job}`, and each engine state change as
+`music_engine_status` `{engine}`; `get_music_job` answers the same state for a UI that polls.
+"Stop X" on a job waiting for the card is the existing `stop_local_engine` command with the
+holder's alias from `job.card_wait.holders`; nothing here stops another engine.
 """
 
 from __future__ import annotations
@@ -62,10 +74,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..local_api import slow_command
-from .capabilities import MusicCapabilities
+from .acestep import AceStepError, AceStepServer, read_config
+from .capabilities import EngineStatus, MusicCapabilities
 from .jobs import MusicJobError, MusicJobStore
 from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
 from .lyrics import MusicLyrics
+from .runner import MusicJobRunner
 from .stream import DEFAULT_STREAM_PORT, MusicStreamServer
 
 LOCAL_WHISPER_TYPE = "local_whisper"
@@ -83,6 +97,8 @@ def _error(exc: Exception) -> Dict[str, Any]:
         return {"status": "error", "code": exc.code, "message": exc.message}
     if isinstance(exc, MusicJobError):
         return {"status": "error", "code": exc.code, "message": exc.message, "field": exc.field}
+    if isinstance(exc, AceStepError):
+        return {"status": "error", "code": exc.code, "message": exc.message}
     logger.exception("music command failed")
     return {"status": "error", "code": "internal", "message": str(exc)}
 
@@ -120,6 +136,8 @@ class MusicCommandsMixin:
     _music_lyrics_instance: Optional[MusicLyrics] = None
     _music_jobs_instance: Optional[MusicJobStore] = None
     _music_jobs_lock: Optional[asyncio.Lock] = None
+    _music_engine_instance: Optional[AceStepServer] = None
+    _music_runner_instance: Optional[MusicJobRunner] = None
 
     def _music_poll_interval_s(self) -> float:
         raw = self.settings.get("music", "poll_interval_s", str(DEFAULT_POLL_INTERVAL_S))
@@ -442,10 +460,110 @@ class MusicCommandsMixin:
             self._music_jobs_lock = asyncio.Lock()
         async with self._music_jobs_lock:
             if self._music_jobs_instance is None:
-                store = MusicJobStore(self.settings.dpc_home_dir, capabilities=MusicCapabilities())
+                store = MusicJobStore(self.settings.dpc_home_dir,
+                                      capabilities=MusicCapabilities(self._music_engine().status))
                 await asyncio.to_thread(store.open)
                 self._music_jobs_instance = store
         return self._music_jobs_instance
+
+    # -- the engine and the runner (ADR-051 D30) --------------------------------------
+
+    def _music_engine(self) -> AceStepServer:
+        """The acestep.cpp supervisor, built on first use; its settings are re-read before
+        each start."""
+        if self._music_engine_instance is None:
+            home = self.settings.dpc_home_dir
+
+            def config():
+                return read_config(self.settings.get, home)
+            self._music_engine_instance = AceStepServer(config(), dpc_home=home, config_source=config,
+                                                        on_change=self._music_engine_changed)
+        return self._music_engine_instance
+
+    def _music_broadcast(self, event: str, payload: Dict[str, Any]) -> None:
+        """Send an event to the UI when one is connected; never raises."""
+        local_api = getattr(self, "local_api", None)
+        broadcast = getattr(local_api, "broadcast_event", None)
+        if broadcast is None:
+            return
+        try:
+            asyncio.get_running_loop().create_task(broadcast(event, payload))
+        except RuntimeError:
+            pass  # no running loop: nobody to tell
+        except Exception:
+            logger.exception("music: broadcasting %s failed", event)
+
+    def _music_engine_changed(self, status: EngineStatus) -> None:
+        self._music_broadcast("music_engine_status", {"engine": status.as_dict()})
+
+    def _music_job_changed(self, job: Dict[str, Any]) -> None:
+        self._music_broadcast("music_job_updated", {"job": job})
+
+    def _music_wake_runner(self) -> None:
+        if self._music_runner_instance is not None:
+            self._music_runner_instance.wake()
+
+    async def start_music_jobs(self) -> None:
+        """Start the job runner (it resumes queued jobs); called at service start. A
+        failure is logged and leaves jobs queued."""
+        try:
+            store = await self._music_jobs()
+            if self._music_runner_instance is None:
+                self._music_runner_instance = MusicJobRunner(
+                    store, self._music_engine(), self._music, dpc_home=self.settings.dpc_home_dir,
+                    on_job_change=self._music_job_changed)
+            self._music_runner_instance.start()
+        except Exception:
+            logger.exception("music: the job runner did not start")
+
+    async def stop_music_jobs(self) -> None:
+        """Stop the runner and the acestep.cpp server; called at shutdown. A job still
+        running is settled by the store's restart rule at the next start."""
+        runner = self._music_runner_instance
+        if runner is not None:
+            await runner.stop()
+        if self._music_engine_instance is not None:
+            await self._music_engine_instance.shutdown()
+
+    async def get_music_engine_status(self) -> Dict[str, Any]:
+        """The engine's state, where its files are, and the job the runner holds. Who holds
+        the GPU card is the local-engine status command's (owner-only) answer, and a waiting
+        job's `card_wait` names the holder."""
+        try:
+            engine = self._music_engine()
+            runner = self._music_runner_instance
+            return {"status": "ok", "engine": engine.details(),
+                    "runner": {"running": bool(runner and runner.running),
+                               "current_job_id": runner.current_job_id if runner else None}}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
+    async def start_music_engine(self) -> Dict[str, Any]:
+        """Start the acestep.cpp server by hand (also the way out of an `error` state).
+        Slow: it waits for the server's /health."""
+        try:
+            engine = self._music_engine()
+            await engine.start()
+            return {"status": "ok", "engine": engine.details()}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
+    async def stop_music_engine(self, force: Any = False) -> Dict[str, Any]:
+        """Stop the acestep.cpp server by hand to free the card. Refused (`engine_busy`)
+        while a job runs on it, unless `force` (the job then fails)."""
+        try:
+            engine = self._music_engine()
+            runner = self._music_runner_instance
+            busy = runner.current_job_id if runner else None
+            if busy and force is not True:
+                return {"status": "error", "code": "engine_busy",
+                        "message": f"music job {busy} is using the engine; cancel it first, or pass force"}
+            stopped = await engine.stop("ui_stop")
+            return {"status": "ok", "stopped": stopped, "engine": engine.details()}
+        except Exception as exc:
+            return _error(exc)
 
     async def _music_hide_for_discard(self, take: Dict[str, Any]) -> Dict[str, Any]:
         """Decision 35: Discard removes the library entry (hides it); the file stays. A
@@ -484,6 +602,8 @@ class MusicCommandsMixin:
                 ("action", action), ("prompt", prompt), ("idempotency_key", idempotency_key))}
             store = await self._music_jobs()
             job = await asyncio.to_thread(lambda: store.create_job(job_type, params, region=region, **strs))
+            if job.get("state") == "queued":
+                self._music_wake_runner()
             return {"status": "ok", "job": job}
         except Exception as exc:
             return _error(exc)
@@ -511,7 +631,9 @@ class MusicCommandsMixin:
             jid = _need_str(job_id, "job_id", "invalid_job_id")
             why = _opt_str(reason, "reason", "invalid_reason")
             store = await self._music_jobs()
-            return {"status": "ok", "job": await asyncio.to_thread(store.cancel_job, jid, why)}
+            job = await asyncio.to_thread(store.cancel_job, jid, why)
+            self._music_wake_runner()
+            return {"status": "ok", "job": job}
         except Exception as exc:
             return _error(exc)
 
@@ -671,6 +793,9 @@ MUSIC_COMMANDS = (
     "remove_missing_music_tracks",
     "delete_generated_music_file",
     "get_music_capabilities",
+    "get_music_engine_status",
+    "start_music_engine",
+    "stop_music_engine",
     "propose_music_job",
     "get_music_job",
     "list_music_jobs",

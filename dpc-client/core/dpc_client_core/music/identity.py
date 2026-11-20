@@ -92,6 +92,7 @@ class FlacStreamInfo:
     sample_rate: int
     channels: int
     total_samples: int
+    bits_per_sample: int = 0
 
     @property
     def duration_s(self) -> Optional[float]:
@@ -156,9 +157,11 @@ def read_flac_streaminfo(path: Path) -> Optional[FlacStreamInfo]:
     bits = int.from_bytes(block[10:18], "big")
     sample_rate = bits >> 44
     channels = ((bits >> 41) & 0x7) + 1
+    bits_per_sample = ((bits >> 36) & 0x1F) + 1
     total_samples = bits & 0xFFFFFFFFF
     return FlacStreamInfo(
         md5=block[18:34].hex(), sample_rate=sample_rate, channels=channels, total_samples=total_samples,
+        bits_per_sample=bits_per_sample,
     )
 
 
