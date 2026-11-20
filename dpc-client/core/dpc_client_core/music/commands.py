@@ -140,7 +140,7 @@ class MusicCommandsMixin:
     _music_runner_instance: Optional[MusicJobRunner] = None
 
     def _music_poll_interval_s(self) -> float:
-        raw = self.settings.get("music", "poll_interval_s", str(DEFAULT_POLL_INTERVAL_S))
+        raw = self._music_config_value("poll_interval_s", str(DEFAULT_POLL_INTERVAL_S))
         try:
             return float(raw)
         except (TypeError, ValueError):
@@ -156,7 +156,7 @@ class MusicCommandsMixin:
 
     def _music_lrclib_enabled(self) -> bool:
         """`[music] lrclib_enabled`: whether the lyrics chain may ask lrclib.net."""
-        raw = self.settings.get("music", "lrclib_enabled", "true" if DEFAULT_LRCLIB_ENABLED else "false")
+        raw = self._music_config_value("lrclib_enabled", "true" if DEFAULT_LRCLIB_ENABLED else "false")
         text = str(raw).strip().lower()
         if text in _TRUE:
             return True
@@ -183,6 +183,18 @@ class MusicCommandsMixin:
             return fn()
         except Exception:
             logger.warning("music: reading %s failed; using %r", getter, default)
+            return default
+
+    def _music_config_value(self, key: str, default: str) -> Any:
+        """`[music] key` from the settings, or `default` when the settings object has no
+        `get` (a start-up stand-in) or the read fails."""
+        fn = getattr(self.settings, "get", None)
+        if not callable(fn):
+            return default
+        try:
+            return fn("music", key, default)
+        except Exception:
+            logger.warning("music: reading [music] %s failed; using %r", key, default)
             return default
 
     def _music_pick_transcriber(self) -> tuple:
@@ -316,7 +328,7 @@ class MusicCommandsMixin:
     _music_stream_problem: Optional[str] = None
 
     def _music_stream_port(self) -> int:
-        raw = self.settings.get("music", "stream_port", str(DEFAULT_STREAM_PORT))
+        raw = self._music_config_value("stream_port", str(DEFAULT_STREAM_PORT))
         try:
             port = int(str(raw).strip())
             if 0 <= port <= 65535:
@@ -329,7 +341,7 @@ class MusicCommandsMixin:
     def _music_stream_ranges_linux(self) -> bool:
         """`[music] stream_ranges_linux`: the Linux UI asks the stream for `Range` only when
         true; the default (false) asks for `ranges=0`, a plain whole-file 200."""
-        raw = self.settings.get("music", "stream_ranges_linux", "false")
+        raw = self._music_config_value("stream_ranges_linux", "false")
         return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
     def _music_track_path(self, track_id: str) -> Optional[Path]:
@@ -580,6 +592,7 @@ class MusicCommandsMixin:
             logger.exception("music: hiding the discarded take's library entry failed")
             return {"library_hidden": False, "library_reason": str(exc)}
 
+    @slow_command
     async def get_music_capabilities(self) -> Dict[str, Any]:
         try:
             store = await self._music_jobs()
@@ -587,6 +600,7 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    @slow_command
     async def propose_music_job(self, type: Any = None, params: Any = None, track_id: Any = None,
                                 base_version_id: Any = None, comment_id: Any = None, action: Any = None,
                                 region: Any = None, prompt: Any = None,
@@ -608,6 +622,7 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    @slow_command
     async def get_music_job(self, job_id: Any = None) -> Dict[str, Any]:
         try:
             jid = _need_str(job_id, "job_id", "invalid_job_id")
@@ -616,6 +631,7 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    @slow_command
     async def list_music_jobs(self, states: Any = None, job_type: Any = None) -> Dict[str, Any]:
         try:
             st = _opt_str_list(states, "states", "invalid_states")
@@ -626,6 +642,7 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    @slow_command
     async def cancel_music_job(self, job_id: Any = None, reason: Any = None) -> Dict[str, Any]:
         try:
             jid = _need_str(job_id, "job_id", "invalid_job_id")
@@ -637,6 +654,7 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    @slow_command
     async def list_music_takes(self, job_id: Any = None) -> Dict[str, Any]:
         try:
             jid = _need_str(job_id, "job_id", "invalid_job_id")
@@ -645,6 +663,7 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    @slow_command
     async def keep_music_take(self, take_id: Any = None) -> Dict[str, Any]:
         """Keep: the take is the person's. The library is not touched."""
         try:
@@ -656,6 +675,7 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    @slow_command
     async def discard_music_take(self, take_id: Any = None, reason_text: Any = None,
                                  reason_class: Any = None) -> Dict[str, Any]:
         try:
@@ -669,6 +689,7 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    @slow_command
     async def reject_all_music_takes(self, job_id: Any = None, reason_text: Any = None,
                                      reason_class: Any = None) -> Dict[str, Any]:
         try:
