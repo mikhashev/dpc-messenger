@@ -136,6 +136,21 @@ describe('what is remembered', () => {
         expect(parseWindowState(s.data.get(WINDOW_STORAGE_KEY))).toBeNull();
     });
 
+    it('keeps a mini width when one is stored, drops a bad one, and adds none otherwise', () => {
+        const s = memory();
+        saveWindowState(s, { rect: { x: 10, y: 20, width: 700, height: 500 }, minimised: false });
+        expect(s.data.get(WINDOW_STORAGE_KEY)).not.toContain('miniWidth');
+        expect('miniWidth' in loadWindowState(s, VP)).toBe(false);
+        saveWindowState(s, { rect: { x: 10, y: 20, width: 700, height: 500 }, minimised: true, miniWidth: 330 });
+        expect(loadWindowState(s, VP).miniWidth).toBe(330);
+        const box = { x: 10, y: 20, width: 700, height: 500 };
+        for (const bad of ['wide', -5, 0, null]) {
+            const parsed = parseWindowState(JSON.stringify({ rect: box, minimised: true, miniWidth: bad }));
+            expect(parsed).toEqual({ rect: box, minimised: true });
+            expect('miniWidth' in parsed!).toBe(false);
+        }
+    });
+
     it('works with a storage that throws', () => {
         const hostile = {
             getItem: () => { throw new Error('blocked'); },

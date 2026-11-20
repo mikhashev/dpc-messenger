@@ -51,7 +51,25 @@ describe('playback outlives the window', () => {
 describe('the window follows the Agent map pattern', () => {
     it('remembers its box under its own key through windowGeometry', () => {
         expect(player).toContain('loadWindowState(storage(), viewport(), MUSIC_PLAYER_WINDOW)');
-        expect(player).toContain('saveWindowState(storage(), { rect, minimised }, MUSIC_PLAYER_WINDOW)');
+        expect(player).toContain('saveWindowState(storage(), { rect, minimised, miniWidth: miniWidth ?? undefined }, MUSIC_PLAYER_WINDOW)');
+    });
+
+    it('minimised, the bar has its own right-edge handle that resizes the width only', () => {
+        const mini = player.slice(player.indexOf('<!-- Outside .mp-head'));
+        expect(mini).toContain('class="mini-resize-handle"');
+        expect(mini).toContain("onpointerdown={(e) => beginGesture(e, 'mini-resize')}");
+        // The handle sits after .mp-head closes, so its press never reaches the bar's restore click.
+        expect(player.indexOf('class="mini-resize-handle"')).toBeGreaterThan(player.indexOf('<div class="mp-buttons">'));
+        expect(player).toContain("if (kind === 'mini-resize') e.stopPropagation();");
+        expect(player).toContain("if (gesture.kind === 'mini-resize') miniWidth = resizeMiniWidth(s, dx, viewport());");
+        expect(player).toMatch(/\.mini-resize-handle \{[^}]*cursor: ew-resize;[^}]*touch-action: none;/);
+    });
+
+    it('a narrow bar hides k / n, shuffle and repeat but keeps restore and close', () => {
+        expect(player).toContain('{#if $musicPosition && miniShows.position}');
+        expect(player).toContain('{#if miniShows.modes}{@render modeButtons(true)}{/if}');
+        const buttons = player.slice(player.indexOf('<div class="mp-buttons">'), player.indexOf('{#if !minimised}'));
+        expect(buttons).not.toContain('{#if');
     });
 
     it('minimised, the header bar is the mini-player: transport, title, k / n, shuffle and repeat', () => {

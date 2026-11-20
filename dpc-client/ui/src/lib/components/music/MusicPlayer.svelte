@@ -4,6 +4,9 @@
   minimise to its header bar, like the Agent map; its box and the minimised flag are
   remembered through utils/windowGeometry.ts under its own key. Minimised, the bar
   is the mini-player: prev / play / next, the title, "k / n", shuffle and repeat.
+  The bar is resized by its right-edge handle and keeps its own width (miniWidth),
+  remembered beside the box; restoring gives back the window's size. A narrow bar
+  drops shuffle and repeat, then "k / n"; restore and close always stay.
 
   Non-modal: the chat stays usable beside it. The audio element and the playback
   state are not here but in services/music.ts, a singleton of the page, so playback
@@ -48,11 +51,15 @@
     dropIndex,
     formatTime,
     matchesFilter,
+    miniPlayerRect,
+    miniPlayerShows,
+    miniPlayerWidth,
     moveItem,
     nextPlaylistName,
     originTag,
     playbackProblem,
     repeatLabel,
+    resizeMiniWidth,
     trackSubtitle,
     type LibraryEntry,
     type Playlist,
@@ -97,8 +104,14 @@
 
   let rootEl = $state<HTMLDivElement | null>(null);
   let rect = $state<WindowRect>({ x: 0, y: 0, width: 0, height: 0 });
-  let gesture: { kind: 'move' | 'resize'; px: number; py: number; start: WindowRect } | null = null;
+  // The mini-player bar's own width; null until the bar is resized (then it is as wide as the window).
+  let miniWidth = $state<number | null>(null);
+  type GestureKind = 'move' | 'resize' | 'mini-resize';
+  let gesture: { kind: GestureKind; px: number; py: number; start: WindowRect } | null = null;
   let dragged = false;
+  // Minimised, the window is drawn at the bar's width (rect and miniWidth are kept in the viewport).
+  let shownWidth = $derived(minimised ? (miniWidth ?? rect.width) : rect.width);
+  let miniShows = $derived(miniPlayerShows(shownWidth));
 
   const viewport = () => ({ width: window.innerWidth, height: window.innerHeight });
   function storage(): Storage | null {
@@ -108,14 +121,26 @@
       return null;
     }
   }
-  const remember = () => saveWindowState(storage(), { rect, minimised }, MUSIC_PLAYER_WINDOW);
+  const remember = () => saveWindowState(storage(), { rect, minimised, miniWidth: miniWidth ?? undefined }, MUSIC_PLAYER_WINDOW);
+
+  /** The window's box fitted to the viewport: whole when open, only the bar (at its
+   *  own width) when minimised. The mini width is kept within its limits too. */
+  function fitted(r: WindowRect, m: boolean): WindowRect {
+    const vp = viewport();
+    if (miniWidth !== null) miniWidth = miniPlayerWidth(miniWidth, r.width, vp);
+    if (!m) return clampRect(r, vp, false, LIMITS);
+    const full = clampRect(r, vp, true, LIMITS);
+    const bar = miniPlayerRect(full, miniWidth, vp);
+    return { ...full, x: bar.x, y: bar.y };
+  }
 
   // Each opening takes the remembered box, fitted to the viewport as it is now.
   $effect(() => {
     if (!open) return;
     untrack(() => {
       const w = loadWindowState(storage(), viewport(), MUSIC_PLAYER_WINDOW);
-      rect = clampRect(w.rect, viewport(), minimised, LIMITS);
+      miniWidth = w.miniWidth ?? null;
+      rect = fitted(w.rect, minimised);
       tick().then(() => rootEl?.focus({ preventScroll: true }));
     });
   });
@@ -128,7 +153,7 @@
       if (m === lastMinimised) return;
       lastMinimised = m;
       if (open) {
-        rect = clampRect(rect, viewport(), m, LIMITS);
+        rect = fitted(rect, m);
         remember();
       }
     });
@@ -142,11 +167,14 @@
     minimised = !minimised;
   }
 
-  function beginGesture(e: PointerEvent, kind: 'move' | 'resize') {
+  function beginGesture(e: PointerEvent, kind: GestureKind) {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement;
     if (kind === 'move' && target.closest('button, input, select')) return;
-    gesture = { kind, px: e.clientX, py: e.clientY, start: { ...rect } };
+    // The bar's handle is not the bar: its press must never become the bar's "click to restore".
+    if (kind === 'mini-resize') e.stopPropagation();
+    const start = kind === 'mini-resize' ? miniPlayerRect(rect, miniWidth, viewport()) : { ...rect };
+    gesture = { kind, px: e.clientX, py: e.clientY, start };
     dragged = false;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     rootEl?.focus({ preventScroll: true });
@@ -158,9 +186,12 @@
     const dx = e.clientX - gesture.px;
     const dy = e.clientY - gesture.py;
     if (!isClick(dx, dy)) dragged = true;
-    rect = gesture.kind === 'move'
-      ? moveRect(gesture.start, dx, dy, viewport(), minimised, LIMITS)
-      : resizeRect(gesture.start, dx, dy, viewport(), LIMITS);
+    const s = gesture.start;
+    if (gesture.kind === 'mini-resize') miniWidth = resizeMiniWidth(s, dx, viewport());
+    else if (gesture.kind === 'resize') rect = resizeRect(s, dx, dy, viewport(), LIMITS);
+    // Minimised, the bar (at its own width) is what has to stay in view.
+    else if (minimised) rect = fitted({ ...s, x: s.x + dx, y: s.y + dy }, true);
+    else rect = moveRect(s, dx, dy, viewport(), false, LIMITS);
   }
 
   function endGesture(e: PointerEvent) {
@@ -178,7 +209,7 @@
   }
 
   function refit() {
-    if (open) rect = clampRect(rect, viewport(), minimised, LIMITS);
+    if (open) rect = fitted(rect, minimised);
   }
 
   // -- the library -----------------------------------------------------------------
@@ -589,7 +620,7 @@
     aria-modal="false"
     aria-labelledby="music-player-title"
     tabindex="-1"
-    style="left: {rect.x}px; top: {rect.y}px; width: {rect.width}px; height: {minimised ? HEADER_HEIGHT : rect.height}px"
+    style="left: {rect.x}px; top: {rect.y}px; width: {shownWidth}px; height: {minimised ? HEADER_HEIGHT : rect.height}px"
   >
     <div
       class="mp-head"
@@ -606,8 +637,8 @@
           <span id="music-player-title" class="mini-title" title={cur?.title ?? 'Music Player'}>
             {cur?.title ?? 'Music Player'}
           </span>
-          {#if $musicPosition}<span class="mini-pos" title="Track k of n in Up next">{$musicPosition}</span>{/if}
-          {@render modeButtons(true)}
+          {#if $musicPosition && miniShows.position}<span class="mini-pos" title="Track k of n in Up next">{$musicPosition}</span>{/if}
+          {#if miniShows.modes}{@render modeButtons(true)}{/if}
         </div>
       {:else}
         <div class="mp-title">
@@ -891,6 +922,17 @@
         onpointerup={endGesture}
         onpointercancel={endGesture}
       ></div>
+    {:else}
+      <!-- Outside .mp-head, so its press never reaches the bar's move / restore gesture. -->
+      <div
+        class="mini-resize-handle"
+        role="presentation"
+        title="Drag to resize the mini-player"
+        onpointerdown={(e) => beginGesture(e, 'mini-resize')}
+        onpointermove={moveGesture}
+        onpointerup={endGesture}
+        onpointercancel={endGesture}
+      ></div>
     {/if}
   </div>
 {/if}
@@ -985,6 +1027,19 @@
     border-bottom-right-radius: 10px;
   }
 
+  /* The mini-player's right edge: width only. Inside the head's 8 px right padding,
+     so it never covers the close button. */
+  .mini-resize-handle {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: ew-resize;
+    touch-action: none;
+  }
+  .mini-resize-handle:hover { background: rgba(110, 118, 129, 0.35); }
+
   .banner {
     display: flex;
     align-items: center;
@@ -1042,6 +1097,7 @@
   }
   .t-btn:hover { background: #2c3036; }
   .t-btn.play { width: 44px; height: 44px; background: #58a6ff; border-color: #58a6ff; color: #0d1117; }
+  .transport.small { flex: 0 0 auto; }
   .transport.small .t-btn { width: 32px; height: 32px; font-size: 13px; }
   .transport.small .t-btn.play { width: 36px; height: 36px; }
 

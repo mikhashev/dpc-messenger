@@ -20,6 +20,10 @@ export interface Viewport {
 export interface WindowState {
     rect: WindowRect;
     minimised: boolean;
+    /** The width of the minimised bar when it is kept apart from the window's
+     *  (the Music Player's mini-player). Absent: the bar is as wide as the window.
+     *  Optional, so a state stored without it loads as before. */
+    miniWidth?: number;
 }
 
 /** The smallest box a window can be resized to (a smaller viewport wins). */
@@ -122,10 +126,13 @@ export function parseWindowState(raw: string | null | undefined): WindowState | 
         const r = v?.rect;
         if (!r || !finite(r.x) || !finite(r.y) || !finite(r.width) || !finite(r.height)) return null;
         if (r.width <= 0 || r.height <= 0) return null;
-        return {
+        const state: WindowState = {
             rect: { x: r.x, y: r.y, width: r.width, height: r.height },
             minimised: v.minimised === true,
         };
+        // A bad mini width is dropped, not the whole state: the bar falls back to the window's width.
+        if (finite(v.miniWidth) && v.miniWidth > 0) state.miniWidth = v.miniWidth;
+        return state;
     } catch {
         return null;
     }
@@ -145,7 +152,10 @@ export function loadWindowState(
         stored = null;
     }
     if (!stored) return { rect: defaultRect(vp, spec.limits), minimised: false };
-    return { rect: clampRect(stored.rect, vp, stored.minimised, spec.limits), minimised: stored.minimised };
+    const state: WindowState = { rect: clampRect(stored.rect, vp, stored.minimised, spec.limits), minimised: stored.minimised };
+    // Passed through as stored: the window that keeps a mini width fits it to the viewport itself.
+    if (stored.miniWidth !== undefined) state.miniWidth = stored.miniWidth;
+    return state;
 }
 
 /** Remember the window; a storage that refuses is ignored. */

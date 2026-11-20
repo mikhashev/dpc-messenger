@@ -40,6 +40,13 @@ import {
     type PlaybackEnv,
     type Playlist,
     type QueueState,
+    MINI_PLAYER_MIN_WIDTH,
+    MINI_PLAYER_MODES_WIDTH,
+    MINI_PLAYER_POSITION_WIDTH,
+    miniPlayerRect,
+    miniPlayerShows,
+    miniPlayerWidth,
+    resizeMiniWidth,
 } from './musicPlayer';
 import { HEADER_HEIGHT, loadWindowState, saveWindowState } from './windowGeometry';
 
@@ -265,6 +272,70 @@ describe('the window geometry is remembered under its own key', () => {
         const throwing = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
         expect(loadMusicPreferences(throwing)).toEqual({ shuffle: false, repeat: 'off', volume: 1 });
         expect(() => saveMusicPreferences(throwing, { shuffle: false, repeat: 'off', volume: 1 })).not.toThrow();
+    });
+});
+
+describe('the mini-player bar keeps its own width', () => {
+    const VP = { width: 1600, height: 900 };
+    function memory() {
+        const m = new Map<string, string>();
+        return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m };
+    }
+
+    it('without a mini width the bar is as wide as the window, as before', () => {
+        expect(miniPlayerWidth(null, 700, VP)).toBe(700);
+        expect(miniPlayerWidth(undefined, 700, VP)).toBe(700);
+        expect(miniPlayerWidth(Number.NaN, 700, VP)).toBe(700);
+    });
+
+    it('is clamped to its minimum and to the viewport', () => {
+        expect(miniPlayerWidth(120, 700, VP)).toBe(MINI_PLAYER_MIN_WIDTH);
+        expect(miniPlayerWidth(5000, 700, VP)).toBe(VP.width);
+        expect(miniPlayerWidth(360, 700, VP)).toBe(360);
+        // A viewport under the minimum wins.
+        expect(miniPlayerWidth(400, 700, { width: 250, height: 600 })).toBe(250);
+    });
+
+    it('the bar box is the window corner at the bar width, pulled back into view', () => {
+        const rect = { x: 1400, y: 2000, width: 700, height: 500 };
+        expect(miniPlayerRect(rect, 320, VP)).toEqual({ x: 1600 - 320, y: 900 - HEADER_HEIGHT, width: 320, height: HEADER_HEIGHT });
+        // A narrow bar may sit further right than the whole window could.
+        expect(miniPlayerRect({ ...rect, x: 1200, y: 100 }, 320, VP).x).toBe(1200);
+    });
+
+    it('the right-edge handle changes the width only, within min and the viewport edge', () => {
+        const bar = { x: 1000, y: 300, width: 400, height: HEADER_HEIGHT };
+        expect(resizeMiniWidth(bar, 50, VP)).toBe(450);
+        expect(resizeMiniWidth(bar, -60, VP)).toBe(340);
+        expect(resizeMiniWidth(bar, -500, VP)).toBe(MINI_PLAYER_MIN_WIDTH);
+        expect(resizeMiniWidth(bar, 900, VP)).toBe(VP.width - bar.x);
+        // The left edge does not move: the bar box is not an output of the resize.
+        expect(bar).toEqual({ x: 1000, y: 300, width: 400, height: HEADER_HEIGHT });
+    });
+
+    it('a narrow bar drops shuffle and repeat, then k / n', () => {
+        expect(miniPlayerShows(MINI_PLAYER_MODES_WIDTH)).toEqual({ position: true, modes: true });
+        expect(miniPlayerShows(MINI_PLAYER_MODES_WIDTH - 1)).toEqual({ position: true, modes: false });
+        expect(miniPlayerShows(MINI_PLAYER_POSITION_WIDTH - 1)).toEqual({ position: false, modes: false });
+        expect(miniPlayerShows(MINI_PLAYER_MIN_WIDTH)).toEqual({ position: false, modes: false });
+    });
+
+    it('the mini width survives a save and load under the same key', () => {
+        const s = memory();
+        saveWindowState(s, { rect: { x: 100, y: 80, width: 900, height: 600 }, minimised: true, miniWidth: 340 }, MUSIC_PLAYER_WINDOW);
+        expect([...s.m.keys()]).toEqual(['dpc.musicPlayer.window']);
+        expect(loadWindowState(s, VP, MUSIC_PLAYER_WINDOW)).toEqual({
+            rect: { x: 100, y: 80, width: 900, height: 600 }, minimised: true, miniWidth: 340,
+        });
+    });
+
+    it('a state stored before the mini width loads, with no mini width', () => {
+        const s = memory();
+        s.setItem('dpc.musicPlayer.window', JSON.stringify({ rect: { x: 100, y: 80, width: 900, height: 600 }, minimised: true }));
+        const w = loadWindowState(s, VP, MUSIC_PLAYER_WINDOW);
+        expect(w.rect).toEqual({ x: 100, y: 80, width: 900, height: 600 });
+        expect('miniWidth' in w).toBe(false);
+        expect(miniPlayerWidth(w.miniWidth, w.rect.width, VP)).toBe(900);
     });
 });
 

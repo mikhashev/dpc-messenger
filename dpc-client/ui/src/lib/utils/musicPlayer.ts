@@ -13,7 +13,7 @@
 //   its end, and Next / Prev still move;
 // - a track that cannot play (missing, outside the DPC folder) is skipped.
 
-import type { WindowSpec } from './windowGeometry';
+import { HEADER_HEIGHT, clampRect, type Viewport, type WindowRect, type WindowSpec } from './windowGeometry';
 
 // -- records from the core music service (dpc_client_core/music/schemas.py) ------
 
@@ -496,6 +496,53 @@ export const MUSIC_PLAYER_WINDOW: WindowSpec = {
     key: 'dpc.musicPlayer.window',
     limits: { minWidth: 520, minHeight: 360, defaultWidth: 1040, defaultHeight: 720 },
 };
+
+// -- the mini-player bar: its own width, apart from the window's -----------------
+//
+// Measured from the bar's CSS: the head pads 8 + 8 px and puts 12 px between the
+// mini part and the restore / close pair (2 x 40 px + 2); the small transport is
+// 32 + 36 + 32 px with 6 px gaps; the mini part's gaps are 8 px; the window's
+// border is 1 + 1 px. That is 224 px before the title, so 300 px leaves the title
+// about 70 px (a handful of characters at 14 px) with k / n, shuffle and repeat hidden.
+
+/** The narrowest the mini-player bar may be dragged (a smaller viewport wins). */
+export const MINI_PLAYER_MIN_WIDTH = 300;
+/** At or above this width the bar shows "k / n" (about 50 px more, plus a gap). */
+export const MINI_PLAYER_POSITION_WIDTH = 370;
+/** At or above this width the bar shows shuffle and repeat too (2 x 30 px plus gaps). */
+export const MINI_PLAYER_MODES_WIDTH = 440;
+
+function within(value: number, low: number, high: number): number {
+    return Math.min(Math.max(value, low), Math.max(low, high));
+}
+
+/** The bar's width: the remembered mini width, or the window's width when there is
+ *  none, kept within [MINI_PLAYER_MIN_WIDTH, viewport]. */
+export function miniPlayerWidth(miniWidth: number | null | undefined, fullWidth: number, vp: Viewport): number {
+    const w = typeof miniWidth === 'number' && Number.isFinite(miniWidth) && miniWidth > 0 ? miniWidth : fullWidth;
+    return within(w, Math.min(MINI_PLAYER_MIN_WIDTH, vp.width), vp.width);
+}
+
+/** The bar's box: the window's top-left corner at the bar's width and the header's
+ *  height, pulled back so the whole bar stays in view. */
+export function miniPlayerRect(rect: WindowRect, miniWidth: number | null | undefined, vp: Viewport): WindowRect {
+    const width = miniPlayerWidth(miniWidth, rect.width, vp);
+    const limits = { ...MUSIC_PLAYER_WINDOW.limits, minWidth: MINI_PLAYER_MIN_WIDTH, minHeight: 0 };
+    const bar = clampRect({ x: rect.x, y: rect.y, width, height: HEADER_HEIGHT }, vp, true, limits);
+    return { x: bar.x, y: bar.y, width, height: HEADER_HEIGHT };
+}
+
+/** The bar's width after its right-edge handle moved by dx from `start` (the bar's
+ *  box at the press): the left edge stays, the bar cannot pass the viewport's edge. */
+export function resizeMiniWidth(start: WindowRect, dx: number, vp: Viewport): number {
+    return within(start.width + dx, Math.min(MINI_PLAYER_MIN_WIDTH, vp.width), vp.width - start.x);
+}
+
+/** What a bar this wide has room for besides prev / play / next, the title and the
+ *  restore / close pair, which are always shown. */
+export function miniPlayerShows(width: number): { position: boolean; modes: boolean } {
+    return { position: width >= MINI_PLAYER_POSITION_WIDTH, modes: width >= MINI_PLAYER_MODES_WIDTH };
+}
 
 /** What the player remembers between sessions: preferences, never the library. */
 export interface MusicPreferences {
