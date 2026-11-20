@@ -16,13 +16,17 @@ import { derived, get, writable } from 'svelte/store';
 import {
     addMusicFolder,
     createMusicPlaylist,
+    deleteGeneratedMusicFile,
     deleteMusicPlaylist,
+    hideMusicTrack,
     listMusicFolders,
     listMusicLibrary,
     listMusicPlaylists,
+    removeMissingMusic,
     removeMusicFolder,
     rescanMusicFolder,
     sendCommand,
+    unhideMusicTrack,
     updateMusicPlaylist,
 } from '$lib/coreService';
 import { detectWindows } from '$lib/utils/attachmentSrc';
@@ -39,8 +43,10 @@ import {
     loadMusicPreferences,
     onTrackEnded,
     playbackProblem,
+    playableIds,
     positionLabel,
     queueClear,
+    queueDrop,
     queueFromList,
     queueRemoveAt,
     saveMusicPreferences,
@@ -654,7 +660,7 @@ export async function togglePlay(): Promise<void> {
 /** Play a list from `startId`, or from its start (a random track with shuffle on). */
 export async function playList(list: Playlist, startId: string | null = null): Promise<void> {
     const s = get(musicPlayback);
-    const q = queueFromList(list.id, list.track_ids, { startId, shuffle: s.shuffle, playable: await playablePredicate() });
+    const q = queueFromList(list.id, playableIds(list.track_ids, get(musicEntriesById)), { startId, shuffle: s.shuffle, playable: await playablePredicate() });
     if (!q) {
         say(list.track_ids.length ? `Nothing in "${list.name}" can play yet.` : `"${list.name}" is empty.`);
         return;
@@ -664,6 +670,10 @@ export async function playList(list: Playlist, startId: string | null = null): P
 
 /** Queue: add to the end of Up next, or (`next`) right after the current track. */
 export function queueTrack(id: string, next = false): void {
+    if (entryOf(id)?.hidden) {
+        say(`"${titleOf(id)}" is hidden: unhide it to queue it.`);
+        return;
+    }
     musicPlayback.update(s => ({ ...s, queue: enqueue(s.queue, [id], next) }));
     say(`Added "${titleOf(id)}" to Up next.`);
 }
@@ -775,3 +785,53 @@ export function clearNotice(): void {
 }
 
 export { say as musicNotice };
+
+// -- hide, remove, delete --------------------------------------------------------
+
+/** Hide a track. A hidden track leaves the queue (the one playing now plays on). */
+export async function hideTrack(id: string): Promise<MusicAnswer<{ entry: LibraryEntry }>> {
+    const a = noteAnswer(await hideMusicTrack(id));
+    if (a.ok) {
+        const playing = currentId(get(musicPlayback).queue);
+        if (playing !== id) musicPlayback.update(s => ({ ...s, queue: queueDrop(s.queue, [id]) }));
+        await loadMusicLibrary(true);
+    }
+    return a;
+}
+
+export async function unhideTrack(id: string): Promise<MusicAnswer<{ entry: LibraryEntry }>> {
+    const a = noteAnswer(await unhideMusicTrack(id));
+    if (a.ok) await loadMusicLibrary(true);
+    return a;
+}
+
+/** Stop the audio if it holds one of `ids`, and take them out of the queue. */
+function forgetInPlayback(ids: readonly string[]): void {
+    const s = get(musicPlayback);
+    if (s.loadedId && ids.includes(s.loadedId)) {
+        loadToken++;
+        stopAudio();
+        musicPlayback.update(x => ({ ...x, loadedId: null, playing: false, loadingTrack: false, currentTime: 0 }));
+    }
+    musicPlayback.update(x => ({ ...x, queue: queueDrop(x.queue, ids) }));
+}
+
+/** Remove a missing entry, or (no id) every missing one, from the library for good. */
+export async function removeMissingTracks(id?: string): Promise<MusicAnswer<{ removed: string[] }>> {
+    const a = noteAnswer(await removeMissingMusic(id));
+    if (a.ok) {
+        forgetInPlayback(a.data.removed);
+        await loadMusicLibrary(true);
+    }
+    return a;
+}
+
+/** Delete a DPC-made file. The audio element lets go of the file first (Windows will not
+ *  delete an open file), so deleting the track that is playing stops playback and the
+ *  queue moves to the next track, not started. */
+export async function deleteGeneratedFile(id: string): Promise<MusicAnswer<{ id: string; title: string; deleted: string[] }>> {
+    forgetInPlayback([id]);
+    const a = noteAnswer(await deleteGeneratedMusicFile(id));
+    await loadMusicLibrary(true);
+    return a;
+}

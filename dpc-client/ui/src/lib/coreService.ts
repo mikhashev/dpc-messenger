@@ -2043,6 +2043,25 @@ export function deleteMusicPlaylist(playlistId: string): Promise<MusicAnswer<{ d
     return callMusic(sendCommand, 'delete_music_playlist', { playlist_id: playlistId });
 }
 
+/** Hide a track (reversible; the file is untouched). */
+export function hideMusicTrack(trackId: string): Promise<MusicAnswer<{ entry: LibraryEntry }>> {
+    return callMusic(sendCommand, 'music_hide_track', { track_id: trackId });
+}
+
+export function unhideMusicTrack(trackId: string): Promise<MusicAnswer<{ entry: LibraryEntry }>> {
+    return callMusic(sendCommand, 'music_unhide_track', { track_id: trackId });
+}
+
+/** Drop one missing entry, or every missing one without an id, from the library and the playlists. */
+export function removeMissingMusic(trackId?: string): Promise<MusicAnswer<{ removed: string[] }>> {
+    return callMusic(sendCommand, 'music_remove_missing', trackId ? { track_id: trackId } : {});
+}
+
+/** Delete a DPC-made file under music/generated/ and its .json sidecar, and drop the entry. */
+export function deleteGeneratedMusicFile(trackId: string): Promise<MusicAnswer<{ id: string; title: string; deleted: string[] }>> {
+    return callMusic(sendCommand, 'music_delete_generated_file', { track_id: trackId });
+}
+
 // --- Lyrics (ADR-051 D6; dpc_client_core/music/lyrics.py) ---
 
 /** The track's lyrics: stored ones, or (none stored, or `refresh`) the chain's result:

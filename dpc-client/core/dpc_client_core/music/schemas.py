@@ -57,7 +57,7 @@ _ENTRY_REQUIRED = (
 )
 _ENTRY_KEYS = set(_ENTRY_REQUIRED) | {
     "needs_readd", "origin", "path", "folder_id", "alt_paths", "file_stat",
-    "hash_state", "missing",
+    "hash_state", "missing", "hidden",
     # extensions, see the module docstring
     "hash_kind", "artist", "album", "hash_notes",
 }
@@ -162,6 +162,8 @@ def validate_library_entry(entry: Any) -> None:
             _expect(s, entry["content_hash"] is None, "a pending entry has content_hash null")
     if "missing" in entry:
         _expect(s, isinstance(entry["missing"], bool), "'missing' must be a boolean")
+    if "hidden" in entry:
+        _expect(s, isinstance(entry["hidden"], bool), "'hidden' must be a boolean")
     if "hash_kind" in entry:
         _expect(s, entry["hash_kind"] is None or entry["hash_kind"] in HASH_KINDS, f"'hash_kind' must be one of {HASH_KINDS} or null")
     if "hash_notes" in entry:

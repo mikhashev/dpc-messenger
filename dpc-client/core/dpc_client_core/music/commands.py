@@ -369,6 +369,35 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    async def music_hide_track(self, track_id: str) -> Dict[str, Any]:
+        """Hide a track: reversible, the file is untouched."""
+        try:
+            return {"status": "ok", "entry": await (await self._music()).set_hidden(track_id, True)}
+        except Exception as exc:
+            return _error(exc)
+
+    async def music_unhide_track(self, track_id: str) -> Dict[str, Any]:
+        try:
+            return {"status": "ok", "entry": await (await self._music()).set_hidden(track_id, False)}
+        except Exception as exc:
+            return _error(exc)
+
+    async def music_remove_missing(self, track_id: Optional[str] = None) -> Dict[str, Any]:
+        """Drop one missing entry (`track_id`), or all of them, from the library and
+        the playlists. A present entry is refused."""
+        try:
+            return {"status": "ok", "removed": await (await self._music()).remove_missing(track_id)}
+        except Exception as exc:
+            return _error(exc)
+
+    async def music_delete_generated_file(self, track_id: str) -> Dict[str, Any]:
+        """Delete a DPC-made file under `music/generated/` (and its .json sidecar) and
+        drop its entry. Anything else is refused; this is not Keep / Discard."""
+        try:
+            return {"status": "ok", **await (await self._music()).delete_generated_file(track_id)}
+        except Exception as exc:
+            return _error(exc)
+
     @slow_command
     async def get_music_track(self, track_id: str) -> Dict[str, Any]:
         """The library entry and its `mp.track/1` (null while the duration is unknown).

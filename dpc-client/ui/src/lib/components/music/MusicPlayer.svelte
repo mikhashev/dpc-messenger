@@ -47,11 +47,14 @@
     MUSIC_PLAYER_WINDOW,
     SMART_ALL_ID,
     TRACK_ROWS_STEP,
+    canDeleteFile,
     currentId,
     dropIndex,
     fitMusicPlayer,
     formatTime,
+    hiddenEntries,
     matchesFilter,
+    missingEntries,
     minimiseMusicPlayer,
     miniPlayerRect,
     miniPlayerShows,
@@ -76,7 +79,9 @@
     clearQueue,
     createPlaylist,
     cycleRepeatMode,
+    deleteGeneratedFile,
     deletePlaylist,
+    hideTrack,
     loadMusicLibrary,
     musicCurrentEntry,
     musicEntriesById,
@@ -92,6 +97,7 @@
     queueTrack,
     removeFolder,
     removeFromQueue,
+    removeMissingTracks,
     renamePlaylist,
     rescanFolder,
     seekBy,
@@ -100,6 +106,7 @@
     setShuffle,
     setVolume,
     togglePlay,
+    unhideTrack,
   } from '$lib/services/music';
 
   let { open = $bindable(false), minimised = $bindable(false) }: { open?: boolean; minimised?: boolean } = $props();
@@ -273,14 +280,25 @@
     untrack(() => (rowLimit = TRACK_ROWS_STEP));
   });
 
+  // Hidden tracks (Hide) are left out of every list; "Show hidden" lists them below.
+  let hiddenList = $derived(hiddenEntries($musicLibrary.entries));
+  let missingList = $derived(missingEntries($musicLibrary.entries));
+  let showHidden = $state(false);
+  $effect(() => {
+    if (!hiddenList.length) showHidden = false;
+  });
+  let menuId = $state<string | null>(null);
+
   type Row = { index: number; id: string; entry: LibraryEntry | null };
-  let allRows = $derived<Row[]>(
+  // `index` is the place in the whole list (what a reorder works on), hidden tracks included.
+  let listRows = $derived<Row[]>(
     (selectedList?.track_ids ?? []).map((id, index) => ({ index, id, entry: $musicEntriesById.get(id) ?? null })),
   );
+  let allRows = $derived(listRows.filter(r => !r.entry?.hidden));
   let filteredRows = $derived(filter.trim() ? allRows.filter(r => matchesFilter(r.entry, filter)) : allRows);
   let shownRows = $derived(filteredRows.slice(0, rowLimit));
   // Reordering works on the whole list only, so a filtered view does not reorder.
-  let canReorder = $derived(isUserList && !filter.trim());
+  let canReorder = $derived(isUserList && !filter.trim() && allRows.length === listRows.length);
 
   let env = $derived($playbackEnv);
   function problemOf(entry: LibraryEntry | null) {
@@ -397,6 +415,53 @@
     }
     const a = await setPlaylistTracks(p.id, [...p.track_ids, trackId]);
     if (a.ok) musicNotice(`Added "${title}" to ${p.name}.`);
+    else fail(a.message);
+  }
+
+  // -- hide, remove, delete ---------------------------------------------------------
+
+  async function hideRow(entry: LibraryEntry) {
+    menuId = null;
+    const a = await hideTrack(entry.id);
+    if (a.ok) musicNotice(`Hid "${entry.title}". Show hidden (${hiddenList.length + 1}) brings it back.`);
+    else fail(a.message);
+  }
+
+  async function unhideRow(entry: LibraryEntry) {
+    const a = await unhideTrack(entry.id);
+    if (!a.ok) fail(a.message);
+  }
+
+  async function removeMissingRow(entry: LibraryEntry) {
+    menuId = null;
+    const a = await removeMissingTracks(entry.id);
+    if (!a.ok) fail(a.message);
+  }
+
+  async function removeAllMissing() {
+    const n = missingList.length;
+    if (!n) return;
+    const yes = await confirmAsync(
+      `Remove ${n} missing ${n === 1 ? 'track' : 'tracks'} from the library? Their files are already gone; they leave every playlist too.`,
+      { title: 'Remove missing tracks', kind: 'warning' },
+    );
+    if (!yes) return;
+    const a = await removeMissingTracks();
+    if (a.ok) musicNotice(`Removed ${a.data.removed.length} missing ${a.data.removed.length === 1 ? 'track' : 'tracks'}.`);
+    else fail(a.message);
+  }
+
+  async function deleteFileRow(entry: LibraryEntry) {
+    menuId = null;
+    const name = entry.source?.name ?? entry.title;
+    const playing = $musicCurrentEntry?.id === entry.id && $musicPlayback.loadedId === entry.id;
+    const yes = await confirmAsync(
+      `Delete the file "${name}" from disk? This cannot be undone.${playing ? ' It is playing now and will stop.' : ''}`,
+      { title: 'Delete file', kind: 'warning' },
+    );
+    if (!yes) return;
+    const a = await deleteGeneratedFile(entry.id);
+    if (a.ok) musicNotice(`Deleted "${name}".`);
     else fail(a.message);
   }
 
@@ -820,6 +885,18 @@
                 <button type="button" class="small-btn primary" onclick={playSelectedList} disabled={!selectedList?.track_ids.length}>Play this list</button>
                 <input class="text-input filter" type="search" placeholder="Filter tracks" bind:value={filter} aria-label="Filter tracks" />
               </div>
+              {#if hiddenList.length || missingList.length}
+                <div class="list-bar">
+                  {#if hiddenList.length}
+                    <button type="button" class="small-btn" aria-pressed={showHidden} onclick={() => (showHidden = !showHidden)}>
+                      {showHidden ? 'Hide the hidden' : 'Show hidden'} ({hiddenList.length})
+                    </button>
+                  {/if}
+                  {#if missingList.length}
+                    <button type="button" class="small-btn danger" onclick={removeAllMissing}>Remove all missing ({missingList.length})</button>
+                  {/if}
+                </div>
+              {/if}
               {#if isUserList}
                 <p class="muted tiny">{canReorder ? 'Drag rows by ⠿, use ↑ ↓, or Alt+↑ / Alt+↓ on a row, to reorder.' : 'Clear the filter to reorder.'}</p>
               {/if}
@@ -886,6 +963,19 @@
                       {#if isUserList}
                         <button type="button" class="small-btn" onclick={() => removeRow(row.index)}>Remove</button>
                       {/if}
+                      {#if row.entry}
+                        <button type="button" class="small-btn icon" onclick={() => (menuId = menuId === row.id ? null : row.id)}
+                          aria-label="More actions for {row.entry.title}" aria-expanded={menuId === row.id} title="More">⋯</button>
+                        {#if menuId === row.id}
+                          <button type="button" class="small-btn" onclick={() => hideRow(row.entry!)}>Hide</button>
+                          {#if row.entry.missing}
+                            <button type="button" class="small-btn danger" onclick={() => removeMissingRow(row.entry!)}>Remove from library</button>
+                          {/if}
+                          {#if canDeleteFile(row.entry)}
+                            <button type="button" class="small-btn danger" onclick={() => deleteFileRow(row.entry!)}>Delete file…</button>
+                          {/if}
+                        {/if}
+                      {/if}
                     </span>
                   </li>
                 {/each}
@@ -894,6 +984,32 @@
                 <button type="button" class="small-btn more" onclick={() => (rowLimit += TRACK_ROWS_STEP)}>
                   Show more ({filteredRows.length - shownRows.length} left)
                 </button>
+              {/if}
+              {#if showHidden && hiddenList.length}
+                <p class="muted tiny hidden-head">Hidden ({hiddenList.length}): not in any list, never queued.</p>
+                <ol class="rows">
+                  {#each hiddenList as entry (entry.id)}
+                    <li class="row unplayable">
+                      <span class="row-main static">
+                        <span class="track-title">{entry.title}</span>
+                        {#if trackSubtitle(entry)}<span class="muted tiny">{trackSubtitle(entry)}</span>{/if}
+                      </span>
+                      <span class="tags">
+                        <span class="tag">{originTag(entry)}</span>
+                        {#if entry.missing}<span class="tag warn">missing</span>{/if}
+                      </span>
+                      <span class="row-actions">
+                        <button type="button" class="small-btn" onclick={() => unhideRow(entry)}>Unhide</button>
+                        {#if entry.missing}
+                          <button type="button" class="small-btn danger" onclick={() => removeMissingRow(entry)}>Remove from library</button>
+                        {/if}
+                        {#if canDeleteFile(entry)}
+                          <button type="button" class="small-btn danger" onclick={() => deleteFileRow(entry)}>Delete file…</button>
+                        {/if}
+                      </span>
+                    </li>
+                  {/each}
+                </ol>
               {/if}
             </section>
 
@@ -1250,6 +1366,8 @@
 
   .tag { font-size: 11px; padding: 1px 6px; border-radius: 5px; background: #31353d; color: #c9d1d9; white-space: nowrap; }
   .tag.warn { background: #3d3016; color: #f0c674; }
+  .hidden-head { margin: 8px 0 4px; }
+  .row-main.static { cursor: default; }
 
   .folder { align-items: flex-start; }
   .folder-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }

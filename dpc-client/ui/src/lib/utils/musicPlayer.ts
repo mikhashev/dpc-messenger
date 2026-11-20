@@ -28,6 +28,7 @@ export interface LibraryEntry {
     path?: string | null;
     folder_id?: string | null;
     missing?: boolean;
+    hidden?: boolean;
     hash_state?: 'pending' | 'done' | 'error' | string;
     artist?: string | null;
     album?: string | null;
@@ -1171,4 +1172,45 @@ export function guessArtistTitle(entry: LibraryEntry | null | undefined): { arti
     const base = (entry.source?.name || entry.title || '').replace(/\.[^./\\]+$/, '').trim();
     const m = base.match(/^(.+?)\s+[-–—]\s+(.+)$/);
     return m ? { artist: m[1].trim(), title: m[2].trim() } : { artist: '', title: (entry.title ?? base).trim() };
+}
+
+// -- hide, remove, delete (Mike, 2026-11-21) ---------------------------------------
+
+/** The ids that may be played or queued: a hidden track is left out, an unknown id stays
+ *  (the row says "Not in the library"). The playlist itself keeps hidden ids, so an
+ *  unhide puts the track back where it was. */
+export function playableIds(ids: readonly string[], byId: ReadonlyMap<string, LibraryEntry>): string[] {
+    return ids.filter(id => !byId.get(id)?.hidden);
+}
+
+/** The hidden entries, in library order. */
+export function hiddenEntries(entries: readonly LibraryEntry[]): LibraryEntry[] {
+    return entries.filter(e => !!e.hidden);
+}
+
+/** The entries whose file is gone. */
+export function missingEntries(entries: readonly LibraryEntry[]): LibraryEntry[] {
+    return entries.filter(e => !!e.missing);
+}
+
+/** Whether Delete file is offered: a take DPC made, outside the person's watched folders,
+ *  with a file still there. The core checks the real path again; this only hides the button. */
+export function canDeleteFile(entry: LibraryEntry | null | undefined): boolean {
+    return !!entry && entry.origin === 'generated' && !entry.folder_id && !entry.missing && !!entry.path;
+}
+
+/** Take every occurrence of `ids` out of the queue. When the current track is one of them
+ *  the index points at the track that followed it (not loaded), or at -1 when none is left. */
+export function queueDrop(q: QueueState, ids: readonly string[]): QueueState {
+    const gone = new Set(ids);
+    if (!q.ids.some(id => gone.has(id))) return q;
+    const kept: string[] = [];
+    let index = -1;
+    q.ids.forEach((id, i) => {
+        if (gone.has(id)) return;
+        if (i >= q.index && index < 0) index = kept.length;
+        kept.push(id);
+    });
+    if (!kept.length) return { ...q, ids: [], index: -1 };
+    return { ...q, ids: kept, index: index < 0 ? kept.length - 1 : index };
 }

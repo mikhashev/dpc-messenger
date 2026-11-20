@@ -18,6 +18,16 @@ methods (ADR-051 D11, "one service with two front doors").
 5. A file that is gone is kept as `missing: true`, never deleted; it comes back by
    itself when the same audio reappears.
 
+**Hide, remove, delete** (Mike, 2026-11-21). `hidden: true` on an entry is a reversible
+flag that leaves the file alone; a hidden entry is left out of the smart lists, and the UI
+leaves it out of the queue and a playlist's play order (the playlist keeps the id, so an
+unhide puts it back). It lives on the entry, so a rescan or a relink keeps it.
+`remove_missing` drops entries whose file is gone (never a present one), with their
+playlist positions. `delete_generated_file` deletes the audio file of a take DPC owns
+(resolved path inside `<DPC home>/music/generated/`, not in a watched folder) and its
+`<name>.json` sidecar, then drops the entry; nothing else in that folder is touched, and
+the person's own music is never deleted.
+
 Files in watched folders are only read (`rb`); tags are never written.
 
 **Generated takes** (ADR-051 D21) enter through `register_generated` only: once, by the
@@ -1249,6 +1259,82 @@ class MusicLibrary:
             schemas.validate_track(track)
         return {"entry": e, "track": track}
 
+    # -- hide, remove, delete ----------------------------------------------------
+
+    async def set_hidden(self, track_id: str, hidden: bool) -> dict:
+        """Hide or unhide a track. The file is untouched. Returns the entry."""
+        e = self._entries.get(track_id)
+        if e is None:
+            raise MusicLibraryError("unknown_track", f"no track {track_id}")
+        if bool(e.get("hidden")) != hidden:
+            e["hidden"] = hidden
+            await self.flush()
+        return copy.deepcopy(e)
+
+    async def remove_missing(self, track_id: Optional[str] = None) -> List[str]:
+        """Drop one missing entry, or every missing entry, from the library and from
+        the playlists. A present entry is refused (`not_missing`). Returns the ids."""
+        if track_id is not None:
+            e = self._entries.get(track_id)
+            if e is None:
+                raise MusicLibraryError("unknown_track", f"no track {track_id}")
+            if not e.get("missing"):
+                raise MusicLibraryError(
+                    "not_missing", f"{e.get('title')!r} is not missing: Hide it, or delete its file if DPC made it")
+            ids = [track_id]
+        else:
+            ids = [i for i, e in self._entries.items() if e.get("missing")]
+        for i in ids:
+            self._delete_entry(i)
+        if ids:
+            await self.flush()
+        return ids
+
+    def _generated_root(self) -> Path:
+        return (self.root / "generated").resolve()
+
+    def _owned_file(self, e: dict) -> Path:
+        """The resolved path of an entry's file when DPC owns it, else a refusal."""
+        raw = e.get("path")
+        if not raw or e.get("missing"):
+            raise MusicLibraryError("file_missing", "the file is already gone: use Remove from library")
+        if e.get("folder_id") is not None:
+            raise MusicLibraryError(
+                "not_owned", "this track is in one of your own folders; DPC never deletes your music. Hide it instead")
+        try:
+            target = Path(raw).resolve()
+            owned = self._generated_root()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise MusicLibraryError("invalid_path", f"cannot resolve the path: {exc}")
+        if target == owned or not target.is_relative_to(owned):
+            raise MusicLibraryError(
+                "not_owned", f"this file is outside {owned}, so DPC does not own it and will not delete it. Hide it instead")
+        return target
+
+    async def delete_generated_file(self, track_id: str) -> dict:
+        """Delete the audio file of a DPC-owned generated take, and its `<name>.json`
+        sidecar when there is one, then drop the entry. Returns `{id, title, deleted}`
+        (the paths removed)."""
+        e = self._entries.get(track_id)
+        if e is None:
+            raise MusicLibraryError("unknown_track", f"no track {track_id}")
+        target = self._owned_file(e)
+        sidecar = target.with_suffix(".json")
+        try:
+            if not target.is_file():
+                raise MusicLibraryError("file_missing", "the file is not there: use Remove from library")
+            target.unlink()
+            deleted = [str(target)]
+            if sidecar.is_file() and sidecar.resolve().is_relative_to(self._generated_root()):
+                sidecar.unlink()
+                deleted.append(str(sidecar))
+        except OSError as exc:
+            raise MusicLibraryError("delete_failed", f"could not delete {target.name}: {exc}")
+        title = e.get("title")
+        self._delete_entry(track_id)
+        await self.flush()
+        return {"id": track_id, "title": title, "deleted": deleted}
+
     # -- playlists ---------------------------------------------------------------
 
     def _check_track_ids(self, track_ids: Any) -> List[str]:
@@ -1271,7 +1357,7 @@ class MusicLibrary:
         out = []
         for pl_id, name, rule in _SMART_LISTS:
             ids = [e["id"] for e in self._entries.values()
-                   if rule == "all" or e.get("origin") == "generated"]
+                   if not e.get("hidden") and (rule == "all" or e.get("origin") == "generated")]
             out.append({"schema": schemas.PLAYLIST, "id": pl_id, "name": name, "track_ids": ids,
                         "created_at": now, "updated_at": now, "kind": "smart", "rule": rule})
         out.extend(copy.deepcopy(p) for p in self._playlists.values())
