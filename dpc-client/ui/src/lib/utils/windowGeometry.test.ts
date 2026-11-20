@@ -151,6 +151,20 @@ describe('what is remembered', () => {
         }
     });
 
+    it('keeps the bar corner only whole, and adds none otherwise', () => {
+        const s = memory();
+        const box = { x: 10, y: 20, width: 700, height: 500 };
+        saveWindowState(s, { rect: box, minimised: false });
+        expect(s.data.get(WINDOW_STORAGE_KEY)).toBe(JSON.stringify({ rect: box, minimised: false }));
+        expect('miniX' in loadWindowState(s, VP)).toBe(false);
+        saveWindowState(s, { rect: box, minimised: true, miniWidth: 330, miniX: 1200, miniY: 840 });
+        expect(loadWindowState(s, VP)).toEqual({ rect: box, minimised: true, miniWidth: 330, miniX: 1200, miniY: 840 });
+        for (const [miniX, miniY] of [[5, 'y'], [null, 5], [5, undefined], [Number.NaN, 1]]) {
+            const parsed = parseWindowState(JSON.stringify({ rect: box, minimised: true, miniX, miniY }));
+            expect(parsed).toEqual({ rect: box, minimised: true });
+        }
+    });
+
     it('works with a storage that throws', () => {
         const hostile = {
             getItem: () => { throw new Error('blocked'); },

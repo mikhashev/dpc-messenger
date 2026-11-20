@@ -24,6 +24,11 @@ export interface WindowState {
      *  (the Music Player's mini-player). Absent: the bar is as wide as the window.
      *  Optional, so a state stored without it loads as before. */
     miniWidth?: number;
+    /** The minimised bar's own top-left corner, kept apart from the window's (the
+     *  Music Player's mini-player). Absent: the bar sits where the window's header is.
+     *  Both or neither; optional, so a state stored without them loads as before. */
+    miniX?: number;
+    miniY?: number;
 }
 
 /** The smallest box a window can be resized to (a smaller viewport wins). */
@@ -132,6 +137,11 @@ export function parseWindowState(raw: string | null | undefined): WindowState | 
         };
         // A bad mini width is dropped, not the whole state: the bar falls back to the window's width.
         if (finite(v.miniWidth) && v.miniWidth > 0) state.miniWidth = v.miniWidth;
+        // The bar's corner is kept only whole: one bad coordinate drops both.
+        if (finite(v.miniX) && finite(v.miniY)) {
+            state.miniX = v.miniX;
+            state.miniY = v.miniY;
+        }
         return state;
     } catch {
         return null;
@@ -155,6 +165,10 @@ export function loadWindowState(
     const state: WindowState = { rect: clampRect(stored.rect, vp, stored.minimised, spec.limits), minimised: stored.minimised };
     // Passed through as stored: the window that keeps a mini width fits it to the viewport itself.
     if (stored.miniWidth !== undefined) state.miniWidth = stored.miniWidth;
+    if (stored.miniX !== undefined && stored.miniY !== undefined) {
+        state.miniX = stored.miniX;
+        state.miniY = stored.miniY;
+    }
     return state;
 }
 

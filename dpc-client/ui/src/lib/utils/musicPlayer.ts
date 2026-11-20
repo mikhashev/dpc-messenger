@@ -13,7 +13,7 @@
 //   its end, and Next / Prev still move;
 // - a track that cannot play (missing, outside the DPC folder) is skipped.
 
-import { HEADER_HEIGHT, clampRect, type Viewport, type WindowRect, type WindowSpec } from './windowGeometry';
+import { HEADER_HEIGHT, clampRect, type Viewport, type WindowRect, type WindowSpec, type WindowState } from './windowGeometry';
 
 // -- records from the core music service (dpc_client_core/music/schemas.py) ------
 
@@ -523,13 +523,75 @@ export function miniPlayerWidth(miniWidth: number | null | undefined, fullWidth:
     return within(w, Math.min(MINI_PLAYER_MIN_WIDTH, vp.width), vp.width);
 }
 
-/** The bar's box: the window's top-left corner at the bar's width and the header's
- *  height, pulled back so the whole bar stays in view. */
-export function miniPlayerRect(rect: WindowRect, miniWidth: number | null | undefined, vp: Viewport): WindowRect {
+/** The bar's own top-left corner, kept apart from the window's. */
+export interface MiniPosition {
+    x: number;
+    y: number;
+}
+
+/** The bar's box: its own corner (`at`), or the window's top-left corner when it has
+ *  none, at the bar's width and the header's height, pulled back so the whole bar
+ *  stays in view. */
+export function miniPlayerRect(
+    rect: WindowRect, miniWidth: number | null | undefined, vp: Viewport, at?: MiniPosition | null,
+): WindowRect {
     const width = miniPlayerWidth(miniWidth, rect.width, vp);
     const limits = { ...MUSIC_PLAYER_WINDOW.limits, minWidth: MINI_PLAYER_MIN_WIDTH, minHeight: 0 };
-    const bar = clampRect({ x: rect.x, y: rect.y, width, height: HEADER_HEIGHT }, vp, true, limits);
+    const corner = at ?? rect;
+    const bar = clampRect({ x: corner.x, y: corner.y, width, height: HEADER_HEIGHT }, vp, true, limits);
     return { x: bar.x, y: bar.y, width, height: HEADER_HEIGHT };
+}
+
+/** The bar's corner after a drag of (dx, dy) from `start` (the bar's box at the
+ *  press): only the bar moves, and the whole bar, at its own width, stays in view,
+ *  so a narrow bar reaches the right edge. */
+export function moveMiniPlayer(start: WindowRect, dx: number, dy: number, vp: Viewport): MiniPosition {
+    const bar = miniPlayerRect({ ...start, x: start.x + dx, y: start.y + dy }, start.width, vp);
+    return { x: bar.x, y: bar.y };
+}
+
+/** The bar's remembered corner in a stored state, or null when it has none. */
+export function miniPosition(state: WindowState): MiniPosition | null {
+    return state.miniX !== undefined && state.miniY !== undefined ? { x: state.miniX, y: state.miniY } : null;
+}
+
+/** The state with the bar at `at` (null: no corner of its own). Only the fields
+ *  that are set are written, so a state that never had them stores as before. */
+function withMini(state: WindowState, miniWidth: number | undefined, at: MiniPosition | null): WindowState {
+    const out: WindowState = { rect: state.rect, minimised: state.minimised };
+    if (miniWidth !== undefined) out.miniWidth = miniWidth;
+    if (at) {
+        out.miniX = at.x;
+        out.miniY = at.y;
+    }
+    return out;
+}
+
+/** Both boxes fitted to the viewport: the whole window, and the whole bar at its own
+ *  width. A minimised state without a corner of its own (stored before the bar had
+ *  one) takes the window's corner as the bar's, where the bar was drawn then. */
+export function fitMusicPlayer(state: WindowState, vp: Viewport): WindowState {
+    const miniWidth = state.miniWidth !== undefined ? miniPlayerWidth(state.miniWidth, state.rect.width, vp) : undefined;
+    let at = miniPosition(state);
+    if (!at && state.minimised) at = { x: state.rect.x, y: state.rect.y };
+    if (at) {
+        const bar = miniPlayerRect(state.rect, miniWidth, vp, at);
+        at = { x: bar.x, y: bar.y };
+    }
+    const rect = clampRect(state.rect, vp, false, MUSIC_PLAYER_WINDOW.limits);
+    return withMini({ ...state, rect }, miniWidth, at);
+}
+
+/** Minimised: the bar goes to its own remembered corner; the first time, where the
+ *  window's header is. The window's box is kept as it was, for the restore. */
+export function minimiseMusicPlayer(state: WindowState, vp: Viewport): WindowState {
+    return fitMusicPlayer({ ...state, minimised: true }, vp);
+}
+
+/** Restored: the window at its own corner and size; the bar keeps its corner for the
+ *  next minimise. */
+export function restoreMusicPlayer(state: WindowState, vp: Viewport): WindowState {
+    return fitMusicPlayer({ ...state, minimised: false }, vp);
 }
 
 /** The bar's width after its right-edge handle moved by dx from `start` (the bar's

@@ -51,7 +51,8 @@ describe('playback outlives the window', () => {
 describe('the window follows the Agent map pattern', () => {
     it('remembers its box under its own key through windowGeometry', () => {
         expect(player).toContain('loadWindowState(storage(), viewport(), MUSIC_PLAYER_WINDOW)');
-        expect(player).toContain('saveWindowState(storage(), { rect, minimised, miniWidth: miniWidth ?? undefined }, MUSIC_PLAYER_WINDOW)');
+        expect(player).toContain('saveWindowState(storage(), windowState(), MUSIC_PLAYER_WINDOW)');
+        expect(player).toContain('const w: WindowState = { rect, minimised };');
     });
 
     it('minimised, the bar has its own right-edge handle that resizes the width only', () => {
@@ -61,8 +62,17 @@ describe('the window follows the Agent map pattern', () => {
         // The handle sits after .mp-head closes, so its press never reaches the bar's restore click.
         expect(player.indexOf('class="mini-resize-handle"')).toBeGreaterThan(player.indexOf('<div class="mp-buttons">'));
         expect(player).toContain("if (kind === 'mini-resize') e.stopPropagation();");
-        expect(player).toContain("if (gesture.kind === 'mini-resize') miniWidth = resizeMiniWidth(s, dx, viewport());");
+        expect(player).toContain('miniWidth = resizeMiniWidth(s, dx, viewport());');
+        expect(player).toContain('mini = { x: s.x, y: s.y };');
         expect(player).toMatch(/\.mini-resize-handle \{[^}]*cursor: ew-resize;[^}]*touch-action: none;/);
+    });
+
+    it('minimised, a drag moves only the bar, and the bar is drawn at its own corner', () => {
+        expect(player).toContain('else if (minimised) mini = moveMiniPlayer(s, dx, dy, viewport());');
+        expect(player).toContain("const start = kind === 'mini-resize' || (kind === 'move' && minimised) ? barRect() : { ...rect };");
+        expect(player).toContain('style="left: {shown.x}px; top: {shown.y}px;');
+        expect(player).toContain('apply(m ? minimiseMusicPlayer(w, viewport()) : restoreMusicPlayer(w, viewport()));');
+        expect(player).toContain('if (open) apply(fitMusicPlayer(windowState(), viewport()));');
     });
 
     it('a narrow bar hides k / n, shuffle and repeat but keeps restore and close', () => {

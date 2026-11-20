@@ -43,10 +43,14 @@ import {
     MINI_PLAYER_MIN_WIDTH,
     MINI_PLAYER_MODES_WIDTH,
     MINI_PLAYER_POSITION_WIDTH,
+    fitMusicPlayer,
+    minimiseMusicPlayer,
     miniPlayerRect,
     miniPlayerShows,
     miniPlayerWidth,
+    moveMiniPlayer,
     resizeMiniWidth,
+    restoreMusicPlayer,
 } from './musicPlayer';
 import { HEADER_HEIGHT, loadWindowState, saveWindowState } from './windowGeometry';
 
@@ -336,6 +340,87 @@ describe('the mini-player bar keeps its own width', () => {
         expect(w.rect).toEqual({ x: 100, y: 80, width: 900, height: 600 });
         expect('miniWidth' in w).toBe(false);
         expect(miniPlayerWidth(w.miniWidth, w.rect.width, VP)).toBe(900);
+    });
+});
+
+describe('the mini-player bar keeps its own corner', () => {
+    // Mike's window: 2576 px wide.
+    const VP = { width: 2576, height: 1400 };
+    const window1 = { x: 300, y: 120, width: 1600, height: 900 };
+    function memory() {
+        const m = new Map<string, string>();
+        return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m };
+    }
+
+    it('a minimised drag reaches the right edge at the bar width, not the window width', () => {
+        const bar = { x: 300, y: 120, width: 400, height: HEADER_HEIGHT };
+        expect(moveMiniPlayer(bar, 5000, 0, VP)).toEqual({ x: VP.width - 400, y: 120 });
+        expect(moveMiniPlayer(bar, 5000, 5000, VP)).toEqual({ x: VP.width - 400, y: VP.height - HEADER_HEIGHT });
+        expect(moveMiniPlayer(bar, -5000, -5000, VP)).toEqual({ x: 0, y: 0 });
+        expect(moveMiniPlayer(bar, 100, 50, VP)).toEqual({ x: 400, y: 170 });
+    });
+
+    it('the first minimise puts the bar where the window header is and keeps the window box', () => {
+        const w = minimiseMusicPlayer({ rect: window1, minimised: false, miniWidth: 400 }, VP);
+        expect(w).toEqual({ rect: window1, minimised: true, miniWidth: 400, miniX: 300, miniY: 120 });
+    });
+
+    it('minimise / restore round trips keep both corners', () => {
+        let w = minimiseMusicPlayer({ rect: window1, minimised: false, miniWidth: 400 }, VP);
+        const moved = moveMiniPlayer(miniPlayerRect(w.rect, w.miniWidth, VP, { x: w.miniX!, y: w.miniY! }), 5000, 400, VP);
+        w = { ...w, miniX: moved.x, miniY: moved.y };
+        w = restoreMusicPlayer(w, VP);
+        expect(w).toEqual({ rect: window1, minimised: false, miniWidth: 400, miniX: 2176, miniY: 520 });
+        // The window moves while open; the bar's corner does not follow it.
+        w = { ...w, rect: { ...window1, x: 50, y: 60 } };
+        w = minimiseMusicPlayer(w, VP);
+        expect(w).toEqual({ rect: { ...window1, x: 50, y: 60 }, minimised: true, miniWidth: 400, miniX: 2176, miniY: 520 });
+        expect(restoreMusicPlayer(w, VP).rect).toEqual({ ...window1, x: 50, y: 60 });
+    });
+
+    it('a bar resize keeps its left edge, so the corner is unchanged', () => {
+        const bar = { x: 2000, y: 400, width: 400, height: HEADER_HEIGHT };
+        const width = resizeMiniWidth(bar, 300, VP);
+        expect(width).toBe(VP.width - 2000);
+        expect(miniPlayerRect(window1, width, VP, { x: bar.x, y: bar.y })).toMatchObject({ x: 2000, y: 400 });
+    });
+
+    it('a viewport resize fits both boxes', () => {
+        const small = { width: 1200, height: 700 };
+        const w = fitMusicPlayer({ rect: window1, minimised: true, miniWidth: 400, miniX: 2176, miniY: 1300 }, small);
+        expect(w).toEqual({
+            rect: { x: 0, y: 0, width: 1200, height: 700 }, minimised: true, miniWidth: 400, miniX: 800, miniY: 700 - HEADER_HEIGHT,
+        });
+    });
+
+    it('a stored state with both corners survives a save and load under the same key', () => {
+        const s = memory();
+        const state = { rect: window1, minimised: true, miniWidth: 400, miniX: 2176, miniY: 520 };
+        saveWindowState(s, state, MUSIC_PLAYER_WINDOW);
+        expect([...s.m.keys()]).toEqual(['dpc.musicPlayer.window']);
+        const loaded = loadWindowState(s, VP, MUSIC_PLAYER_WINDOW);
+        expect(loaded).toEqual(state);
+        expect(fitMusicPlayer(loaded, VP)).toEqual(state);
+    });
+
+    it('an old minimised state without a bar corner loads with the bar where it was drawn', () => {
+        const s = memory();
+        // Before: the stored rect corner was the bar's, here at the bottom edge.
+        s.setItem('dpc.musicPlayer.window', JSON.stringify({ rect: { x: 900, y: 1400 - HEADER_HEIGHT, width: 1000, height: 600 }, minimised: true }));
+        const w = fitMusicPlayer(loadWindowState(s, VP, MUSIC_PLAYER_WINDOW), VP);
+        expect(w.miniX).toBe(900);
+        expect(w.miniY).toBe(1400 - HEADER_HEIGHT);
+        expect('miniWidth' in w).toBe(false);
+        expect(miniPlayerRect(w.rect, w.miniWidth, VP, { x: w.miniX!, y: w.miniY! }))
+            .toEqual({ x: 900, y: 1400 - HEADER_HEIGHT, width: 1000, height: HEADER_HEIGHT });
+        // Restored, the window is whole in view.
+        expect(restoreMusicPlayer(w, VP).rect).toEqual({ x: 900, y: 800, width: 1000, height: 600 });
+    });
+
+    it('an old open state loads as before, with no bar corner until the first minimise', () => {
+        const s = memory();
+        s.setItem('dpc.musicPlayer.window', JSON.stringify({ rect: window1, minimised: false }));
+        expect(fitMusicPlayer(loadWindowState(s, VP, MUSIC_PLAYER_WINDOW), VP)).toEqual({ rect: window1, minimised: false });
     });
 });
 

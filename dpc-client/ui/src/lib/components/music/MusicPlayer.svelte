@@ -4,8 +4,9 @@
   minimise to its header bar, like the Agent map; its box and the minimised flag are
   remembered through utils/windowGeometry.ts under its own key. Minimised, the bar
   is the mini-player: prev / play / next, the title, "k / n", shuffle and repeat.
-  The bar is resized by its right-edge handle and keeps its own width (miniWidth),
-  remembered beside the box; restoring gives back the window's size. A narrow bar
+  The bar is resized by its right-edge handle and keeps its own width (miniWidth)
+  and its own corner (miniX / miniY), remembered beside the box: the bar is dragged
+  on its own, and restoring gives back the window at its own place and size. A narrow bar
   drops shuffle and repeat, then "k / n"; restore and close always stay.
 
   Non-modal: the chat stays usable beside it. The audio element and the playback
@@ -34,13 +35,13 @@
   import MusicLyrics from './MusicLyrics.svelte';
   import {
     HEADER_HEIGHT,
-    clampRect,
     isClick,
     loadWindowState,
     moveRect,
     resizeRect,
     saveWindowState,
     type WindowRect,
+    type WindowState,
   } from '$lib/utils/windowGeometry';
   import {
     LIBRARY_POLL_MS,
@@ -49,19 +50,24 @@
     TRACK_ROWS_STEP,
     currentId,
     dropIndex,
+    fitMusicPlayer,
     formatTime,
     matchesFilter,
+    minimiseMusicPlayer,
     miniPlayerRect,
     miniPlayerShows,
-    miniPlayerWidth,
+    miniPosition,
     moveItem,
+    moveMiniPlayer,
     nextPlaylistName,
     originTag,
     playbackProblem,
     repeatLabel,
     resizeMiniWidth,
+    restoreMusicPlayer,
     trackSubtitle,
     type LibraryEntry,
+    type MiniPosition,
     type Playlist,
   } from '$lib/utils/musicPlayer';
   import {
@@ -103,17 +109,24 @@
   // -- the window ------------------------------------------------------------------
 
   let rootEl = $state<HTMLDivElement | null>(null);
+  // The full window's box: where it is open, and where a restore brings it back.
   let rect = $state<WindowRect>({ x: 0, y: 0, width: 0, height: 0 });
   // The mini-player bar's own width; null until the bar is resized (then it is as wide as the window).
   let miniWidth = $state<number | null>(null);
+  // The bar's own corner; null until the first minimise (then it is where the window's header is).
+  let mini = $state<MiniPosition | null>(null);
   type GestureKind = 'move' | 'resize' | 'mini-resize';
   let gesture: { kind: GestureKind; px: number; py: number; start: WindowRect } | null = null;
   let dragged = false;
-  // Minimised, the window is drawn at the bar's width (rect and miniWidth are kept in the viewport).
-  let shownWidth = $derived(minimised ? (miniWidth ?? rect.width) : rect.width);
-  let miniShows = $derived(miniPlayerShows(shownWidth));
 
   const viewport = () => ({ width: window.innerWidth, height: window.innerHeight });
+  // The bar's box at its own corner and width (both are kept in the viewport by fitMusicPlayer).
+  const barRect = () => miniPlayerRect(rect, miniWidth, viewport(), mini);
+  // Minimised, the window is drawn as the bar: at the bar's corner and width.
+  let shown = $derived(minimised ? barRect() : rect);
+  let shownWidth = $derived(shown.width);
+  let miniShows = $derived(miniPlayerShows(shownWidth));
+
   function storage(): Storage | null {
     try {
       return window.localStorage;
@@ -121,31 +134,35 @@
       return null;
     }
   }
-  const remember = () => saveWindowState(storage(), { rect, minimised, miniWidth: miniWidth ?? undefined }, MUSIC_PLAYER_WINDOW);
-
-  /** The window's box fitted to the viewport: whole when open, only the bar (at its
-   *  own width) when minimised. The mini width is kept within its limits too. */
-  function fitted(r: WindowRect, m: boolean): WindowRect {
-    const vp = viewport();
-    if (miniWidth !== null) miniWidth = miniPlayerWidth(miniWidth, r.width, vp);
-    if (!m) return clampRect(r, vp, false, LIMITS);
-    const full = clampRect(r, vp, true, LIMITS);
-    const bar = miniPlayerRect(full, miniWidth, vp);
-    return { ...full, x: bar.x, y: bar.y };
+  /** Both boxes as one state; a field never set is left out, so it stores as before. */
+  function windowState(): WindowState {
+    const w: WindowState = { rect, minimised };
+    if (miniWidth !== null) w.miniWidth = miniWidth;
+    if (mini) {
+      w.miniX = mini.x;
+      w.miniY = mini.y;
+    }
+    return w;
   }
+  function apply(w: WindowState) {
+    rect = w.rect;
+    miniWidth = w.miniWidth ?? null;
+    mini = miniPosition(w);
+  }
+  const remember = () => saveWindowState(storage(), windowState(), MUSIC_PLAYER_WINDOW);
 
-  // Each opening takes the remembered box, fitted to the viewport as it is now.
+  // Each opening takes the remembered boxes, fitted to the viewport as it is now.
   $effect(() => {
     if (!open) return;
     untrack(() => {
       const w = loadWindowState(storage(), viewport(), MUSIC_PLAYER_WINDOW);
-      miniWidth = w.miniWidth ?? null;
-      rect = fitted(w.rect, minimised);
+      apply(fitMusicPlayer({ ...w, minimised }, viewport()));
       tick().then(() => rootEl?.focus({ preventScroll: true }));
     });
   });
 
-  // Minimised or restored, from the bar or from the Music Player button.
+  // Minimised or restored, from the bar or from the Music Player button: the bar goes
+  // to its own corner, the window comes back at its own.
   let lastMinimised = minimised;
   $effect(() => {
     const m = minimised;
@@ -153,7 +170,8 @@
       if (m === lastMinimised) return;
       lastMinimised = m;
       if (open) {
-        rect = fitted(rect, m);
+        const w = { ...windowState(), minimised: m };
+        apply(m ? minimiseMusicPlayer(w, viewport()) : restoreMusicPlayer(w, viewport()));
         remember();
       }
     });
@@ -173,7 +191,7 @@
     if (kind === 'move' && target.closest('button, input, select')) return;
     // The bar's handle is not the bar: its press must never become the bar's "click to restore".
     if (kind === 'mini-resize') e.stopPropagation();
-    const start = kind === 'mini-resize' ? miniPlayerRect(rect, miniWidth, viewport()) : { ...rect };
+    const start = kind === 'mini-resize' || (kind === 'move' && minimised) ? barRect() : { ...rect };
     gesture = { kind, px: e.clientX, py: e.clientY, start };
     dragged = false;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -187,10 +205,13 @@
     const dy = e.clientY - gesture.py;
     if (!isClick(dx, dy)) dragged = true;
     const s = gesture.start;
-    if (gesture.kind === 'mini-resize') miniWidth = resizeMiniWidth(s, dx, viewport());
-    else if (gesture.kind === 'resize') rect = resizeRect(s, dx, dy, viewport(), LIMITS);
-    // Minimised, the bar (at its own width) is what has to stay in view.
-    else if (minimised) rect = fitted({ ...s, x: s.x + dx, y: s.y + dy }, true);
+    // The bar's left edge stays: the handle changes its width only.
+    if (gesture.kind === 'mini-resize') {
+      miniWidth = resizeMiniWidth(s, dx, viewport());
+      mini = { x: s.x, y: s.y };
+    } else if (gesture.kind === 'resize') rect = resizeRect(s, dx, dy, viewport(), LIMITS);
+    // Minimised, only the bar moves, kept in view at its own width.
+    else if (minimised) mini = moveMiniPlayer(s, dx, dy, viewport());
     else rect = moveRect(s, dx, dy, viewport(), false, LIMITS);
   }
 
@@ -209,7 +230,7 @@
   }
 
   function refit() {
-    if (open) rect = fitted(rect, minimised);
+    if (open) apply(fitMusicPlayer(windowState(), viewport()));
   }
 
   // -- the library -----------------------------------------------------------------
@@ -620,7 +641,7 @@
     aria-modal="false"
     aria-labelledby="music-player-title"
     tabindex="-1"
-    style="left: {rect.x}px; top: {rect.y}px; width: {shownWidth}px; height: {minimised ? HEADER_HEIGHT : rect.height}px"
+    style="left: {shown.x}px; top: {shown.y}px; width: {shownWidth}px; height: {minimised ? HEADER_HEIGHT : rect.height}px"
   >
     <div
       class="mp-head"
