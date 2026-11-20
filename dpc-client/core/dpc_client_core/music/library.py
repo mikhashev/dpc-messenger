@@ -24,7 +24,8 @@ leaves it out of the queue and a playlist's play order (the playlist keeps the i
 unhide puts it back). It lives on the entry, so a rescan or a relink keeps it.
 `remove_missing` drops entries whose file is gone (never a present one), with their
 playlist positions. `delete_generated_file` deletes the audio file of a take DPC owns
-(resolved path inside `<DPC home>/music/generated/`, not in a watched folder) and its
+(resolved path strictly inside `<DPC home>/music/generated/`, however the entry arrived:
+the DPC home may itself be a watched folder) and its
 `<name>.json` sidecar, then drops the entry; nothing else in that folder is touched, and
 the person's own music is never deleted.
 
@@ -1211,14 +1212,14 @@ class MusicLibrary:
                 continue
             if not include_missing and e.get("missing"):
                 continue
-            out.append(copy.deepcopy(e))
+            out.append({**copy.deepcopy(e), "deletable": self._is_deletable(e)})
         return out
 
     def get_entry(self, track_id: str) -> dict:
         e = self._entries.get(track_id)
         if e is None:
             raise MusicLibraryError("unknown_track", f"no track {track_id}")
-        return copy.deepcopy(e)
+        return {**copy.deepcopy(e), "deletable": self._is_deletable(e)}
 
     def get_track_path(self, track_id: str) -> Optional[Path]:
         """Where the track's bytes are now, or None when it is missing or has no file.
@@ -1293,14 +1294,18 @@ class MusicLibrary:
     def _generated_root(self) -> Path:
         return (self.root / "generated").resolve()
 
+    def _is_deletable(self, e: dict) -> bool:
+        """The `deletable` flag the list responses carry: present, owned by path, file there."""
+        try:
+            return self._owned_file(e).is_file()
+        except (MusicLibraryError, OSError):
+            return False
+
     def _owned_file(self, e: dict) -> Path:
         """The resolved path of an entry's file when DPC owns it, else a refusal."""
         raw = e.get("path")
         if not raw or e.get("missing"):
             raise MusicLibraryError("file_missing", "the file is already gone: use Remove from library")
-        if e.get("folder_id") is not None:
-            raise MusicLibraryError(
-                "not_owned", "this track is in one of your own folders; DPC never deletes your music. Hide it instead")
         try:
             target = Path(raw).resolve()
             owned = self._generated_root()

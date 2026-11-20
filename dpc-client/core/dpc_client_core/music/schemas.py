@@ -57,7 +57,7 @@ _ENTRY_REQUIRED = (
 )
 _ENTRY_KEYS = set(_ENTRY_REQUIRED) | {
     "needs_readd", "origin", "path", "folder_id", "alt_paths", "file_stat",
-    "hash_state", "missing", "hidden",
+    "hash_state", "missing", "hidden", "deletable",
     # extensions, see the module docstring
     "hash_kind", "artist", "album", "hash_notes",
 }

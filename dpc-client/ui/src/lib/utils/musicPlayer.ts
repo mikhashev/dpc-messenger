@@ -29,6 +29,8 @@ export interface LibraryEntry {
     folder_id?: string | null;
     missing?: boolean;
     hidden?: boolean;
+    /** Computed by the core on every read: present, inside DPC's own generated/ folder, file there. */
+    deletable?: boolean;
     hash_state?: 'pending' | 'done' | 'error' | string;
     artist?: string | null;
     album?: string | null;
@@ -1193,10 +1195,10 @@ export function missingEntries(entries: readonly LibraryEntry[]): LibraryEntry[]
     return entries.filter(e => !!e.missing);
 }
 
-/** Whether Delete file is offered: a take DPC made, outside the person's watched folders,
- *  with a file still there. The core checks the real path again; this only hides the button. */
+/** Whether Delete file is offered: only the core's `deletable` flag (ownership is decided
+ *  there, by path). The core checks again when the command arrives. */
 export function canDeleteFile(entry: LibraryEntry | null | undefined): boolean {
-    return !!entry && entry.origin === 'generated' && !entry.folder_id && !entry.missing && !!entry.path;
+    return !!entry && entry.deletable === true && !entry.missing;
 }
 
 /** Take every occurrence of `ids` out of the queue. When the current track is one of them

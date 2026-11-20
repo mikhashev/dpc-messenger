@@ -28,12 +28,12 @@ describe('hiding and removing tracks', () => {
         expect(missingEntries(all).map(x => x.id)).toEqual(['c', 'd']);
     });
 
-    it('offers Delete file only for a DPC-made file outside the watched folders', () => {
-        const gen = { origin: 'generated', path: '/h/music/generated/j/t.wav' };
-        expect(canDeleteFile(e('a', gen))).toBe(true);
-        expect(canDeleteFile(e('a', { ...gen, missing: true }))).toBe(false);
-        expect(canDeleteFile(e('a', { ...gen, folder_id: 'mf_1' }))).toBe(false);
-        expect(canDeleteFile(e('a', { origin: 'folder', path: '/m/a.mp3', folder_id: 'mf_1' }))).toBe(false);
+    it('offers Delete file only from the core's deletable flag', () => {
+        const owned = { origin: 'folder', folder_id: 'mf_1', deletable: true };
+        expect(canDeleteFile(e('a', owned))).toBe(true);
+        expect(canDeleteFile(e('a', { ...owned, missing: true }))).toBe(false);
+        expect(canDeleteFile(e('a', { ...owned, deletable: false }))).toBe(false);
+        expect(canDeleteFile(e('a'))).toBe(false);
         expect(canDeleteFile(null)).toBe(false);
     });
 

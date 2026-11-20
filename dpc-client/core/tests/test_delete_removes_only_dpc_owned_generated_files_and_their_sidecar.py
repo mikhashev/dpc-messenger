@@ -81,14 +81,44 @@ async def test_delete_refuses_a_symlink_that_points_out_of_generated(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_delete_is_not_offered_for_a_watched_folder_track(tmp_path):
+async def test_a_generated_file_seen_through_a_watched_music_dir_is_deletable_and_stays_gone(tmp_path):
+    home = tmp_path / "dpc"
+    music = home / "music"
+    lib = library(home)
+    await lib.open()
+    try:
+        wav = take(generated_dir(home), "take1.wav")
+        song = take(music / "files", "mine.mp3")
+        folder = await lib.add_folder(str(music), scan=False)
+        await lib.rescan_folder(folder["id"])
+        await lib.wait_hashed()
+        ids = {e["source"]["name"]: e for e in lib.list_entries()}
+        gen_entry, own_entry = ids["take1.wav"], ids["mine.mp3"]
+        flags = (gen_entry["folder_id"] is not None, gen_entry["deletable"], own_entry["deletable"])
+        with pytest.raises(MusicLibraryError) as refused:
+            await lib.delete_generated_file(own_entry["id"])
+        await lib.delete_generated_file(gen_entry["id"])
+        await lib.rescan_folder(folder["id"])
+        await lib.wait_hashed()
+        names = sorted(e["source"]["name"] for e in lib.list_entries())
+        count = lib.list_folders()[0]["file_count"]
+    finally:
+        await lib.stop()
+    assert flags == (True, True, False)
+    assert refused.value.code == "not_owned" and song.exists()
+    assert not wav.exists() and names == ["mine.mp3"] and count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_track_in_an_ordinary_watched_folder_is_not_deletable(tmp_path):
     home, music = tmp_path / "dpc", tmp_path / "Music"
     lib = library(home)
     await lib.open()
     try:
         _, ids = await folder_with_tracks(lib, music, ("a.mp3",))
+        flag = lib.get_entry(ids["a.mp3"])["deletable"]
         with pytest.raises(MusicLibraryError) as exc:
             await lib.delete_generated_file(ids["a.mp3"])
     finally:
         await lib.stop()
-    assert exc.value.code == "not_owned" and (music / "a.mp3").exists()
+    assert flag is False and exc.value.code == "not_owned" and (music / "a.mp3").exists()
