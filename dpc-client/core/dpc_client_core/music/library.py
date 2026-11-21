@@ -281,6 +281,7 @@ class MusicLibrary:
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
         save_delay_s: float = DEFAULT_SAVE_DELAY_S,
         on_added: Optional[Callable[[dict], None]] = None,
+        on_merged: Optional[Callable[[str, str], None]] = None,
     ):
         self.dpc_home = Path(dpc_home_dir)
         self.root = music_dir_of(dpc_home_dir)
@@ -290,6 +291,10 @@ class MusicLibrary:
         # The one "added" event producer (ADR-051 D21): called with a copy of the entry,
         # synchronously, once per generated take that enters the library.
         self.on_added = on_added
+        # Called as `on_merged(from_id, to_id)`, synchronously, when an entry is folded into
+        # another (a duplicate or a missing twin): what is keyed by the entry id (the
+        # comments) moves with the playlist positions. A failure is logged, never raised.
+        self.on_merged = on_merged
         self._entries: Dict[str, dict] = {}
         self._folders: Dict[str, dict] = {}
         self._playlists: Dict[str, dict] = {}
@@ -580,6 +585,11 @@ class MusicLibrary:
             return
         self._index_drop(e)
         self._verify.pop(track_id, None)
+        if replaced_by and replaced_by != track_id and self.on_merged is not None:
+            try:
+                self.on_merged(track_id, replaced_by)
+            except Exception:
+                logger.exception("music: the on_merged listener failed for %s -> %s", track_id, replaced_by)
         for pl in self._playlists.values():
             if track_id in pl["track_ids"]:
                 if replaced_by and replaced_by not in pl["track_ids"]:

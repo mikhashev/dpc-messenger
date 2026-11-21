@@ -153,6 +153,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "get_music_lyrics", "save_music_lyrics", "lookup_music_lyrics_lrclib", "transcribe_music_lyrics",
     # The track stream (ADR-051 N8): its loopback base URL and token, for the <audio> element
     "get_music_stream_info",
+    # Timecoded listening notes on a library track (mp.comment/1)
+    "list_music_comments", "add_music_comment", "update_music_comment", "delete_music_comment",
     "list_strata_models",
     "install_strata_model",
     # The process registry (ADR-046 point 8): what runs now, who started it

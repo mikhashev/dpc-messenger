@@ -29,6 +29,7 @@ MUSIC_FOLDER = "mp.music_folder/1"
 PLAYLIST = "mp.playlist/1"
 TRACK = "mp.track/1"
 LYRICS = "mp.lyrics/1"
+COMMENT = "mp.comment/1"
 
 TRACK_ID_RE = re.compile(r"^trk_[0-9a-f]{16}$")
 FOLDER_ID_RE = re.compile(r"^mf_[0-9a-f]{16}$")
@@ -72,6 +73,16 @@ _TRACK_REQUIRED = ("schema", "id", "source", "source_hash", "editable", "duratio
 _TRACK_KEYS = set(_TRACK_REQUIRED) | {
     "content_hash", "sample_rate", "sample_rate_basis", "channels", "loaded_at",
 }
+
+
+COMMENT_ID_RE = re.compile(r"^cmt_[0-9a-f]{16}$")
+COMMENT_KINDS = ("point", "region")
+COMMENT_ACTIONS = ("note", "regenerate_region", "extend_ending", "fix_seam", "remove_region")
+COMMENT_AUTHOR_KINDS = ("human", "agent")
+
+_COMMENT_REQUIRED = ("schema", "id", "track_id", "version_id", "kind", "t_start", "t_end", "text",
+                     "action", "author", "created_at")
+_COMMENT_KEYS = set(_COMMENT_REQUIRED) | {"sample_rate", "anchor", "status", "updated_at"}
 
 
 class SchemaError(ValueError):
@@ -310,3 +321,29 @@ VALIDATORS: Dict[str, Any] = {
     TRACK: validate_track,
     LYRICS: validate_lyrics,
 }
+
+
+def validate_comment(comment: Any) -> None:
+    """`mp.comment/1` (SPEC §4), as the core stores it: the `allOf` rule (a point has
+    `t_end` null, a region a number) and the `author` object are checked too."""
+    s = COMMENT
+    _check_keys(s, comment, _COMMENT_REQUIRED, _COMMENT_KEYS)
+    _expect(s, _is_str(comment["id"]) and bool(COMMENT_ID_RE.match(comment["id"])), "'id' does not match cmt_ + 16 hex")
+    _expect(s, _is_str(comment["track_id"]) and bool(TRACK_ID_RE.match(comment["track_id"])), "'track_id' does not match trk_ + 16 hex")
+    _expect(s, _is_str(comment["version_id"]), "'version_id' must be a string")
+    _expect(s, comment["kind"] in COMMENT_KINDS, f"'kind' {comment['kind']!r} is not one of {COMMENT_KINDS}")
+    _expect(s, _is_number(comment["t_start"]) and comment["t_start"] >= 0, "'t_start' must be a number >= 0")
+    end = comment["t_end"]
+    if comment["kind"] == "point":
+        _expect(s, end is None, "a point comment has 't_end' null")
+    else:
+        _expect(s, _is_number(end) and end > comment["t_start"], "a region comment has 't_end' > 't_start'")
+    _expect(s, _is_str(comment["text"]), "'text' must be a string")
+    _expect(s, comment["action"] in COMMENT_ACTIONS, f"'action' {comment['action']!r} is not one of {COMMENT_ACTIONS}")
+    author = comment["author"]
+    _expect(s, isinstance(author, Mapping) and set(author) == {"kind", "name"}
+            and author["kind"] in COMMENT_AUTHOR_KINDS and _is_str(author["name"]),
+            "'author' must be {kind: human|agent, name: string}")
+    _expect(s, _is_str(comment["created_at"]), "'created_at' must be a string")
+    if "updated_at" in comment:
+        _expect(s, _is_str(comment["updated_at"]), "'updated_at' must be a string")

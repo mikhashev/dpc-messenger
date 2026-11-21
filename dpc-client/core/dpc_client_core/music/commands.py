@@ -88,6 +88,7 @@ from urllib.request import url2pathname
 from ..local_api import slow_command
 from . import job_schemas as js
 from .acestep import AceStepServer, read_config
+from .comments import MusicComments
 from .capabilities import EngineStatus, MusicCapabilities
 from .engine_base import MusicEngineError
 from .engines import MusicEngines
@@ -118,6 +119,9 @@ def _error(exc: Exception) -> Dict[str, Any]:
         return {"status": "error", "code": exc.code, "message": exc.message}
     logger.exception("music command failed")
     return {"status": "error", "code": "internal", "message": str(exc)}
+
+
+_UNSET: Any = object()
 
 
 def _bad(code: str, field: str, what: str) -> MusicJobError:
@@ -165,6 +169,7 @@ class MusicCommandsMixin:
 
     _music_library_instance: Optional[MusicLibrary] = None
     _music_lyrics_instance: Optional[MusicLyrics] = None
+    _music_comments_instance: Optional[MusicComments] = None
     _music_jobs_instance: Optional[MusicJobStore] = None
     _music_jobs_lock: Optional[asyncio.Lock] = None
     _music_engines_instance: Optional[MusicEngines] = None
@@ -182,6 +187,10 @@ class MusicCommandsMixin:
         if self._music_library_instance is None:
             self._music_library_instance = MusicLibrary(
                 self.settings.dpc_home_dir, poll_interval_s=self._music_poll_interval_s())
+            # The comments follow an entry the library folds into another.
+            comments = MusicComments(self.settings.dpc_home_dir, self._music_library_instance)
+            self._music_comments_instance = comments
+            self._music_library_instance.on_merged = comments.merge
         await self._music_library_instance.start()
         return self._music_library_instance
 
@@ -875,6 +884,55 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    # -- listening notes: timecoded comments (`mp.comment/1`, music/comments.py) ----------
+
+    async def _music_comments(self) -> MusicComments:
+        await self._music()
+        assert self._music_comments_instance is not None
+        return self._music_comments_instance
+
+    @slow_command
+    async def list_music_comments(self, track_id: Any = None) -> Dict[str, Any]:
+        """The track's comments, by start time. Keyed by the library entry id."""
+        try:
+            return {"status": "ok", "track_id": track_id, "comments": await (await self._music_comments()).list(track_id)}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
+    async def add_music_comment(self, track_id: Any = None, start_s: Any = None, end_s: Any = None,
+                                text: Any = None, action: Any = None) -> Dict[str, Any]:
+        """Add a point (`end_s` null) or region comment. `action` is `note` (the default);
+        the other SPEC actions answer `action_unsupported`. Broadcasts `music_comments_updated`."""
+        try:
+            comment = await (await self._music_comments()).add(track_id, start_s, end_s, text, action)
+        except Exception as exc:
+            return _error(exc)
+        self._music_broadcast("music_comments_updated", {"track_id": track_id})
+        return {"status": "ok", "comment": comment}
+
+    @slow_command
+    async def update_music_comment(self, track_id: Any = None, comment_id: Any = None, start_s: Any = _UNSET,
+                                   end_s: Any = _UNSET, text: Any = _UNSET, action: Any = _UNSET) -> Dict[str, Any]:
+        """Change a comment; a field not passed stays, `end_s: null` makes it a point."""
+        fields = {k: v for k, v in (("start_s", start_s), ("end_s", end_s), ("text", text), ("action", action))
+                  if v is not _UNSET}
+        try:
+            comment = await (await self._music_comments()).update(track_id, comment_id, **fields)
+        except Exception as exc:
+            return _error(exc)
+        self._music_broadcast("music_comments_updated", {"track_id": track_id})
+        return {"status": "ok", "comment": comment}
+
+    @slow_command
+    async def delete_music_comment(self, track_id: Any = None, comment_id: Any = None) -> Dict[str, Any]:
+        try:
+            await (await self._music_comments()).delete(track_id, comment_id)
+        except Exception as exc:
+            return _error(exc)
+        self._music_broadcast("music_comments_updated", {"track_id": track_id})
+        return {"status": "ok", "deleted": comment_id}
+
     # -- lyrics ------------------------------------------------------------------
 
     @slow_command
@@ -967,4 +1025,8 @@ MUSIC_COMMANDS = (
     "lookup_music_lyrics_lrclib",
     "transcribe_music_lyrics",
     "get_music_stream_info",
+    "list_music_comments",
+    "add_music_comment",
+    "update_music_comment",
+    "delete_music_comment",
 )
