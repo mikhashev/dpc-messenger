@@ -25,7 +25,10 @@ jobs:
     # Playwright 1.61, and pyproject.toml holds playwright <1.61 for Camoufox. 24.04
     # also gives Python 3.12, what the nodes run. Back to latest when that pin lifts.
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # A safety net, not a budget: pytest-timeout below fails a hanging test in
+    # minutes with a stack trace, so this limit only catches a hang outside a
+    # test (sync, collection). Raised from 30 when the suite passed ~34 min.
+    timeout-minutes: 90
     steps:
       # Full history: the long-tier eval golds are pinned to GOLD_COMMIT and their
       # tests `git archive` that commit, which a depth-1 clone does not hold
@@ -84,6 +87,7 @@ jobs:
         working-directory: dpc-client/core
         run: >
           uv run python -m pytest -q
+          --timeout=300
           --deselect tests/test_turn.py::test_turn_connectivity
 
   protocol:
