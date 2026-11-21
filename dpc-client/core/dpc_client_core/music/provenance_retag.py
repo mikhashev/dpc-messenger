@@ -306,6 +306,9 @@ def _take_sidecar_record(side: Mapping[str, Any], md5: str, container: str, wav_
             "vocal_language_chosen": res0.get("vocal_language", NS),
             "lyrics": req.get("lyrics", NS),
             "pronunciation": prov.stress_marks(req["lyrics"]) if "lyrics" in req else {"stress_marks": NS, "count": 0},
+            **({"instrumental": req["lyrics"] == "[Instrumental]",
+                "lyrics_prep": res0["lyrics"] if res0.get("lyrics") not in (None, req["lyrics"]) else None}
+               if "lyrics" in req and res0 else {}),
             "audio_codes_sha256": prov.text_sha256(codes) if codes else side.get("audio_codes_sha256") or NS,
             "codes_count": prov.count_codes(codes) if codes else count if count is not None else NS,
             "inference_steps": side.get("inference_steps", NS), "guidance_scale": prov.ENGINE_DEFAULT,
@@ -328,6 +331,7 @@ def _take_sidecar_record(side: Mapping[str, Any], md5: str, container: str, wav_
             "caption_sent": req.get("style", NS), "caption_chosen": res.get("style", NS),
             "lyrics": req.get("lyrics", NS),
             "pronunciation": prov.stress_marks(req["lyrics"]) if "lyrics" in req else {"stress_marks": NS, "count": 0},
+            **({"instrumental": not req["lyrics"], "lyrics_prep": None} if "lyrics" in req else {}),
             "backbone": side.get("backbone") or NS, "adapters": prov._adapters_list(side.get("adapters")),
             "inference_steps": side.get("steps", NS), "cot": side.get("cot", NS),
             "peak_clip": req.get("peak_clip", prov.ENGINE_DEFAULT), "lm_batch_size": side.get("lm_batch_size", NS),
