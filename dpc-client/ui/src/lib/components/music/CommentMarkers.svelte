@@ -1,4 +1,4 @@
-<!-- CommentMarkers.svelte — the comment markers under a position slider (mp.comment/1). -->
+<!-- CommentMarkers.svelte — the comment markers under a position slider (mp.comment/1); the fallback when the waveform cannot be drawn (MusicWaveform.svelte draws markers on the waveform). -->
 <!--
   A thin strip under the slider: a dot for a point comment, a bar for a region, placed by
   markerGeometry (time as a percentage of the duration, clamped). Hovering a marker shows

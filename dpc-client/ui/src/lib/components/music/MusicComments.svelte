@@ -34,6 +34,8 @@
     duration = 0,
     loaded = false,
     openSignal = 0,
+    regionRequest = null,
+    onclose = () => {},
     onseek = (t: number) => seekTo(t, 'ui'),
     label = 'COMMENTS',
   }: {
@@ -43,6 +45,10 @@
     loaded?: boolean;
     /** Bumped by the parent (the C key, the card's Comment button) to open the form. */
     openSignal?: number;
+    /** A region picked on the waveform: opens the form with Start and End filled (a new `id` each time). */
+    regionRequest?: { id: number; start: number; end: number } | null;
+    /** The form went away (saved, cancelled, another track): the waveform's draft region goes too. */
+    onclose?: () => void;
     onseek?: (seconds: number) => void;
     label?: string;
   } = $props();
@@ -78,6 +84,31 @@
     await tick();
     textEl?.focus();
   }
+
+  async function openRegion(start: number, end: number) {
+    if (!trackId) return;
+    form = { id: null, start: secondsText(start) || '0', end: secondsText(end), text: '', action: 'note' };
+    formError = '';
+    await tick();
+    textEl?.focus();
+  }
+
+  let lastRegion = untrack(() => regionRequest?.id);
+  $effect(() => {
+    const r = regionRequest;
+    if (r && r.id !== lastRegion) {
+      lastRegion = r.id;
+      void openRegion(r.start, r.end);
+    }
+  });
+
+  // The form closing, however it closes, tells the parent (its draft region goes).
+  let wasOpen = false;
+  $effect(() => {
+    const isOpen = form !== null;
+    if (wasOpen && !isOpen) untrack(onclose);
+    wasOpen = isOpen;
+  });
 
   async function openEdit(c: MusicComment) {
     form = { id: c.id, start: secondsText(c.t_start), end: secondsText(c.t_end), text: c.text, action: c.action };

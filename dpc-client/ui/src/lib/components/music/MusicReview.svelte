@@ -1,10 +1,10 @@
 <!-- MusicReview.svelte — the plain, level-matched A/B of a job's takes (SPEC flow 7, §12 decisions 35, 37). -->
 <!--
-  The takes are A, B (C, D with more variants), on one shared transport and a position
-  bar (no waveform). Switching take keeps the position: the other take is loaded at the
+  The takes are A, B (C, D with more variants), on one shared transport and a waveform
+  (MusicWaveform: each take draws its own peaks and markers). Switching take keeps the position: the other take is loaded at the
   same time, clamped to its length (takes differ by a frame or more). Keys while focus is
   in this view: A / B / C / D pick a take (the letter of the take playing flips back to
-  the one before, so B toggles A and B, SPEC §9), Space plays / pauses, ← → seek 5 s.
+  the one before, so B toggles A and B, SPEC §9), Space plays / pauses, ← → seek 5 s, R region.
 
   Level matching (decision 37, display gain only, the files are never changed): every
   take plays at the quietest take's integrated loudness (the core's ffmpeg ebur128
@@ -53,7 +53,7 @@
   import { discardTake, fetchTakes, keepTake, measureTakeLoudness, musicTakes, rejectAllTakes } from '$lib/services/musicJobs';
   import MusicReasonBox from './MusicReasonBox.svelte';
   import MusicComments from './MusicComments.svelte';
-  import CommentMarkers from './CommentMarkers.svelte';
+  import MusicWaveform from './MusicWaveform.svelte';
   import { musicComments } from '$lib/services/musicComments';
 
   let { job, classes = [], onclose }: { job: MusicJob; classes?: FailureClass[]; onclose: () => void } = $props();
@@ -148,22 +148,17 @@
     await load(i, at, wasPlaying);
   }
 
-  let scrub = $state<number | null>(null);
-  function onScrub(e: Event) {
-    scrub = parseFloat((e.currentTarget as HTMLInputElement).value);
-  }
-  function onSeekCommit(e: Event) {
-    const v = parseFloat((e.currentTarget as HTMLInputElement).value);
-    scrub = null;
-    if (!Number.isFinite(v)) return;
-    if (loaded) reviewSeek(v);
-    else parked = abSwitchPosition(v, duration);
-  }
-
   /** A comment's time was clicked: seek the take being heard (or park the bar before it loads). */
   function seekComment(t: number) {
     if (loaded) reviewSeek(t);
     else parked = abSwitchPosition(t, duration);
+  }
+  let regionSignal = $state(0);
+  let regionRequest = $state<{ id: number; start: number; end: number } | null>(null);
+  let draftRegion = $state<{ start: number; end: number } | null>(null);
+  function pickRegion(start: number, end: number) {
+    draftRegion = { start, end };
+    regionRequest = { id: (regionRequest?.id ?? 0) + 1, start, end };
   }
   let takeComments = $derived($musicComments[take?.library_track_id ?? ''] ?? []);
 
@@ -180,6 +175,9 @@
       if (t.tagName === 'BUTTON') return;
       e.preventDefault();
       togglePlay();
+    } else if (e.key.toLowerCase() === 'r' && !e.shiftKey) {
+      e.preventDefault();
+      regionSignal += 1;
     } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
       seekBy((e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 1 : 5));
@@ -314,22 +312,20 @@
       </button>
     </div>
     <div class="seek-row">
-      <span class="time">{formatTime(scrub ?? position)}</span>
+      <span class="time">{formatTime(position)}</span>
       <div class="seek-col">
-        <input
-          class="seek"
-          type="range"
-          min="0"
-          max={duration || 0}
-          step="0.1"
-          value={scrub ?? position}
-          oninput={onScrub}
-          onchange={onSeekCommit}
-          onblur={() => (scrub = null)}
-          disabled={!duration}
-          aria-label="Position in take {takeLetter(current)}"
+        <MusicWaveform
+          trackId={take?.library_track_id ?? null}
+          comments={takeComments}
+          {position}
+          {duration}
+          seekable={!!duration}
+          ariaLabel="Position in take {takeLetter(current)}"
+          draft={draftRegion}
+          {regionSignal}
+          onseek={seekComment}
+          onregion={pickRegion}
         />
-        <CommentMarkers comments={takeComments} {duration} onseek={seekComment} />
       </div>
       <span class="time">{formatTime(duration || null)}</span>
     </div>
@@ -338,7 +334,7 @@
     {#if rv.loading}<p class="muted tiny">Loading take {takeLetter(current)}…</p>{/if}
     {#if rv.notice || notice}<p class="muted small" role="status" aria-live="polite">{rv.notice || notice}</p>{/if}
     {#if actionError}<p class="field-error" role="alert">{actionError}</p>{/if}
-    <p class="muted tiny">A / B{takes.length > 2 ? ` / ${takes.slice(2).map((_, i) => takeLetter(i + 2)).join(' / ')}` : ''} pick a take at the same position · Space play/pause · ← → seek · your volume applies on top</p>
+    <p class="muted tiny">A / B{takes.length > 2 ? ` / ${takes.slice(2).map((_, i) => takeLetter(i + 2)).join(' / ')}` : ''} pick a take at the same position · Space play/pause · ← → seek · R region · your volume applies on top</p>
 
     {#if take?.library_track_id}
       <MusicComments
@@ -347,6 +343,8 @@
         {duration}
         {loaded}
         onseek={seekComment}
+        {regionRequest}
+        onclose={() => (draftRegion = null)}
         label="COMMENTS ON {takeLetter(current)}"
       />
     {/if}

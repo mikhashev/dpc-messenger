@@ -2067,6 +2067,11 @@ export function getMusicTrack(trackId: string): Promise<MusicAnswer<{ entry: Lib
     return callMusic(sendCommand, 'get_music_track', { track_id: trackId });
 }
 
+/** Waveform peaks of a library track: one [min, max] per bucket, each in -1..1. The core decodes with ffmpeg on the first request and caches by content hash. */
+export function getMusicTrackPeaks(trackId: string, n?: number): Promise<MusicAnswer<{ peaks: [number, number][]; duration_s: number; n: number; cached: boolean }>> {
+    return callMusic(sendCommand, 'get_music_track_peaks', n ? { track_id: trackId, n } : { track_id: trackId });
+}
+
 /** The smart lists (All tracks, Generated), then the person's playlists. */
 export function listMusicPlaylists(): Promise<MusicAnswer<{ playlists: Playlist[] }>> {
     return callMusic(sendCommand, 'list_music_playlists', {});

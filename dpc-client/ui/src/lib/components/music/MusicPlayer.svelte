@@ -39,7 +39,7 @@
   import MusicLyrics from './MusicLyrics.svelte';
   import MusicCreate from './MusicCreate.svelte';
   import MusicComments from './MusicComments.svelte';
-  import CommentMarkers from './CommentMarkers.svelte';
+  import MusicWaveform from './MusicWaveform.svelte';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import { revealInFolder } from '$lib/utils/revealInFolder';
   import { isCommentShortcut } from '$lib/utils/musicComments';
@@ -339,6 +339,13 @@
 
   // -- comments (mp.comment/1): the C key and the card's Comment button open the form ---------
   let commentSignal = $state(0);
+  let regionSignal = $state(0);
+  let regionRequest = $state<{ id: number; start: number; end: number } | null>(null);
+  let draftRegion = $state<{ start: number; end: number } | null>(null);
+  function pickRegion(start: number, end: number) {
+    draftRegion = { start, end };
+    regionRequest = { id: (regionRequest?.id ?? 0) + 1, start, end };
+  }
 
   // -- playlist forms --------------------------------------------------------------
 
@@ -626,20 +633,6 @@
       : cur ? `${p.playing ? 'Playing' : loaded ? 'Paused' : 'Up next'}: ${cur.title}` : `${$musicLibrary.entries.length} tracks`,
   );
 
-  // The slider only moves the thumb while it is dragged; the seek is made once, on release
-  // (`change`). Seeking on every `input` made a flush-and-reseek of the media pipeline
-  // for each 0.1 s step of a drag, and each `timeupdate` wrote the playing position back
-  // over the thumb under the person's finger.
-  let scrub = $state<number | null>(null);
-  function onScrub(e: Event) {
-    scrub = parseFloat((e.currentTarget as HTMLInputElement).value);
-  }
-  function onSeekCommit(e: Event) {
-    const v = parseFloat((e.currentTarget as HTMLInputElement).value);
-    scrub = null;
-    if (Number.isFinite(v)) seekTo(v, 'slider');
-  }
-
   function onVolume(e: Event) {
     setVolume(parseFloat((e.currentTarget as HTMLInputElement).value));
   }
@@ -675,6 +668,10 @@
       if (!cur) return;
       e.preventDefault();
       commentSignal += 1;
+    } else if (kl === 'r' && !e.shiftKey) {
+      if (!cur) return;
+      e.preventDefault();
+      regionSignal += 1;
     } else if (k === ' ') {
       if (a.tagName === 'BUTTON') return; // the button presses itself
       e.preventDefault();
@@ -854,22 +851,20 @@
               </div>
               {#if curProblem}<p class="muted small">{curProblem.reason}</p>{/if}
               <div class="seek-row">
-                <span class="time">{formatTime(loaded ? (scrub ?? p.currentTime) : 0)}</span>
+                <span class="time">{formatTime(loaded ? p.currentTime : 0)}</span>
                 <div class="seek-col">
-                  <input
-                    class="seek"
-                    type="range"
-                    min="0"
-                    max={shownDuration || 0}
-                    step="0.1"
-                    value={loaded ? (scrub ?? p.currentTime) : 0}
-                    oninput={onScrub}
-                    onchange={onSeekCommit}
-                    onblur={() => (scrub = null)}
-                    disabled={!loaded}
-                    aria-label="Position in the track"
+                  <MusicWaveform
+                    trackId={cur?.id ?? null}
+                    comments={curComments}
+                    position={loaded ? p.currentTime : 0}
+                    duration={shownDuration}
+                    seekable={loaded}
+                    ariaLabel="Position in the track"
+                    draft={draftRegion}
+                    {regionSignal}
+                    onseek={(t) => seekTo(t, 'ui')}
+                    onregion={pickRegion}
                   />
-                  <CommentMarkers comments={curComments} duration={shownDuration} onseek={(t) => seekTo(t, 'ui')} />
                 </div>
                 <span class="time">{formatTime(shownDuration || null)}</span>
               </div>
@@ -882,12 +877,12 @@
                   <input type="range" min="0" max="1" step="0.05" value={p.volume} oninput={onVolume} onchange={onVolumeEnd} aria-label="Volume" />
                 </label>
               </div>
-              <p class="muted tiny">Space play/pause · N next · P previous · Shift+S shuffle · Shift+R repeat · ← → seek · C comment</p>
+              <p class="muted tiny">Space play/pause · N next · P previous · Shift+S shuffle · Shift+R repeat · ← → seek · C comment · R region</p>
             </section>
 
             <MusicLyrics entry={cur} currentTime={loaded ? p.currentTime : 0} duration={shownDuration} {loaded} />
 
-            <MusicComments trackId={cur?.id ?? null} currentTime={loaded ? p.currentTime : 0} duration={shownDuration} {loaded} openSignal={commentSignal} />
+            <MusicComments trackId={cur?.id ?? null} currentTime={loaded ? p.currentTime : 0} duration={shownDuration} {loaded} openSignal={commentSignal} {regionRequest} onclose={() => (draftRegion = null)} />
 
             <section class="card" aria-labelledby="up-next-label">
               <div class="section-head">
@@ -1306,9 +1301,7 @@
   .track-title.big { font-size: 18px; font-weight: 600; }
 
   .seek-row { display: flex; align-items: center; gap: 10px; }
-  .seek { flex: 1 1 auto; min-width: 0; }
   .seek-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
-  .seek-col .seek { width: 100%; }
   .time { font-size: 12px; color: var(--text-secondary, #a9b0bb); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
   .controls-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
