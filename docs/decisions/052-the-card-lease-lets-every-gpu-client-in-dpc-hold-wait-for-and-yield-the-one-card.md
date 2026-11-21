@@ -26,17 +26,20 @@ session: "AI Studio group chat (group-60aff6110f02), 2026-11-21 — Whisper plan
 > **Decided by Mike so far, and only this:** at #20 he approved that llama-server and Strata
 > wait for Whisper or music to free the card, and that the embedder and other GPU-capable
 > parts join later. At #62 he chose a **smart GPU/CPU choice for dictation and
-> transcription**: a short file goes to the CPU when the card is busy and the line is long;
-> a long file, or a free card, uses the GPU (rule L12). The thresholds, the peer rule and
-> the unmeasured-CPU rule under L12 are CC's proposals. Everything else, including the six
-> items under **Open for Mike**, is a proposal. Decision 6 (dictation during a music job)
-> is **proposed, pending Mike's OK**, with sub-choices left to him. Anything marked
-> **[unverified]** was not confirmed.
+> transcription** (rule L12). At #68, #70 and #71 (2026-11-21) he decided: Whisper never
+> loads beside llama-server or Strata (#68); a peer may wait when the line is short and is
+> refused when it is long (#70); music unloads an idle server when nothing waits, amending
+> SPEC decision 32 (#70); the CPU may take files up to 5 minutes even while Strata is busy
+> (#71); a model stays in memory only while something waits for it (#71); peers do not use
+> the owner's CPU by default, with an optional setting (#71). Section **Decided by Mike**
+> lists them; **Open for Mike** keeps what is still open. Anything marked **[unverified]**
+> was not confirmed.
 >
 > **Second revision** (same day): answers Zcode #59, Ark #60 and #61, and Mike #62, checked
 > against `dev` HEAD `d80d76f7`. **Third revision:** answers Ark #64 on the GPU/CPU choice
 > (L12 compares times, counts the CPU's cold start and contention, and the CPU route is a
-> separate provider object), same HEAD.
+> separate provider object), same HEAD. **Fourth revision:** records Mike's decisions
+> #68–#71 with Ark #67 and Zcode #69, checked against `dev` HEAD `0b017ebd`.
 >
 > **ADR-051 N11** (how an external GPU job joins the card queue) is answered here as
 > "(b)+(c)" **only once Mike confirms**. He has not chosen N11. Until he does, this ADR
@@ -285,6 +288,9 @@ What those files assume (section 4 says what each lease row must do about it):
   parts must be able to join without a redesign.
 - **Mike's #49–#50 question.** Dictation that meets a busy card should queue, "the same
   mechanism as the model queue", rather than be refused.
+- **Mike's #68–#71 decisions.** No Whisper beside a local LLM; peers wait on the owner's
+  terms, as for inference; music takes the card from an idle server when nothing waits; the
+  CPU takes files up to 5 minutes; nothing stays in memory without a queue for it.
 - **The queue already works.** `_free_the_card` reaches a holder through a small
   duck-typed surface. A new kind of holder that speaks that surface costs a few edits, not
   a rewrite of a 5,555-line file other agents are editing.
@@ -444,16 +450,17 @@ them as "never retried".
 - `LeaseSkipped`: `background=True` and the card is not free right now. The client falls
   back to CPU.
 - `LeaseRefusedForPeer`: worded for a peer, and says **"right now"** so it does not read as
-  "never" (Ark #45, D3): "this node's GPU is busy with another job right now". It names no
-  alias, agent or chat (rule 7).
+  "never" (Ark #45, D3): "this node's GPU is busy with another job right now, for about N
+  min" (the estimate when known). It names no alias, agent or chat (rule 7). Since Mike
+  #70 a peer is refused only when its estimated wait is over the peer bound (L4).
 - `LeaseBusy`: `let_go_by_hand` on a busy lease. It names `who_uses()`.
 - `LeaseClosed`: the backend is stopping.
 
 **L4. Deadlines.** One deadline per acquire, fixed at acceptance (rule 5). A person's
 doors queue the way model starts do (decision 6, Mike #49–#50), with a bound of their own:
 the **dictation bound**, a new `[local_transcription] queue_wait_s`, proposed 600 s (Zcode
-#52; the alternative is to inherit `swap_wait_s`, 1800 s on this machine: decision 6,
-sub-choice A). **Open for Mike, items 3 and 6.**
+#52; the alternative is to inherit `swap_wait_s`, 1800 s on this machine). The shape is
+decided (Mike #62, #70, #71); the bound is **Open for Mike, item 6A**.
 
 **The queue's deadline is never longer than its caller's** (Ark #53): `wait_s = min(caller's
 remaining time − margin, bound)`, where the margin is the transcription's own expected time
@@ -469,7 +476,7 @@ bound plus the margin), so the local path and both Telegram paths are no longer 
 | agent tool `transcribe_audio_file` | L12 first; in the line: the turn hold's deadline and the tool timeout less the margin (`waiting_for_the_card_at_most`) | the tool timeout is 1800 s (`tools/transcribe.py:293`) |
 | music Transcribe | L12 first; in the line: `wait_s=None`, until `check()` raises (cancel) | a track's vocals are usually minutes long, so L12 mostly sends it to the line |
 | music jobs | `wait_s=None`: until `check()` raises (cancel) | |
-| peer (`p2p_coordinator.py:1398`) | 0: refused at once ("right now"), with the holder's ETA when known; no CPU route unless Mike says so (decision 6, sub-choice C) | rule 7, no place |
+| peer (`p2p_coordinator.py:1398`) | **Mike #70:** the peer bound `_a_peers_slot_wait_s()` (`llama_server_supervisor.py:1505`: the smaller of `swap_wait_s` and `[connection] remote_inference_timeout`, 1200 s by default, so 1200 s on this machine): an estimated wait over it → refused at once with the estimate; otherwise it waits in `_LEASE_LINE`, behind every owner's waiter, until that bound; no CPU route unless the owner's optional setting allows it (Mike #71) | the same bound a peer already has in the slot queue for inference (`in_the_slot_queue`, 1530) |
 | background transcription | L12: on the CPU twin when its estimate passes, otherwise skipped (`LeaseSkipped`) | rule 10 |
 | background, other (Whisper preload, embedder steady state) | never waits: `LeaseSkipped` | rule 10 |
 
@@ -497,11 +504,11 @@ refusal).
 - So a dictation stream cannot starve a music job or a llama-server start.
 
 **L5a. One order across the two lines** (Zcode #41, gap 2; mandatory with decision 6,
-Zcode #52). There are two lines in v1, `_LEASE_LINE` and `_CARD_QUEUE`; they share one
-clock, and **no waiter overtakes another in either direction**: a queued dictation is not
-starved by a series of server starts, and a server start is not starved by a stream of
-dictations. The one named exception (point 3) is a waiter that by decision 32 will never
-act, which would otherwise hold the line forever.
+Zcode #52). There are two lines, `_LEASE_LINE` and `_CARD_QUEUE`; they share one clock,
+and **no waiter overtakes another in either direction**: a queued dictation is not starved
+by a series of server starts, and a server start is not starved by a stream of dictations.
+Two named exceptions: a peer never goes ahead of an owner's waiter (rule 7), and a call the
+CPU twin takes is in no line at all.
 
 1. **One clock.** Every lease waiter draws `arrival = next(_CARD_ARRIVAL)` when it enters
    `_LEASE_LINE`, and every lease use draws one when it opens. A supervisor place has
@@ -518,22 +525,19 @@ act, which would otherwise hold the line forever.
      (bounded by the request's deadline; the refusal names it, as
      `_behind_a_place_refusal` does).
 3. **Who acts.** Only the earliest waiter that a holder blocks may mark it (ask it to let
-   go, or swap it). **One exception, decision 32:** a music lease whose only blockers are
-   supervisors does not act on them, and it does not hold up a later supervisor place
-   blocked by the same supervisor, which swaps as it does today. That is the one way a
-   server start overtakes a waiting music lease in v1, and it changes nothing for the music
-   job, which was waiting for a person's "Stop X" either way. Amending decision 32
-   (item 4) removes the exception.
+   go, or swap it). The decision-32 exception of earlier revisions is **gone** (Mike #70):
+   a music lease now acts on an idle supervisor like an owner's start (section 3.2), so it
+   no longer has to stand aside for a later server start.
 4. **The bound.** A waiter waits only for holders granted before it arrived and for
    waiters with a lower arrival; both sets are closed at its arrival (L5 for leases, rule 4
    `_stands_before_the_line` for supervisor holds). So a series of server starts that
    arrive after a waiting music lease cannot take the card before it: when the busy holder
    lets go, the music lease is granted first, and the starts then wait for the busy music
    job (Mike's #20 ask) up to their own deadlines.
-5. **Later (S9).** Once Whisper waits for supervisors, `_stands_before_the_line` (1202)
-   compares a hold with the lowest arrival across both lines, not only
-   `_CARD_QUEUE[0].arrival`. In v1 no lease that acts waits for a supervisor (point 3), so
-   that change is not needed before S9.
+5. **In the first slice now (S2).** Leases wait for supervisors (Whisper since Mike #68,
+   music since #70), so `_stands_before_the_line` (1202) compares a hold with the lowest
+   arrival across both lines, not only `_CARD_QUEUE[0].arrival`; otherwise a stream of
+   agent turns accepted after a waiting dictation would keep Strata busy for it.
 
 This also closes the window Ark #44 named: between a lease's `give_up_for` and the
 supervisor's next round, another lease cannot be granted unless it arrived earlier, and if
@@ -640,8 +644,8 @@ pending Mike's OK**).
   pair (Ark #53).
 - **One cell, not a rule** (Zcode #52): contender = a Whisper lease, holder = a **busy**
   music lease. No other pair shares by measurement in v1; each further shared cell needs
-  its own arithmetic and tests. Whisper beside llama-server stays the v1 asymmetry (2.1),
-  not a measured share, until S9.
+  its own arithmetic and tests. Whisper never shares with llama-server or Strata (Mike
+  #68).
 - **When.** Additionally, no earlier waiter in either line is blocked by that music lease
   (a co-grant must not add to an earlier waiter's wait).
 - **The arithmetic: declared peaks against total, a live reading may only veto** (Ark's
@@ -704,119 +708,120 @@ pending Mike's OK**).
   covered by a measured share for this contender. Among those, **idle cheap holders first**
   (`yield_cost="cheap"`: Whisper), then busy ones are waited for, each in `_CARD_ARRIVAL`
   order of the waiters. In v1 a co-living Whisper is in the way of every contender except
-  the shared cell itself, so the "not in the way" clause guards S9's later shares; it is
+  the shared cell itself, so the "not in the way" clause guards any later share; it is
   pinned by a test now.
 - **What it means for "one owner"** (Zcode #52): the invariant of one owner per model
   object (one Whisper object owns the pipeline through a reload) is untouched. What gives
   is the card's exclusivity, in one cell, with proof of headroom, visible as two holder
   rows. An idle music holder is still yielded as the matrix says; whether a fit should
   also spare an idle engine its stop is left open.
-- This pulls a fit check into S3 for the Whisper+music cell only. The general fit check
-  (Whisper beside llama-server) stays in S9; the CPU route moved to S3 with L12.
+- This pulls a fit check into S3 for the Whisper+music cell only. There is no general fit
+  check for Whisper beside llama-server: Mike #68 ruled that sharing out.
 
-**L12. The GPU/CPU choice for a transcription** (Mike #62, a product decision; restated
-after Ark #64 to compare times, not audio length; the numbers are proposals until the
-measurement below). Before a transcription takes a place in the line:
+**L12. The GPU/CPU choice for a transcription** (Mike #62 and #71, decided; restated after
+Ark #64 and #67 and Zcode #69 to compare times and to put the Strata check inside the
+choice). Before a transcription takes a place in the line, in this order:
 
 1. **The card is free, or L11 says `fits`** → the GPU, at once.
-2. **The card is busy and L11 says `does_not_fit` or `unknown`** → compare two estimates:
-   - **`gpu_wait`:** the busy holders' remaining time plus the remaining times of the
-     waiters ahead in the line (L10). Any unknown part makes it **long** (infinite for the
-     comparison). A running music job is unknown in v1 (L10), so it is long.
-   - **`cpu_estimate`:** what the CPU twin (section 3.1) would take, **cold or warm** (Ark
-     #64 §2):
-     - warm (the twin is loaded): `warm_s(audio_s)`, the measured inference time for that
-       length;
-     - cold (the twin is not loaded): `cold_load_s + first_call_s + warm_s(audio_s)`, the
-       measured load into RAM and the first call's warm-up added. For a 20 s dictation the
-       load dominates, so a cold short file goes to the CPU only when it pays for its load.
-     - `warm_s` is interpolated from measurements at two or more lengths (load dominates at
-       10 s, inference at 40 min), never extrapolated from one "seconds per minute" figure.
-     - **Contention** (Ark #64 §3): when a resident that computes on the CPU is **busy**
-       (Strata in a turn), there is no CPU route: the CPU twin would slow the very holder
-       the line waits for. When such a resident is idle, `cpu_estimate` is multiplied by
-       `[local_transcription] cpu_contention_factor` (proposed 2.0, to be measured). Music
-       engines are treated as not CPU-contended (GPU-bound) **[unverified: the
-       measurement includes the CPU load of a running YuE2 job]**.
+2. **The audio is longer than `[local_transcription] cpu_max_audio_s` = 300 s** (Mike #71:
+   "up to 5 minutes, easy") → the line; the CPU twin is not considered.
+3. **Is a CPU-computing engine busy?** The signal is explicit (Zcode #69): a resident
+   Strata child is busy when its alias has a live `accepted_request` hold in `_CARD_HOLDS`
+   (the registry the `_CARD_HOLD` contextvar's holds are entered into, 693–701), or a call
+   in flight (`_in_flight > 0`), the same test as `_busy_for_the_card` (2668). Not a guess
+   from timing. When it is busy, the CPU twin **is still allowed** for files within the
+   300 s cap (Mike #71, replacing the hard stop of the third revision), and its estimate is
+   multiplied by `[local_transcription] cpu_contention_factor`.
+4. **Compare times:**
+   - **`gpu_wait`:** the busy holders' remaining time plus the waiters ahead in the line
+     (L10); any unknown part makes it **long**. A running music job and a supervisor in a
+     turn are both unknown in v1, so both are long.
+   - **`cpu_estimate`:** the CPU twin's time for this file, cold (the twin is not loaded:
+     its load and first call added) or warm, interpolated from the measured lengths below,
+     times the contention factor from point 3 when it applies.
+   - **The CPU twin** when `cpu_estimate < gpu_wait` **and** `cpu_estimate <= cpu_max_s`.
+5. **Otherwise the line** for the GPU, bounded by the door's deadline (L4; `queue_wait_s`
+   for a person's doors), with the status line and a cancel.
 
-   **The CPU twin** when `cpu_estimate < gpu_wait` **and** `cpu_estimate <= cpu_max_s`
-   **and** `audio_s <= cpu_max_audio_s`. **Otherwise the line** for the GPU, bounded by the
-   door's deadline (L4; `queue_wait_s` = 600 s for a person's doors), with the status line
-   and a cancel.
-   - **`[local_transcription] cpu_max_s`, proposed 600 s = `queue_wait_s`.** Neither route
-     makes a person wait longer than the dictation bound: when the GPU wait is unknown, the
-     CPU is taken only if it finishes within the time the line would have been allowed.
-   - **`[local_transcription] cpu_max_audio_s`, proposed 1200 s (20 min), only as an upper
-     guard** (decision 6D). With `cpu_max_s` = 600 it binds only when the measured factor
-     reads better than 0.5× real time on a long file, which is exactly the case where a
-     factor taken on short files may be wrong. It is no longer the deciding rule: a 130 s
-     file whose CPU estimate is 260 s goes to the CPU against a 600 s GPU wait, and a 90 s
-     file stays on the GPU when the card frees in 10 s (Ark #64 §1).
-3. **Background transcriptions:** the same test, and when the CPU does not pass, skipped
-   (`LeaseSkipped`), as rule 10 skips today.
-4. **Peers:** refused at once with "busy right now"; no CPU route (decision 6C: no, Ark
-   #64 §7 agrees).
-5. **No measurement yet** (cold, warm at two or more lengths) → no CPU route; the line
-   (CC's proposal, Ark #64 §6 agrees). The figures are kept per machine and updated from
-   every CPU-twin run (warm or cold, by length).
-6. **Enough RAM:** a cold CPU route is taken only when available host RAM covers the twin
-   plus a margin (`psutil`); otherwise the line (proposal).
+Around the rule:
 
-**Cold or resident: the choice and why** (Ark #64 §2). The estimate always counts the load
-when the twin is cold, so a short file never goes to a cold CPU twin unless that is still
-quicker than the line. Once the twin has loaded for a call, **it stays loaded while the
-same holder keeps the card**, and its own idle timer starts only when that holder lets go:
-a second dictation during the same long music job then pays only the warm cost. The twin is
-never loaded speculatively just because the card became busy (3 GB of RAM for a dictation
-that may never come). Residency mostly coincides with music jobs, because a busy Strata
-turns the CPU route off.
+- **Background transcriptions:** the same test; failing it, skipped (`LeaseSkipped`).
+- **Peers:** not on the CPU twin unless the owner turns on the optional setting (Mike #71,
+  6C, decided; S5 puts it next to the device selector). Otherwise they get L4's peer bound.
+- **Nothing measured yet** → no CPU route; the line (Ark #64 §6).
+- **Enough RAM:** a cold CPU route is taken only when available host RAM covers the twin
+  plus a margin (`psutil`); otherwise the line (proposal).
+- **No switch in mid-flight** (Zcode #69): the choice is final for that call. A dictation
+  that started on the CPU twin stays there even if the card frees a second later; only new
+  calls take the GPU. A call sent to the line does not later jump to the CPU.
+- **`cpu_max_s`, proposed 600 s:** neither route makes a person wait longer than the
+  dictation bound. With the measured factor of about 1.0–1.1× real time, the 300 s audio
+  cap binds first when nothing contends.
+- **`cpu_contention_factor`, proposed 1.0 until measured.** Mike's #71 and the logs
+  (`~/.dpc/logs/dpc-client.log*`: the Whisper alias ran with `device=cpu` on 2026-11-14 to
+  11-20, e.g. "Whisper model loaded in 1.0 seconds (device=cpu)" on 2026-11-20) say a 5-minute
+  file on the CPU beside Strata works; a factor of 2.0 would push a 300 s file (≈306 s) past
+  `cpu_max_s` and contradict him. The measurement Ark #67 and Zcode #69 ask for (a Strata
+  turn's tokens per second and length with and without the twin running) sizes it.
 
-**The measurement** (being run now by another agent; numbers to be filled in here):
+**Residency** (Mike #71: "keep a model in memory only if there is a queue for it"). The CPU
+twin has **its own `idle_unload_s`**, the mechanism already built and pinned in step 1
+(Ark #67, Zcode #69), with a **short default, proposed 60 s**; it is never loaded
+speculatively, and its life is not tied to "the card is held" (which would add a second
+unload trigger and a mid-dictation question). The first call after an idle period pays the
+cold start (≈9 s, below). Mike's sentence also covers the GPU Whisper alias, whose idle
+unload shipped in step 1 at 300 s; its default is an open follow-up for Mike (Open for
+Mike, item 7). Nothing in code changes here.
 
-| Figure | turbo on this CPU | Notes |
+**The measurement** (CC's subagent, reported at #66: Whisper turbo on the CPU of this
+machine, a Ryzen 9950X, Mike's own Telegram voice message; not re-measured here):
+
+| Audio | CPU time | Notes |
 |---|---|---|
-| `cold_load_s` (load into RAM) | [pending] | |
-| `first_call_s` (warm-up of the first call) | [pending] | |
-| `warm_s` at 10 s of audio | [pending] | load-free inference |
-| `warm_s` at 60 s of audio | [pending] | |
-| `warm_s` at ≥10 min of audio | [pending] | |
-| host RAM of the twin | [pending] | ~3 GB expected (fp32, from the parameter count) |
+| 10 s | 11 s warm, ≈20 s cold | so load + first call ≈ 9 s |
+| 30 s | 22 s | |
+| 60 s | 53 s | |
+| 120 s | 104 s | |
+| 300 s | 306 s | ≈1.0–1.1× real time (Ark #67) |
+| host RAM | ≈4 GB, up to ≈10 GB on long recordings | (#66) |
 | CPU load of a running YuE2 job | [pending] | decides whether music counts as CPU-contended |
-| slowdown of a Strata turn with the twin running | [pending] | sizes `cpu_contention_factor` |
+| a Strata turn with the twin running | [pending] | sizes `cpu_contention_factor` |
 
-The CPU route holds **no card lease** and touches no VRAM. The choice in point 2 is final
-for that call: a call sent to the line does not later jump to the CPU, and a CPU call takes
-no place.
+The CPU route holds **no card lease** and touches no VRAM.
 
 ### 2. Integration
 
 #### 2.1 Who excludes whom (v1)
 
-The guiding rule: a lease is visible to everyone, but who waits or yields for whom follows
-Mike's words and the cost of a reload.
+The guiding rule: a lease is visible to everyone, and who waits or yields for whom follows
+Mike's words (#20, #68, #70) and the cost of a reload.
 
 | contender \ holder | llama-server | strata | music lease | whisper / embed / ner lease |
 |---|---|---|---|---|
 | llama-server start | arithmetic, as today | excludes | **excludes: waits while busy, yields while idle** | **excludes: waits while busy, yields while idle** |
 | strata start | excludes | excludes | **same** | **same** |
-| music start | excludes: waits, **never stops it** (decision 32 kept; L5a point 3) | same | music engines: `exclusive()` as today; their leases agree | **excludes: waits while busy, yields while idle** |
-| whisper load | **not excluded in v1** (loads beside, as today, and now says so in the log) | **not excluded in v1** | **busy: the one shared cell, beside if it provably fits (L11), else L12: the CPU twin when its estimate beats the GPU wait, otherwise the lease line; idle: yields** | same holder: re-entrant; another whisper alias: excludes |
+| music start | **excludes: waits while busy; idle and nothing waiting → swaps it out like an owner's start, with swap on** (Mike #70, SPEC decision 32 amended) | same | music engines: `exclusive()` as today; their leases agree | **excludes: waits while busy, yields while idle** |
+| whisper load | **excludes (Mike #68): busy → L12 (CPU twin or the line); idle → L12 first, then a swap with swap on (item 1a, proposed)** | **same** | **busy: the one shared cell, beside if it provably fits (L11), else L12; idle: yields** | same holder: re-entrant; another whisper alias: excludes |
 | embedder / ner (background) | granted only if the card is free, otherwise CPU | CPU | CPU | CPU |
 
-**Why Whisper does not wait for supervisors in v1.**
+**Whisper waits for supervisors** (Mike #68: "no, it must not load beside").
 
-- Making it wait would turn dictation during an agent turn into a wait of up to
-  `swap_wait_s` (1800 s on this machine).
-- Swapping an idle Strata out for a 3 GB transcription drops parked conversations and
-  costs a long reload.
-- Mike's decision covers the other direction: supervisors wait for Whisper.
-- When Whisper loads beside a supervisor it logs one INFO line (Zcode #41): `card: <display>
-  loaded beside <engine> '<alias>' (v1: Whisper does not wait for local LLM engines)`, and
-  its holder row carries `beside`. Today that exception is invisible.
-- The later fit check (slice S9) replaces this exception: Whisper shares with llama-server
-  only when the measured free VRAM allows (L11's arithmetic), and otherwise falls back to
-  CPU.
-- **Open for Mike, item 1:** confirm this asymmetry for v1, or make it strict.
+- The whisper × supervisor exclusion is symmetric in the first slice. The v1 asymmetry of
+  earlier revisions, its "loaded beside" log line and its `beside` row are gone; `beside`
+  stays only for L11's one shared cell.
+- A busy supervisor (a turn in progress) is waited for through L12: a file up to 300 s
+  goes to the CPU twin (Mike #71), a longer one takes the line.
+- **The consequence Zcode #69 names:** a dictation longer than the CPU allowance (300 s
+  audio) during a long agent turn takes the line, and if the turn holds the card past the
+  dictation bound (600 s proposed) the dictation is refused.
+- **An idle supervisor (item 1a, proposed, pending Mike):** L12 first (a file up to 300 s
+  goes to the CPU twin, so a dictation never costs the LLM its reload or Strata its parked
+  conversations); a longer file, with the swap on and nothing waiting, swaps the idle
+  supervisor out exactly as an owner's start or a music job does (section 3.2). With the
+  swap off it waits, like an owner's start today.
+- The self-wait case is now in the first slice: an agent turn on Strata whose tool
+  transcribes stands on Strata, so its lease would wait for its own turn. L12 sends a file
+  up to 300 s to the CPU twin; a longer one is refused at once (`LeaseWouldWaitOnItself`).
 
 **The swap switch.**
 
@@ -828,7 +833,9 @@ Mike's words and the cost of a reload.
   3 GB in seconds; stopping an idle music engine costs the next job an engine boot and a
   5–9 GB model reload **[unverified: neither reload time is measured here]**. Neither
   loses anyone's work.
-- **Open for Mike, item 2.**
+- **Open for Mike, item 2.** It now interacts with Mike #70: music swapping an idle
+  supervisor **is** gated by `swap_when_idle` (owner-start rule), while a music engine or
+  Whisper yielding to another lease is not (if item 2 stays at its default).
 
 #### 2.2 How llama-server and Strata start honouring leases
 
@@ -886,6 +893,18 @@ All in `llama_server_supervisor.py` unless noted. Small edits.
     then idle cheap leases, then the rest. Only holders in the contender's way are in the
     list at all (`_blocking_holders` already filters by `_excludes`; a measured share for
     this contender removes its co-holder too).
+12. **A lease contender swaps an idle supervisor** (Mike #70 for music; item 1a for
+    Whisper). A module function, `swap_out_for_a_lease(holder, lease, stop_bound)`, runs
+    the owner-start path for a contender that is not a supervisor: the same conditions as
+    `_free_the_card` (swap on, the contender first by L5a, `holder._busy_for_the_card(state)`
+    False, no description-borrow refusal), then `holder._begin_swap_drain(lease)` in the
+    stretch of the busy test, `stop_by_hand(holder, why="swap")` under `_SAVE_BY` so the
+    owner's live conversation is saved before the stop (as
+    `test_a_swap_saves_the_owners_live_conversation_before_the_stop.py` pins), and the
+    `_note_swap` words and toast, with Strata's parked conversations said dropped. The
+    lease waits for the stop as `_wait_for_the_stop` does.
+13. `_stands_before_the_line` compares with the lowest arrival across both lines (L5a
+    point 5).
 
 ##### 2.2.1 The lease as a holder: its full duck surface
 
@@ -1108,8 +1127,8 @@ touched in 2.2:
     (the precedent of `b9725990`); its result says `device: "cpu"`.
   - **No card lease:** a CPU device builds none (section 3.1, first bullet), so L11, the
     lines and "who holds the card" do not apply to it, and its load and unload never touch
-    the lease. Its RAM is guarded by L12 point 6. Fp32 turbo is about 3 GB of host RAM
-    **[unverified: from the parameter count, ~0.8 B × 4 bytes; measured below L12]**. On
+    the lease. Its RAM is guarded by L12's RAM check: about 4 GB, up to about 10 GB on long
+    recordings (measured, #66). On
     macOS, where the GPU route is MLX or MPS, the twin is the transformers CPU pipeline
     **[unverified on macOS]**.
   - **Selection:** the GPU alias's `transcribe` runs L12 at entry. When L12 says CPU it
@@ -1119,19 +1138,17 @@ touched in 2.2:
     `service.transcribe_audio` (the owner's dictation, voice messages, both Telegram
     paths), the received-voice cascade, the agent tool and music Transcribe. A configured
     `device: cpu` alias later in `provider_priority` is reached the same way.
-  - **Residency:** the twin stays loaded while the holder it was loaded for keeps the card,
-    and its idle timer starts when that holder lets go (L12, "Cold or resident").
+  - **Residency:** its own `idle_unload_s`, short (proposed 60 s), never loaded
+    speculatively (L12, "Residency"; Mike #71).
+  - **Peers:** the twin serves a peer only when the owner turns on the optional setting
+    beside the device selector (Mike #71; S5).
   - **The measured figures** (cold, warm by length) are recorded per machine after every
     twin run and read by L12; until there are any, L12 does not route to the CPU. The
     measurement joins step 5 of the Whisper plan.
-- **Later (S9, not in the first slice):** `excludable=True`, Whisper waiting for
-  supervisors. With the CPU route already in S3, S9 still needs three things: L12 applied
-  against supervisor holders (a short file beside a busy local LLM goes to the CPU instead
-  of loading beside); `_stands_before_the_line` across both lines (L5a point 5); and the
-  self-wait case, where a turn on a local engine whose tool would wait for that engine
-  goes to the CPU instead of `LeaseWouldWaitOnItself` when L12 allows it. Whether Whisper
-  beside llama-server becomes a second measured shared cell is a separate choice with its
-  own arithmetic and tests (Zcode #52: one cell per decision).
+- **What was S9 is in the first slice** (Mike #68): Whisper waits for supervisors, L12
+  applies against them, the self-wait case goes to the CPU twin or is refused, and
+  `_stands_before_the_line` uses one order (S2). No second shared cell is planned: Mike
+  ruled out Whisper beside a local LLM.
 
 #### 3.2 Music engines (supervised children; holder and contender)
 
@@ -1183,7 +1200,15 @@ touched in 2.2:
     - The frontend follows: `musicCreate.ts:145` shows holders for a `running` job with a
       `card_wait` too.
   - A busy lease holder (Whisper) is waited for. An idle one is yielded (unloaded).
-  - A supervisor holder is waited for and never stopped (decision 32).
+  - A busy supervisor holder is waited for. **An idle one, with nothing waiting, is swapped
+    out** (Mike #70, amending SPEC decision 32: "if the queue is empty and the server just
+    idles, unload it and take the card; the principle is simple"). It is the owner-start
+    rule, `swap_out_for_a_lease` (2.2 item 12): **gated by `swap_when_idle`**, the same as
+    an owner's start today; the owner's live conversation is saved before the stop; a
+    stopped Strata drops its parked conversations and the swap note says so. With the swap
+    off, the job waits for a person's Stop X, as before. The SPEC file
+    (`ai-studio/experiments/music-player/SPEC.md`) needs the decision-32 amendment; this
+    record does not edit it.
   - A failed read of the holders is no longer "free": the lease registry is in-process and
     has no read that can fail.
 - `MusicEngines.exclusive` stays. Its stops of the other idle music engine release that
@@ -1222,24 +1247,24 @@ far more free than Whisper's peak plus the music growth left) and Whisper loads 
 once, as today, now named in `card_holders()` and the log **[unverified: the weights figure
 is from general knowledge; S3 reads it from `model_size_bytes`]**.
 
-**What S1+S3+S4 do not change** (Ark #44, finding 5), said plainly for Mike:
+**The first slice is now S1+S2+S3+S4** (Mike #68). Whisper must not load beside a local
+LLM, so supervisors must honour leases (S2) and Whisper must wait for supervisors in the
+same slice; S2 cannot trail S3. What that adds to the first slice:
 
-- Whisper **still loads beside llama-server and Strata**. It waits only for music and for
-  other Whisper aliases.
-- So open point 1's "Whisper no longer loads beside a model: refuse / wait / load anyway"
-  is **not** answered by S3. "Refuse" or "wait" need the lease to wait for supervisors,
-  which is S9 (`excludable=True`). The CPU route that keeps agents on a local engine from
-  meeting `transcribe_audio_file` refusals in between is already in S3 (L12). S2 makes the
-  other direction work (supervisors wait for Whisper).
-- L12's CPU route in S3 applies against a busy **music** holder only; against a busy local
-  LLM, Whisper still loads beside it until S9.
+- S2 in full (2.2 items 1–13), in the 5,555-line supervisor file other agents edit;
+- Whisper excluded by and waiting for supervisors, with L12 and the CPU twin as the escape;
+- the self-wait case of an agent's own transcription tool;
+- music swapping an idle supervisor (Mike #70).
+
+The earlier open point "Whisper no longer loads beside a model: refuse / wait / load
+anyway" is answered: it waits, or the CPU twin takes a file up to 5 minutes.
 
 #### 3.4 Embedder, then GLiNER (S6, S7)
 
 - **Device mode.** New value `lease` for `[memory] embedding_device` and
   `[knowledge_graph] gliner_device`. Proposal: `auto` comes to mean `lease` on CUDA. This
-  is a further decision for Mike, outside the six below (no default is proposed beyond
-  the one stated).
+  is a further decision for Mike, listed under Open for Mike as not numbered (no default
+  is proposed beyond the one stated).
 - **Embedder.**
   - `EmbeddingProvider` keeps a CPU model, plus a GPU model loaded only inside
     `lease.use_blocking("index rebuild"|"memory search", background=...)`.
@@ -1262,8 +1287,9 @@ is from general knowledge; S3 reads it from `model_size_bytes`]**.
 **Logs, one INFO line per transition, no repeats while polling:**
 
 - `card: <display> granted (<what>)`
-- `card: <display> loaded beside <holder display> (<why: fits N MiB | v1: Whisper does not
-  wait for local LLM engines>)`
+- `card: <display> loaded beside <music display> (fits: N MiB)`, only for L11's one shared
+  cell
+- `card: decided without knowledge of the card (<reason>): <decision>` (section 5)
 - `card: <display> waits for <holder display> (<busy: who_uses | idle, asking it to let go
   | yielding>); wait <N s | about N min (estimate) | unknown>, up to <bound | until
   cancelled>`
@@ -1358,11 +1384,28 @@ must be checked against what those files assume:
   - **A foreign process over 2048 MiB** becomes a synthetic holder: `engine "foreign"`,
     `alias "pid 23200 python.exe (ComfyUI?)"`, busy, never yieldable. Contenders wait,
     bounded, and are refused naming it.
-  - **A failed read is "unreadable", never "free".** Background leases are refused (CPU),
-    **and the refusal logs its reason** ("background lease refused: the card probe could not
-    be read: <error>"), so "CPU instead of GPU" never looks like chance (Ark #45, D5).
-    Foreground leases go ahead with a WARNING naming the failure. **Open for Mike, item
-    5:** fail closed for foreground too?
+  - **Where the readings come from** (Mike #70: "how can that fail? the agent map already
+    collects RAM and VRAM"). The agent map reads the same helpers, and the probe reuses
+    them instead of spawning anything new:
+    - the card's free and total VRAM in the agent map (`vram_free_mib`,
+      `vram_total_mib`) come from `commit_memory.read_vram_mib()` (135), which calls
+      `_free_vram_mib` / `_total_vram_mib`, i.e. nvidia-smi, at most once per
+      `_VRAM_READING_TTL_S` = 30 s (130). L11 reads through it; the lease module
+      invalidates that cache on every grant and release, so a reading never predates the
+      last change of holder (proposal);
+    - per-process VRAM (`peak_vram_mib`) comes from the process registry's sampler, every
+      `SAMPLE_INTERVAL_S` = 2 s (268), through `_default_vram_reader` (PDH on Windows, NVML
+      on Linux), which never spawns nvidia-smi (`process_registry.py:36-40`); S8 reads the
+      sampler's latest full reading instead of calling the reader again.
+  - **What can still fail, honestly:** no NVIDIA card or no nvidia-smi (AMD, Intel,
+    macOS); nvidia-smi timing out (10 s) during a driver hang or reset; output it cannot
+    parse (a driver/NVML mismatch); a probe refused during the backend's stop
+    (`ProcessRegistryClosed`, unless `while_stopping`); PDH or NVML unavailable for the
+    per-process figures. Then the reading is "unreadable", never "free": background leases
+    are refused (CPU), and **every decision taken without a reading logs that it was taken
+    without knowledge of the card**, with the reason (Ark #67, Zcode #69): "card: decided
+    without knowledge of the card (<reason>): <decision>". Foreground leases go ahead with
+    that line at WARNING.
   - **The 90 s claim, in one sentence** (Zcode #41): a lease that is granted counts its
     `vram_mib` as in use, in the fit arithmetic and in the probe's "is it ours" test, from
     its grant until 90 s after its load has finished, because a fresh load's memory is not
@@ -1451,10 +1494,14 @@ Unify-versus-replace of `_CARD_CLAIMS` is a separate sub-choice (section 2.3).
 - **Negative:** `service.transcribe_audio` and the Telegram paths gain a deadline they do
   not have today; a transcription that used to wait for a slow provider indefinitely now
   ends at the bound.
-- **Negative:** a **new refusal for peers** while music runs and Whisper does not fit.
-  Today a peer would load Whisper beside the music engine.
-- **Negative:** S1+S3+S4 still let Whisper load beside llama-server and Strata (section
-  3.3); only S9 changes that.
+- **Negative:** a peer whose estimated wait is over the peer bound (1200 s here) is
+  refused while the card is busy; one under it waits, behind the owner's waiters (Mike
+  #70). Today a peer would load Whisper beside the music engine.
+- **Negative (Mike #68, Zcode #69):** Whisper no longer loads beside a local LLM. A
+  dictation over 5 minutes of audio during a long agent turn waits in the line and is
+  refused if the turn outlasts the dictation bound. Shorter files go to the CPU twin.
+- **Negative:** the first slice grows to S1+S2+S3+S4, and S2 changes the 5,555-line
+  supervisor file other agents edit.
 - **Negative:** with swap off, supervisors now take queue places when only leases block
   them. That path existed only with swap on until now.
 - **Negative (Ark #44):** with swap off, **background calls start being skipped** while a
@@ -1463,8 +1510,10 @@ Unify-versus-replace of `_CARD_CLAIMS` is a separate sub-choice (section 2.3).
   background call never meets that check. Mike would see it as background work in agent
   chats being skipped with the reason "a request is waiting in the queue for the card".
   Own test (Confirmation, 16).
-- **Negative:** a music job behind an idle **supervisor** still waits until a person
-  presses Stop X, because supervisors never idle-stop (SPEC decision 32, kept in v1).
+- **Negative (Mike #70):** with the swap on, a music job swaps out an idle llama-server or
+  Strata when nothing waits; a stopped Strata drops its parked conversations (the live one
+  is saved first), and the agent's next turn pays the reload. With the swap off, music
+  still waits for a person's Stop X.
 - **Negative:** fp16-GPU and bf16-CPU embedding vectors differ slightly (cosine
   0.998–1.000 measured) and the cache key has no device in it.
 - **Neutral:** S1 to S4 add a new module and touch the supervisor in a few places, but not
@@ -1484,14 +1533,15 @@ Unify-versus-replace of `_CARD_CLAIMS` is a separate sub-choice (section 2.3).
   - Invariant L2: a waiter holds nothing, and a granted holder never waits for the card.
     So "llama-server waits for Whisper while Whisper waits for llama-server" cannot
     happen.
-  - In v1, Whisper does not wait for supervisors at all. A waiting music lease holds
-    nothing.
+  - Whisper and music now wait for supervisors (Mike #68, #70), but as waiters they hold
+    nothing (L2).
   - The one way to violate L2 is a request that stands on X (`_CARD_HOLD`) and waits for
     something that waits for X. That is caught at once by `LeaseWouldWaitOnItself` /
     `_this_request_holds`, for a lease holder and a supervisor holder alike (2.2 item 4).
-    Examples: an agent turn on Strata whose tool would wait for Strata (only once S9 makes
-    Whisper excludable; Zcode notes this makes Q1 unreachable through Whisper in v1); a
-    tool that holds a Whisper use and then calls the LLM inside the same tool.
+    Examples: an agent turn on Strata whose tool transcribes, so would wait for Strata (in
+    the first slice now; L12 sends a file up to 300 s to the CPU twin, a longer one is
+    refused at once); a tool that holds a Whisper use and then calls the LLM inside the
+    same tool.
   - **The supervisor variant through music** (Zcode #41): an agent on Strata that proposes
     a music job and waits for it. The job's lease waits for Strata (decision 32), and the
     turn holds Strata. The contextvar does **not** reach the job, because the runner's
@@ -1535,18 +1585,15 @@ Unify-versus-replace of `_CARD_CLAIMS` is a separate sub-choice (section 2.3).
 - **Starvation.**
   - Both lines are FIFO on one clock (L5a). L5 stops new uses of a granted lease while
     someone waits for it.
-  - Music behind a **supervisor**: the music job waits for an idle llama-server until a
-    person presses Stop X, because supervisors never idle-stop. That is today's behaviour
-    under decision 32. Amending decision 32 (swap on: music yields an idle supervisor) is
-    **Open for Mike, item 4**.
-  - A later supervisor start may swap a supervisor that a music lease is waiting for (L5a
-    point 3, the decision 32 exception). The music job loses nothing by it: it waits for a
-    person's Stop X in both cases.
+  - Music behind a **supervisor**: a busy one is waited for; an idle one is swapped out
+    with the swap on (Mike #70). With the swap off the job waits for a person's Stop X.
+  - A dictation behind a busy supervisor waits, or goes to the CPU twin (Mike #68, #71).
   - A series of server starts cannot overtake a music lease that waits for a lease holder
     (L5a point 4; Confirmation, 3b).
 - **Ping-pong.** Dictation, then llama-server, then dictation: each swap costs an unload or
-  reload of Whisper, which is cheap. Llama-server is never stopped for Whisper in v1. A
-  safety net like `_MAX_SWAP_ROUNDS` applies to lease contenders too.
+  reload of Whisper, which is cheap. A llama-server is stopped for Whisper only for a file
+  over 5 minutes with the swap on and nothing waiting (item 1a), and for music under the
+  same conditions. A safety net like `_MAX_SWAP_ROUNDS` applies to lease contenders too.
 - **Background calls.** `background=True` never queues, waits or yields (rule 10 analog).
   The embedder's steady state and the Whisper preload are background. LLM background calls
   keep rule 10 unchanged, except for the swap-off case in Negatives.
@@ -1563,12 +1610,13 @@ Unify-versus-replace of `_CARD_CLAIMS` is a separate sub-choice (section 2.3).
 - **P2P peers using our Whisper.**
   - `p2p_coordinator.handle_transcription_request` must wrap the call in `serving_a_peer`
     (it is not wrapped today, line 1398).
-  - A peer lease takes no place and does not wait (rule 7). It is granted if the card is
-    free, if only idle cheap leases stand in its way, or if L11 finds a fit beside busy
-    music.
+  - A peer lease waits only within the peer bound (L4, Mike #70), behind every owner's
+    waiter; it is granted at once if the card is free, if only idle cheap leases stand in
+    its way, or if L11 finds a fit beside busy music. An estimate over the bound is
+    refused at once; an unknown estimate waits up to the bound (proposal, item 8).
   - Yielding an idle music engine for a peer happens only on the owner's terms (swap on,
     nothing queued, nothing busy, as in `_why_a_peer_may_not_swap`).
-  - The refusal is worded for a peer and says "right now".
+  - The refusal is worded for a peer, says "right now" and gives the estimate when known.
 - **Hand-over during a reload.** One lease object follows the model, never two. Test that
   `hand_over_to` keeps a single registry entry.
 - **`on_yield` that lies.** A client that returns `let_go` without freeing memory is caught
@@ -1615,9 +1663,9 @@ New test files:
    a waiting music lease; (b) **a series of server starts does not starve a waiting music
    lease** (Zcode #41): music waits for a busy Whisper, three llama-server/Strata starts
    arrive after it, Whisper lets go, music is granted first, the starts then wait for the
-   busy music job and are refused naming it at their deadlines; (c) the decision 32
-   exception: a music lease waiting only for an idle supervisor does not hold up a later
-   supervisor start that swaps that supervisor.
+   busy music job and are refused naming it at their deadlines; (c) a waiting music lease
+   that is first in line swaps an idle supervisor itself (Mike #70) and a later supervisor
+   start does not overtake it.
 4. `test_a_transcription_during_a_running_yue2_job_waits_and_names_the_holder.py`: **the
    Done-when**, with the reading faked to "does not fit"; plus the reverse (a music job
    yields an idle warm Whisper and waits for a busy one, `card_wait.holders` naming
@@ -1630,8 +1678,11 @@ New test files:
    _live_claims()` and `card_holders()` rows equal the old rows plus `kind`.
 7. `test_a_background_lease_never_queues_and_never_yields.py`: the Whisper preload and the
    embedder fake give `LeaseSkipped` while anything holds the card or someone waits.
-8. `test_a_peer_lease_takes_no_place_and_is_refused_in_a_peers_words.py`: assert the text
-   contains no alias, agent or conversation ids, and says "right now".
+8. `test_a_peer_lease_waits_within_the_peer_bound_and_is_refused_beyond_it.py` (Mike #70):
+   the bound is `_a_peers_slot_wait_s()`; an estimate under it waits behind every owner's
+   waiter and is granted; over it, refused at once; an owner's request arriving later
+   goes ahead of the waiting peer; the refusal contains no alias, agent or conversation
+   ids, says "right now" and gives the estimate.
 9. `test_a_lease_that_would_wait_on_its_own_request_is_refused_at_once.py`: inside
    `card_held_for(alias, "accepted_request")` and the use-carries-hold case; **and the
    supervisor-holder variant** (Zcode #41): a turn on Strata whose code waits for a lease
@@ -1678,8 +1729,11 @@ New test files:
     music lease → no co-grant; the music lease's busy, yield and stop are unchanged by the
     co-holder; a peer or background call that does not fit is refused at once; no other
     pair (Whisper × llama-server, music × Whisper) is ever co-granted by measurement.
-19. `test_whisper_beside_a_local_llm_engine_says_so.py` (Zcode #41): v1 load beside
-    llama-server logs the "loaded beside" line once and sets `beside`.
+19. `test_whisper_never_loads_beside_a_local_llm_engine.py` (Mike #68): with llama-server
+    or Strata on the card, a Whisper load never shares it; busy → L12 (a 60 s file to the
+    CPU twin, a 400 s file to the line); the self-wait of an agent's own tool → CPU twin
+    for 60 s, refused at once for 400 s; no "loaded beside" line is ever written for a
+    supervisor.
 20. `test_a_queued_transcription_outlives_no_caller.py` (S3 integration): the queue's
     deadline is `min(caller's remaining − margin, bound)` for the owner's door, the agent
     tool (1800 s tool timeout) and a Telegram call; `service.transcribe_audio` ends at its
@@ -1730,13 +1784,15 @@ New test files:
     line whatever the estimate; nothing measured → the line; too little RAM for a cold
     twin → the line; background passing → CPU, failing → `LeaseSkipped`; a peer → refused
     at once, never CPU.
-31. `test_a_cold_cpu_twin_counts_its_load_and_a_warm_one_does_not.py` (Ark #64 §2): with a
-    long load and a 20 s file, a cold twin loses to a short GPU wait and a warm twin wins;
-    after one twin run during a music job the twin stays loaded until that holder lets go,
-    then its idle timer runs; the twin is never loaded because the card became busy.
-32. `test_a_busy_strata_turns_the_cpu_route_off.py` (Ark #64 §3): a busy Strata resident →
-    no CPU route, the line; an idle Strata resident → the estimate is multiplied by
-    `cpu_contention_factor`; a busy music holder → no penalty.
+31. `test_a_cold_cpu_twin_counts_its_load_and_a_warm_one_does_not.py` (Ark #64 §2, Mike
+    #71): with a long load and a 20 s file, a cold twin loses to a short GPU wait and a
+    warm twin wins; the twin unloads after its own `idle_unload_s` whatever holds the
+    card; it is never loaded because the card became busy.
+32. `test_a_busy_strata_lets_short_files_on_the_cpu_with_the_contention_factor.py` (Mike
+    #71, Zcode #69): "busy" is read from a live `accepted_request` hold in `_CARD_HOLDS`
+    or `_in_flight`; a busy Strata and a 120 s file → the CPU twin, estimate × factor; a
+    busy Strata and a 400 s file → the line; the order of the checks is the one in L12; a
+    call started on the CPU stays there when the card frees mid-run.
 33. `test_the_cpu_twin_is_its_own_provider.py` (Ark #64 §4): the twin is a separate
     `local_whisper` object with `device: "cpu"`, no lease, its own `model_loaded`, lock and
     idle timer; a GPU alias's hand-over moves only the GPU model state; `RoutedToCpu` sends
@@ -1745,6 +1801,15 @@ New test files:
 34. `test_a_running_music_jobs_eta_is_unknown_until_it_has_progress.py` (Ark #64 §5): a
     running YuE2 job with only per-variant progress → ETA unknown (long); a queued job →
     the text estimate, marked as an estimate; an instrumental never reads as "almost done".
+35. `test_music_swaps_out_an_idle_supervisor_when_nothing_waits.py` (Mike #70): swap on,
+    an idle Strata, empty lines → the music lease marks it, the live conversation is saved
+    before the stop, the swap note says the parked conversations are dropped, the job
+    runs; a busy Strata → waited for; another waiter ahead → no swap; swap off → the job
+    waits and nothing is stopped.
+36. `test_the_card_probe_reuses_the_agent_maps_readings.py` (Mike #70): L11 and S8 read
+    `read_vram_mib` and the sampler, and spawn no nvidia-smi of their own; the cache is
+    invalidated on a grant; a reading that fails writes "decided without knowledge of the
+    card" with its reason (Ark #67, Zcode #69).
 
 Compliance checks beyond tests:
 
@@ -1781,23 +1846,23 @@ Compliance checks beyond tests:
 
 ## Implementation Status
 
-Nothing is built. Recommended order: S0, then S1, then S3 and S4 together (they meet the
-Whisper card's Done-when), then S2 (Mike's "llama-server and Strata wait"), then S5–S10.
-S2 could be pulled ahead of S3 if Mike wants supervisors honouring leases first; it changes
-the 5,555-line file, so land it after the Whisper editing settles.
+Nothing is built. Recommended order (Mike #68 made S2 part of the first slice): S0, then
+S1, then S2, S3 and S4 together (they meet the Whisper card's Done-when and keep Whisper
+off a local LLM's card), then S5–S8 and S10. S2 changes the 5,555-line file, so it is
+coordinated with the agents editing it rather than postponed.
 
 | # | Commit | Touches | Proves | Status |
 |---|---|---|---|---|
-| S0 | docs: this ADR (the design proposed an ADR-044 amendment; this record carries the matrix, L1–L11 and the six decisions instead), revised after reviews #41, #44, #45 | `docs/decisions/052-…md` | — | This commit |
+| S0 | docs: this ADR (the design proposed an ADR-044 amendment; this record carries the matrix, L1–L12 and the decisions instead), revised after reviews #41–#69 and Mike #68–#71 | `docs/decisions/052-…md` | — | This commit |
 | S1 | feat(card-lease): lease registry, lease line, one order across both lines (L5a), refusals, wait estimate; `card_holders`/`card_queue` include lease rows through the hook (supervisor rows first, `until_cancelled`); `card_holder()` stays supervisor-only | new `managers/card_lease.py`; `llama_server_supervisor.py` (`_LEASE_HOLDERS`, `_LEASE_WAITERS`, `_live_holders`, `card_holders`, `card_queue`); `tests/conftest.py` | tests 1–3, 6–8, 14 with fake clients only | Pending |
-| S3 | feat(whisper): the local model holds a card lease, yields by unloading when idle (`yield_card`, releasing only when the unload ran), loads beside busy music only in the one shared cell when it provably fits (L11), otherwise chooses the CPU twin when its estimate beats the GPU wait (L12, Mike #62, Ark #64) or queues before `_load_lock`; the CPU twin is a separate `local_whisper` provider with `device: cpu` and no lease, selected by `transcribe_with_route`; doors pass `purpose` and their bounds; every caller gets a deadline and the queue's is shorter; a card refusal ends the provider cascade; the peer check runs again after a wait; llama-server children record `predicted_vram_mib` | `providers/whisper_provider.py`; `service.py` (`transcribe_audio` bound, the cascade at 5152, the peer check), `music/commands.py:324`, `tools/transcribe.py:172` (`purpose`, `on_wait`); `p2p_coordinator.py:1398` (`serving_a_peer`); `coordinators/telegram_coordinator.py:509`, `managers/agent_telegram_bridge.py:1674`; `settings.py` (`queue_wait_s`, `cpu_max_s`, `cpu_max_audio_s`, `cpu_contention_factor`); `ui/src/lib/coreService.ts:1492`; `llama_server_supervisor.py` (`predicted_vram_mib`, one attribute set at launch) | 9, 10, 18–24, 26–28, 30–34 | Pending; lands with S4 |
-| S4 | feat(music): music engines hold the card lease (acquired before `_the_lock`); the runner waits through it and names lease holders; a `running` job may wait for the card (both gates: `jobs.py` and the runner's wait loop) | `music/engine_base.py`, `music/runner.py`, `music/commands.py` (start by hand), `music/jobs.py`, `music/acestep.py`/`yue2.py`, test helpers, `ui/src/lib/utils/musicCreate.ts` | **4 (Done-when)**, 11, 13, 15, 17, 29 | Pending; lands with S3 |
-| S2 | feat(card): llama-server and Strata wait for a busy lease and unload an idle one, with the swap on or off | `llama_server_supervisor.py` (2.2 items 3–10), `providers/llamacpp_server_provider.py` (`stop_local_engine`, then `card_holder` may return lease rows) | 5, 16, and the full list of existing card tests green | Pending |
-| S5 | feat(ui): lease rows and lease waiters in the existing holder and queue lines, "until cancelled", unknown ETA as "—"; whether the block shows without a local LLM provider | `ProvidersEditor.svelte`, `cardQueue.ts`, `cardQueue.test.ts`, `MusicCreate.svelte`; the status payload | 25 and manual | Pending |
+| S3 | feat(whisper): the local model holds a card lease, yields by unloading when idle (`yield_card`, releasing only when the unload ran), loads beside busy music only in the one shared cell when it provably fits (L11), otherwise chooses the CPU twin when its estimate beats the GPU wait (L12, Mike #62, Ark #64) or queues before `_load_lock`; the CPU twin is a separate `local_whisper` provider with `device: cpu` and no lease, selected by `transcribe_with_route`; doors pass `purpose` and their bounds; every caller gets a deadline and the queue's is shorter; a card refusal ends the provider cascade; the peer check runs again after a wait; llama-server children record `predicted_vram_mib` | `providers/whisper_provider.py`; `service.py` (`transcribe_audio` bound, the cascade at 5152, the peer check), `music/commands.py:324`, `tools/transcribe.py:172` (`purpose`, `on_wait`); `p2p_coordinator.py:1398` (`serving_a_peer`); `coordinators/telegram_coordinator.py:509`, `managers/agent_telegram_bridge.py:1674`; `settings.py` (`queue_wait_s`, `cpu_max_s`, `cpu_max_audio_s`, `cpu_contention_factor`); `ui/src/lib/coreService.ts:1492`; `llama_server_supervisor.py` (`predicted_vram_mib`, one attribute set at launch) | 9, 10, 18–24, 26–28, 30–34, 36 | Pending; first slice |
+| S4 | feat(music): music engines hold the card lease (acquired before `_the_lock`); the runner waits through it and names lease holders; a `running` job may wait for the card (both gates: `jobs.py` and the runner's wait loop) | `music/engine_base.py`, `music/runner.py`, `music/commands.py` (start by hand), `music/jobs.py`, `music/acestep.py`/`yue2.py`, test helpers, `ui/src/lib/utils/musicCreate.ts` | **4 (Done-when)**, 11, 13, 15, 17, 29 | Pending; first slice |
+| S2 | feat(card): llama-server and Strata wait for a busy lease and unload an idle one, with the swap on or off; a lease contender swaps an idle supervisor on the owner-start path; one order across both lines | `llama_server_supervisor.py` (2.2 items 3–13), `providers/llamacpp_server_provider.py` (`stop_local_engine`, then `card_holder` may return lease rows) | 5, 16, 35, and the full list of existing card tests green | Pending; first slice |
+| S5 | feat(ui): lease rows and lease waiters in the existing holder and queue lines, "until cancelled", unknown ETA as "—"; whether the block shows without a local LLM provider; the optional "let peers use the CPU twin" setting beside the device selector of a Whisper provider (Mike #71) | `ProvidersEditor.svelte`, `cardQueue.ts`, `cardQueue.test.ts`, `MusicCreate.svelte`; the status payload | 25 and manual | Pending |
 | S6 | feat(memory): the embedder joins the lease (GPU for rebuilds, CPU when skipped), with a real unload | `dpc_agent/memory.py`, `managers/agent_manager.py`, `settings.py` | fake-thread client tests | Pending |
 | S7 | feat(graph-ner): GLiNER gains an unload and joins the lease | `dpc_agent/knowledge_graph.py`, `sleep_pipeline.py` | same | Pending |
-| S8 | feat(card-probe): foreign GPU use from PDH/NVML, own pids and desktop excluded, unreadable is never free and says why | new `managers/card_probe.py`, `process_registry.py` | 12 | Pending |
-| S9 | feat(whisper): Whisper waits for supervisors (`excludable=True`): L12 against a busy local LLM, the self-wait case on the CPU route, one order across both lines in `_stands_before_the_line`; a second shared cell (Whisper beside llama-server) only if Mike and the reviewers take it | `card_lease.py`, `whisper_provider.py`, `llama_server_supervisor.py` (`_stands_before_the_line`) | supervisor-holder and self-wait tests | Pending |
+| S8 | feat(card-probe): foreign GPU use from the process registry sampler's PDH/NVML readings (no new nvidia-smi), own pids and desktop excluded, unreadable is never free and says it was decided without knowledge of the card | new `managers/card_probe.py`, `process_registry.py`, `managers/commit_memory.py` | 12, 36 | Pending |
+| S9 | — folded into S1–S4 (Mike #68): Whisper waits for supervisors in the first slice; no shared cell with a local LLM | — | — | Folded |
 | S10 | feat(local-api): external lease with a 90 s TTL and heartbeat | `local_api.py` | HTTP tests | Pending |
 
 ### Backlog cards
@@ -1806,8 +1871,8 @@ the 5,555-line file, so land it after the Whisper editing settles.
 
 - `WHISPER-RUNS-OUTSIDE-THE-CARD-QUEUE-…` (161): part (1), the queue, closes with S1+S3+S4
   (+S2). Part (2) (GPU choice and CPU fallback) is now mostly S3 (L12, the CPU route); its
-  remainder against supervisors is S9. Part (3) (per-use models) stays open. Step 5 of the
-  Whisper plan gains the CPU real-time factor measurement.
+  remainder against supervisors joined the first slice (Mike #68). Part (3) (per-use
+  models) stays open. Step 5 of the Whisper plan gains the CPU measurement.
 - `EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-…` (1524): this ADR is its option (b)
   in-process plus (c) as S8. The HTTP surface in `local_api.py` (S10: a lease with a 90 s
   TTL and heartbeat, `kind="external"`) closes it. That card's Done is not met until S10.
@@ -1831,8 +1896,8 @@ the 5,555-line file, so land it after the Whisper editing settles.
   the lease rows at S5.
 - `THE-CARD-HOLDER-AND-ITS-STOP-BUTTON-SIT-INSIDE-EACH-STRATA-ALIAS-…` (2078): the holder
   list is now multi-kind.
-- `THE-ADMISSION-ARITHMETIC-SIZES-ONE-CHILD-AND-CANNOT-SEE-THE-OTHERS` (7119): S9 and L11
-  use the lease estimates.
+- `THE-ADMISSION-ARITHMETIC-SIZES-ONE-CHILD-AND-CANNOT-SEE-THE-OTHERS` (7119): L11 uses
+  the lease estimates.
 - `THE-CARD-QUEUE-TESTS-LEAVE-PENDING-TASKS-…` (1550): the new tests must assert no pending
   tasks.
 
@@ -1849,128 +1914,85 @@ the 5,555-line file, so land it after the Whisper editing settles.
 
 **Documents**
 
-- A SPEC decision 32 amendment, if Mike lets music yield idle supervisors (item 4).
+- **A SPEC decision 32 amendment is needed** (Mike #70): music swaps out an idle server
+  when nothing waits, with the swap on. File: `ai-studio/experiments/music-player/SPEC.md`.
+  This record does not edit it.
 - ADR-044 and ADR-051 are not edited by this record. If accepted, ADR-044 may get a short
   pointer to it.
 
+## Decided by Mike
+
+Recorded as decided; each line names the message.
+
+- **#20 (2026-11-21):** llama-server and Strata wait for Whisper or music to free the card;
+  the embedder and other GPU-capable parts join later.
+- **#62 (2026-11-21):** a smart GPU/CPU choice for dictation and transcription (L12).
+- **#68 (2026-11-21), decision 1: no asymmetry.** Whisper does not load beside llama-server
+  or Strata; the exclusion is symmetric in the first slice, which therefore includes S2
+  (section 3.3). The "loaded beside" line for supervisors goes with the exception. A
+  dictation during an agent turn goes to the CPU twin when the file is up to 5 minutes
+  (#71); a longer one waits and may be refused at the dictation bound (Zcode #69).
+- **#70 (2026-11-21), decision 3 (peers): not refused outright.** A peer waits when the
+  line is short and is refused when it is long, by the mechanism inference sharing already
+  has: the peer bound `_a_peers_slot_wait_s()` (L4). Background calls stay as decided.
+- **#70 (2026-11-21), decision 4: SPEC decision 32 amended.** With nothing waiting and the
+  server idle, music unloads the server and takes the card, by the owner-start rule and
+  gated like it by `swap_when_idle` (section 3.2). The SPEC file needs the amendment
+  (Documents).
+- **#70 (2026-11-21), decision 5 (unreadable probe): answered by reuse.** Mike asked how
+  the read can fail when the agent map already collects VRAM. It reads the same helpers;
+  the probe now reuses them (section 5), and the residual failures (no NVIDIA, a driver
+  hang or reset, a timeout, unparseable output, the backend stopping) keep the default:
+  background refused, foreground on with "decided without knowledge of the card". Mike
+  did not object to that default; his explicit OK was not given.
+- **#71 (2026-11-21), decision 6: the CPU takes files up to 5 minutes**, even while Strata
+  is busy: `cpu_max_audio_s` = 300 s, the contention factor applies to the estimate, the
+  Strata check is a condition of the choice (L12 point 3), and a call that started on the
+  CPU stays there (Zcode #69).
+- **#71 (2026-11-21), decision 6G: residency.** "Keep a model in memory only if there is a
+  queue for it." The CPU twin gets its own short `idle_unload_s` (proposed 60 s).
+- **#71 (2026-11-21), decision 6C: peers on the CPU twin, no by default**, with an optional
+  setting in the provider UI beside the CPU/GPU device selector (S5).
+
 ## Open for Mike
 
-Six decisions, each with the proposed default and the reviewers' votes, plus the
-sub-choices under decision 6. They must be answered before S2; decisions 3 and 6 also
-before S3.
+Still open after #68–#71. Each has a proposed default.
 
-1. **The Whisper/supervisor asymmetry in v1.** Supervisors wait for Whisper, but Whisper
-   does not wait for supervisors (it loads beside llama-server and Strata, as today, and
-   now logs that it did). *Proposed default:* keep the asymmetry for v1; S9 replaces it
-   (`excludable=True`, with L12's CPU route, which S3 already brings).
-   *Votes:* Zcode — the default. Ark — the default (otherwise dictation meets
-   `swap_wait_s` = 1800 s).
-   **Said plainly:** S1+S3+S4 do not stop Whisper loading beside llama-server or Strata.
-   The earlier open point "Whisper no longer loads beside a model: refuse / wait / load
-   anyway" is answered only by S9 (and S2 for the other direction), not by S3.
-2. **Lease yields not gated by `swap_when_idle`.** Unloading Whisper or stopping an idle
-   music engine for a contender happens even with the switch off; the switch keeps
-   governing only llama-server and Strata. *Proposed default:* not gated. The costs differ:
-   unloading Whisper is a reload of about 3 GB in seconds; stopping an idle music engine
-   costs the next job an engine boot and a 5–9 GB model reload; neither loses anyone's
-   work.
-   *Votes:* Zcode — the default. Ark — the default, with the cost difference named (done
-   above).
-3. **Per-door waits (L4).** *Proposed default (revised after Mike's #49–#50 and #62, and
-   the reviews #52, #53):* a transcription first goes through L12 (GPU now, CPU, or the
-   line); in the line, the owner's dictation, received voice messages, Telegram voice and
-   the agent tool wait up to the **dictation bound** (decision 6, sub-choice A: 600 s), and
-   never longer than their caller's own remaining time less a margin; every caller gets a
-   deadline (the local path and Telegram have none today); music jobs and music Transcribe
-   wait until cancelled; peers 0 (refused at once, "right now"); background transcriptions
-   short on the CPU, long skipped; other background calls never wait. The first draft's
-   `[local_transcription] card_wait_s` = 120 is dropped.
-   *Votes (both given on the 120 s version, before the revision):* Zcode — ETA-early-refuse
-   first, then 120 s makes sense. Ark — 120 s, peer 0 s with "right now" in the refusal
-   (adopted). On the revised shape: Ark #53 — the queue's deadline must be
-   `min(caller's remaining, bound)` (adopted); Zcode #52 — a dictation bound of its own,
-   about 10 min (proposed as the default of sub-choice A).
-4. **SPEC decision 32.** Music never stops an idle supervisor (it waits until a person
-   presses Stop X). *Proposed default:* kept as is in v1, with the one-order exception of
-   L5a point 3. The alternative, with swap on, lets music yield an idle supervisor and
-   removes that exception.
-   *Votes:* Zcode — the default. Ark — the default (otherwise music would drop Strata's
-   parked conversations for a generation).
-5. **An unreadable probe (S8).** *Proposed default:* fail closed for background leases
-   only (they fall back to CPU, and the refusal logs its reason); foreground leases go
-   ahead with a WARNING naming the failure. The alternative fails closed for foreground
-   leases too.
-   *Votes:* Zcode — the default. Ark — the default, plus the logged reason (adopted).
-6. **Dictation and transcription while the card is busy, in the first slice.** S1+S3+S4
-   make Whisper and music exclusive, so without more, dictation during a YuE2 job (minutes
-   long) would wait and then be refused where today it loads beside and works: a
-   regression (Zcode #41). Options considered: (a) ETA-early-refuse; (b) a CPU fallback;
-   (c) accept the regression; (d) load beside when it fits (L11).
-   **Mike's decision at #62** settles the shape: a smart GPU/CPU choice. *Proposed rule,
-   **pending Mike's OK of the details**:*
-   1. The card is free, or Whisper provably fits beside a busy music engine (L11, the one
-      shared cell) → the GPU at once, visible as two holder rows when shared.
-   2. The card is busy and it does not fit (or the fit is unknown) → compare **times**
-      (Ark #64): the GPU wait (the holders' remaining time plus the line ahead; unknown,
-      including any running music job in v1, counts as long) against the CPU twin's
-      estimate (cold load and warm-up counted when the twin is not loaded; times a
-      contention factor when an idle CPU-computing engine such as Strata is resident; no
-      CPU route at all while such an engine is busy). **The CPU twin** when its estimate
-      is below the GPU wait and at most `cpu_max_s`, and the audio is within the
-      `cpu_max_audio_s` guard; **otherwise the line** for the GPU: before `_load_lock`, one
-      place per call (a card refusal ends the cascade over GPU aliases but may still reach
-      the twin), the peer check again after the wait, deadline `min(caller's remaining −
-      margin, dictation bound)`, visible ("transcription queued behind yue2.cpp (song, time
-      unknown)") and cancellable.
-   3. Background transcriptions: the same test; failing it, skipped.
-   4. Peers: refused at once, "busy right now" (sub-choice C).
-   5. Nothing measured yet → no CPU route; the line.
-   6. Not enough free RAM for a cold twin → the line.
-   This moves (b), the CPU route, from S9 into S3 as a separate provider object, the CPU
-   twin (section 3.1). (a) survives only as the peer's immediate refusal; the ETA never
-   refuses on its own.
-   **Sub-choices for Mike:**
-   - **A. The dictation bound:** `[local_transcription] queue_wait_s` = 600 s. *Votes:*
-     Zcode #52 and Ark #60/#61 both for 600 s; CC leans the same way. The alternative,
-     inheriting `swap_wait_s` (1800 s here), would leave the agent tool (1800 s timeout)
-     no time to transcribe after the wait (Ark #60 §7).
-   - **B. An unknown ETA:** **replaced by Mike's #62.** An unknown ETA counts as a long
-     GPU wait, so the CPU twin takes the file when its estimate passes; otherwise the file
-     waits with "time unknown" up to the bound.
-   - **C. Peers on the owner's CPU:** *proposed* **no**; a peer is refused at once while
-     the card is busy, as today. *Votes:* Ark #64 §7 — no. Zcode — not yet.
-   - **D. The long-audio guard** `cpu_max_audio_s`: *proposed* 1200 s (20 min), an upper
-     guard only, binding when the CPU factor reads better than 0.5× real time on a long
-     file (L12). It replaces the 120 s "short file" threshold, which Ark #64 §1 showed
-     fights the time comparison in both directions.
-   - **E. The CPU's own bound** `cpu_max_s`: *proposed* 600 s, equal to the dictation
-     bound, so neither route makes a person wait longer than the line would.
-   - **F. Contention with a local LLM engine:** *proposed* no CPU route while a
-     CPU-computing resident (Strata) is busy; times `cpu_contention_factor` = 2.0 while it
-     is idle; music engines not counted until measured. *Alternative:* a penalty factor
-     only, never a hard stop.
-   - **G. Residency of the CPU twin:** *proposed* count the cold load in every estimate,
-     keep the twin loaded while the holder it was loaded for keeps the card, never load it
-     speculatively. *Alternative:* keep the twin resident whenever the card is held by a
-     long job, so short files never pay the load (3 GB of RAM held on speculation).
-   *Votes:* on (d) + queue, Zcode #52 and Ark #53 accept with conditions, all of them in
-   this record (L4, L5a, L11, section 3.1, tests 18–24). On the GPU/CPU choice, Ark #64
-   accepts the direction with the changes above (times not length, cold start, contention,
-   a separate provider object, progress-based music ETA) and agrees on C (no) and on
-   "nothing measured → the line"; D–G are new and have no votes yet. Zcode has not voted
-   on #62 or #64's points.
+- **Item 2.** **Lease yields not gated by `swap_when_idle`.** Unloading Whisper or stopping an idle
+  music engine for another lease happens even with the switch off. *Proposed default:* not
+  gated (CC #66 question 4; Zcode and Ark for). It interacts with decision 4: music
+  swapping an idle **supervisor** is gated by the switch (owner-start rule).
+- **Item 6A.** **The dictation bound** `[local_transcription] queue_wait_s`: *proposed* 600 s (CC #66
+  question 8; Zcode and Ark for). The alternative, `swap_wait_s` (1800 s here), would
+  leave the agent tool no time to transcribe after a full wait (Ark #60 §7).
+- **Item 7.** **The GPU Whisper alias's idle unload** (follow-up of #71). Step 1 shipped
+  `idle_unload_s` = 300 s; Mike's "only if there is a queue for it" suggests less. Options
+  (CC #75 A): 300 s, 60 s, or unload as soon as nothing waits. No code changes until Mike
+  chooses.
+- **Item 1a.** **An idle supervisor in front of a dictation** (follows from #68 and #70). *Proposed:*
+  L12 first (a file up to 5 minutes goes to the CPU twin and costs the LLM nothing); a
+  longer file, with the swap on and nothing waiting, swaps the idle supervisor out by the
+  owner-start rule, like music. *Alternative:* a dictation never stops a supervisor and
+  waits. No votes yet.
+- **Item 8.** **A peer with an unknown wait estimate** (follows from #70). *Proposed:* it waits up to
+  the peer bound (1200 s here), as the owner's doors do for an unknown ETA; a known
+  estimate over the bound is refused at once. *Alternative:* refuse an unknown estimate
+  at once. With a running music job's ETA unknown in v1 (L10), the choice decides whether
+  peers wait during music at all. No votes yet.
+- **Item 9.** **`cpu_max_s`** (proposed 600 s) and **`cpu_contention_factor`** (proposed 1.0 until the
+  Strata measurement). No votes yet.
 
-Also open, and not among the six: whether `auto` means `lease` on CUDA for the embedder
-and GLiNER (section 3.4), whether L11 should also spare an *idle* music engine its stop
-when Whisper fits beside it, and ADR-051 N11, which this ADR answers as "(b)+(c)" only once
-Mike confirms.
+Also open, and not numbered: whether `auto` means `lease` on CUDA for the embedder and
+GLiNER (section 3.4); whether L11 should also spare an *idle* music engine its stop when
+Whisper fits beside it; ADR-051 N11, which this ADR answers as "(b)+(c)" only once Mike
+confirms; and, outside this ADR, whether Ark writes the track into his knowledge base (CC
+#75 D).
 
 ## Open Questions
 
 - **Q1:** Whether any agent tool calls the LLM while a transcription use is open (a
-  `LeaseWouldWaitOnItself` risk). **[unverified]** In v1 the self-wait is unreachable
-  through Whisper, because Whisper does not wait for supervisors (Zcode #41); the question
-  moves to S9's risks. — CC
+  `LeaseWouldWaitOnItself` risk). **[unverified]** Live again in the first slice, since
+  Whisper waits for supervisors (Mike #68). — CC
 - **Q2:** Answered (section 2.3): no test resolves a real CUDA device; two build `mlx`
   providers, which get a lease that must stay harmless.
 - **Q3:** Whether the PDH counter is vendor-neutral on AMD and Intel. **[unverified]** — CC
@@ -2074,6 +2096,15 @@ was done instead. The underlying concern is kept wherever it stands on its own.
 - **Zcode #52 vs Ark #53 on how to compute the fit** (actual use plus peaks vs declared
   sizes): not an error on either side; reconciled in L11 as declared peaks against total
   with a live reading that may only veto, and any unknown queues.
+- **Mike #70 on the probe ("how can nvidia-smi fail, the agent map collects VRAM"):**
+  checked. The agent map's free/total VRAM is `commit_memory.read_vram_mib()` (135), a 30 s
+  cache over the same `_free_vram_mib`/`_total_vram_mib` nvidia-smi helpers; its
+  per-process VRAM is the registry sampler (2 s, PDH/NVML, no nvidia-smi). So the agent map
+  can fail the same ways; the probe reuses it rather than adding calls (section 5).
+- **Mike #71 ("we already did it, see the logs"):** checked. `~/.dpc/logs/dpc-client.log*`
+  show the Whisper alias initialised and loaded with `device=cpu` from 2026-11-14 to
+  2026-11-20 (e.g. "Whisper model loaded in 1.0 seconds (device=cpu)", 2026-11-20 08:42).
+  Whether those runs overlapped a busy Strata turn was not checked.
 - **Ark #64, checked.** §1 (length vs time) and §2 (cold start) are design points, adopted
   in L12. §3: Strata's experts live in host RAM (confirmed: the resident budget in
   `docs/GLOSSARY.md`, `ProvidersEditor.svelte:2366`); that it computes missed experts on
@@ -2161,6 +2192,22 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   transcription. Led to L12, the CPU route in S3, S9 reduced to `excludable=True` against
   supervisors, decision 6 rewritten, sub-choice B replaced, sub-choices C (peers on CPU)
   and D (the short threshold) added.
+- **#67, Ark** (before Mike's answers). Taken: the measurement at #66 confirms the cold
+  start (≈9 s) and a CPU at about 1.0–1.1× real time, so the Strata check belongs inside
+  the choice (L12 point 3); the Strata-turn measurement is required before rollout (the
+  pending row of L12's table); the CPU twin gets its own `idle_unload_s` instead of a
+  card-tied life; peers not on the CPU; the "decided without knowledge of the card" log
+  line (section 5). Confirmed `_predicted_total_mib` exists (3554, called at 3566, 3610).
+- **#68, Mike:** decision 1, no asymmetry (Decided by Mike).
+- **#69, Zcode** (before and after #68). Taken: the symmetric exclusion and its
+  consequence for a long dictation during a long turn; the order of conditions with the
+  Strata check inside; no switch in mid-flight; "Strata busy" named as the live request
+  hold; the twin's own `idle_unload_s`; the "without knowledge" line; withdrew his 6B
+  "refuse at once" in favour of Ark's wait.
+- **#70, Mike:** decisions 3 (peers wait on the inference-sharing terms), 4 (SPEC
+  decision 32 amended) and the question behind 5 (Decided by Mike).
+- **#71, Mike:** decisions 6 (CPU up to 5 minutes, also beside a busy Strata), 6G
+  (residency only with a queue) and 6C (peers not on the CPU, optional setting).
 - **#64, Ark** (the GPU/CPU choice: direction right, three wrong answers in it). Taken: §1
   compare times, not audio length; 120 s threshold dropped, a 1200 s long-audio guard and
   `cpu_max_s` in its place (L12, test 30); §2 cold and warm CPU figures at several lengths,
@@ -2173,9 +2220,9 @@ was done instead. The underlying concern is kept wherever it stands on its own.
 
 ## Authors
 
-- **Mike** — Decisions (#20 and #62, 2026-11-21); question at #49–#50
+- **Mike** — Decisions (#20, #62, #68, #70, #71, 2026-11-21); question at #49–#50
 - **CC** — Request, review, this record
-- **Ark, Zcode** — Consulted; reviews #41, #44, #45, #52, #53, #59, #60, #61, #64
+- **Ark, Zcode** — Consulted; reviews #41, #44, #45, #52, #53, #59, #60, #61, #64, #67, #69
 
 ## References
 
@@ -2191,4 +2238,4 @@ was done instead. The underlying concern is kept wherever it stands on its own.
 - Design source: the card-lease design, `dev` HEAD `b9725990`; revision checked at
   `5099b326`
 - Reviews: AI Studio group chat, messages #41, #52 and #59 (Zcode), #44, #45, #53, #60,
-  #61 and #64 (Ark), #49–#50 and #62 (Mike)
+  #61, #64 and #67 (Ark), #69 (Zcode), #49–#50, #62, #68, #70 and #71 (Mike)
