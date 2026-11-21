@@ -42,8 +42,10 @@ take is decided once. Agents get no decision method of their own (ADR-051 Q1); t
 that calls these methods must be the person's.
 
 **Unsupported.** `create_job` asks the capabilities (`capabilities.py`) whether the type
-can run now. When it cannot, the job is created `unsupported` with the reason, the normal
-answer of SPEC §5. Today that is every job, because the engine adapter is not built.
+can run now, on the engine its params name (`generate_from_text`: yue2 by default, or
+acestep). When it cannot, the job is created `unsupported` with the reason, the normal
+answer of SPEC §5. A YuE2 backbone whose file is missing or an adapter the adapters folder
+does not hold is refused as `invalid_params` (`MusicCapabilities.check_params`).
 
 **Threading.** Every public method is blocking and thread-safe (one re-entrant lock).
 `job.json` is written before the method returns. Call it through `asyncio.to_thread` from
@@ -463,6 +465,7 @@ class MusicJobStore:
                                                           "comment or region")
                 try:
                     params = js.normalize_params_from_text(params)
+                    self.capabilities.check_params(job_type, params)
                 except js.ParamsError as exc:
                     raise MusicJobError("invalid_params", exc.message, field=exc.field)
                 prompt = params["style"]
@@ -482,7 +485,8 @@ class MusicJobStore:
             job = self._new_job(job_type, params, track_id=track_id, base_version_id=base_version_id,
                                 comment_id=comment_id, action=action, region=region, prompt=prompt,
                                 idempotency_key=idempotency_key)
-            reason = self.capabilities.unsupported_reason(job_type)
+            reason = self.capabilities.unsupported_reason(
+                job_type, params if job_type == js.GENERATE_FROM_TEXT else None)
             if reason is not None:
                 self._move(job, js.UNSUPPORTED, reason)
             self._jobs[job["id"]] = job
@@ -580,6 +584,11 @@ class MusicJobStore:
             self._move(job, js.REVIEW, reason)
             job["progress"] = 1
         return self._change(job_id, change)
+
+    def refuse_job(self, job_id: str, reason: str) -> dict:
+        """The runner cannot build a queued job's request any more (an adapter it names
+        went missing after the proposal): `queued -> unsupported`, with the reason."""
+        return self._change(job_id, lambda j: self._move(j, js.UNSUPPORTED, reason))
 
     def fail_job(self, job_id: str, reason: str) -> dict:
         """The runner gives up: `running -> failed`, with the reason (required)."""
@@ -715,10 +724,13 @@ class MusicJobStore:
         library_track_id: Optional[str] = None,
         simulated: bool = False,
         loudness: Optional[Mapping[str, Any]] = None,
+        engine: Optional[str] = None,
+        lm_seed: Optional[int] = None,
     ) -> dict:
         """Record a finished take of a running `generate_from_text` job: a `new_track` take,
         `pending`, `qa` null until QA runs, `loudness` the runner's ebur128 measurement or
-        null (`loudness.py`). The file is written and registered by the runner
+        null (`loudness.py`), `engine` the engine id that made it and `lm_seed` its token
+        seed when the engine reports one. The file is written and registered by the runner
         (`register_generated`). One take per variant and per file (decision 24:
         `duplicate_take`). `payload` must name a payload of this job. Raises
         `MusicJobError`."""
@@ -767,6 +779,8 @@ class MusicJobStore:
                 "reason_class": None,
                 "decided_at": None,
                 "loudness": dict(loudness) if loudness is not None else None,
+                "engine": engine,
+                "lm_seed": lm_seed,
             }
             try:
                 js.validate_take(take)

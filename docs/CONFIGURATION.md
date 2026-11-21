@@ -1003,6 +1003,14 @@ An empty default means the key is written blank and the feature stays off until 
 | `acestep_port` | `9995` | The loopback port of the acestep.cpp server (always 127.0.0.1). 0 = a free port at each start |
 | `acestep_idle_stop_s` | `300` | Stop the acestep.cpp server after this many idle seconds to free the GPU card; 0 = as soon as a job ends |
 | `acestep_device` | *(empty)* | Passed to acestep.cpp as --device (CUDA0, Vulkan0, MTL0, CPU). Empty = the engine picks the best device |
+| `yue2_binary` | *(empty)* | The yue2.cpp server DPC starts for music jobs, the default engine (ADR-051 D35). Empty = <DPC home>/engines/yue2.cpp/build/yue-server(.exe), or the first one found a few folders down |
+| `yue2_models_dir` | *(empty)* | The YuE2 weights folder. Empty = <DPC home>/models/music/yue2. Needs serveurperso/YuE2-3B-Q8_0.gguf (or rs-tw/YuE2-3B-RS-TW-2.0x0.75-Q8_0.gguf) and serveurperso/YuE2-Vae-F32.gguf |
+| `yue2_backbone` | `stock` | The backbone a start by hand loads: stock or rs-tw. A job names its own |
+| `yue2_port` | `9994` | The loopback port of the yue2.cpp server (always 127.0.0.1). 0 = a free port at each start |
+| `yue2_idle_stop_s` | `300` | Stop the yue2.cpp server after this many idle seconds to free the GPU card; 0 = as soon as a job ends |
+| `yue2_adapters_dir` | *(empty)* | The LoRA adapters folder (one level: .safetensors files, or folders holding one). Empty = <yue2_models_dir>/loras/ruach-voices/voices. DPC splits each into music and sound halves under <yue2_models_dir>/loras/.split |
+| `yue2_device` | *(empty)* | Passed to yue2.cpp as --device (CUDA0, Vulkan0, MTL0, CPU). Empty = the engine picks the best device |
+| `yue2_max_seq` | `0` | Passed as --max-seq when above 0 (KV cache size; less VRAM, shorter songs). 0 = the model context |
 
 #### `[oauth]`
 

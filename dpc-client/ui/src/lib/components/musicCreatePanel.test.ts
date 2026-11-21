@@ -90,3 +90,22 @@ describe('decisions', () => {
         expect(service).toContain('export async function noteTracksHidden(');
     });
 });
+
+describe('the form picks the engine, YuE2 by default, and Start / Stop act on it', () => {
+    it('engine, backbone and voice selects; the voice note; the short-cap warning', () => {
+        expect(create).toContain('id="mc-engine"');
+        expect(create).toContain('id="mc-backbone"');
+        expect(create).toContain('id="mc-voice"');
+        expect(create).toContain('<option value="">None</option>');
+        expect(create).toContain('VOICE_NOTE');
+        expect(create).toContain('shortCapWarning($musicCreateDraft, caps)');
+    });
+
+    it('the engine line and its buttons follow the selected engine', () => {
+        expect(create).toContain('startEngine(selectedEngine,');
+        expect(create).toContain('stopEngine(selectedEngine)');
+        expect(create).toContain('fromTextSupport(caps, selectedEngine)');
+        expect(core).toContain("callMusic(sendCommand, 'start_music_engine', payload)");
+        expect(core).toContain("callMusic(sendCommand, 'stop_music_engine', engine ? { engine } : {})");
+    });
+});

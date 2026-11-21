@@ -1525,8 +1525,9 @@ class CoreService(MusicCommandsMixin):
         bind_model_download_service(self.model_download_service)
         # The idle swap reads its two settings at each start, so a change needs no restart.
         bind_local_engine_settings(self.settings)
-        # The music job runner (ADR-051 D30): resumes queued jobs; it starts the acestep.cpp
-        # server only when a job needs it. A failure is logged and leaves jobs queued.
+        # The music job runner (ADR-051 D30, D35): resumes queued jobs; it starts the job's
+        # engine (yue2.cpp or acestep.cpp) only when a job needs it. A failure is logged and
+        # leaves jobs queued.
         await self.start_music_jobs()
 
         # Run knowledge integrity check
@@ -1861,7 +1862,7 @@ class CoreService(MusicCommandsMixin):
         from .process_registry import get_registry
         get_registry().begin_shutdown()
 
-        # The music job runner and the acestep.cpp server it supervises (ADR-051 D30).
+        # The music job runner and the engine servers it supervises (ADR-051 D30, D35).
         try:
             await self.stop_music_jobs()
         except Exception:

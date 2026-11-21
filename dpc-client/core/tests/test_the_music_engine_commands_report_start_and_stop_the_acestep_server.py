@@ -1,7 +1,8 @@
 """The `local_api` door to the music engine (ADR-051 D30): `get_music_engine_status`,
 `start_music_engine`, `stop_music_engine`; the job store's probe is the engine's real
 state; `start_music_jobs` runs a proposed job to review and `stop_music_jobs` stops the
-server. Every answer is `ok` or a mapped error.
+server. Every answer is `ok` or a mapped error. yue2 is the default engine since
+2026-11-21, so these calls name acestep with `engine`.
 """
 
 import asyncio
@@ -42,12 +43,12 @@ def test_the_engine_commands_are_on_the_door():
 @pytest.mark.asyncio
 async def test_not_installed_is_reported_and_start_is_refused(tmp_path, monkeypatch):
     service = service_at(tmp_path / "dpc", monkeypatch)
-    status = await service.get_music_engine_status()
+    status = await service.get_music_engine_status(engine="acestep")
     assert status["status"] == "ok"
     assert status["engine"]["state"] == "not_installed"
     assert status["engine"]["host"] == "127.0.0.1"
-    assert status["runner"] == {"running": False, "current_job_id": None}
-    started = await service.start_music_engine()
+    assert status["runner"] == {"running": False, "current_job_id": None, "current_engine": None}
+    started = await service.start_music_engine(engine="acestep")
     assert started["status"] == "error" and started["code"] == "not_installed"
 
 
@@ -59,12 +60,12 @@ async def test_start_and_stop_by_hand_and_a_job_through_the_runner(tmp_path, mon
     service = service_at(home, monkeypatch)
     monkeypatch.setattr(commands, "MusicJobRunner", _runner_with_fake_flac(commands.MusicJobRunner))
     try:
-        started = await service.start_music_engine()
+        started = await service.start_music_engine(engine="acestep")
         assert started["status"] == "ok", started
         assert started["engine"]["state"] == "running" and isinstance(started["engine"]["pid"], int)
         caps = (await service.get_music_capabilities())["capabilities"]
-        assert caps["engine"]["state"] == "running"
-        stopped = await service.stop_music_engine()
+        assert caps["engines"]["acestep"]["state"] == "running"
+        stopped = await service.stop_music_engine(engine="acestep")
         assert stopped["status"] == "ok" and stopped["stopped"] is True
         assert stopped["engine"]["state"] == "stopped"
 
@@ -93,7 +94,7 @@ async def test_start_and_stop_by_hand_and_a_job_through_the_runner(tmp_path, mon
     finally:
         await service.stop_music_jobs()
         await service.stop_music_library()
-    assert not service._music_engine().alive()
+    assert not service._music_engine("acestep").alive()
 
 
 @pytest.mark.asyncio
@@ -107,14 +108,14 @@ async def test_stop_is_refused_while_a_job_uses_the_engine_unless_forced(tmp_pat
         await service.start_music_jobs()
         job_id = (await service.propose_music_job(type="generate_from_text", params=from_text()))["job"]["id"]
         runner = service._music_runner_instance
-        await wait_until(lambda: runner.current_job_id == job_id and service._music_engine().alive())
-        refused = await service.stop_music_engine()
+        await wait_until(lambda: runner.current_job_id == job_id and service._music_engine("acestep").alive())
+        refused = await service.stop_music_engine(engine="acestep")
         assert refused["status"] == "error" and refused["code"] == "engine_busy"
         assert job_id in refused["message"]
         cancelled = await service.cancel_music_job(job_id=job_id)
         assert cancelled["job"]["state"] == "cancelled"
         await wait_until(lambda: runner.current_job_id is None)
-        assert (await service.stop_music_engine())["status"] == "ok"
+        assert (await service.stop_music_engine(engine="acestep"))["status"] == "ok"
     finally:
         await service.stop_music_jobs()
         await service.stop_music_library()

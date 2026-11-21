@@ -1,13 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import {
     AB_END_GUARD_S,
+    DEFAULT_ENGINE,
     DEFAULT_FROM_TEXT_LIMITS,
+    ENGINE_DURATION_LIMITS,
     abKeyTarget,
     abSwitchPosition,
     cardHolders,
     cardWaitText,
     dbToGain,
     emptyFromTextForm,
+    engineKeyOf,
+    estimateYue2Seconds,
+    formForEngine,
+    shortCapWarning,
+    yue2Adapters,
     engineCanStart,
     engineCanStop,
     engineStatusText,
@@ -146,11 +153,18 @@ describe('the form mirrors the core limits', () => {
         const lyrics = '[verse]\nТы́сячи умов\n\n[chorus]\n  spaced  \n';
         const v = validateFromTextForm({ ...base, lyrics });
         expect(v.ok).toBe(true);
-        if (v.ok) expect(v.params).toEqual({ lyrics, style: 'indie rock', variants: 2, duration_s: 120, seed: null });
+        if (v.ok) expect(v.params).toEqual({ lyrics, style: 'indie rock', variants: 2, duration_s: 180, seed: null,
+            engine: 'yue2', backbone: 'stock' });
     });
 
-    it('defaults are the core defaults: 2 variants, 120 s, no seed', () => {
-        expect(emptyFromTextForm()).toMatchObject({ variants: 2, duration: 120, seed: '' });
+    it('defaults are the core defaults: YuE2, stock backbone, no voice, 2 variants, a 180 s cap, no seed', () => {
+        expect(DEFAULT_ENGINE).toBe('yue2');
+        expect(emptyFromTextForm()).toMatchObject({ engine: 'yue2', backbone: 'stock', voice: '', variants: 2, duration: 180,
+            seed: '', voiceMusic: 0.45, voiceSound: 0.35 });
+        const ace = emptyFromTextForm(limitsFrom(null, 'acestep'), 'acestep');
+        expect(ace).toMatchObject({ engine: 'acestep', duration: 120 });
+        const v = validateFromTextForm({ ...ace, lyrics: 'x', style: 'y' }, limitsFrom(null, 'acestep'));
+        expect(v.ok && v.params).toEqual({ lyrics: 'x', style: 'y', variants: 2, duration_s: 120, seed: null, engine: 'acestep' });
     });
 
     it('instrumental sends null lyrics; empty lyrics without it is refused', () => {
@@ -173,13 +187,19 @@ describe('the form mirrors the core limits', () => {
         expect(validateFromTextForm({ ...base, variants: '4' }).ok).toBe(true);
     });
 
-    it('duration 10-600 s', () => {
-        for (const bad of [9.9, 601, '', null]) {
+    it('duration: a YuE2 cap of 30-360 s, an ACE-Step length of 10-600 s', () => {
+        for (const bad of [29.9, 361, '', null]) {
             const v = validateFromTextForm({ ...base, duration: bad as any });
+            expect(!v.ok && v.errors.duration).toBe('Duration must be from 30 to 360 seconds.');
+        }
+        expect(validateFromTextForm({ ...base, duration: 30 }).ok).toBe(true);
+        const ace = limitsFrom(null, 'acestep');
+        for (const bad of [9.9, 601]) {
+            const v = validateFromTextForm({ ...base, engine: 'acestep', duration: bad }, ace);
             expect(!v.ok && v.errors.duration).toBe('Duration must be from 10 to 600 seconds.');
         }
-        const v = validateFromTextForm({ ...base, duration: 30 });
-        expect(v.ok && v.params.duration_s).toBe(30);
+        const v = validateFromTextForm({ ...base, engine: 'acestep', duration: 10 }, ace);
+        expect(v.ok && v.params.duration_s).toBe(10);
     });
 
     it('seed 0..2^32-1 or empty', () => {
@@ -195,6 +215,34 @@ describe('the form mirrors the core limits', () => {
     it('every bad field is named at once', () => {
         const v = validateFromTextForm({ lyrics: '', instrumental: false, style: '', variants: 9, duration: 1, seed: 'x' });
         expect(!v.ok && Object.keys(v.errors).sort()).toEqual(['duration', 'lyrics', 'seed', 'style', 'variants']);
+    });
+
+    it('the limits follow the engine, from the report or the core defaults', () => {
+        expect(limitsFrom(null).duration_s).toEqual(ENGINE_DURATION_LIMITS.yue2);
+        expect(limitsFrom(null, 'acestep').duration_s).toEqual({ min: 10, max: 600, default: 120 });
+        const caps = { default_engine: 'yue2', limits: { generate_from_text: { engines: { yue2: { duration_s: { min: 30, max: 300, default: 150 } } } } } };
+        expect(limitsFrom(caps, 'yue2').duration_s.max).toBe(300);
+        expect(limitsFrom(caps, 'acestep').duration_s.max).toBe(600);
+    });
+
+    it('a voice adds one adapter with its music and sound strengths; none sends none', () => {
+        expect(validateFromTextForm(base).ok && (validateFromTextForm(base) as any).params.adapters).toBeUndefined();
+        const v = validateFromTextForm({ ...base, voice: 'voice-ru-m-bass-82' });
+        expect(v.ok && v.params.adapters).toEqual([{ name: 'voice-ru-m-bass-82', music: 0.45, sound: 0.35 }]);
+        const bad = validateFromTextForm({ ...base, voice: 'voice-ru-m-bass-82', voiceMusic: '3' });
+        expect(!bad.ok && bad.errors.voice).toMatch(/0 to 2/);
+        const ace = validateFromTextForm({ ...base, engine: 'acestep', voice: 'voice-ru-m-bass-82', duration: 60 }, limitsFrom(null, 'acestep'));
+        expect(ace.ok && ace.params).not.toHaveProperty('adapters');
+        expect(ace.ok && ace.params).not.toHaveProperty('backbone');
+        expect(formFieldOf('adapters')).toBe('voice');
+        expect(formFieldOf('backbone')).toBe('backbone');
+    });
+
+    it('switching the engine moves a default duration to the new default and keeps a typed one', () => {
+        const f = { ...emptyFromTextForm(), lyrics: 'x', style: 'y' };
+        expect(formForEngine(f, 'acestep')).toMatchObject({ engine: 'acestep', duration: 120 });
+        expect(formForEngine({ ...f, duration: 200 }, 'acestep')).toMatchObject({ engine: 'acestep', duration: 200 });
+        expect(formForEngine(formForEngine(f, 'acestep'), 'yue2')).toMatchObject({ engine: 'yue2', duration: 180 });
     });
 
     it('the capability report can narrow the limits', () => {
@@ -221,6 +269,61 @@ describe('the form mirrors the core limits', () => {
 });
 
 // -- the reason box ---------------------------------------------------------------
+
+describe('the YuE2 short-cap warning is an estimate from the sung lines', () => {
+    const lyrics = '[verse]\none\ntwo\n\n[chorus]\nthree\nfour\nfive\nsix\n';
+
+    it('about 10 s per sung line plus a 20 s intro; tags and blank lines do not count', () => {
+        expect(estimateYue2Seconds(lyrics)).toBe(80);
+        expect(estimateYue2Seconds('')).toBe(20);
+        expect(estimateYue2Seconds('a\r\nb', 12, 15)).toBe(39);
+    });
+
+    it('warns when the cap is under the estimate, and says it is an estimate', () => {
+        const w = shortCapWarning({ engine: 'yue2', lyrics, instrumental: false, duration: 30 });
+        expect(w).toMatch(/estimate: about 80 s/);
+        expect(w).toMatch(/30 s looks short/);
+        expect(shortCapWarning({ engine: 'yue2', lyrics, instrumental: false, duration: 180 })).toBe('');
+        expect(shortCapWarning({ engine: 'acestep', lyrics, instrumental: false, duration: 30 })).toBe('');
+        expect(shortCapWarning({ engine: 'yue2', lyrics, instrumental: true, duration: 30 })).toBe('');
+        expect(shortCapWarning({ engine: 'yue2', lyrics, instrumental: false, duration: '' })).toBe('');
+    });
+
+    it('the report can set the estimate', () => {
+        const caps = { limits: { generate_from_text: { engines: { yue2: { short_cap_estimate: { seconds_per_line: 5, intro_s: 10 } } } } } };
+        expect(shortCapWarning({ engine: 'yue2', lyrics, instrumental: false, duration: 45 }, caps)).toBe('');
+        expect(shortCapWarning({ engine: 'yue2', lyrics, instrumental: false, duration: 30 }, caps)).toMatch(/about 40 s/);
+    });
+});
+
+describe('two engines in the report and the events', () => {
+    it('an engine status is keyed by key, else by id', () => {
+        expect(engineKeyOf({ key: 'yue2' })).toBe('yue2');
+        expect(engineKeyOf({ id: 'acestep.cpp' })).toBe('acestep');
+        expect(engineKeyOf({ id: 'other' })).toBeNull();
+    });
+
+    it('engine events keep each engine apart', () => {
+        let s = reduceMusicEvent({ jobs: [], engine: null }, 'music_engine_status', { engine: { key: 'yue2', state: 'running', reason: '' } });
+        s = reduceMusicEvent(s, 'music_engine_status', { engine: { id: 'acestep.cpp', state: 'stopped', reason: 'swap' } });
+        expect(s.engines?.yue2?.state).toBe('running');
+        expect(s.engines?.acestep?.state).toBe('stopped');
+    });
+
+    it('Generate follows the selected engine, and the voice list puts voices first', () => {
+        const caps = {
+            job_types: { generate_from_text: { status: 'supported', reason: '' } },
+            engines: {
+                yue2: { state: 'not_installed', available: false, reason: 'no yue-server', adapters: [
+                    { name: 'style-x', kind: 'other' }, { name: 'voice-b', kind: 'voice' }, { name: 'voice-a', kind: 'voice' }] },
+                acestep: { state: 'stopped', available: true, reason: 'installed' },
+            },
+        };
+        expect(fromTextSupport(caps, 'yue2')).toEqual({ supported: false, reason: 'no yue-server' });
+        expect(fromTextSupport(caps, 'acestep').supported).toBe(true);
+        expect(yue2Adapters(caps).map(a => a.name)).toEqual(['voice-a', 'voice-b', 'style-x']);
+    });
+});
 
 describe('a Discard reason is text, a class, or both, never neither', () => {
     it('refuses empty and blank', () => {
@@ -349,6 +452,8 @@ describe('take info and decisions', () => {
 
     it('shows seed, variant, batch, duration and LUFS / TP', () => {
         expect(takeInfo(take)).toBe('seed 42 · variant 1 · batch 2, index 0 · 0:30 · −14.0 LUFS / −1.0 dBTP');
+        expect(takeInfo({ ...take, engine: 'yue2.cpp', seed: 43, lm_seed: 43, synth_batch_size: 1, synth_batch_index: 0 }))
+            .toBe('yue2.cpp · seed 43 · variant 1 · batch 1, index 0 · 0:30 · −14.0 LUFS / −1.0 dBTP');
         expect(takeInfo({ ...take, loudness: null })).toContain('loudness not measured');
     });
 

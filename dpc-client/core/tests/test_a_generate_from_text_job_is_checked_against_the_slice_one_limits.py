@@ -1,7 +1,8 @@
 """A `generate_from_text` job is checked against the slice-1 limits (SPEC §12 decisions
-33-34): variants 1-4 (default 2), duration 10-600 s (default 120), a seed in the engine's
-range or null, no source track. A bad param is refused with its name, and the lyrics are
-kept verbatim.
+33-34): variants 1-4 (default 2), a seed in the engine's range or null, no source track; on
+acestep the duration is 10-600 s (default 120). Since decision 40 (Mike #198) the default
+engine is yue2, whose own defaults are filled in when no engine is named. A bad param is
+refused with its name, and the lyrics are kept verbatim.
 """
 
 import pytest
@@ -19,8 +20,12 @@ def _refused(store, **params):
 def test_defaults_fill_variants_duration_seed_prep_and_engine(tmp_path):
     store = store_at(tmp_path)
     job = store.create_job("generate_from_text", {"lyrics": "la la", "style": "dnb"})
-    assert job["params"] == {"lyrics": "la la", "style": "dnb", "variants": 2, "duration_s": 120, "seed": None,
-                             "lyrics_prep": {}, "engine": "ace-step-1.5:text2music"}
+    assert job["params"] == {"lyrics": "la la", "style": "dnb", "variants": 2, "duration_s": 180, "seed": None,
+                             "lyrics_prep": {}, "engine": "yue2", "backbone": "stock", "cot": "full",
+                             "adapters": []}
+    ace = store.create_job("generate_from_text", {"lyrics": "la la", "style": "dnb", "engine": "acestep"})
+    assert ace["params"] == {"lyrics": "la la", "style": "dnb", "variants": 2, "duration_s": 120, "seed": None,
+                             "lyrics_prep": {}, "engine": "acestep"}
     assert job["track_id"] is None and job["base_version_id"] is None
     assert job["comment_id"] is None and job["action"] is None and job["region"] is None
     assert job["prompt"] == "dnb"
@@ -40,12 +45,13 @@ def test_variants_outside_one_to_four_are_refused(tmp_path, variants):
 
 @pytest.mark.parametrize("duration", [10, 10.0, 120, 599.5, 600])
 def test_durations_from_ten_to_six_hundred_seconds_are_accepted(tmp_path, duration):
-    assert store_at(tmp_path).create_job("generate_from_text", from_text_params(duration_s=duration))["params"]["duration_s"] == duration
+    params = from_text_params(duration_s=duration, engine="acestep")
+    assert store_at(tmp_path).create_job("generate_from_text", params)["params"]["duration_s"] == duration
 
 
 @pytest.mark.parametrize("duration", [9.99, 0, 600.01, -5, float("nan"), float("inf"), "120", True])
 def test_durations_outside_the_limits_are_refused(tmp_path, duration):
-    err = _refused(store_at(tmp_path), **from_text_params(duration_s=duration))
+    err = _refused(store_at(tmp_path), **from_text_params(duration_s=duration, engine="acestep"))
     assert err.field == "duration_s" and "10 to 600" in err.message
 
 

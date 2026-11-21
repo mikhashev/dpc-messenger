@@ -130,8 +130,9 @@ async def wait_until(predicate, timeout=30.0, step=0.02):
 
 
 def from_text(**over):
+    """acestep.cpp job params (yue2 is the default engine since 2026-11-21, so these name it)."""
     params = {"lyrics": "[verse]\nТысячи умов, один огонь\n", "style": "indie rock, warm guitars", "variants": 2,
-              "duration_s": 30, "seed": 42}
+              "duration_s": 30, "seed": 42, "engine": "acestep"}
     params.update(over)
     return params
 

@@ -32,12 +32,17 @@ async def test_the_store_opens_once_under_concurrent_first_calls(tmp_path, monke
 async def test_with_no_engine_installed_a_proposed_job_is_unsupported(tmp_path):
     service = Service(tmp_path / "dpc")
     caps = (await service.get_music_capabilities())["capabilities"]
-    assert caps["engine"]["state"] == "not_installed"
+    assert caps["engine"]["state"] == "not_installed" and caps["engine"]["key"] == "yue2"
     assert caps["engine"]["supervised"] is True
-    assert "ace-server" in caps["engine"]["reason"]
-    assert "acestep-v15-turbo-Q8_0.gguf" in caps["engine"]["reason"]
+    assert "yue-server" in caps["engine"]["reason"]
+    ace = caps["engines"]["acestep"]
+    assert ace["state"] == "not_installed" and "ace-server" in ace["reason"]
+    assert "acestep-v15-turbo-Q8_0.gguf" in ace["reason"]
     proposed = await service.propose_music_job(type="generate_from_text", params=from_text_params())
     assert proposed["status"] == "ok"
     job = proposed["job"]
     assert job["state"] == "unsupported"
-    assert "binary is missing" in job["state_reason"]
+    assert "yue2.cpp server binary is missing" in job["state_reason"]
+    proposed = await service.propose_music_job(type="generate_from_text",
+                                               params=from_text_params(engine="acestep"))
+    assert "acestep.cpp server binary is missing" in proposed["job"]["state_reason"]

@@ -36,16 +36,23 @@ def test_every_job_type_and_edit_action_is_listed_with_a_status_and_a_reason():
     assert report["job_types"]["voice_clone"]["status"] == "unsupported"
 
 
-def test_the_limits_are_the_slice_one_decisions():
-    limits = MusicCapabilities().report()["limits"]
+def test_the_limits_are_the_slice_one_decisions_per_engine():
+    report = MusicCapabilities().report()
+    limits = report["limits"]
     assert limits["max_track_s"] == 600
     g = limits["generate_from_text"]
     assert g["variants"] == {"min": 1, "max": 4, "default": 2}
-    assert g["duration_s"] == {"min": 10, "max": 600, "default": 120}
+    # The top-level duration is the default engine's: yue2 (decision 40), a cap.
+    assert g["engine"] == "yue2" == report["default_engine"] and g["engine_choices"] == ["yue2", "acestep"]
+    assert g["duration_s"] == {"min": 30, "max": 360, "default": 180}
     assert (g["seed"]["min"], g["seed"]["max"]) == (0, 2 ** 32 - 1)
-    assert (g["dit_model"], g["dit_quant"], g["inference_steps"]) == ("turbo", "Q8", 8)
+    ace = g["engines"]["acestep"]
+    assert ace["duration_s"] == {"min": 10, "max": 600, "default": 120}
+    assert (ace["dit_model"], ace["dit_quant"], ace["inference_steps"]) == ("turbo", "Q8", 8)
+    yue = g["engines"]["yue2"]
+    assert yue["duration_is_cap"] is True and yue["backbones"] == ["stock", "rs-tw"] and yue["cot_default"] == "full"
+    assert yue["adapter_scale"]["music_default"] == 0.45 and yue["adapter_scale"]["sound_default"] == 0.35
     assert (g["engine_output"], g["library_format"]) == ("wav24", "flac")
-    assert g["engine"] == "ace-step-1.5:text2music"
 
 
 def test_the_report_names_the_discard_classes_and_that_a_reason_is_needed():

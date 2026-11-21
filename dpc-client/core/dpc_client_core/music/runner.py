@@ -1,5 +1,11 @@
-"""The music job runner: runs `generate_from_text` jobs on the DPC-supervised acestep.cpp
-server, one at a time, oldest first (SPEC §5, §6; §12 decisions 31-35; ADR-051 D30-D32).
+"""The music job runner: runs `generate_from_text` jobs on the DPC-supervised music engines,
+one at a time, oldest first (SPEC §5, §6; §12 decisions 31-35, 40; ADR-051 D30-D32, D35).
+
+A job runs on the engine its params name (`job_schemas.engine_of`): yue2.cpp by default
+(Mike #198), or acestep.cpp. Both share the steps below except where each engine's own
+requests and answers differ; "yue2.cpp" at the end says how it differs. Before an engine
+starts, the other music engine is made to leave the card (`MusicEngines.exclusive`: an idle
+one is stopped, a busy one is waited for).
 
 One asyncio task per backend. It takes the oldest `queued` job, runs it to `review`,
 `failed` or `cancelled`, and takes the next; at start it resumes whatever is queued (a job
@@ -65,6 +71,19 @@ the service turns it into a `music_job_updated` broadcast.
 
 **ffmpeg** is found on PATH (`MediaTools.discover`) and run through the process registry
 (`run_probe`, as the library's probes). Without it a job fails with that reason.
+
+**yue2.cpp** (decision 40). No `/lm` pass: each variant is one `/synth` request at batch 1
+(`lm_batch_size` and `synth_batch_size` 1; the CUDA flash-attention mask bug at batch > 1),
+with seed and lm_seed `seed + i` (`variant_seed`). Every variant's body is written as
+payload `synth.v<n>.request.json` before the card wait, so a resumed job keeps its seeds.
+The answer is multipart: the engine's replay request (the score, the semantic codes and
+the seeds it consumed; written as payload `synth.v<n>.result.json`, what makes the song
+repeatable), the wav24 audio, and the latents. Each take records `synth_batch_size` 1,
+index 0, its own seed and lm_seed and engine `yue2.cpp`; the sidecar adds the commit, the
+backbone and its sha256, the adapters with the source and both split sha256s and the
+strengths, `cot`, and the duration cap beside the received length. Cancel stops between
+variants and cancels the engine's job in flight. A job's engine-job limit grows with the
+cap (about 3.5x real time on the trial card).
 """
 
 from __future__ import annotations
@@ -84,7 +103,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import job_schemas as js
-from .acestep import MODEL_FILES, AceStepError, AceStepServer
+from .acestep import MODEL_FILES
+from .engine_base import MusicEngineError
+from .engines import MusicEngines
 from .identity import MediaTools, read_flac_streaminfo
 from .jobs import MusicJobError, MusicJobStore
 from .loudness import LoudnessError, LoudnessMeter, ffmpeg_loudness_meter
@@ -99,6 +120,8 @@ SIDECAR_SCHEMA = "dpc.take-sidecar/1"
 INSTRUMENTAL_LYRICS = "[Instrumental]"   # acestep.cpp's instrumental marker (request.cpp)
 CODES_HZ = 5.0                            # audio_codes run at 5 Hz: received length = codes x 0.2 s
 FFMPEG_TIMEOUT_S = 600.0
+YUE2_BATCH_NOTE = ("batch 1 per variant: the CUDA flash-attention mask bug at batch > 1 is unfixed in ggml "
+                   "ef4555b7 (ai-studio engine/yue2-cpp/BUILD.md)")
 DEFAULT_CARD_POLL_S = 3.0
 DEFAULT_ENGINE_POLL_S = 0.5
 DEFAULT_ENGINE_JOB_TIMEOUT_S = 1800.0
@@ -157,6 +180,45 @@ def build_lm_body(params: Mapping[str, Any], seed: int) -> bytes:
         "synth_model": MODEL_FILES["dit"],
         "vae": MODEL_FILES["vae"],
     })
+    return json.dumps(req, ensure_ascii=False).encode("utf-8")
+
+
+def yue2_request_name(variant: int) -> str:
+    return f"synth.v{variant}.request.json"
+
+
+def yue2_result_name(variant: int) -> str:
+    return f"synth.v{variant}.result.json"
+
+
+def variant_seed(seed: int, index: int) -> int:
+    """The seed of variant `index` (0-based) of a yue2 job: `seed + index`, kept in the
+    seed range."""
+    return (seed + index) % (js.SEED_MAX + 1)
+
+
+def build_yue2_body(params: Mapping[str, Any], seed: int, adapters: Optional[List[Dict[str, Any]]] = None) -> bytes:
+    """One variant's yue2.cpp `/synth` body, in the shape of the trial's requests
+    (`engine/yue2-cpp/scripts/mkreq.py`): batch 1, the token and noise seeds both `seed`,
+    wav24. `adapters` is the request form, one entry per split half
+    (`Yue2Server.request_adapters`). An instrumental sends empty lyrics: the model then
+    composes on its own (ARCHITECTURE.md, `lyrics`)."""
+    lyrics = params.get("lyrics")
+    req: Dict[str, Any] = {
+        "style": params["style"],
+        "lyrics": lyrics if lyrics is not None else "",
+        "cot": params.get("cot") or js.YUE2_COT_DEFAULT,
+        "duration": float(params["duration_s"]),
+        "lm_seed": seed,
+        "seed": seed,
+        "steps": js.YUE2_STEPS,
+        "lm_batch_size": 1,
+        "synth_batch_size": 1,
+        "output_format": js.ENGINE_OUTPUT_FORMAT,
+        "peak_clip": js.YUE2_PEAK_CLIP,
+    }
+    if adapters:
+        req["adapters"] = [{"name": a["name"], "scale": a["scale"]} for a in adapters]
     return json.dumps(req, ensure_ascii=False).encode("utf-8")
 
 
@@ -315,12 +377,13 @@ def ffmpeg_converter(tools: Optional[MediaTools] = None) -> Converter:
 
 
 class MusicJobRunner:
-    """One worker task running queued `generate_from_text` jobs in FIFO order."""
+    """One worker task running queued `generate_from_text` jobs in FIFO order, each on the
+    engine its params name."""
 
     def __init__(
         self,
         store: MusicJobStore,
-        engine: AceStepServer,
+        engines: Any,
         library: Callable[[], Awaitable[Any]],
         *,
         dpc_home: Path,
@@ -334,7 +397,8 @@ class MusicJobRunner:
         loudness_meter: Optional[LoudnessMeter] = None,
     ):
         self.store = store
-        self.engine = engine
+        # A `MusicEngines`, a mapping of engine word to supervisor, or one supervisor.
+        self.engines = MusicEngines.of(engines)
         self._library = library
         self.generated_root = music_dir_of(dpc_home) / "generated"
         self._card_holders = card_holders or default_card_holders
@@ -349,6 +413,12 @@ class MusicJobRunner:
         self._wake: Optional[asyncio.Event] = None
         self._skipped: Dict[str, str] = {}
         self.current_job_id: Optional[str] = None
+        self.current_engine: Optional[str] = None
+
+    @property
+    def engine(self) -> Any:
+        """The default engine's supervisor (the only one when the runner was given one)."""
+        return self.engines.get()
 
     # -- the worker ---------------------------------------------------------------
 
@@ -401,6 +471,7 @@ class MusicJobRunner:
                 await self._fail(job_id, f"internal error in the runner: {type(exc).__name__}: {exc}")
             finally:
                 self.current_job_id = None
+                self.current_engine = None
             job = await self._get(job_id)
             if job is not None and job["state"] == js.QUEUED:
                 # Still queued after a run: something refused before the start. Skip it in
@@ -464,7 +535,21 @@ class MusicJobRunner:
         job = await self._get(job_id)
         if job is None or job["state"] != js.QUEUED or job["type"] != js.GENERATE_FROM_TEXT:
             return
-        lm_body, seed = await self._lm_payload(job)
+        key = js.engine_of(job["params"])
+        engine = self.engines.find(key)
+        if engine is None:
+            logger.error("music: job %s names engine %s, which this DPC has not set up", job_id, key)
+            return
+        if key == js.ENGINE_YUE2:
+            try:
+                seed = await self._yue2_payloads(job)
+            except MusicEngineError as exc:
+                # The adapter went missing between the proposal and the run.
+                await self._change(self.store.refuse_job, job_id, exc.message)
+                return
+            lm_body = b""
+        else:
+            lm_body, seed = await self._lm_payload(job)
         if not await self._wait_for_card(job_id):
             return
         try:
@@ -473,23 +558,27 @@ class MusicJobRunner:
             if await self._cancelled(job_id):
                 return
             raise
-        async with self.engine.in_use():
+        self.current_engine = key
+        async with engine.in_use():
             engine_job: List[Optional[str]] = [None]
             try:
-                await self._produce(job_id, job["params"], lm_body, seed, engine_job)
+                if key == js.ENGINE_YUE2:
+                    await self._produce_yue2(job_id, job["params"], seed, engine, engine_job)
+                else:
+                    await self._produce(job_id, job["params"], lm_body, seed, engine_job, engine)
             except _Cancelled:
-                if engine_job[0] is not None and self.engine.alive():
-                    await self.engine.cancel(engine_job[0])
+                if engine_job[0] is not None and engine.alive():
+                    await engine.cancel(engine_job[0])
                 logger.info("music: job %s cancelled", job_id)
-            except (_JobFailure, AceStepError) as exc:
-                reason = exc.message if isinstance(exc, AceStepError) else str(exc)
+            except (_JobFailure, MusicEngineError) as exc:
+                reason = exc.message if isinstance(exc, MusicEngineError) else str(exc)
                 logger.warning("music: job %s failed: %s", job_id, reason)
                 if await self._cancelled(job_id):
                     return
                 await self._fail(job_id, reason)
 
     async def _lm_payload(self, job: dict) -> Tuple[bytes, int]:
-        """The `/lm` body on disk, written now or reused from an earlier start."""
+        """The acestep `/lm` body on disk, written now or reused from an earlier start."""
         job_id = job["id"]
         if any(p["name"] == LM_PAYLOAD for p in job.get("payloads") or []):
             body = await self._call(self.store.read_payload, job_id, LM_PAYLOAD)
@@ -500,6 +589,31 @@ class MusicJobRunner:
         await self._call(self.store.write_payload, job_id, LM_PAYLOAD, body, endpoint="/lm")
         self._emit(await self._get(job_id))
         return body, seed
+
+    async def _yue2_payloads(self, job: dict) -> int:
+        """Every variant's yue2.cpp `/synth` body on disk before anything is sent (one per
+        variant, batch 1, seed and lm_seed `seed + i`), written now or reused from an
+        earlier start so the seeds do not change. Returns the job's seed."""
+        job_id, params = job["id"], job["params"]
+        names = [yue2_request_name(v) for v in range(1, int(params["variants"]) + 1)]
+        have = {p["name"] for p in job.get("payloads") or []}
+        if names[0] in have:
+            first = await self._call(self.store.read_payload, job_id, names[0])
+            seed = int(json.loads(first.decode("utf-8"))["seed"])
+        else:
+            seed = params["seed"] if params.get("seed") is not None else int(self._draw_seed())
+        engine = self.engines.get(js.ENGINE_YUE2)
+        request_adapters = engine.request_adapters(params.get("adapters") or [])
+        wrote = False
+        for index, name in enumerate(names):
+            if name in have:
+                continue
+            body = build_yue2_body(params, variant_seed(seed, index), request_adapters)
+            await self._call(self.store.write_payload, job_id, name, body, endpoint="/synth")
+            wrote = True
+        if wrote:
+            self._emit(await self._get(job_id))
+        return seed
 
     async def _wait_for_card(self, job_id: str) -> bool:
         """Wait while a DPC engine holds the card; False when the job was cancelled."""
@@ -540,41 +654,52 @@ class MusicJobRunner:
             pass
         self._wake.clear()
 
-    async def _engine_job(self, job_id: str, path: str, body: bytes, engine_job: List[Optional[str]],
-                          dest: Optional[Path] = None) -> Tuple[str, Optional[bytes]]:
+    async def _start_engine(self, job_id: str, key: str, engine: Any, **start_kw) -> None:
+        """Start the job's engine with the card free of the other music engine: an idle one
+        is stopped, a busy one is waited for (`MusicEngines.exclusive`)."""
+        async def check() -> None:
+            await self._check(job_id)
+        async with self.engines.exclusive(key, check=check):
+            await engine.start(**start_kw)
+
+    async def _engine_job(self, job_id: str, engine: Any, path: str, body: bytes,
+                          engine_job: List[Optional[str]], dest: Optional[Path] = None,
+                          timeout_s: Optional[float] = None) -> Tuple[str, Optional[bytes]]:
         """POST a body, poll `/job` until it ends (watching for the person's Cancel),
         and fetch the result."""
         await self._check(job_id)
-        eid = await self.engine.submit(path, body)
+        eid = await engine.submit(path, body)
         engine_job[0] = eid
+        limit = timeout_s if timeout_s is not None else self.engine_job_timeout_s
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.engine_job_timeout_s
+        deadline = loop.time() + limit
         while True:
             await self._check(job_id)
-            status = await self.engine.job_status(eid)
+            status = await engine.job_status(eid)
             if status == "done":
                 break
             if status in ("failed", "cancelled"):
-                raise _JobFailure(self.engine.with_log_tail(f"acestep.cpp {path} job {eid} {status}"))
+                raise _JobFailure(engine.with_log_tail(f"{engine.DISPLAY} {path} job {eid} {status}"))
             if loop.time() > deadline:
-                await self.engine.cancel(eid)
-                raise _JobFailure(f"acestep.cpp {path} job {eid} did not finish within "
-                                  f"{self.engine_job_timeout_s:g} s")
+                await engine.cancel(eid)
+                raise _JobFailure(f"{engine.DISPLAY} {path} job {eid} did not finish within {limit:g} s")
             await asyncio.sleep(self.engine_poll_s)
-        result = await self.engine.fetch_result(eid, dest)
+        result = await engine.fetch_result(eid, dest)
         engine_job[0] = None
         return result
 
+    # -- acestep.cpp: one /lm, then one /synth with every variant -------------------------
+
     async def _produce(self, job_id: str, params: Mapping[str, Any], lm_body: bytes, seed: int,
-                       engine_job: List[Optional[str]]) -> None:
+                       engine_job: List[Optional[str]], engine: Any) -> None:
         variants = int(params["variants"])
         await self._progress(job_id, 0.05)
         await self._check(job_id)
-        await self.engine.start()
+        await self._start_engine(job_id, js.ENGINE_ACESTEP, engine)
         await self._progress(job_id, 0.1)
 
         # LM: codes.
-        _ctype, lm_raw = await self._engine_job(job_id, "/lm", lm_body, engine_job)
+        _ctype, lm_raw = await self._engine_job(job_id, engine, "/lm", lm_body, engine_job)
         assert lm_raw is not None
         await self._check(job_id)
         await self._call(self.store.write_payload, job_id, LM_RESULT_PAYLOAD, lm_raw, endpoint="/lm")
@@ -598,7 +723,7 @@ class MusicJobRunner:
         out_dir.mkdir(parents=True, exist_ok=True)
         multipart = out_dir / "synth.multipart.part"
         try:
-            ctype, _ = await self._engine_job(job_id, "/synth", synth_body, engine_job, dest=multipart)
+            ctype, _ = await self._engine_job(job_id, engine, "/synth", synth_body, engine_job, dest=multipart)
             await self._check(job_id)
             parts = await asyncio.to_thread(split_multipart_file, multipart, multipart_boundary(ctype))
             audio = [(h, s, e) for h, s, e in parts if "audio/" in h.lower()]
@@ -609,7 +734,7 @@ class MusicJobRunner:
             await self._progress(job_id, 0.8)
             job = await self._get(job_id)
             payloads = {p["name"]: p["sha256"] for p in (job or {}).get("payloads") or []}
-            identity = await asyncio.to_thread(self.engine.identity)
+            identity = await asyncio.to_thread(engine.identity)
             slug = slug_of(params.get("style") or "")
             for index, (_h, start, end) in enumerate(audio):
                 await self._check(job_id)
@@ -632,6 +757,160 @@ class MusicJobRunner:
                         codes: str, payloads: Dict[str, str], identity: Dict[str, Any],
                         latent_sha: Optional[str]) -> None:
         variant = index + 1
+        version = identity.get("version") or ""
+        lm_seed = lm0.get("lm_seed")
+        await self._store_take(
+            job_id, params, out_dir, slug, variant, multipart, start, end, latent_sha=latent_sha,
+            artist="DPC (acestep.cpp)",
+            comment=(f"Generated by DPC with acestep.cpp {version}; job {job_id}, variant {variant}, seed {seed}, "
+                     f"synth batch {index}/{batch_size}").replace("  ", " "),
+            tags={"DPC_SEED": str(seed), "DPC_SYNTH_BATCH_SIZE": str(batch_size),
+                  "DPC_SYNTH_BATCH_INDEX": str(index)},
+            record={
+                "task_type": lm0.get("task_type") or "text2music",
+                "engine": {k: identity.get(k) for k in ("engine", "version", "binaries", "server_args")},
+                "models": identity.get("models"),
+                "payloads": payloads,
+                "seed": seed,
+                "variant_seed": seed + index,
+                "synth_batch_size": batch_size,
+                "synth_batch_index": index,
+                "inference_steps": lm0.get("inference_steps", js.FROM_TEXT_INFERENCE_STEPS),
+                "synth_model": MODEL_FILES["dit"],
+                "lm_model": MODEL_FILES["lm"],
+                "solver": lm0.get("solver"),
+                "lm_seed": lm_seed,
+                "audio_codes_sha256": "sha256:" + hashlib.sha256(codes.encode("utf-8")).hexdigest(),
+                "codes_count": len([c for c in codes.split(",") if c.strip()]),
+            },
+            take={"seed": seed, "synth_batch_size": batch_size, "synth_batch_index": index, "payload": SYNTH_PAYLOAD,
+                  "engine": identity.get("engine") or "acestep.cpp",
+                  "lm_seed": lm_seed if isinstance(lm_seed, int) and not isinstance(lm_seed, bool)
+                  and 0 <= lm_seed <= js.LM_SEED_MAX else None})
+
+    # -- yue2.cpp: one /synth per variant, batch 1 ----------------------------------------
+
+    async def _produce_yue2(self, job_id: str, params: Mapping[str, Any], seed: int, engine: Any,
+                            engine_job: List[Optional[str]]) -> None:
+        variants = int(params["variants"])
+        backbone = params.get("backbone") or js.YUE2_BACKBONE_DEFAULT
+        await self._progress(job_id, 0.05)
+        await self._check(job_id)
+        await self._start_engine(job_id, js.ENGINE_YUE2, engine, backbone=backbone,
+                                 adapters=params.get("adapters") or [])
+        await self._progress(job_id, 0.1)
+        out_dir = self.generated_root / job_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        identity = await asyncio.to_thread(lambda: engine.identity(backbone=backbone,
+                                                                   adapters=params.get("adapters") or []))
+        slug = slug_of(params.get("style") or "")
+        # About 3.5x real time on the trial card: a 360 s cap must not hit the default limit.
+        timeout_s = max(self.engine_job_timeout_s, float(params["duration_s"]) * 6 + 300)
+        for index in range(variants):
+            variant = index + 1
+            await self._check(job_id)
+            name = yue2_request_name(variant)
+            body = await self._call(self.store.read_payload, job_id, name)
+            multipart = out_dir / f"synth.v{variant}.multipart.part"
+            try:
+                ctype, _ = await self._engine_job(job_id, engine, "/synth", body, engine_job, dest=multipart,
+                                                  timeout_s=timeout_s)
+                await self._check(job_id)
+                parts = await asyncio.to_thread(split_multipart_file, multipart, multipart_boundary(ctype))
+                replays = [(h, s, e) for h, s, e in parts if "application/json" in h.lower()]
+                audio = [(h, s, e) for h, s, e in parts if "audio/" in h.lower()]
+                latents = [(h, s, e) for h, s, e in parts if "application/octet-stream" in h.lower()]
+                if len(audio) != 1:
+                    raise _JobFailure(f"yue2.cpp returned {len(audio)} audio part(s) for one song at batch 1 "
+                                      f"(variant {variant})")
+                replay_raw = b""
+                replay: Dict[str, Any] = {}
+                if replays:
+                    replay_raw = await asyncio.to_thread(_read_range, multipart, replays[0][1], replays[0][2])
+                    try:
+                        loaded = json.loads(replay_raw.decode("utf-8"))
+                        replay = loaded if isinstance(loaded, dict) else {}
+                    except (ValueError, UnicodeDecodeError):
+                        logger.warning("music: the replay request of variant %s of job %s is not JSON",
+                                       variant, job_id)
+                    await self._call(self.store.write_payload, job_id, yue2_result_name(variant), replay_raw,
+                                     endpoint="/synth")
+                latent_sha = None
+                if latents:
+                    latent_sha = await asyncio.to_thread(_range_sha256, multipart, latents[0][1], latents[0][2])
+                job = await self._get(job_id)
+                payloads = {p["name"]: p["sha256"] for p in (job or {}).get("payloads") or []}
+                sent = json.loads(body.decode("utf-8"))
+                await self._yue2_take(job_id, params, out_dir, slug, multipart, audio[0][1], audio[0][2], variant,
+                                      seed, sent, replay, replay_raw, payloads, identity, latent_sha)
+            finally:
+                try:
+                    multipart.unlink()
+                except OSError:
+                    pass
+            await self._progress(job_id, round(0.1 + 0.9 * variant / variants, 4))
+        await self._check(job_id)
+        await self._change(self.store.finish_job, job_id)
+
+    async def _yue2_take(self, job_id: str, params: Mapping[str, Any], out_dir: Path, slug: str, multipart: Path,
+                         start: int, end: int, variant: int, seed: int, sent: Mapping[str, Any],
+                         replay: Mapping[str, Any], replay_raw: bytes, payloads: Dict[str, str],
+                         identity: Dict[str, Any], latent_sha: Optional[str]) -> None:
+        # The engine's replay request carries the seeds it consumed; ours were explicit, so
+        # they agree, but the record keeps what the engine says it used.
+        v_seed = _int_or(replay.get("seed"), sent["seed"])
+        v_lm_seed = _int_or(replay.get("lm_seed"), sent["lm_seed"])
+        if (v_seed, v_lm_seed) != (sent["seed"], sent["lm_seed"]):
+            logger.warning("music: yue2.cpp used seeds %s/%s for variant %s of job %s, not the sent %s/%s",
+                           v_lm_seed, v_seed, variant, job_id, sent["lm_seed"], sent["seed"])
+        tokens = str(replay.get("semantic_tokens") or "")
+        abc = str(replay.get("abc") or "")
+        version = identity.get("version") or ""
+        backbone = params.get("backbone") or js.YUE2_BACKBONE_DEFAULT
+        adapters = identity.get("adapters") or []
+        adapter_text = ", ".join(f"{a.get('name')} music {(a.get('music') or {}).get('scale')} "
+                                 f"sound {(a.get('sound') or {}).get('scale')}" for a in adapters) or "none"
+        await self._store_take(
+            job_id, params, out_dir, slug, variant, multipart, start, end, latent_sha=latent_sha,
+            artist="DPC (yue2.cpp)",
+            comment=(f"Generated by DPC with yue2.cpp {version}; job {job_id}, variant {variant}, seed {v_seed}, "
+                     f"lm_seed {v_lm_seed}, backbone {backbone}, adapters {adapter_text}, batch 1").replace("  ", " "),
+            tags={"DPC_ENGINE": "yue2.cpp", "DPC_SEED": str(v_seed), "DPC_LM_SEED": str(v_lm_seed),
+                  "DPC_BACKBONE": backbone, "DPC_SYNTH_BATCH_SIZE": "1", "DPC_SYNTH_BATCH_INDEX": "0"},
+            record={
+                "task_type": "text2music",
+                "engine": {k: identity.get(k) for k in ("engine", "version", "commit", "binaries", "server_args")},
+                "models": identity.get("models"),
+                "backbone": backbone,
+                "adapters": adapters,
+                "payloads": payloads,
+                "seed": seed,
+                "variant_seed": v_seed,
+                "lm_seed": v_lm_seed,
+                "lm_batch_size": 1,
+                "synth_batch_size": 1,
+                "synth_batch_index": 0,
+                "batch_note": YUE2_BATCH_NOTE,
+                "cot": sent.get("cot"),
+                "steps": sent.get("steps"),
+                "duration_cap_s": params.get("duration_s"),
+                "replay": {"payload": yue2_result_name(variant) if replay_raw else None,
+                           "sha256": ("sha256:" + hashlib.sha256(replay_raw).hexdigest()) if replay_raw else None,
+                           "semantic_tokens_count": len([c for c in tokens.split(",") if c.strip()]),
+                           "abc_sha256": ("sha256:" + hashlib.sha256(abc.encode("utf-8")).hexdigest()) if abc else None},
+            },
+            take={"seed": v_seed, "synth_batch_size": 1, "synth_batch_index": 0, "payload": yue2_request_name(variant),
+                  "engine": identity.get("engine") or "yue2.cpp",
+                  "lm_seed": v_lm_seed if 0 <= v_lm_seed <= js.LM_SEED_MAX else None})
+
+    # -- a take, whichever engine made it ---------------------------------------------------
+
+    async def _store_take(self, job_id: str, params: Mapping[str, Any], out_dir: Path, slug: str, variant: int,
+                          source: Path, start: int, end: int, *, latent_sha: Optional[str], artist: str,
+                          comment: str, tags: Mapping[str, str], record: Mapping[str, Any],
+                          take: Mapping[str, Any]) -> None:
+        """The engine's WAV bytes (`source[start:end]`) to a verified FLAC, a sidecar, a
+        loudness measurement, a library entry and a take."""
         stem = f"{slug}_v{variant}"
         wav_part = out_dir / f"{stem}.wav.part"
         flac_part = out_dir / f"{stem}.flac.part"
@@ -640,27 +919,24 @@ class MusicJobRunner:
         style = " ".join(str(params.get("style") or "").split())
         title = f"{style[:60]} (v{variant})" if style else f"Generated take v{variant}"
 
-        await asyncio.to_thread(copy_range, multipart, start, end, wav_part)
+        await asyncio.to_thread(copy_range, source, start, end, wav_part)
         try:
             try:
                 wav = await asyncio.to_thread(read_wav_info, wav_part)
             except ValueError as exc:
                 raise _JobFailure(f"variant {variant}: the engine's audio is not a WAV file: {exc}")
             wav_md5, wav_sha = await asyncio.to_thread(pcm_md5_and_sha256, wav_part, wav)
-            tags = {
+            all_tags = {
                 "TITLE": title,
-                "ARTIST": "DPC (acestep.cpp)",
+                "ARTIST": artist,
                 "GENRE": style[:120],
                 "DATE": _now()[:10],
-                "COMMENT": (f"Generated by DPC with acestep.cpp {identity.get('version') or ''}; job {job_id}, "
-                            f"variant {variant}, seed {seed}, synth batch {index}/{batch_size}").replace("  ", " "),
+                "COMMENT": comment,
                 "DPC_JOB_ID": job_id,
                 "DPC_VARIANT": str(variant),
-                "DPC_SEED": str(seed),
-                "DPC_SYNTH_BATCH_SIZE": str(batch_size),
-                "DPC_SYNTH_BATCH_INDEX": str(index),
+                **tags,
             }
-            await asyncio.to_thread(self._convert, wav_part, flac_part, tags)
+            await asyncio.to_thread(self._convert, wav_part, flac_part, all_tags)
             info = await asyncio.to_thread(read_flac_streaminfo, flac_part)
             if info is None:
                 raise _JobFailure(f"variant {variant}: the converter did not write a FLAC file")
@@ -677,7 +953,7 @@ class MusicJobRunner:
                 except OSError:
                     logger.warning("music: could not remove %s", p, exc_info=True)
 
-        record = {
+        sidecar_record: Dict[str, Any] = {
             "schema": SIDECAR_SCHEMA,
             "note": "a subset of the proposed mp.provenance/1 (docs/PROVENANCE.md); the full record is a later card",
             "job_id": job_id,
@@ -685,21 +961,7 @@ class MusicJobRunner:
             "library_track_id": None,
             "variant": variant,
             "created_at": _now(),
-            "task_type": lm0.get("task_type") or "text2music",
-            "engine": {k: identity.get(k) for k in ("engine", "version", "binaries", "server_args")},
-            "models": identity.get("models"),
-            "payloads": payloads,
-            "seed": seed,
-            "variant_seed": seed + index,
-            "synth_batch_size": batch_size,
-            "synth_batch_index": index,
-            "inference_steps": lm0.get("inference_steps", js.FROM_TEXT_INFERENCE_STEPS),
-            "synth_model": MODEL_FILES["dit"],
-            "lm_model": MODEL_FILES["lm"],
-            "solver": lm0.get("solver"),
-            "lm_seed": lm0.get("lm_seed"),
-            "audio_codes_sha256": "sha256:" + hashlib.sha256(codes.encode("utf-8")).hexdigest(),
-            "codes_count": len([c for c in codes.split(",") if c.strip()]),
+            **record,
             "duration_requested_s": params.get("duration_s"),
             "duration_received_s": info.duration_s,
             "engine_output": {"format": js.ENGINE_OUTPUT_FORMAT, "sha256": wav_sha, "pcm_md5": wav_md5,
@@ -709,7 +971,7 @@ class MusicJobRunner:
             "output": {"container": js.LIBRARY_FORMAT, "file": flac.name, "pcm_md5": info.md5,
                        "sample_rate": info.sample_rate, "channels": info.channels, "bits": info.bits_per_sample},
         }
-        await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(record, ensure_ascii=False, indent=1))
+        await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(sidecar_record, ensure_ascii=False, indent=1))
 
         loudness: Optional[Dict[str, Any]] = None
         try:
@@ -735,17 +997,26 @@ class MusicJobRunner:
 
         await self._check(job_id)
         try:
-            take = await self._call(
+            added = await self._call(
                 self.store.add_take, job_id, variant=variant, file_uri=flac.as_uri(), content_hash=content_hash,
-                title=title, seed=seed, synth_batch_size=batch_size, synth_batch_index=index, payload=SYNTH_PAYLOAD,
-                sample_rate=info.sample_rate or None, channels=info.channels or None,
-                duration_s=info.duration_s, library_track_id=library_id, loudness=loudness)
+                title=title, sample_rate=info.sample_rate or None, channels=info.channels or None,
+                duration_s=info.duration_s, library_track_id=library_id, loudness=loudness, **dict(take))
         except MusicJobError:
             await self._check(job_id)
             raise
         self._emit(await self._get(job_id))
-        record["take_id"], record["library_track_id"] = take["id"], library_id
-        await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(record, ensure_ascii=False, indent=1))
+        sidecar_record["take_id"], sidecar_record["library_track_id"] = added["id"], library_id
+        await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(sidecar_record, ensure_ascii=False, indent=1))
+
+
+def _int_or(value: Any, fallback: int) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else fallback
+
+
+def _read_range(path: Path, start: int, end: int) -> bytes:
+    with open(path, "rb") as f:
+        f.seek(start)
+        return f.read(end - start)
 
 
 def _range_sha256(path: Path, start: int, end: int) -> str:

@@ -15,7 +15,10 @@
 //   louder takes are turned down to the quietest one's integrated loudness; nothing is
 //   turned up, since `HTMLAudioElement.volume` stops at 1;
 // - the A/B switch keeps the position, clamped to the other take's length;
-// - a Discard or "None of these" needs a reason: text, a class, or both (decision 35).
+// - a Discard or "None of these" needs a reason: text, a class, or both (decision 35);
+// - two engines (decision 40, Mike #198): yue2 (the default) and acestep, each with its own
+//   duration limits; for yue2 the duration is a cap, and the form warns when the cap looks
+//   short for the lyrics (an estimate: ~10 s per sung line plus a ~20 s intro).
 
 // -- records from the core (music/job_schemas.py, capabilities.py) -----------------
 
@@ -66,13 +69,17 @@ export interface MusicTake {
     reason_class?: string | null;
     decided_at?: string | null;
     loudness?: TakeLoudness | null;
+    engine?: string | null;
+    lm_seed?: number | null;
 }
 
 export type EngineState = 'not_built' | 'not_installed' | 'stopped' | 'starting' | 'running' | 'error';
 
-/** `EngineStatus.as_dict()` (the event) or `AceStepServer.details()` (the command). */
+/** `EngineStatus.as_dict()` (the event) or `SupervisedEngine.details()` (the command). */
 export interface MusicEngine {
     id?: string;
+    /** The job-param word: 'yue2' or 'acestep'. */
+    key?: string | null;
     name?: string;
     state: EngineState | string;
     available?: boolean;
@@ -86,8 +93,28 @@ export interface FailureClass {
     meaning: string;
 }
 
+/** A voice or style adapter yue2.cpp can stack (capabilities `engines.yue2.adapters`). */
+export interface EngineAdapter {
+    name: string;
+    file?: string;
+    kind?: 'voice' | 'other' | string;
+    halves?: string[];
+}
+
+/** One engine in the capability report (`engines.<key>`). */
+export interface EngineInfo extends MusicEngine {
+    default?: boolean;
+    limits?: Record<string, any>;
+    backbones?: Record<string, { present: boolean; file?: string; reason?: string | null }>;
+    backbone_default?: string;
+    adapters?: EngineAdapter[];
+    adapter_note?: string;
+}
+
 export interface MusicCapabilities {
     engine?: MusicEngine;
+    engines?: Record<string, EngineInfo>;
+    default_engine?: string;
     job_types?: Record<string, { status: string; reason: string }>;
     limits?: { generate_from_text?: Partial<FromTextLimits> & Record<string, any> };
     take_decisions?: { failure_classes?: FailureClass[]; max_reason_text?: number };
@@ -193,6 +220,17 @@ export function mergeJobs(jobs: readonly MusicJob[], incoming: readonly MusicJob
 export interface MusicEventState {
     jobs: MusicJob[];
     engine: MusicEngine | null;
+    /** Each engine's last status, by its key ('yue2', 'acestep'). */
+    engines?: Record<string, MusicEngine>;
+}
+
+/** An engine status's key: its `key`, else read from its `id` (`yue2.cpp`, `acestep.cpp`). */
+export function engineKeyOf(engine: Pick<MusicEngine, 'key' | 'id'> | null | undefined): string | null {
+    if (!engine) return null;
+    if (typeof engine.key === 'string' && engine.key) return engine.key;
+    if (engine.id === 'yue2.cpp') return 'yue2';
+    if (engine.id === 'acestep.cpp') return 'acestep';
+    return null;
 }
 
 /** Apply one backend event. Unknown events and malformed payloads leave the state as it is. */
@@ -206,7 +244,10 @@ export function reduceMusicEvent(state: MusicEventState, event: string, payload:
     if (event === 'music_engine_status') {
         const engine = payload?.engine;
         if (!engine || typeof engine.state !== 'string') return state;
-        return { ...state, engine: { ...(state.engine ?? {}), ...engine } as MusicEngine };
+        const key = engineKeyOf(engine);
+        const engines = { ...(state.engines ?? {}) };
+        if (key) engines[key] = { ...(engines[key] ?? {}), ...engine } as MusicEngine;
+        return { ...state, engine: { ...(state.engine ?? {}), ...engine } as MusicEngine, engines };
     }
     return state;
 }
@@ -245,12 +286,77 @@ export function engineCanStop(engine: MusicEngine | null | undefined): boolean {
     return !!engine && (engine.state === 'starting' || engine.state === 'running');
 }
 
-/** `{supported, reason}` of generate_from_text from the capability report. Without a
- *  report it is not supported (the core is the authority; the panel waits for it). */
-export function fromTextSupport(caps: MusicCapabilities | null | undefined): { supported: boolean; reason: string } {
+/** `{supported, reason}` of generate_from_text from the capability report, on `engine`
+ *  when the report lists engines. Without a report it is not supported (the core is the
+ *  authority; the panel waits for it). */
+export function fromTextSupport(caps: MusicCapabilities | null | undefined, engine?: string): { supported: boolean; reason: string } {
     const st = caps?.job_types?.generate_from_text;
     if (!st) return { supported: false, reason: 'the capabilities have not been read yet' };
+    const info = engine ? caps?.engines?.[engine] : undefined;
+    if (info) return { supported: !!info.available, reason: info.available ? '' : (info.reason ?? `${engine} is not available`) };
     return { supported: st.status === 'supported', reason: st.reason ?? '' };
+}
+
+// -- engines -------------------------------------------------------------------------
+
+export type EngineKey = 'yue2' | 'acestep';
+/** Mike #198, 2026-11-21: YuE2 is the default engine. */
+export const DEFAULT_ENGINE: EngineKey = 'yue2';
+export const ENGINE_CHOICES: readonly { key: EngineKey; label: string; detail: string }[] = [
+    { key: 'yue2', label: 'YuE2 (yue2.cpp)', detail: 'yue2.cpp · YuE2 3B Q8 · one run per variant · FLAC' },
+    { key: 'acestep', label: 'ACE-Step 1.5 (acestep.cpp)', detail: 'acestep.cpp · turbo Q8 · 8 steps · FLAC' },
+];
+export const BACKBONE_CHOICES: readonly { key: string; label: string }[] = [
+    { key: 'stock', label: 'Stock (m-a-p YuE2 3B)' },
+    { key: 'rs-tw', label: 'RS-TW finetune' },
+];
+export const ADAPTER_MUSIC_DEFAULT = 0.45;
+export const ADAPTER_SOUND_DEFAULT = 0.35;
+export const VOICE_NOTE = "Voice adapters are trained on real readers' voices without stated consent: for local listening only.";
+
+/** The engine the panel starts on: the report's default, else yue2. */
+export function defaultEngineOf(caps: MusicCapabilities | null | undefined): EngineKey {
+    const d = caps?.default_engine;
+    return d === 'acestep' || d === 'yue2' ? d : DEFAULT_ENGINE;
+}
+
+/** The adapters yue2.cpp offers (found in the adapters folder and splittable), voices first. */
+export function yue2Adapters(caps: MusicCapabilities | null | undefined): EngineAdapter[] {
+    const list = caps?.engines?.yue2?.adapters ?? [];
+    return [...list].sort((a, b) => (a.kind === 'voice' ? 0 : 1) - (b.kind === 'voice' ? 0 : 1) || a.name.localeCompare(b.name));
+}
+
+/** Whether a backbone's file is present (true when the report does not say). */
+export function backbonePresent(caps: MusicCapabilities | null | undefined, backbone: string): boolean {
+    const b = caps?.engines?.yue2?.backbones?.[backbone];
+    return b ? !!b.present : true;
+}
+
+// -- the short-cap warning (yue2) ---------------------------------------------------
+
+export const YUE2_SECONDS_PER_LINE = 10;
+export const YUE2_INTRO_S = 20;
+
+/** About how long YuE2 needs to sing these lyrics: an intro plus a few seconds per sung
+ *  line (section tags such as [verse] and blank lines do not count). The core's
+ *  `estimate_yue2_seconds`; an estimate, never a limit. */
+export function estimateYue2Seconds(lyrics: string | null | undefined, perLine = YUE2_SECONDS_PER_LINE, intro = YUE2_INTRO_S): number {
+    if (!lyrics) return intro;
+    const sung = lyrics.split(/\r?\n/).map(l => l.trim()).filter(l => l && !(l.startsWith('[') && l.endsWith(']')));
+    return intro + perLine * sung.length;
+}
+
+/** The warning under the duration when a YuE2 cap looks too short for the lyrics, or ''. */
+export function shortCapWarning(form: Pick<FromTextForm, 'engine' | 'lyrics' | 'instrumental' | 'duration'>,
+    caps?: MusicCapabilities | null): string {
+    if ((form.engine ?? DEFAULT_ENGINE) !== 'yue2' || form.instrumental) return '';
+    const cap = asNumber(form.duration);
+    if (!Number.isFinite(cap)) return '';
+    const est = caps?.limits?.generate_from_text?.engines?.yue2?.short_cap_estimate ?? {};
+    const need = estimateYue2Seconds(form.lyrics, est.seconds_per_line ?? YUE2_SECONDS_PER_LINE, est.intro_s ?? YUE2_INTRO_S);
+    if (cap >= need) return '';
+    return `The cap of ${Math.round(cap)} s looks short for these lyrics (estimate: about ${Math.round(need)} s). `
+        + 'YuE2 stops at the cap, so the song may end before the vocals do.';
 }
 
 // -- the form ----------------------------------------------------------------------
@@ -261,21 +367,33 @@ export interface FromTextLimits {
     seed: { min: number; max: number };
 }
 
-/** The core's `job_schemas.py` limits (SPEC §12 decision 34). */
+/** The core's `job_schemas.py` duration limits per engine (yue2: a cap, decision 40;
+ *  acestep: SPEC §12 decision 34). */
+export const ENGINE_DURATION_LIMITS: Record<EngineKey, { min: number; max: number; default: number }> = {
+    yue2: { min: 30, max: 360, default: 180 },
+    acestep: { min: 10, max: 600, default: 120 },
+};
+
+/** The default engine's limits. */
 export const DEFAULT_FROM_TEXT_LIMITS: FromTextLimits = {
     variants: { min: 1, max: 4, default: 2 },
-    duration_s: { min: 10, max: 600, default: 120 },
+    duration_s: ENGINE_DURATION_LIMITS[DEFAULT_ENGINE],
     seed: { min: 0, max: 2 ** 32 - 1 },
 };
 
-/** The limits the capability report gives, with the defaults for what it leaves out. */
-export function limitsFrom(caps: MusicCapabilities | null | undefined): FromTextLimits {
+/** The limits the capability report gives for `engine` (the default engine when omitted),
+ *  with the defaults for what it leaves out. */
+export function limitsFrom(caps: MusicCapabilities | null | undefined, engine?: string): FromTextLimits {
     const l = caps?.limits?.generate_from_text ?? {};
+    const key: EngineKey = engine === 'acestep' || engine === 'yue2' ? engine : defaultEngineOf(caps);
     const pick = <T extends object>(given: any, fallback: T): T =>
         given && typeof given === 'object' ? { ...fallback, ...given } : fallback;
+    const perEngine = l.engines?.[key]?.duration_s;
+    const fallbackDuration = ENGINE_DURATION_LIMITS[key];
     return {
         variants: pick(l.variants, DEFAULT_FROM_TEXT_LIMITS.variants),
-        duration_s: pick(l.duration_s, DEFAULT_FROM_TEXT_LIMITS.duration_s),
+        duration_s: perEngine ? pick(perEngine, fallbackDuration)
+            : (engine ? fallbackDuration : pick(l.duration_s, fallbackDuration)),
         seed: pick(l.seed, DEFAULT_FROM_TEXT_LIMITS.seed),
     };
 }
@@ -288,13 +406,33 @@ export interface FromTextForm {
     duration: string | number | null;
     /** Empty: the runner draws one. */
     seed: string | number | null;
+    /** 'yue2' (the default) or 'acestep'; a form without it is yue2. */
+    engine?: EngineKey;
+    /** yue2 only: 'stock' or 'rs-tw'. */
+    backbone?: string;
+    /** yue2 only: an adapter name, or '' for none (the default). */
+    voice?: string;
+    voiceMusic?: string | number | null;
+    voiceSound?: string | number | null;
 }
 
-export type FormField = 'lyrics' | 'style' | 'variants' | 'duration' | 'seed' | 'form';
+export type FormField = 'lyrics' | 'style' | 'variants' | 'duration' | 'seed' | 'engine' | 'backbone' | 'voice' | 'form';
 export type FormErrors = Partial<Record<FormField, string>>;
 
-export function emptyFromTextForm(limits: FromTextLimits = DEFAULT_FROM_TEXT_LIMITS): FromTextForm {
-    return { lyrics: '', instrumental: false, style: '', variants: limits.variants.default, duration: limits.duration_s.default, seed: '' };
+export function emptyFromTextForm(limits: FromTextLimits = DEFAULT_FROM_TEXT_LIMITS, engine: EngineKey = DEFAULT_ENGINE): FromTextForm {
+    return {
+        lyrics: '', instrumental: false, style: '', variants: limits.variants.default, duration: limits.duration_s.default, seed: '',
+        engine, backbone: 'stock', voice: '', voiceMusic: ADAPTER_MUSIC_DEFAULT, voiceSound: ADAPTER_SOUND_DEFAULT,
+    };
+}
+
+/** The form after the engine select changed: a duration still at the old engine's default
+ *  takes the new engine's default; anything the person typed stays. */
+export function formForEngine(form: FromTextForm, engine: EngineKey, caps?: MusicCapabilities | null): FromTextForm {
+    const before = limitsFrom(caps, form.engine ?? DEFAULT_ENGINE).duration_s.default;
+    const after = limitsFrom(caps, engine).duration_s.default;
+    const d = asNumber(form.duration);
+    return { ...form, engine, duration: !Number.isFinite(d) || d === before ? after : form.duration };
 }
 
 function asNumber(v: string | number | null | undefined): number {
@@ -334,8 +472,20 @@ export function validateFromTextForm(form: FromTextForm, limits: FromTextLimits 
             errors.seed = `Seed must be a whole number from ${smin} to ${smax}, or empty to draw one.`;
         } else seed = s;
     }
+    const engine: EngineKey = form.engine ?? DEFAULT_ENGINE;
+    const extra: Record<string, any> = {};
+    if (engine === 'yue2') {
+        extra.backbone = form.backbone || 'stock';
+        if (form.voice) {
+            const music = asNumber(form.voiceMusic);
+            const sound = asNumber(form.voiceSound);
+            if (![music, sound].every(x => Number.isFinite(x) && x >= 0 && x <= 2)) {
+                errors.voice = 'The voice strengths must be numbers from 0 to 2.';
+            } else extra.adapters = [{ name: form.voice, music, sound }];
+        }
+    }
     if (Object.keys(errors).length) return { ok: false, errors };
-    return { ok: true, params: { lyrics, style: form.style, variants: v, duration_s: d, seed } };
+    return { ok: true, params: { lyrics, style: form.style, variants: v, duration_s: d, seed, engine, ...extra } };
 }
 
 /** The form field a core `field` names (`ParamsError.field`), else 'form'. */
@@ -346,6 +496,9 @@ export function formFieldOf(coreField: string | null | undefined): FormField {
         case 'variants': return 'variants';
         case 'duration_s': return 'duration';
         case 'seed': return 'seed';
+        case 'engine': return 'engine';
+        case 'backbone': return 'backbone';
+        case 'adapters': return 'voice';
         default: return 'form';
     }
 }
@@ -467,10 +620,12 @@ function clock(seconds: number): string {
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-/** "seed 42 · variant 1 · batch 2, index 0 · 0:30 · −14.0 LUFS / −1.0 dBTP". */
+/** "yue2.cpp · seed 42 · lm_seed 42 · variant 1 · batch 1, index 0 · 0:30 · −14.0 LUFS / −1.0 dBTP". */
 export function takeInfo(take: MusicTake): string {
     const parts: string[] = [];
+    if (take.engine) parts.push(take.engine);
     if (typeof take.seed === 'number') parts.push(`seed ${take.seed}`);
+    if (typeof take.lm_seed === 'number' && take.lm_seed !== take.seed) parts.push(`lm_seed ${take.lm_seed}`);
     parts.push(`variant ${take.variant}`);
     if (typeof take.synth_batch_size === 'number') parts.push(`batch ${take.synth_batch_size}, index ${take.synth_batch_index ?? '?'}`);
     const d = take.file?.duration_s;

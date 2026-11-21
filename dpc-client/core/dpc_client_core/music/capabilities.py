@@ -21,6 +21,15 @@ starts it when a job runs. The states:
 free is not part of availability: a job on an available engine is queued and waits for
 the card (SPEC decision 32).
 
+**Two engines** (SPEC §12 decision 40, Mike #198): yue2.cpp, the default, and acestep.cpp.
+The report keeps `engine` (the default engine's status, for an older reader) and adds
+`engines` (each by its job-param word, `yue2` and `acestep`, with what its form needs:
+backbones, adapters found, limits) and `default_engine`. `generate_from_text` is
+`supported` when at least one engine is available; a proposal is checked against the
+engine it names (`unsupported_reason(type, params)`), and its YuE2 backbone and adapters
+against the files present (`check_params`). A single probe (`MusicCapabilities(probe)`)
+answers for every engine: a stand-in for tests and start-up, never what the service builds.
+
 **Statuses** are SPEC §7's `supported | planned | unsupported`. `planned` means on the
 roadmap and not built in DPC; `propose_job` answers `unsupported` for it, as SPEC §7 says a
 real backend does. `features.lyrics_*` and `features.transcribe` describe what the DPC
@@ -41,6 +50,8 @@ logger = logging.getLogger(__name__)
 BACKEND_ID = "music-jobs"
 ENGINE_ID = "acestep.cpp"
 ENGINE_NAME = "acestep.cpp (ACE-Step 1.5, GGML)"
+YUE2_ENGINE_ID = "yue2.cpp"
+YUE2_ENGINE_NAME = "yue2.cpp (YuE2 3B, GGML)"
 
 ENGINE_STATES = ("not_built", "not_installed", "stopped", "starting", "running", "error")
 AVAILABLE_ENGINE_STATES = frozenset({"stopped", "starting", "running"})
@@ -96,6 +107,7 @@ class EngineStatus:
     supervised: bool = False      # true when DPC starts and stops the engine
     version: Optional[str] = None
     models: Mapping[str, str] = field(default_factory=dict)
+    key: Optional[str] = None     # the job-param word: "yue2", "acestep"
 
     def __post_init__(self) -> None:
         if self.state not in ENGINE_STATES:
@@ -109,9 +121,9 @@ class EngineStatus:
 
     def as_dict(self) -> Dict[str, Any]:
         return {
-            "id": self.engine_id, "name": self.name, "state": self.state, "available": self.available,
-            "reason": self.reason, "supervised": self.supervised, "version": self.version,
-            "models": dict(self.models),
+            "id": self.engine_id, "key": self.key, "name": self.name, "state": self.state,
+            "available": self.available, "reason": self.reason, "supervised": self.supervised,
+            "version": self.version, "models": dict(self.models),
         }
 
 
@@ -124,23 +136,68 @@ def adapter_not_built_probe() -> EngineStatus:
 
 
 class MusicCapabilities:
-    """The capability report, with the engine part read from `engine_probe` on every call
-    (SPEC §7: re-read on connect and before each send)."""
+    """The capability report, with the engine part read from the probes on every call
+    (SPEC §7: re-read on connect and before each send).
 
-    def __init__(self, engine_probe: Optional[EngineProbe] = None):
+    `engines` maps an engine word (`yue2`, `acestep`) to its supervisor, or to anything with
+    a `status()`; a supervisor that has `form_info()` (`Yue2Server`) adds what the form
+    needs (backbones present, adapters found). `engine_probe` alone answers for every
+    engine (see the module docstring)."""
+
+    def __init__(self, engine_probe: Optional[EngineProbe] = None, *,
+                 engines: Optional[Mapping[str, Any]] = None,
+                 default_engine: str = js.DEFAULT_FROM_TEXT_ENGINE):
         self._probe: EngineProbe = engine_probe or adapter_not_built_probe
+        self._engines: Dict[str, Any] = dict(engines or {})
+        self.default_engine = default_engine
 
-    def engine_status(self) -> EngineStatus:
-        """The probe's answer; a probe that raises or answers the wrong type reports an
+    # -- probes ------------------------------------------------------------------
+
+    @staticmethod
+    def _safe(probe: Callable[[], Any], key: Optional[str]) -> EngineStatus:
+        """A probe's answer; a probe that raises or answers the wrong type reports an
         `error` engine, never an available one."""
         try:
-            status = self._probe()
+            status = probe()
         except Exception as exc:
             logger.warning("music: the engine probe failed", exc_info=True)
-            return EngineStatus(state="error", reason=f"engine probe failed: {exc}")
+            return EngineStatus(state="error", reason=f"engine probe failed: {exc}", key=key)
         if not isinstance(status, EngineStatus):
-            return EngineStatus(state="error", reason=f"engine probe answered {type(status).__name__}")
+            return EngineStatus(state="error", reason=f"engine probe answered {type(status).__name__}", key=key)
         return status
+
+    def _probe_of(self, key: str) -> Callable[[], Any]:
+        engine = self._engines.get(key)
+        if engine is None:
+            return self._probe
+        return engine.status if hasattr(engine, "status") else engine
+
+    def engine_status(self, key: Optional[str] = None) -> EngineStatus:
+        """The status of one engine (the default when `key` is None)."""
+        key = key or self.default_engine
+        if self._engines and key not in self._engines:
+            return EngineStatus(state="not_built", reason=f"no {key} engine in this DPC", key=key)
+        return self._safe(self._probe_of(key), key)
+
+    def engine_statuses(self) -> Dict[str, EngineStatus]:
+        """Every engine's status; a single probe is read once for all of them."""
+        if not self._engines:
+            status = self._safe(self._probe, None)
+            return {k: status for k in js.FROM_TEXT_ENGINES}
+        return {k: self.engine_status(k) for k in js.FROM_TEXT_ENGINES}
+
+    def _form_info(self, key: str) -> Dict[str, Any]:
+        engine = self._engines.get(key)
+        info = getattr(engine, "form_info", None)
+        if not callable(info):
+            return {}
+        try:
+            return dict(info())
+        except Exception:
+            logger.warning("music: reading the %s form info failed", key, exc_info=True)
+            return {}
+
+    # -- job types -------------------------------------------------------------------
 
     @staticmethod
     def _from_text_status(engine: EngineStatus) -> Dict[str, str]:
@@ -148,47 +205,120 @@ class MusicCapabilities:
             return {"status": SUPPORTED, "reason": f"{engine.name}: {engine.reason}"}
         return {"status": UNSUPPORTED, "reason": engine.reason}
 
-    def job_type_status(self, job_type: str, engine: Optional[EngineStatus] = None) -> Dict[str, str]:
-        """`{status, reason}` of one job type."""
+    def _from_text_any(self, statuses: Mapping[str, EngineStatus]) -> Dict[str, str]:
+        """Supported when an engine is available (the default one first in the reason)."""
+        if not self._engines:  # one probe answers for every engine: its own words
+            return self._from_text_status(next(iter(statuses.values())))
+        order = [self.default_engine] + [k for k in statuses if k != self.default_engine]
+        for k in order:
+            if k in statuses and statuses[k].available:
+                return self._from_text_status(statuses[k])
+        reasons = "; ".join(f"{k}: {statuses[k].reason}" for k in order if k in statuses)
+        return {"status": UNSUPPORTED, "reason": reasons or "no music engine"}
+
+    def job_type_status(self, job_type: str, engine: Optional[EngineStatus] = None,
+                        params: Optional[Mapping[str, Any]] = None) -> Dict[str, str]:
+        """`{status, reason}` of one job type; for `generate_from_text` with `params`, of
+        the engine they name."""
         if job_type == js.GENERATE_FROM_TEXT:
-            return self._from_text_status(engine or self.engine_status())
+            if engine is not None:
+                return self._from_text_status(engine)
+            if params is not None:
+                return self._from_text_status(self.engine_status(js.engine_of(params)))
+            return self._from_text_any(self.engine_statuses())
         if job_type in _NOT_BUILT_JOB_TYPES:
             return dict(_NOT_BUILT_JOB_TYPES[job_type])
         return {"status": UNSUPPORTED, "reason": f"{job_type!r} is not a job type"}
 
-    def unsupported_reason(self, job_type: str) -> Optional[str]:
-        """Why a job of this type cannot run now, or None when it can be queued."""
-        st = self.job_type_status(job_type)
+    def unsupported_reason(self, job_type: str, params: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+        """Why a job of this type (with these params) cannot run now, or None when it can
+        be queued."""
+        st = self.job_type_status(job_type, params=params)
         if st["status"] == SUPPORTED:
             return None
         if st["status"] == PLANNED:
             return f"planned, not built: {st['reason']}"
         return st["reason"]
 
+    def check_params(self, job_type: str, params: Mapping[str, Any]) -> None:
+        """Raise `job_schemas.ParamsError` when normalized `generate_from_text` params name a
+        YuE2 backbone whose file is missing or an adapter the adapters folder does not hold.
+        Without a supervisor that reports them (a test stand-in), or while the engine is not
+        installed, nothing is checked."""
+        if job_type != js.GENERATE_FROM_TEXT or js.engine_of(params) != js.ENGINE_YUE2:
+            return
+        if not self.engine_status(js.ENGINE_YUE2).available:
+            return  # the job is `unsupported` with the engine's own reason
+        info = self._form_info(js.ENGINE_YUE2)
+        if not info:
+            return
+        backbones = info.get("backbones") or {}
+        choice = params.get("backbone")
+        if choice in backbones and not backbones[choice].get("present"):
+            raise js.ParamsError("backbone", f"backbone {choice!r}: {backbones[choice].get('reason') or 'its file is missing'}")
+        found = {a.get("name") for a in info.get("adapters") or []}
+        for a in params.get("adapters") or []:
+            if a.get("name") not in found:
+                where = info.get("adapters_dir") or "the adapters folder"
+                raise js.ParamsError("adapters", f"adapter {a.get('name')!r} is not in {where}"
+                                                 + ("" if found else " (no adapters found there)"))
+
+    # -- the report --------------------------------------------------------------------
+
+    def _engine_limits(self, key: str) -> Dict[str, Any]:
+        dmin, dmax, ddefault = js.DURATION_LIMITS[key]
+        out: Dict[str, Any] = {"duration_s": {"min": dmin, "max": dmax, "default": ddefault}}
+        if key == js.ENGINE_ACESTEP:
+            out.update({"dit_model": js.FROM_TEXT_DIT_MODEL, "dit_quant": js.FROM_TEXT_DIT_QUANT,
+                        "inference_steps": js.FROM_TEXT_INFERENCE_STEPS, "synth_batch": "variants in one request"})
+        else:
+            out.update({
+                "duration_is_cap": True,
+                "backbones": list(js.YUE2_BACKBONES), "backbone_default": js.YUE2_BACKBONE_DEFAULT,
+                "cot": list(js.YUE2_COT_MODES), "cot_default": js.YUE2_COT_DEFAULT,
+                "steps": js.YUE2_STEPS,
+                "adapters_max": js.YUE2_ADAPTERS_MAX,
+                "adapter_scale": {"min": js.YUE2_ADAPTER_SCALE_MIN, "max": js.YUE2_ADAPTER_SCALE_MAX,
+                                  "music_default": js.YUE2_ADAPTER_MUSIC_DEFAULT,
+                                  "sound_default": js.YUE2_ADAPTER_SOUND_DEFAULT},
+                "synth_batch": "1 per variant, seed and lm_seed + variant index",
+                "short_cap_estimate": {"seconds_per_line": js.YUE2_SECONDS_PER_LINE, "intro_s": js.YUE2_INTRO_S},
+            })
+        return out
+
     def report(self) -> Dict[str, Any]:
         """The `mp.capabilities/1` report."""
-        engine = self.engine_status()
-        from_text = self._from_text_status(engine)
+        statuses = self.engine_statuses()
+        default = statuses.get(self.default_engine) or self.engine_status()
+        from_text = self._from_text_any(statuses)
         features = copy.deepcopy(_FEATURES)
         features["text2music"] = dict(from_text)
+        engines: Dict[str, Any] = {}
+        for k, st in statuses.items():
+            engines[k] = {**st.as_dict(), "key": k, "default": k == self.default_engine,
+                          "limits": self._engine_limits(k), **self._form_info(k)}
+        dmin, dmax, ddefault = js.DURATION_LIMITS[self.default_engine]
+        job_types = {t: dict(from_text) if t == js.GENERATE_FROM_TEXT else self.job_type_status(t)
+                     for t in js.JOB_TYPES}
         return {
             "schema": js.CAPABILITIES,
             "backend": {"id": BACKEND_ID, "connected": True, "simulated": False},
-            "engine": engine.as_dict(),
-            "job_types": {t: self.job_type_status(t, engine) for t in js.JOB_TYPES},
+            "engine": default.as_dict(),
+            "engines": engines,
+            "default_engine": self.default_engine,
+            "job_types": job_types,
             "actions": copy.deepcopy(_EDIT_ACTIONS),
             "limits": {
                 "max_region_s": 30,
-                "max_track_s": js.DURATION_MAX_S,
+                "max_track_s": max(js.DURATION_MAX_S, js.YUE2_DURATION_MAX_S),
                 "takes_per_job": 2,
                 "generate_from_text": {
                     "variants": {"min": js.VARIANTS_MIN, "max": js.VARIANTS_MAX, "default": js.VARIANTS_DEFAULT},
-                    "duration_s": {"min": js.DURATION_MIN_S, "max": js.DURATION_MAX_S, "default": js.DURATION_DEFAULT_S},
+                    "duration_s": {"min": dmin, "max": dmax, "default": ddefault},
                     "seed": {"min": js.SEED_MIN, "max": js.SEED_MAX, "null": "the runner draws one"},
-                    "engine": js.FROM_TEXT_ENGINE,
-                    "dit_model": js.FROM_TEXT_DIT_MODEL,
-                    "dit_quant": js.FROM_TEXT_DIT_QUANT,
-                    "inference_steps": js.FROM_TEXT_INFERENCE_STEPS,
+                    "engine": self.default_engine,
+                    "engine_choices": list(js.FROM_TEXT_ENGINES),
+                    "engines": {k: self._engine_limits(k) for k in js.FROM_TEXT_ENGINES},
                     "engine_output": js.ENGINE_OUTPUT_FORMAT,
                     "library_format": js.LIBRARY_FORMAT,
                 },

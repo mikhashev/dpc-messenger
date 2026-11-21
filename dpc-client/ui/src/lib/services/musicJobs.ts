@@ -36,6 +36,7 @@ import { MUSIC_UNAVAILABLE_TEXT, type MusicAnswer } from '$lib/utils/musicPlayer
 import {
     JOB_POLL_TICK_MS,
     emptyFromTextForm,
+    engineKeyOf,
     jobsToPoll,
     mergeJobs,
     reduceMusicEvent,
@@ -57,11 +58,14 @@ export interface MusicJobsState {
     status: JobsStatus;
     message: string;
     jobs: MusicJob[];
+    /** The last engine status heard of (any engine). */
     engine: MusicEngine | null;
+    /** Each engine's status by key ('yue2', 'acestep'); the panel shows the selected one. */
+    engines: Record<string, MusicEngine>;
     capabilities: MusicCapabilities | null;
 }
 
-export const musicJobs = writable<MusicJobsState>({ status: 'idle', message: '', jobs: [], engine: null, capabilities: null });
+export const musicJobs = writable<MusicJobsState>({ status: 'idle', message: '', jobs: [], engine: null, engines: {}, capabilities: null });
 
 /** The takes of the jobs the panel has opened, by job id. */
 export const musicTakes = writable<Record<string, MusicTake[]>>({});
@@ -126,9 +130,9 @@ export function noteMusicEvent(event: string, payload: any): void {
         putJob(payload.job as MusicJob);
         return;
     }
-    const next = reduceMusicEvent({ jobs: s.jobs, engine: s.engine }, event, payload);
+    const next = reduceMusicEvent({ jobs: s.jobs, engine: s.engine, engines: s.engines }, event, payload);
     if (next.engine !== s.engine) {
-        musicJobs.update(x => ({ ...x, engine: next.engine }));
+        musicJobs.update(x => ({ ...x, engine: next.engine, engines: next.engines ?? x.engines }));
         refreshCapabilitiesSoon();
     }
 }
@@ -161,6 +165,7 @@ export async function loadMusicJobs(): Promise<void> {
         jobs: mergeJobs(x.jobs, list),
         capabilities: (caps as any).data.capabilities ?? null,
         engine: (engine as any).data.engine ?? x.engine,
+        engines: { ...x.engines, ...((engine as any).data.engines ?? {}) },
     }));
 }
 
@@ -288,14 +293,25 @@ export async function measureTakeLoudness(takeId: string): Promise<MusicAnswer<{
     }
 }
 
-export async function startEngine(): Promise<MusicAnswer<{ engine: MusicEngine }>> {
-    const a = await startMusicEngine();
-    if (a.ok) musicJobs.update(x => ({ ...x, engine: a.data.engine }));
+function putEngine(engine: MusicEngine): void {
+    const key = engineKeyOf(engine);
+    musicJobs.update(x => ({ ...x, engine, engines: key ? { ...x.engines, [key]: engine } : x.engines }));
+}
+
+/** Start `engine` ('yue2' or 'acestep'); the core stops the other one when it is idle. */
+export async function startEngine(engine?: string, backbone?: string): Promise<MusicAnswer<{ engine: MusicEngine }>> {
+    const a = await startMusicEngine(engine, backbone);
+    if (a.ok) {
+        putEngine(a.data.engine);
+        // The other engine may have been stopped for this one: read every engine again.
+        const all = await getMusicEngineStatus();
+        if (all.ok) musicJobs.update(x => ({ ...x, engines: { ...x.engines, ...(all.data.engines ?? {}) } }));
+    }
     return a;
 }
 
-export async function stopEngine(): Promise<MusicAnswer<{ engine: MusicEngine; stopped: boolean }>> {
-    const a = await stopMusicEngine();
-    if (a.ok) musicJobs.update(x => ({ ...x, engine: a.data.engine }));
+export async function stopEngine(engine?: string): Promise<MusicAnswer<{ engine: MusicEngine; stopped: boolean }>> {
+    const a = await stopMusicEngine(engine);
+    if (a.ok) putEngine(a.data.engine);
     return a;
 }

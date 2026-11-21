@@ -1482,8 +1482,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     timeout = 240000;
                 } else if (command === 'start_music_engine' || command === 'stop_music_engine'
                     || command === 'measure_music_take_loudness' || command === 'stop_local_engine') {
-                    // 180s: the acestep.cpp start waits up to 60 s for /health, a stop drains a
-                    // running generation, and ebur128 reads a whole take (up to 10 minutes of audio).
+                    // 180s: an engine start waits up to 60 s for /health (yue2.cpp may first split
+                    // its adapters and stop the other engine), a stop drains a running generation,
+                    // and ebur128 reads a whole take (up to 10 minutes of audio).
                     timeout = 180000;
                 } else if (command === 'send_image') {
                     // Image vision analysis timeout: 240s (v0.20.0+), for the plain AI chat;
@@ -2141,16 +2142,24 @@ export function measureMusicTakeLoudness(takeId: string, force = false): Promise
     return callMusic(sendCommand, 'measure_music_take_loudness', force ? { take_id: takeId, force: true } : { take_id: takeId });
 }
 
-export function getMusicEngineStatus(): Promise<MusicAnswer<{ engine: MusicEngine; runner?: { running: boolean; current_job_id: string | null } }>> {
-    return callMusic(sendCommand, 'get_music_engine_status', {});
+/** An engine's status (`engine`: 'yue2' or 'acestep'; the default engine, yue2, when
+ *  omitted) and every engine's under `engines`. */
+export function getMusicEngineStatus(engine?: string): Promise<MusicAnswer<{
+    engine: MusicEngine; engines?: Record<string, MusicEngine>; default_engine?: string;
+    runner?: { running: boolean; current_job_id: string | null; current_engine?: string | null } }>> {
+    return callMusic(sendCommand, 'get_music_engine_status', engine ? { engine } : {});
 }
 
-export function startMusicEngine(): Promise<MusicAnswer<{ engine: MusicEngine }>> {
-    return callMusic(sendCommand, 'start_music_engine', {});
+/** Start an engine by hand; the other music engine is stopped when idle (one on the card). */
+export function startMusicEngine(engine?: string, backbone?: string): Promise<MusicAnswer<{ engine: MusicEngine }>> {
+    const payload: Record<string, string> = {};
+    if (engine) payload.engine = engine;
+    if (backbone) payload.backbone = backbone;
+    return callMusic(sendCommand, 'start_music_engine', payload);
 }
 
-export function stopMusicEngine(): Promise<MusicAnswer<{ engine: MusicEngine; stopped: boolean }>> {
-    return callMusic(sendCommand, 'stop_music_engine', {});
+export function stopMusicEngine(engine?: string): Promise<MusicAnswer<{ engine: MusicEngine; stopped: boolean }>> {
+    return callMusic(sendCommand, 'stop_music_engine', engine ? { engine } : {});
 }
 
 /** "Stop X" for the engine holding the GPU card (the existing stop_local_engine, which

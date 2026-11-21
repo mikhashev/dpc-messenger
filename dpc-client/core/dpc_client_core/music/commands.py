@@ -53,15 +53,22 @@ transcriptions under its load lock and refuses the unload while any is running.
 (default 9996), which serves a library track's bytes by `track_id` with HTTP `Range`, a
 per-process token and an `Origin` allowlist. The command hands the UI `{base_url, token, ranges_linux}`.
 
-**The engine and the runner** (ADR-051 D30, SPEC §12 decisions 31-34): `music/acestep.py`
-supervises the acestep.cpp server (settings `[music] acestep_binary`, `acestep_models_dir`,
-`acestep_port`, `acestep_idle_stop_s`, `acestep_device`), and its `status()` is the job
-store's engine probe, so the capabilities report the real state and a `generate_from_text`
-job is queued only when the engine is installed. `music/runner.py` runs queued jobs one at a
-time; `start_music_jobs` starts it at service start (resuming queued jobs) and
-`stop_music_jobs` stops it and the server at shutdown. Each change the runner makes is
-broadcast as `music_job_updated` `{job}`, and each engine state change as
-`music_engine_status` `{engine}`; `get_music_job` answers the same state for a UI that polls.
+**The engines and the runner** (ADR-051 D30, D35; SPEC §12 decisions 31-34, 40): two
+supervisors, `music/yue2.py` for yue2.cpp, the default engine (Mike #198; settings
+`[music] yue2_binary`, `yue2_models_dir`, `yue2_backbone`, `yue2_port`, `yue2_idle_stop_s`,
+`yue2_adapters_dir`, `yue2_device`, `yue2_max_seq`), and `music/acestep.py` for acestep.cpp
+(`acestep_binary`, `acestep_models_dir`, `acestep_port`, `acestep_idle_stop_s`,
+`acestep_device`), held by `music/engines.py` (`MusicEngines`), which keeps one music engine
+on the card at a time. Their `status()` are the job store's engine probes, so the
+capabilities report the real state and a `generate_from_text` job is queued only when the
+engine it names is installed. `music/runner.py` runs queued jobs one at a time;
+`start_music_jobs` starts it at service start (resuming queued jobs) and `stop_music_jobs`
+stops it and both servers at shutdown. Each change the runner makes is broadcast as
+`music_job_updated` `{job}`, and each engine state change as `music_engine_status`
+`{engine}` (with `engine.key`); `get_music_job` answers the same state for a UI that polls.
+The engine commands (`get_music_engine_status`, `start_music_engine`, `stop_music_engine`)
+take an optional `engine` (`yue2` or `acestep`); without it they act on the default engine,
+yue2 (before 2026-11-21 there was only acestep, and a call without `engine` meant it).
 The person's own changes (propose, cancel, keep, discard, none of these) are broadcast the
 same way, so a second window sees them.
 "Stop X" on a job waiting for the card is the existing `stop_local_engine` command with the
@@ -79,14 +86,18 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 from ..local_api import slow_command
-from .acestep import AceStepError, AceStepServer, read_config
+from . import job_schemas as js
+from .acestep import AceStepServer, read_config
 from .capabilities import EngineStatus, MusicCapabilities
+from .engine_base import MusicEngineError
+from .engines import MusicEngines
 from .jobs import MusicJobError, MusicJobStore
 from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
 from .loudness import LoudnessError, measure_loudness
 from .lyrics import MusicLyrics
 from .runner import MusicJobRunner
 from .stream import DEFAULT_STREAM_PORT, MusicStreamServer
+from .yue2 import Yue2Server, read_config as read_yue2_config
 
 LOCAL_WHISPER_TYPE = "local_whisper"
 DEFAULT_LOCAL_TRANSCRIPTION_MAX_MB = 25
@@ -103,7 +114,7 @@ def _error(exc: Exception) -> Dict[str, Any]:
         return {"status": "error", "code": exc.code, "message": exc.message}
     if isinstance(exc, MusicJobError):
         return {"status": "error", "code": exc.code, "message": exc.message, "field": exc.field}
-    if isinstance(exc, AceStepError):
+    if isinstance(exc, MusicEngineError):
         return {"status": "error", "code": exc.code, "message": exc.message}
     logger.exception("music command failed")
     return {"status": "error", "code": "internal", "message": str(exc)}
@@ -156,7 +167,7 @@ class MusicCommandsMixin:
     _music_lyrics_instance: Optional[MusicLyrics] = None
     _music_jobs_instance: Optional[MusicJobStore] = None
     _music_jobs_lock: Optional[asyncio.Lock] = None
-    _music_engine_instance: Optional[AceStepServer] = None
+    _music_engines_instance: Optional[MusicEngines] = None
     _music_runner_instance: Optional[MusicJobRunner] = None
 
     def _music_poll_interval_s(self) -> float:
@@ -492,25 +503,41 @@ class MusicCommandsMixin:
             self._music_jobs_lock = asyncio.Lock()
         async with self._music_jobs_lock:
             if self._music_jobs_instance is None:
+                engines = self._music_engine_set()
                 store = MusicJobStore(self.settings.dpc_home_dir,
-                                      capabilities=MusicCapabilities(self._music_engine().status))
+                                      capabilities=MusicCapabilities(engines=dict(engines.items()),
+                                                                     default_engine=engines.default))
                 await asyncio.to_thread(store.open)
                 self._music_jobs_instance = store
         return self._music_jobs_instance
 
     # -- the engine and the runner (ADR-051 D30) --------------------------------------
 
-    def _music_engine(self) -> AceStepServer:
-        """The acestep.cpp supervisor, built on first use; its settings are re-read before
-        each start."""
-        if self._music_engine_instance is None:
+    def _music_engine_set(self) -> MusicEngines:
+        """Both music engine supervisors, built on first use; each re-reads its settings
+        before each start."""
+        if self._music_engines_instance is None:
             home = self.settings.dpc_home_dir
 
-            def config():
+            def ace_config():
                 return read_config(self.settings.get, home)
-            self._music_engine_instance = AceStepServer(config(), dpc_home=home, config_source=config,
-                                                        on_change=self._music_engine_changed)
-        return self._music_engine_instance
+
+            def yue2_config():
+                return read_yue2_config(self.settings.get, home)
+            self._music_engines_instance = MusicEngines({
+                js.ENGINE_YUE2: Yue2Server(yue2_config(), dpc_home=home, config_source=yue2_config,
+                                           on_change=self._music_engine_changed),
+                js.ENGINE_ACESTEP: AceStepServer(ace_config(), dpc_home=home, config_source=ace_config,
+                                                 on_change=self._music_engine_changed),
+            }, default=js.DEFAULT_FROM_TEXT_ENGINE)
+        return self._music_engines_instance
+
+    def _music_engine(self, engine: Any = None) -> Any:
+        """One engine's supervisor: `engine` is `yue2` or `acestep`, None the default
+        (`invalid_engine` for anything else)."""
+        if engine is not None and not isinstance(engine, str):
+            raise MusicEngineError("invalid_engine", "engine must be a string: yue2 or acestep")
+        return self._music_engine_set().get(engine)
 
     def _music_broadcast(self, event: str, payload: Dict[str, Any]) -> None:
         """Send an event to the UI when one is connected; never raises."""
@@ -542,58 +569,86 @@ class MusicCommandsMixin:
             store = await self._music_jobs()
             if self._music_runner_instance is None:
                 self._music_runner_instance = MusicJobRunner(
-                    store, self._music_engine(), self._music, dpc_home=self.settings.dpc_home_dir,
+                    store, self._music_engine_set(), self._music, dpc_home=self.settings.dpc_home_dir,
                     on_job_change=self._music_job_changed)
             self._music_runner_instance.start()
         except Exception:
             logger.exception("music: the job runner did not start")
 
     async def stop_music_jobs(self) -> None:
-        """Stop the runner and the acestep.cpp server; called at shutdown. A job still
+        """Stop the runner and both engine servers; called at shutdown. A job still
         running is settled by the store's restart rule at the next start."""
         runner = self._music_runner_instance
         if runner is not None:
             await runner.stop()
-        if self._music_engine_instance is not None:
-            await self._music_engine_instance.shutdown()
+        if self._music_engines_instance is not None:
+            await self._music_engines_instance.shutdown()
 
-    async def get_music_engine_status(self) -> Dict[str, Any]:
-        """The engine's state, where its files are, and the job the runner holds. Who holds
-        the GPU card is the local-engine status command's (owner-only) answer, and a waiting
-        job's `card_wait` names the holder."""
+    def _music_engine_job(self, key: str) -> Optional[str]:
+        """The job the runner is running on engine `key`, or None."""
+        runner = self._music_runner_instance
+        if runner is None or not runner.current_job_id:
+            return None
+        if runner.current_engine not in (None, key):
+            return None
+        return runner.current_job_id
+
+    async def get_music_engine_status(self, engine: Any = None) -> Dict[str, Any]:
+        """An engine's state (`engine`: yue2 or acestep; the default when omitted), where its
+        files are, every engine's state under `engines`, and the job the runner holds. Who
+        holds the GPU card is the local-engine status command's (owner-only) answer, and a
+        waiting job's `card_wait` names the holder."""
         try:
-            engine = self._music_engine()
+            chosen = self._music_engine(engine)
+            engines = self._music_engine_set()
             runner = self._music_runner_instance
-            return {"status": "ok", "engine": engine.details(),
+            return {"status": "ok", "engine": chosen.details(),
+                    "engines": {k: e.details() for k, e in engines.items()},
+                    "default_engine": engines.default,
                     "runner": {"running": bool(runner and runner.running),
-                               "current_job_id": runner.current_job_id if runner else None}}
+                               "current_job_id": runner.current_job_id if runner else None,
+                               "current_engine": runner.current_engine if runner else None}}
         except Exception as exc:
             return _error(exc)
 
     @slow_command
-    async def start_music_engine(self) -> Dict[str, Any]:
-        """Start the acestep.cpp server by hand (also the way out of an `error` state).
-        Slow: it waits for the server's /health."""
+    async def start_music_engine(self, engine: Any = None, backbone: Any = None) -> Dict[str, Any]:
+        """Start an engine by hand (`engine`: yue2 or acestep; the default when omitted;
+        also the way out of an `error` state). For yue2, `backbone` (`stock` or `rs-tw`)
+        picks the backbone; without it the running one, else `[music] yue2_backbone`. Only
+        one music engine is on the card at a time: the other is stopped when idle, and the
+        start is refused (`engine_busy`) while it runs a job. Slow: it waits for /health."""
         try:
-            engine = self._music_engine()
-            await engine.start()
-            return {"status": "ok", "engine": engine.details()}
+            chosen = self._music_engine(engine)
+            if backbone is not None and chosen.KEY != js.ENGINE_YUE2:
+                raise MusicEngineError("invalid_params", "backbone is a yue2 option")
+            busy = self._music_engine_job(chosen.KEY)
+            running_backbone = getattr(chosen, "running_backbone", None)
+            if busy and backbone is not None and running_backbone and backbone != running_backbone:
+                raise MusicEngineError("engine_busy", f"music job {busy} is using {chosen.DISPLAY} with the "
+                                                      f"{running_backbone} backbone; cancel it first")
+            async with self._music_engine_set().exclusive(chosen.KEY, wait=False):
+                if chosen.KEY == js.ENGINE_YUE2:
+                    await chosen.start(backbone=backbone)
+                else:
+                    await chosen.start()
+            return {"status": "ok", "engine": chosen.details()}
         except Exception as exc:
             return _error(exc)
 
     @slow_command
-    async def stop_music_engine(self, force: Any = False) -> Dict[str, Any]:
-        """Stop the acestep.cpp server by hand to free the card. Refused (`engine_busy`)
-        while a job runs on it, unless `force` (the job then fails)."""
+    async def stop_music_engine(self, engine: Any = None, force: Any = False) -> Dict[str, Any]:
+        """Stop an engine by hand to free the card (`engine`: yue2 or acestep; the default
+        when omitted). Refused (`engine_busy`) while a job runs on it, unless `force` (the
+        job then fails)."""
         try:
-            engine = self._music_engine()
-            runner = self._music_runner_instance
-            busy = runner.current_job_id if runner else None
+            chosen = self._music_engine(engine)
+            busy = self._music_engine_job(chosen.KEY)
             if busy and force is not True:
                 return {"status": "error", "code": "engine_busy",
-                        "message": f"music job {busy} is using the engine; cancel it first, or pass force"}
-            stopped = await engine.stop("ui_stop")
-            return {"status": "ok", "stopped": stopped, "engine": engine.details()}
+                        "message": f"music job {busy} is using {chosen.DISPLAY}; cancel it first, or pass force"}
+            stopped = await chosen.stop("ui_stop")
+            return {"status": "ok", "stopped": stopped, "engine": chosen.details()}
         except Exception as exc:
             return _error(exc)
 

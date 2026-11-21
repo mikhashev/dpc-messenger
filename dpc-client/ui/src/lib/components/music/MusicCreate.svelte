@@ -2,12 +2,17 @@
 <!--
   Opened from the window header's Create button; Listen stays the default view. Four parts:
 
-  - the engine line (acestep.cpp, supervised by DPC): not installed (with the reason),
-    stopped, starting, running or error, live from `music_engine_status`, with Start / Stop;
-  - the form: lyrics (section tags such as [verse] allowed, sent verbatim), style,
-    variants, duration and an optional seed, checked against the core's limits before
-    sending; a core refusal is shown on the field it names. Generate is off, with the
-    reason, while the capability report says generate_from_text is unsupported;
+  - the engine line of the engine the form has selected (yue2.cpp, the default since Mike
+    #198, or acestep.cpp; both supervised by DPC, one on the card at a time): not installed
+    (with the reason), stopped, starting, running or error, live from `music_engine_status`,
+    with Start / Stop for that engine;
+  - the form: the engine; for YuE2 the backbone and an optional voice adapter (none by
+    default; voice adapters are for local listening only, the note says why) with its music
+    and sound strengths; lyrics (section tags such as [verse] allowed, sent verbatim), style,
+    variants, duration (for YuE2 a cap, with a warning when it looks short for the lyrics:
+    an estimate) and an optional seed, checked against the core's limits before sending; a
+    core refusal is shown on the field it names. Generate is off, with the reason, while the
+    selected engine is not available;
   - the jobs: state and progress live from `music_job_updated` (polled when quiet), Cancel,
     "Waiting for the GPU: X holds it" with a "Stop X" button (the person's press, the
     existing stop_local_engine; nothing is stopped by itself), failures with the reason;
@@ -22,18 +27,29 @@
   import { onDestroy, onMount } from 'svelte';
   import { connectionStatus } from '$lib/coreService';
   import {
+    BACKBONE_CHOICES,
+    ENGINE_CHOICES,
+    VOICE_NOTE,
+    backbonePresent,
     cardHolders,
+    defaultEngineOf,
     engineCanStart,
     engineCanStop,
+    engineKeyOf,
     engineStatusText,
     formFieldOf,
+    formForEngine,
     fromTextSupport,
     isActive,
     jobStateText,
     jobTitle,
     limitsFrom,
+    shortCapWarning,
     validateFromTextForm,
+    yue2Adapters,
+    type EngineKey,
     type FormErrors,
+    type MusicEngine,
     type MusicJob,
   } from '$lib/utils/musicCreate';
   import {
@@ -53,10 +69,18 @@
   const JOB_ROWS = 20;
 
   let jobsState = $derived($musicJobs);
-  let engine = $derived(jobsState.engine);
   let caps = $derived(jobsState.capabilities);
-  let limits = $derived(limitsFrom(caps));
-  let support = $derived(fromTextSupport(caps));
+  let selectedEngine = $derived<EngineKey>($musicCreateDraft.engine ?? defaultEngineOf(caps));
+  let engineChoice = $derived(ENGINE_CHOICES.find(e => e.key === selectedEngine) ?? ENGINE_CHOICES[0]);
+  let engine = $derived<MusicEngine | null>(
+    jobsState.engines[selectedEngine]
+      ?? (engineKeyOf(jobsState.engine) === selectedEngine ? jobsState.engine : null)
+      ?? caps?.engines?.[selectedEngine]
+      ?? null);
+  let limits = $derived(limitsFrom(caps, selectedEngine));
+  let support = $derived(fromTextSupport(caps, selectedEngine));
+  let adapters = $derived(yue2Adapters(caps));
+  let capWarning = $derived(shortCapWarning($musicCreateDraft, caps));
   let classes = $derived(caps?.take_decisions?.failure_classes ?? []);
   let jobs = $derived(jobsState.jobs);
   let showAllJobs = $state(false);
@@ -87,7 +111,9 @@
     engineBusy = true;
     engineError = '';
     try {
-      const a = start ? await startEngine() : await stopEngine();
+      const a = start
+        ? await startEngine(selectedEngine, selectedEngine === 'yue2' ? $musicCreateDraft.backbone : undefined)
+        : await stopEngine(selectedEngine);
       // A start can outlast the call's wait; the status event says how it ends.
       if (!a.ok && !/timed out/i.test(a.message)) engineError = a.message;
     } finally {
@@ -103,6 +129,13 @@
 
   function clearError(field: keyof FormErrors) {
     if (errors[field] || errors.form) errors = { ...errors, [field]: undefined, form: undefined };
+  }
+
+  function pickEngine(value: string) {
+    const key: EngineKey = value === 'acestep' ? 'acestep' : 'yue2';
+    musicCreateDraft.update(f => formForEngine(f, key, caps));
+    errors = {};
+    engineError = '';
   }
 
   function newKey(): string {
@@ -187,10 +220,11 @@
       <span class="engine-line" class:warn={engine?.state === 'not_installed' || engine?.state === 'error' || engine?.state === 'not_built'} role="status" aria-live="polite">
         {engineStatusText(engine)}
       </span>
+      <span class="muted tiny">{engineChoice.label}</span>
       {#if engineCanStop(engine)}
-        <button type="button" class="small-btn" onclick={() => engineAction(false)} disabled={engineBusy} aria-label="Stop the acestep.cpp engine">{engineBusy ? 'Stopping…' : 'Stop'}</button>
+        <button type="button" class="small-btn" onclick={() => engineAction(false)} disabled={engineBusy} aria-label="Stop the {engineChoice.label} engine">{engineBusy ? 'Stopping…' : 'Stop'}</button>
       {:else}
-        <button type="button" class="small-btn" onclick={() => engineAction(true)} disabled={engineBusy || !engineCanStart(engine)} aria-label="Start the acestep.cpp engine">{engineBusy ? 'Starting…' : 'Start'}</button>
+        <button type="button" class="small-btn" onclick={() => engineAction(true)} disabled={engineBusy || !engineCanStart(engine)} aria-label="Start the {engineChoice.label} engine">{engineBusy ? 'Starting…' : 'Start'}</button>
       {/if}
     </div>
     {#if engineError}<p class="field-error" role="alert">{engineError}</p>{/if}
@@ -203,8 +237,61 @@
   <section class="card" aria-labelledby="mc-form-label">
     <div class="section-head">
       <span id="mc-form-label" class="section-label">NEW SONG FROM YOUR TEXT</span>
-      <span class="muted tiny">acestep.cpp · turbo Q8 · 8 steps · FLAC</span>
+      <span class="muted tiny">{engineChoice.detail}</span>
     </div>
+
+    <div class="form-row">
+      <div class="field">
+        <label class="field-label" for="mc-engine">Engine</label>
+        <select id="mc-engine" class="list-select" value={selectedEngine} onchange={(e) => pickEngine((e.currentTarget as HTMLSelectElement).value)}
+          aria-invalid={!!errors.engine} aria-describedby="mc-engine-error">
+          {#each ENGINE_CHOICES as choice (choice.key)}
+            <option value={choice.key}>{choice.label}{choice.key === defaultEngineOf(caps) ? ' (default)' : ''}</option>
+          {/each}
+        </select>
+        <p id="mc-engine-error" class="field-error" role="alert">{errors.engine ?? ''}</p>
+      </div>
+      {#if selectedEngine === 'yue2'}
+        <div class="field">
+          <label class="field-label" for="mc-backbone">Backbone</label>
+          <select id="mc-backbone" class="list-select" bind:value={$musicCreateDraft.backbone} onchange={() => clearError('backbone')}
+            aria-invalid={!!errors.backbone} aria-describedby="mc-backbone-error">
+            {#each BACKBONE_CHOICES as b (b.key)}
+              <option value={b.key} disabled={!backbonePresent(caps, b.key)}>{b.label}{backbonePresent(caps, b.key) ? '' : ' (not installed)'}</option>
+            {/each}
+          </select>
+          <p id="mc-backbone-error" class="field-error" role="alert">{errors.backbone ?? ''}</p>
+        </div>
+        <div class="field">
+          <label class="field-label" for="mc-voice">Voice (optional)</label>
+          <select id="mc-voice" class="list-select" bind:value={$musicCreateDraft.voice} onchange={() => clearError('voice')}
+            aria-invalid={!!errors.voice} aria-describedby="mc-voice-note mc-voice-error">
+            <option value="">None</option>
+            {#each adapters as a (a.name)}
+              <option value={a.name}>{a.name}</option>
+            {/each}
+          </select>
+          <p id="mc-voice-error" class="field-error" role="alert">{errors.voice ?? ''}</p>
+        </div>
+      {/if}
+    </div>
+    {#if selectedEngine === 'yue2'}
+      {#if $musicCreateDraft.voice}
+        <div class="form-row">
+          <div class="field">
+            <label class="field-label" for="mc-voice-music">Voice strength, music half</label>
+            <input id="mc-voice-music" class="text-input num" type="number" min="0" max="2" step="0.05"
+              bind:value={$musicCreateDraft.voiceMusic} oninput={() => clearError('voice')} />
+          </div>
+          <div class="field">
+            <label class="field-label" for="mc-voice-sound">Voice strength, sound half</label>
+            <input id="mc-voice-sound" class="text-input num" type="number" min="0" max="2" step="0.05"
+              bind:value={$musicCreateDraft.voiceSound} oninput={() => clearError('voice')} />
+          </div>
+        </div>
+      {/if}
+      <p id="mc-voice-note" class="muted tiny">{caps?.engines?.yue2?.adapter_note ?? VOICE_NOTE}{adapters.length ? '' : ' No adapters were found in the adapters folder.'}</p>
+    {/if}
 
     <label class="field-label" for="mc-lyrics">Lyrics</label>
     <textarea
@@ -256,7 +343,7 @@
         <p id="mc-variants-error" class="field-error" role="alert">{errors.variants ?? ''}</p>
       </div>
       <div class="field">
-        <label class="field-label" for="mc-duration">Duration (s)</label>
+        <label class="field-label" for="mc-duration">{selectedEngine === 'yue2' ? 'Length cap (s)' : 'Duration (s)'}</label>
         <input
           id="mc-duration"
           class="text-input num"
@@ -267,7 +354,7 @@
           bind:value={$musicCreateDraft.duration}
           oninput={() => clearError('duration')}
           aria-invalid={!!errors.duration}
-          aria-describedby="mc-duration-error"
+          aria-describedby="mc-duration-error mc-duration-warn"
         />
         <p id="mc-duration-error" class="field-error" role="alert">{errors.duration ?? ''}</p>
       </div>
@@ -287,7 +374,8 @@
         <p id="mc-seed-error" class="field-error" role="alert">{errors.seed ?? ''}</p>
       </div>
     </div>
-    <p class="muted tiny">Variants {limits.variants.min}–{limits.variants.max} · duration {limits.duration_s.min}–{limits.duration_s.max} s · an empty seed is drawn by DPC.</p>
+    {#if capWarning}<p id="mc-duration-warn" class="warn-text" role="status">{capWarning}</p>{/if}
+    <p class="muted tiny">Variants {limits.variants.min}–{limits.variants.max} · {selectedEngine === 'yue2' ? 'length cap' : 'duration'} {limits.duration_s.min}–{limits.duration_s.max} s{selectedEngine === 'yue2' ? ' (the song may end earlier; each variant runs on its own seed, seed + 1, …)' : ''} · an empty seed is drawn by DPC.</p>
 
     <div class="form-row">
       <button type="button" class="small-btn primary big" onclick={generate} disabled={generating || !support.supported}>
@@ -318,7 +406,7 @@
             {#if job.state === 'running'}
               <progress class="job-progress" max="1" value={job.progress ?? 0} aria-label="Progress of {jobTitle(job, 40)}"></progress>
             {/if}
-            <span class="muted tiny">{job.params?.variants ?? '?'} × {job.params?.duration_s ?? '?'} s{job.params?.seed != null ? ` · seed ${job.params.seed}` : ''} · {new Date(job.created_at).toLocaleString()}</span>
+            <span class="muted tiny">{job.params?.engine === 'yue2' ? 'YuE2' : 'ACE-Step'} · {job.params?.variants ?? '?'} × {job.params?.duration_s ?? '?'} s{job.params?.seed != null ? ` · seed ${job.params.seed}` : ''}{job.params?.adapters?.length ? ` · voice ${job.params.adapters[0].name}` : ''} · {new Date(job.created_at).toLocaleString()}</span>
           </div>
           <span class="row-actions">
             {#each holders as h (h.alias)}
@@ -428,6 +516,7 @@
   .field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 120px; min-width: 0; }
   .engine-line { font-size: 13px; color: #c9d1d9; }
   .engine-line.warn { color: #f0c674; }
+  .warn-text { font-size: 12px; color: #f0c674; }
 
   .mc-root :global(.rows) { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .mc-root :global(.row) {
