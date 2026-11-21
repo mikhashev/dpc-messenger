@@ -69,10 +69,18 @@ def fake_flac(wav: Path, flac: Path, tags) -> None:
 fake_flac.calls = []
 
 
+def fake_loudness(flac: Path) -> dict:
+    """A loudness record without ffmpeg: variant 1 reads -12.5 LUFS, the others -14.0."""
+    lufs = -12.5 if flac.stem.endswith("_v1") else -14.0
+    return {"lufs_i": lufs, "lra": 3.2, "true_peak_dbtp": -1.4, "measured_by": "ffmpeg ebur128",
+            "measured_at": "2026-11-21T20:00:00Z"}
+
+
 class Rig:
     """An engine, a job store, a library and a runner over one temp DPC home."""
 
-    def __init__(self, home: Path, *, holders=None, converter=fake_flac, engine_settings=None, start_runner=True):
+    def __init__(self, home: Path, *, holders=None, converter=fake_flac, engine_settings=None, start_runner=True,
+                 loudness_meter=fake_loudness):
         self.home = home
         self.holders = list(holders or [])
         self.engine = make_engine(home, settings=engine_settings)
@@ -82,7 +90,8 @@ class Rig:
         self.events = []
         self.runner = MusicJobRunner(
             self.store, self.engine, self._library, dpc_home=home, card_holders=lambda: list(self.holders),
-            converter=converter, on_job_change=self.events.append, card_poll_s=0.05, engine_poll_s=0.02)
+            converter=converter, on_job_change=self.events.append, card_poll_s=0.05, engine_poll_s=0.02,
+            loudness_meter=loudness_meter)
         self._start_runner = start_runner
 
     async def _library(self):

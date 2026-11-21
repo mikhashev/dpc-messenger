@@ -146,6 +146,7 @@ import { telegramEnabled, telegramConnected, telegramStatus, telegramError, tele
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionCancelled, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
 import { callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
+import type { DiscardReason, MusicCapabilities, MusicEngine, MusicJob, MusicTake } from './utils/musicCreate';
 
 // Re-export all service stores for backward compatibility.
 // NOTE: When adding new UI-reactive fields from privacy_rules.json, add the store in
@@ -926,6 +927,12 @@ export async function connectToCoreService() {
                     console.error(`[ERROR TOAST] ${title}: ${toastMessage}`);
                 }
 
+                // Music jobs and the acestep.cpp engine (music/commands.py): the Create
+                // panel's live state; it polls get_music_job when these go quiet.
+                else if (message.event === "music_job_updated" || message.event === "music_engine_status") {
+                    const { noteMusicEvent } = await import("$lib/services/musicJobs");
+                    noteMusicEvent(message.event, message.payload);
+                }
                 else if (message.event === "schedule_approval_request") {
                     console.log("Schedule approval request:", message.payload);
                     const { noteScheduleApproval } = await import("$lib/services/scheduleApproval");
@@ -1473,6 +1480,11 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     // First use: model download (~3GB, 1-2min) + load (~20s) + compile (~30s) + transcribe (~5s)
                     // Subsequent uses: ~5-10s
                     timeout = 240000;
+                } else if (command === 'start_music_engine' || command === 'stop_music_engine'
+                    || command === 'measure_music_take_loudness' || command === 'stop_local_engine') {
+                    // 180s: the acestep.cpp start waits up to 60 s for /health, a stop drains a
+                    // running generation, and ebur128 reads a whole take (up to 10 minutes of audio).
+                    timeout = 180000;
                 } else if (command === 'send_image') {
                     // Image vision analysis timeout: 240s (v0.20.0+), for the plain AI chat;
                     // in an agent chat it is a turn command and waits for the turn instead.
@@ -2073,4 +2085,84 @@ export function getMusicLyrics(trackId: string, refresh = false): Promise<MusicA
 /** Save the person's LRC as `source: manual` (refused while a line has no stamp). */
 export function saveMusicLyrics(trackId: string, lrcText: string): Promise<MusicAnswer<LyricsAnswer>> {
     return callMusic(sendCommand, 'save_music_lyrics', { track_id: trackId, lrc_text: lrcText });
+}
+
+// --- Music jobs, takes and the engine (ADR-051 D30-D33; music/commands.py) ---
+// No agent tool calls these: Keep / Discard / None of these are the person's (ADR-051 Q1).
+
+export function getMusicCapabilities(): Promise<MusicAnswer<{ capabilities: MusicCapabilities }>> {
+    return callMusic(sendCommand, 'get_music_capabilities', {});
+}
+
+/** Queue a job (`queued`), or get it back `unsupported` with the reason. */
+export function proposeMusicJob(type: string, params: Record<string, any>, idempotencyKey?: string): Promise<MusicAnswer<{ job: MusicJob }>> {
+    return callMusic(sendCommand, 'propose_music_job', idempotencyKey ? { type, params, idempotency_key: idempotencyKey } : { type, params });
+}
+
+export function getMusicJob(jobId: string): Promise<MusicAnswer<{ job: MusicJob }>> {
+    return callMusic(sendCommand, 'get_music_job', { job_id: jobId });
+}
+
+export function listMusicJobs(jobType?: string): Promise<MusicAnswer<{ jobs: MusicJob[] }>> {
+    return callMusic(sendCommand, 'list_music_jobs', jobType ? { job_type: jobType } : {});
+}
+
+export function cancelMusicJob(jobId: string): Promise<MusicAnswer<{ job: MusicJob }>> {
+    return callMusic(sendCommand, 'cancel_music_job', { job_id: jobId });
+}
+
+export function listMusicTakes(jobId: string): Promise<MusicAnswer<{ takes: MusicTake[] }>> {
+    return callMusic(sendCommand, 'list_music_takes', { job_id: jobId });
+}
+
+export function keepMusicTake(takeId: string): Promise<MusicAnswer<{ take: MusicTake; job: MusicJob }>> {
+    return callMusic(sendCommand, 'keep_music_take', { take_id: takeId });
+}
+
+/** Discard: a reason is required (text, class or both); the core hides the library entry. */
+export function discardMusicTake(takeId: string, reason: { reason_text?: string; reason_class?: string }):
+    Promise<MusicAnswer<{ take: MusicTake; job: MusicJob; library_hidden: boolean; library_reason?: string }>> {
+    return callMusic(sendCommand, 'discard_music_take', { take_id: takeId, ...reason });
+}
+
+/** None of these: every pending take rejected with one reason. */
+export function rejectAllMusicTakes(jobId: string, reason: { reason_text?: string; reason_class?: string }):
+    Promise<MusicAnswer<{ job: MusicJob; takes: (MusicTake & { library_hidden?: boolean })[] }>> {
+    return callMusic(sendCommand, 'reject_all_music_takes', { job_id: jobId, ...reason });
+}
+
+/** The Discard-reason dictionary (grown from typed reasons), most used first. */
+export function listMusicDiscardReasons(prefix?: string, limit = 8): Promise<MusicAnswer<{ reasons: DiscardReason[] }>> {
+    return callMusic(sendCommand, 'list_music_discard_reasons', prefix ? { prefix, limit } : { limit });
+}
+
+/** Measure a take's loudness with ffmpeg ebur128 (answered as stored unless `force`). */
+export function measureMusicTakeLoudness(takeId: string, force = false): Promise<MusicAnswer<{ take: MusicTake; measured: boolean }>> {
+    return callMusic(sendCommand, 'measure_music_take_loudness', force ? { take_id: takeId, force: true } : { take_id: takeId });
+}
+
+export function getMusicEngineStatus(): Promise<MusicAnswer<{ engine: MusicEngine; runner?: { running: boolean; current_job_id: string | null } }>> {
+    return callMusic(sendCommand, 'get_music_engine_status', {});
+}
+
+export function startMusicEngine(): Promise<MusicAnswer<{ engine: MusicEngine }>> {
+    return callMusic(sendCommand, 'start_music_engine', {});
+}
+
+export function stopMusicEngine(): Promise<MusicAnswer<{ engine: MusicEngine; stopped: boolean }>> {
+    return callMusic(sendCommand, 'stop_music_engine', {});
+}
+
+/** "Stop X" for the engine holding the GPU card (the existing stop_local_engine, which
+ *  answers `success` rather than `ok`). The person's press; nothing calls it by itself. */
+export async function stopLocalEngine(alias: string): Promise<MusicAnswer<{ alias: string }>> {
+    const pending = sendCommand('stop_local_engine', { alias });
+    if (pending === false || pending === true) return { ok: false, unavailable: false, code: 'not_connected', message: 'Not connected to the backend.' };
+    try {
+        const r: any = await pending;
+        if (r?.status === 'success') return { ok: true, data: { alias: r.alias ?? alias } };
+        return { ok: false, unavailable: false, code: 'error', message: r?.message || 'stop_local_engine failed' };
+    } catch (e) {
+        return { ok: false, unavailable: false, code: 'failed', message: e instanceof Error ? e.message : String(e) };
+    }
 }

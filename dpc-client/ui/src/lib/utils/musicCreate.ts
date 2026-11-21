@@ -1,0 +1,500 @@
+// The Music Player's Create panel: pure rules (SPEC flow "song from own text", §5, §8,
+// §12 decisions 29, 32-37; ADR-051 D30-D33).
+//
+// The panel (components/music/MusicCreate.svelte, MusicReview.svelte) and its service
+// (services/musicJobs.ts) call these; nothing here touches the DOM, the audio element or
+// the socket, so every rule is tested in musicCreate.test.ts.
+//
+// - the form mirrors the core's `normalize_params_from_text` limits (job_schemas.py), so
+//   a bad value is named before anything is sent; the core stays the authority and its
+//   `field` error is shown on the same input;
+// - jobs arrive by `music_job_updated` events and by command answers, in any order: a job
+//   never returns to an earlier state, so the copy with more history (then the later
+//   `updated_at`) wins;
+// - level matching (decision 37: a plain A/B at matched loudness, display gain only): the
+//   louder takes are turned down to the quietest one's integrated loudness; nothing is
+//   turned up, since `HTMLAudioElement.volume` stops at 1;
+// - the A/B switch keeps the position, clamped to the other take's length;
+// - a Discard or "None of these" needs a reason: text, a class, or both (decision 35).
+
+// -- records from the core (music/job_schemas.py, capabilities.py) -----------------
+
+export type JobState = 'queued' | 'running' | 'review' | 'accepted' | 'rejected' | 'failed' | 'cancelled' | 'unsupported';
+
+export interface CardHolder {
+    alias: string;
+    engine: string | null;
+}
+
+export interface MusicJob {
+    id: string;
+    type: string;
+    state: JobState | string;
+    state_reason?: string | null;
+    progress?: number;
+    take_ids?: string[];
+    params: Record<string, any>;
+    prompt?: string | null;
+    created_at: string;
+    updated_at?: string;
+    history?: { state: string; at: string; reason: string | null }[];
+    card_wait?: { holders: CardHolder[]; since: string } | null;
+}
+
+/** A take's `loudness` record (core `loudness.py`). */
+export interface TakeLoudness {
+    lufs_i: number;
+    lra: number | null;
+    true_peak_dbtp: number | null;
+    measured_by: string;
+    measured_at: string;
+}
+
+export interface MusicTake {
+    id: string;
+    job_id: string;
+    variant: number;
+    title: string;
+    file: { uri: string; content_hash: string | null; sample_rate?: number | null; channels?: number | null; duration_s?: number | null };
+    decision: 'pending' | 'accepted' | 'rejected' | string;
+    seed?: number;
+    synth_batch_size?: number;
+    synth_batch_index?: number;
+    duration_requested_s?: number;
+    library_track_id?: string | null;
+    reason_text?: string | null;
+    reason_class?: string | null;
+    decided_at?: string | null;
+    loudness?: TakeLoudness | null;
+}
+
+export type EngineState = 'not_built' | 'not_installed' | 'stopped' | 'starting' | 'running' | 'error';
+
+/** `EngineStatus.as_dict()` (the event) or `AceStepServer.details()` (the command). */
+export interface MusicEngine {
+    id?: string;
+    name?: string;
+    state: EngineState | string;
+    available?: boolean;
+    reason: string;
+    version?: string | null;
+    busy?: boolean;
+}
+
+export interface FailureClass {
+    id: string;
+    meaning: string;
+}
+
+export interface MusicCapabilities {
+    engine?: MusicEngine;
+    job_types?: Record<string, { status: string; reason: string }>;
+    limits?: { generate_from_text?: Partial<FromTextLimits> & Record<string, any> };
+    take_decisions?: { failure_classes?: FailureClass[]; max_reason_text?: number };
+}
+
+export interface DiscardReason {
+    text: string;
+    key: string;
+    uses: number;
+    reason_class?: string | null;
+}
+
+// -- states ------------------------------------------------------------------------
+
+export const TERMINAL_STATES: readonly string[] = ['accepted', 'rejected', 'failed', 'cancelled', 'unsupported'];
+export const ACTIVE_STATES: readonly string[] = ['queued', 'running'];
+
+export function isTerminal(job: Pick<MusicJob, 'state'>): boolean {
+    return TERMINAL_STATES.includes(job.state);
+}
+
+export function isActive(job: Pick<MusicJob, 'state'>): boolean {
+    return ACTIVE_STATES.includes(job.state);
+}
+
+/** The GPU card holders a queued job waits for (decision 32), or []. */
+export function cardHolders(job: Pick<MusicJob, 'state' | 'card_wait'>): CardHolder[] {
+    if (job.state !== 'queued' || !job.card_wait) return [];
+    return (job.card_wait.holders ?? []).filter(h => typeof h?.alias === 'string' && h.alias);
+}
+
+/** "Waiting for the GPU: X holds it" (one holder) or "... X, Y hold it". */
+export function cardWaitText(holders: readonly CardHolder[]): string {
+    if (!holders.length) return '';
+    const names = holders.map(h => h.alias);
+    return names.length === 1
+        ? `Waiting for the GPU: ${names[0]} holds it`
+        : `Waiting for the GPU: ${names.join(', ')} hold it`;
+}
+
+/** One line for a job's state, as the jobs list shows it. */
+export function jobStateText(job: MusicJob): string {
+    const reason = (job.state_reason ?? '').trim();
+    switch (job.state) {
+        case 'queued': {
+            const holders = cardHolders(job);
+            return holders.length ? cardWaitText(holders) : 'Queued';
+        }
+        case 'running': return `Running · ${Math.round(Math.max(0, Math.min(1, job.progress ?? 0)) * 100)}%`;
+        case 'review': return reason ? `Ready for review (${reason})` : 'Ready for review';
+        case 'accepted': return 'Kept';
+        case 'rejected': return 'None kept (every take discarded)';
+        case 'failed': return `Failed: ${reason || 'no reason given'}`;
+        case 'cancelled': return 'Cancelled';
+        case 'unsupported': return `Unsupported: ${reason || 'no reason given'}`;
+        default: return String(job.state);
+    }
+}
+
+/** The style the job was made with, cut for a row. */
+export function jobTitle(job: MusicJob, limit = 70): string {
+    const style = String(job.params?.style ?? job.prompt ?? '').replace(/\s+/g, ' ').trim();
+    if (!style) return job.id;
+    return style.length > limit ? `${style.slice(0, limit - 1)}…` : style;
+}
+
+// -- the event -> jobs reducer ----------------------------------------------------
+
+/** True when `incoming` is at least as new as `existing`: more history entries (a job
+ *  never goes back), then a later or equal `updated_at`. */
+export function jobIsNewer(incoming: MusicJob, existing: MusicJob | undefined | null): boolean {
+    if (!existing) return true;
+    const hi = incoming.history?.length ?? 0;
+    const he = existing.history?.length ?? 0;
+    if (hi !== he) return hi > he;
+    return (incoming.updated_at ?? incoming.created_at ?? '') >= (existing.updated_at ?? existing.created_at ?? '');
+}
+
+/** Newest first. */
+export function sortJobs(jobs: readonly MusicJob[]): MusicJob[] {
+    return [...jobs].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : a.id < b.id ? 1 : -1));
+}
+
+/** The list with `job` in it, unless the list already holds a newer copy (then the same array). */
+export function upsertJob(jobs: readonly MusicJob[], job: MusicJob): MusicJob[] {
+    const i = jobs.findIndex(j => j.id === job.id);
+    if (i >= 0) {
+        if (!jobIsNewer(job, jobs[i])) return jobs as MusicJob[];
+        const out = [...jobs];
+        out[i] = job;
+        return out;
+    }
+    return sortJobs([...jobs, job]);
+}
+
+/** A whole list read from the core, merged with what events already brought. */
+export function mergeJobs(jobs: readonly MusicJob[], incoming: readonly MusicJob[]): MusicJob[] {
+    let out = [...jobs];
+    for (const j of incoming) out = upsertJob(out, j);
+    return sortJobs(out);
+}
+
+export interface MusicEventState {
+    jobs: MusicJob[];
+    engine: MusicEngine | null;
+}
+
+/** Apply one backend event. Unknown events and malformed payloads leave the state as it is. */
+export function reduceMusicEvent(state: MusicEventState, event: string, payload: any): MusicEventState {
+    if (event === 'music_job_updated') {
+        const job = payload?.job;
+        if (!job || typeof job.id !== 'string' || typeof job.state !== 'string') return state;
+        const jobs = upsertJob(state.jobs, job as MusicJob);
+        return jobs === state.jobs ? state : { ...state, jobs };
+    }
+    if (event === 'music_engine_status') {
+        const engine = payload?.engine;
+        if (!engine || typeof engine.state !== 'string') return state;
+        return { ...state, engine: { ...(state.engine ?? {}), ...engine } as MusicEngine };
+    }
+    return state;
+}
+
+/** How long an active job may go without an event before the panel asks for it. */
+export const JOB_QUIET_MS = 5000;
+export const JOB_POLL_TICK_MS = 2500;
+
+/** The active jobs not heard from (event or answer) for `quietMs`: the fallback poll. */
+export function jobsToPoll(jobs: readonly MusicJob[], lastSeen: Readonly<Record<string, number>>, now: number, quietMs = JOB_QUIET_MS): string[] {
+    return jobs.filter(j => isActive(j) && now - (lastSeen[j.id] ?? 0) >= quietMs).map(j => j.id);
+}
+
+// -- the engine ------------------------------------------------------------------
+
+/** The engine status line. */
+export function engineStatusText(engine: MusicEngine | null | undefined): string {
+    if (!engine) return 'Engine status unknown';
+    const reason = (engine.reason ?? '').trim();
+    switch (engine.state) {
+        case 'not_built': return `Engine not available: ${reason || 'not built in DPC'}`;
+        case 'not_installed': return `Engine not installed: ${reason || 'binary or weights missing'}`;
+        case 'stopped': return 'Engine stopped (DPC starts it when a job runs)';
+        case 'starting': return 'Engine starting…';
+        case 'running': return engine.busy ? 'Engine running (busy with a job)' : 'Engine running';
+        case 'error': return `Engine error: ${reason || 'the engine failed'}`;
+        default: return `Engine: ${engine.state}`;
+    }
+}
+
+export function engineCanStart(engine: MusicEngine | null | undefined): boolean {
+    return !!engine && (engine.state === 'stopped' || engine.state === 'error');
+}
+
+export function engineCanStop(engine: MusicEngine | null | undefined): boolean {
+    return !!engine && (engine.state === 'starting' || engine.state === 'running');
+}
+
+/** `{supported, reason}` of generate_from_text from the capability report. Without a
+ *  report it is not supported (the core is the authority; the panel waits for it). */
+export function fromTextSupport(caps: MusicCapabilities | null | undefined): { supported: boolean; reason: string } {
+    const st = caps?.job_types?.generate_from_text;
+    if (!st) return { supported: false, reason: 'the capabilities have not been read yet' };
+    return { supported: st.status === 'supported', reason: st.reason ?? '' };
+}
+
+// -- the form ----------------------------------------------------------------------
+
+export interface FromTextLimits {
+    variants: { min: number; max: number; default: number };
+    duration_s: { min: number; max: number; default: number };
+    seed: { min: number; max: number };
+}
+
+/** The core's `job_schemas.py` limits (SPEC §12 decision 34). */
+export const DEFAULT_FROM_TEXT_LIMITS: FromTextLimits = {
+    variants: { min: 1, max: 4, default: 2 },
+    duration_s: { min: 10, max: 600, default: 120 },
+    seed: { min: 0, max: 2 ** 32 - 1 },
+};
+
+/** The limits the capability report gives, with the defaults for what it leaves out. */
+export function limitsFrom(caps: MusicCapabilities | null | undefined): FromTextLimits {
+    const l = caps?.limits?.generate_from_text ?? {};
+    const pick = <T extends object>(given: any, fallback: T): T =>
+        given && typeof given === 'object' ? { ...fallback, ...given } : fallback;
+    return {
+        variants: pick(l.variants, DEFAULT_FROM_TEXT_LIMITS.variants),
+        duration_s: pick(l.duration_s, DEFAULT_FROM_TEXT_LIMITS.duration_s),
+        seed: pick(l.seed, DEFAULT_FROM_TEXT_LIMITS.seed),
+    };
+}
+
+export interface FromTextForm {
+    lyrics: string;
+    instrumental: boolean;
+    style: string;
+    variants: string | number | null;
+    duration: string | number | null;
+    /** Empty: the runner draws one. */
+    seed: string | number | null;
+}
+
+export type FormField = 'lyrics' | 'style' | 'variants' | 'duration' | 'seed' | 'form';
+export type FormErrors = Partial<Record<FormField, string>>;
+
+export function emptyFromTextForm(limits: FromTextLimits = DEFAULT_FROM_TEXT_LIMITS): FromTextForm {
+    return { lyrics: '', instrumental: false, style: '', variants: limits.variants.default, duration: limits.duration_s.default, seed: '' };
+}
+
+function asNumber(v: string | number | null | undefined): number {
+    if (v == null) return NaN;
+    if (typeof v === 'number') return v;
+    const t = v.trim();
+    return t === '' ? NaN : Number(t);
+}
+
+/** The `params` of `propose_music_job {type: generate_from_text}`, or the errors by
+ *  field. The rules are the core's (`normalize_params_from_text`); the lyrics are sent
+ *  verbatim (line breaks, section tags and U+0301 stress marks stay). */
+export function validateFromTextForm(form: FromTextForm, limits: FromTextLimits = DEFAULT_FROM_TEXT_LIMITS):
+    { ok: true; params: Record<string, any> } | { ok: false; errors: FormErrors } {
+    const errors: FormErrors = {};
+    let lyrics: string | null = null;
+    if (!form.instrumental) {
+        if (!form.lyrics.trim()) errors.lyrics = 'The lyrics are empty: write the text, or tick Instrumental.';
+        else lyrics = form.lyrics;
+    }
+    if (!form.style.trim()) errors.style = 'Style is required: describe the sound (genre, instruments, voice).';
+
+    const v = asNumber(form.variants);
+    const { min: vmin, max: vmax } = limits.variants;
+    if (!Number.isInteger(v) || v < vmin || v > vmax) errors.variants = `Variants must be a whole number from ${vmin} to ${vmax}.`;
+
+    const d = asNumber(form.duration);
+    const { min: dmin, max: dmax } = limits.duration_s;
+    if (!Number.isFinite(d) || d < dmin || d > dmax) errors.duration = `Duration must be from ${dmin} to ${dmax} seconds.`;
+
+    let seed: number | null = null;
+    const seedText = form.seed == null ? '' : typeof form.seed === 'number' ? String(form.seed) : form.seed.trim();
+    if (seedText !== '') {
+        const s = Number(seedText);
+        const { min: smin, max: smax } = limits.seed;
+        if (!/^\d+$/.test(seedText) || !Number.isSafeInteger(s) || s < smin || s > smax) {
+            errors.seed = `Seed must be a whole number from ${smin} to ${smax}, or empty to draw one.`;
+        } else seed = s;
+    }
+    if (Object.keys(errors).length) return { ok: false, errors };
+    return { ok: true, params: { lyrics, style: form.style, variants: v, duration_s: d, seed } };
+}
+
+/** The form field a core `field` names (`ParamsError.field`), else 'form'. */
+export function formFieldOf(coreField: string | null | undefined): FormField {
+    switch (coreField) {
+        case 'lyrics': return 'lyrics';
+        case 'style': return 'style';
+        case 'variants': return 'variants';
+        case 'duration_s': return 'duration';
+        case 'seed': return 'seed';
+        default: return 'form';
+    }
+}
+
+// -- level matching (decision 37) ------------------------------------------------
+
+/** ffmpeg's ebur128 never reads below this; a take at the floor is silent or shorter
+ *  than one gating block, and is not matched against. */
+export const LUFS_FLOOR = -70;
+
+export function dbToGain(db: number): number {
+    return Math.pow(10, db / 20);
+}
+
+/** "−1.5" with a real minus sign; "0.0" for zero. */
+export function formatDb(db: number, digits = 1): string {
+    const r = Number(db.toFixed(digits));
+    if (r === 0) return (0).toFixed(digits);
+    return `${r < 0 ? '−' : '+'}${Math.abs(r).toFixed(digits)}`;
+}
+
+export function takeLetter(index: number): string {
+    return String.fromCharCode(65 + index);
+}
+
+export interface LevelMatch {
+    /** True only when every take has a usable measurement. */
+    matched: boolean;
+    /** Per take, in order: the dB applied (0 or negative) and its linear gain (<= 1). */
+    db: number[];
+    gain: number[];
+    /** "matched: −1.5 dB on A", or "not level-matched: ...". */
+    label: string;
+}
+
+/** The display gains that play every take at the quietest one's integrated loudness:
+ *  the louder ones are turned down, nothing is turned up (`volume` stops at 1). Without
+ *  a usable measurement for every take nothing is changed and the label says so. */
+export function levelMatch(loudness: readonly (TakeLoudness | null | undefined)[]): LevelMatch {
+    const n = loudness.length;
+    const flat = (label: string): LevelMatch => ({ matched: false, db: Array(n).fill(0), gain: Array(n).fill(1), label });
+    if (!n) return flat('not level-matched: no takes');
+    const missing = loudness.map((l, i) => (l && Number.isFinite(l.lufs_i) ? null : takeLetter(i))).filter(Boolean) as string[];
+    if (missing.length) {
+        return flat(`not level-matched: the loudness of ${missing.join(', ')} is not measured yet`);
+    }
+    const lufs = loudness.map(l => l!.lufs_i);
+    const floor = lufs.map((v, i) => (v <= LUFS_FLOOR + 0.05 ? takeLetter(i) : null)).filter(Boolean) as string[];
+    if (floor.length) return flat(`not level-matched: ${floor.join(', ')} is silent or too short to measure`);
+    const target = Math.min(...lufs);
+    const db = lufs.map(v => Math.min(0, target - v));
+    const gain = db.map(dbToGain);
+    const turned = db.map((d, i) => (d <= -0.05 ? `${formatDb(d)} dB on ${takeLetter(i)}` : null)).filter(Boolean);
+    const label = turned.length ? `matched: ${turned.join(', ')}` : 'matched: equal loudness, no change';
+    return { matched: true, db, gain, label };
+}
+
+// -- the A/B position --------------------------------------------------------------
+
+/** Stay this far before the end, so a switch at the very end does not land on `ended`. */
+export const AB_END_GUARD_S = 0.05;
+
+/** Where the other take starts when A/B switches at `t`: the same time, clamped to the
+ *  other take's length (takes can differ by a frame or more). */
+export function abSwitchPosition(t: number, otherDuration: number | null | undefined): number {
+    const pos = Number.isFinite(t) && t > 0 ? t : 0;
+    if (typeof otherDuration !== 'number' || !Number.isFinite(otherDuration) || otherDuration <= 0) return pos;
+    return Math.min(pos, Math.max(0, otherDuration - AB_END_GUARD_S));
+}
+
+/** The take a key selects: 'a'..'d' by letter; pressing the letter of the take already
+ *  playing toggles back to the one before (so `B`, SPEC §9's A/B key, flips A and B). */
+export function abKeyTarget(key: string, count: number, current: number, previous: number | null): number | null {
+    const k = key.toLowerCase();
+    if (k.length !== 1 || k < 'a' || k > 'z') return null;
+    const i = k.charCodeAt(0) - 97;
+    if (i >= count) return null;
+    if (i === current) {
+        if (previous !== null && previous !== current && previous < count) return previous;
+        if (count === 2) return 1 - current;
+        return null;
+    }
+    return i;
+}
+
+// -- the reason box (decision 35) -------------------------------------------------
+
+export const MAX_REASON_TEXT = 2000;
+
+/** Whether a Discard / None of these reason can be sent: text, a class, or both, the
+ *  text within the core's limit. */
+export function reasonCheck(text: string, reasonClass: string | null | undefined, max = MAX_REASON_TEXT): { ok: boolean; message: string } {
+    const t = (text ?? '').trim();
+    if (!t && !reasonClass) return { ok: false, message: 'Say why: type a reason, pick a class, or both.' };
+    if (t.length > max) return { ok: false, message: `The reason is longer than ${max} characters.` };
+    return { ok: true, message: '' };
+}
+
+/** The reason part of `discard_music_take` / `reject_all_music_takes`. */
+export function reasonPayload(text: string, reasonClass: string | null | undefined): { reason_text?: string; reason_class?: string } {
+    const out: { reason_text?: string; reason_class?: string } = {};
+    const t = (text ?? '').trim();
+    if (t) out.reason_text = t;
+    if (reasonClass) out.reason_class = reasonClass;
+    return out;
+}
+
+/** The dictionary entries offered under the input: the core's answer for the prefix,
+ *  without the one already typed in full. */
+export function reasonSuggestions(reasons: readonly DiscardReason[], typed: string, limit = 8): DiscardReason[] {
+    const key = typed.split(/\s+/).filter(Boolean).join(' ').toLowerCase();
+    return reasons.filter(r => r.key !== key).slice(0, limit);
+}
+
+// -- take info ---------------------------------------------------------------------
+
+function clock(seconds: number): string {
+    const s = Math.round(seconds);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** "seed 42 · variant 1 · batch 2, index 0 · 0:30 · −14.0 LUFS / −1.0 dBTP". */
+export function takeInfo(take: MusicTake): string {
+    const parts: string[] = [];
+    if (typeof take.seed === 'number') parts.push(`seed ${take.seed}`);
+    parts.push(`variant ${take.variant}`);
+    if (typeof take.synth_batch_size === 'number') parts.push(`batch ${take.synth_batch_size}, index ${take.synth_batch_index ?? '?'}`);
+    const d = take.file?.duration_s;
+    if (typeof d === 'number' && Number.isFinite(d)) parts.push(clock(d));
+    const l = take.loudness;
+    if (l && Number.isFinite(l.lufs_i)) {
+        const tp = typeof l.true_peak_dbtp === 'number' ? ` / ${formatDb(l.true_peak_dbtp)} dBTP` : '';
+        parts.push(`${formatDb(l.lufs_i)} LUFS${tp}`);
+    } else parts.push('loudness not measured');
+    return parts.join(' · ');
+}
+
+/** "Kept", "Discarded: muddy mix (struct)", or '' while pending. */
+export function takeDecisionText(take: MusicTake): string {
+    if (take.decision === 'accepted') return 'Kept';
+    if (take.decision === 'rejected') {
+        const why = [take.reason_text, take.reason_class ? `(${take.reason_class})` : ''].filter(Boolean).join(' ');
+        return why ? `Discarded: ${why}` : 'Discarded';
+    }
+    return '';
+}
+
+/** Keep and Discard are offered for a pending take of a job in review (or already
+ *  accepted: another take may still be kept or discarded); None of these only in review. */
+export function takeDecidable(job: Pick<MusicJob, 'state'>, take: Pick<MusicTake, 'decision'>): boolean {
+    return (job.state === 'review' || job.state === 'accepted') && take.decision === 'pending';
+}

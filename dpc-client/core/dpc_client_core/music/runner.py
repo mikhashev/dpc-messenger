@@ -46,8 +46,13 @@ job store, which keeps the state machine; every store call goes through
    model identity (file names, sizes, sha256; no local paths, PROVENANCE rule 3), and the
    WAV-to-FLAC hash chain. It is `dpc.take-sidecar/1`, a subset of the proposed
    `mp.provenance/1` (a later card), and only grows.
-8. `register_generated(flac, job_id=...)`, then `add_take(... library_track_id=entry id)`.
-9. `finish_job` (`review`), or `fail_job` with the reason.
+8. **Loudness.** The FLAC is measured with ffmpeg `ebur128` (integrated LUFS, LRA, true
+   peak; `loudness.py`) for the review's level-matched A/B (decision 37). A failed
+   measurement is logged and leaves the take's `loudness` null: it is advisory (decision
+   29), never a reason to fail the job, and `measure_music_take_loudness` can retry it.
+9. `register_generated(flac, job_id=...)`, then `add_take(... library_track_id=entry id,
+   loudness=...)`.
+10. `finish_job` (`review`), or `fail_job` with the reason.
 
 **Cancel.** The person's Cancel moves the job to `cancelled` in the store; the runner reads
 the state between steps and on every engine poll, asks the engine to cancel its job
@@ -82,6 +87,7 @@ from . import job_schemas as js
 from .acestep import MODEL_FILES, AceStepError, AceStepServer
 from .identity import MediaTools, read_flac_streaminfo
 from .jobs import MusicJobError, MusicJobStore
+from .loudness import LoudnessError, LoudnessMeter, ffmpeg_loudness_meter
 from .store import atomic_write_text, music_dir_of
 
 logger = logging.getLogger(__name__)
@@ -325,6 +331,7 @@ class MusicJobRunner:
         engine_poll_s: float = DEFAULT_ENGINE_POLL_S,
         engine_job_timeout_s: float = DEFAULT_ENGINE_JOB_TIMEOUT_S,
         draw_seed: Optional[Callable[[], int]] = None,
+        loudness_meter: Optional[LoudnessMeter] = None,
     ):
         self.store = store
         self.engine = engine
@@ -332,6 +339,7 @@ class MusicJobRunner:
         self.generated_root = music_dir_of(dpc_home) / "generated"
         self._card_holders = card_holders or default_card_holders
         self._convert = converter or ffmpeg_converter()
+        self._measure = loudness_meter or ffmpeg_loudness_meter()
         self.on_job_change = on_job_change
         self.card_poll_s = card_poll_s
         self.engine_poll_s = engine_poll_s
@@ -703,6 +711,17 @@ class MusicJobRunner:
         }
         await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(record, ensure_ascii=False, indent=1))
 
+        loudness: Optional[Dict[str, Any]] = None
+        try:
+            loudness = dict(await asyncio.to_thread(self._measure, flac))
+            js.check_loudness(loudness)
+        except LoudnessError as exc:
+            loudness = None
+            logger.warning("music: variant %s of job %s has no loudness measurement: %s", variant, job_id, exc)
+        except Exception:
+            loudness = None  # never a reason to fail the job (decision 29)
+            logger.exception("music: measuring the loudness of variant %s of job %s failed", variant, job_id)
+
         library_id: Optional[str] = None
         content_hash = f"md5:{info.md5}"
         try:
@@ -720,7 +739,7 @@ class MusicJobRunner:
                 self.store.add_take, job_id, variant=variant, file_uri=flac.as_uri(), content_hash=content_hash,
                 title=title, seed=seed, synth_batch_size=batch_size, synth_batch_index=index, payload=SYNTH_PAYLOAD,
                 sample_rate=info.sample_rate or None, channels=info.channels or None,
-                duration_s=info.duration_s, library_track_id=library_id)
+                duration_s=info.duration_s, library_track_id=library_id, loudness=loudness)
         except MusicJobError:
             await self._check(job_id)
             raise

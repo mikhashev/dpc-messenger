@@ -80,7 +80,9 @@ export const NOT_CONNECTED_TEXT = 'Not connected to the backend.';
 
 export type MusicAnswer<T = Record<string, any>> =
     | { ok: true; data: T }
-    | { ok: false; unavailable: boolean; code: string; message: string };
+    | { ok: false; unavailable: boolean; code: string; message: string;
+        /** The param at fault, when the core names one (`MusicJobError.field`). */
+        field?: string };
 
 /** What `sendCommand` is: a promise of the payload, or false when not connected. */
 export type MusicSender = (command: string, payload?: any) => Promise<any> | boolean;
@@ -121,11 +123,13 @@ export async function callMusic<T = Record<string, any>>(
         return { ok: true, data: data as T };
     }
     if (answer && typeof answer === 'object' && answer.status === 'error') {
-        return {
+        const out: Extract<MusicAnswer<T>, { ok: false }> = {
             ok: false, unavailable: false,
             code: typeof answer.code === 'string' ? answer.code : 'error',
             message: typeof answer.message === 'string' && answer.message ? answer.message : `${command} failed`,
         };
+        if (typeof answer.field === 'string' && answer.field) out.field = answer.field;
+        return out;
     }
     return { ok: false, unavailable: false, code: 'bad_answer', message: `${command} gave an answer the player does not understand` };
 }

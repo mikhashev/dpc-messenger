@@ -11,6 +11,16 @@
 // The library comes from the core music service (dpc_client_core/music/commands.py)
 // through the coreService wrappers. Until those commands are wired into local_api,
 // every call answers "unavailable" and the window says MUSIC_UNAVAILABLE_TEXT.
+//
+// **Review playback** (the Create panel's A/B of a job's takes) uses the same audio
+// element, the same `trackPlaybackUrl` and the same wait for the duration before a seek
+// or a play (WebKitGTK, 36a4777a): there is one playback path. The review takes the
+// element over for as long as it plays: the queue itself is never changed, its track and
+// position are remembered, and when the review ends (`endReview`: the review view is
+// left, the window closed or minimised) the queue's track is loaded back, paused, at that
+// position. Pressing Play, Next, Prev or a row of the queue during a review hands the
+// element back to the queue at once (Play resumes at the remembered position). The
+// review's level-match gain multiplies the person's volume; it never raises it.
 
 import { derived, get, writable } from 'svelte/store';
 import {
@@ -69,7 +79,9 @@ import {
     type QueueState,
     type RepeatMode,
     type StepResult,
+    type PlaybackSource,
 } from '$lib/utils/musicPlayer';
+import { abSwitchPosition } from '../utils/musicCreate';
 
 // -- the library -----------------------------------------------------------------
 
@@ -89,11 +101,17 @@ export const musicLibrary = writable<MusicLibraryState>(EMPTY_LIBRARY);
 export const musicEntriesById = derived(musicLibrary, ($l) => new Map($l.entries.map(e => [e.id, e])));
 
 let loading = false;
+/** A read was asked for while one was under way: it may have started before the change
+ *  the asker wants to see (a take hidden by Discard), so one more quiet read follows. */
+let readAgain = false;
 
 /** Read the library, the playlists and the folders. `quiet` keeps what is shown
  *  while reading (the window's poll); otherwise the window shows "Loading". */
 export async function loadMusicLibrary(quiet = false): Promise<void> {
-    if (loading) return;
+    if (loading) {
+        readAgain = true;
+        return;
+    }
     loading = true;
     if (!quiet) musicLibrary.update(l => ({ ...l, status: l.status === 'ready' ? 'ready' : 'loading', message: '' }));
     const heldId = get(musicPlayback).loadedId;
@@ -121,6 +139,10 @@ export async function loadMusicLibrary(quiet = false): Promise<void> {
         noteRefresh(heldId, heldBefore);
     } finally {
         loading = false;
+        if (readAgain) {
+            readAgain = false;
+            void loadMusicLibrary(true);
+        }
     }
 }
 
@@ -356,6 +378,9 @@ let audioToken = -1;
 const current = () => audioToken === loadToken;
 const DURATION_WAIT_MS = 4000;
 
+/** Who holds the audio element: the queue, or a review of a music job's takes. */
+let owner: 'queue' | 'review' = 'queue';
+
 // -- diagnostics -----------------------------------------------------------------
 // One compact debug line per media event, to ui.log through the console relay
 // (grep for "[music]" in ~/.dpc/logs/ui.log). `timeupdate` is never logged. Events that can
@@ -429,23 +454,44 @@ function ensureAudio(): HTMLAudioElement | null {
     a.preload = isLinuxWebview() && !detectWindows() ? 'auto' : 'metadata';
     a.volume = get(musicPlayback).volume;
     attachDiagnostics(a);
-    a.addEventListener('play', () => musicPlayback.update(s => ({ ...s, playing: true })));
-    a.addEventListener('pause', () => musicPlayback.update(s => ({ ...s, playing: false })));
+    a.addEventListener('play', () => {
+        if (owner === 'review') musicReview.update(r => ({ ...r, playing: true }));
+        else musicPlayback.update(s => ({ ...s, playing: true }));
+    });
+    a.addEventListener('pause', () => {
+        if (owner === 'review') musicReview.update(r => ({ ...r, playing: false }));
+        else musicPlayback.update(s => ({ ...s, playing: false }));
+    });
     a.addEventListener('timeupdate', () => {
-        if (current()) musicPlayback.update(s => ({ ...s, currentTime: a.currentTime }));
+        if (!current()) return;
+        if (owner === 'review') musicReview.update(r => ({ ...r, currentTime: a.currentTime }));
+        else musicPlayback.update(s => ({ ...s, currentTime: a.currentTime }));
     });
     const takeDuration = () => {
         if (!current()) return;
+        if (owner === 'review') {
+            const d = resolveDuration(a.duration, entryOf(get(musicReview).trackId)?.duration_s, a.currentTime);
+            if (d > 0) musicReview.update(r => (r.duration === d ? r : { ...r, duration: d }));
+            return;
+        }
         const d = resolveDuration(a.duration, entryOf(get(musicPlayback).loadedId)?.duration_s, a.currentTime);
         if (d > 0) musicPlayback.update(s => (s.duration === d ? s : { ...s, duration: d }));
     };
     a.addEventListener('loadedmetadata', takeDuration);
     a.addEventListener('durationchange', takeDuration);
     a.addEventListener('ended', () => {
-        if (current()) void handleEnded(audioToken);
+        if (!current()) return;
+        // A take ends where it ends: the review never moves the queue on.
+        if (owner === 'review') musicReview.update(r => ({ ...r, playing: false }));
+        else void handleEnded(audioToken);
     });
     a.addEventListener('error', () => {
         if (!a.getAttribute('src') || !current()) return;
+        if (owner === 'review') {
+            const code = a.error?.code;
+            musicReview.update(r => ({ ...r, playing: false, loading: false, notice: `The webview could not open the take${code ? ` (media error ${code})` : ''}.` }));
+            return;
+        }
         const code = a.error?.code;
         musicPlayback.update(s => ({ ...s, playing: false, loadingTrack: false }));
         say(`Could not play "${titleOf(get(musicPlayback).loadedId)}": the webview could not open the file${code ? ` (media error ${code})` : ''}.`);
@@ -501,11 +547,17 @@ export function waitForDuration(
     });
 }
 
-/** Make `queue` the queue and load its track at `index`; play it when `autoplay`. */
-async function startAt(queue: QueueState, index: number, autoplay: boolean): Promise<boolean> {
+/** Make `queue` the queue and load its track at `index`; play it when `autoplay`. From
+ *  `resumeAt` seconds when given (a queue track loaded back after a review). */
+async function startAt(queue: QueueState, index: number, autoplay: boolean, resumeAt = 0): Promise<boolean> {
     const q = { ...queue, index };
     const id = currentId(q);
-    musicPlayback.update(s => ({ ...s, queue: q, loadingTrack: true, currentTime: 0, duration: entryOf(id)?.duration_s ?? 0 }));
+    if (owner === 'review') {
+        // The queue takes the element back from a review (Play, Next, a row, or endReview).
+        if (!resumeAt && queueHeld && queueHeld.id === id) resumeAt = queueHeld.time;
+        leaveReview();
+    }
+    musicPlayback.update(s => ({ ...s, queue: q, loadingTrack: true, currentTime: resumeAt, duration: entryOf(id)?.duration_s ?? 0 }));
     const token = ++loadToken;
     const source = await trackPlaybackUrl(entryOf(id), await getPlaybackEnv());
     if (token !== loadToken) {
@@ -541,9 +593,17 @@ async function startAt(queue: QueueState, index: number, autoplay: boolean): Pro
     releaseSource();
     releaseSource = source.release;
     a.loop = get(musicPlayback).repeat === 'one';
+    a.volume = get(musicPlayback).volume;
     a.src = source.url;
     audioToken = token;
     musicPlayback.update(s => ({ ...s, loadedId: id, loadingTrack: false }));
+    if (resumeAt > 0) {
+        // A seek needs the duration first (and on WebKitGTK it is refused before it).
+        await waitForDuration(a, DURATION_WAIT_MS, () => token !== loadToken);
+        if (token !== loadToken) return true;
+        seekRequested = resumeAt;
+        a.currentTime = resumeAt;
+    }
     if (autoplay) {
         try {
             if (platformIsLinux) {
@@ -716,7 +776,7 @@ export function setShuffle(on: boolean): void {
 export function cycleRepeatMode(): void {
     const repeat = cycleRepeat(get(musicPlayback).repeat);
     musicPlayback.update(s => ({ ...s, repeat }));
-    if (audio) audio.loop = repeat === 'one';
+    if (audio && owner === 'queue') audio.loop = repeat === 'one';
     remember();
     say(repeat === 'one' ? 'Repeat: one (the track loops; Next and Prev still move).'
         : repeat === 'all' ? 'Repeat: all (the queue wraps around).' : 'Repeat: off.');
@@ -748,7 +808,7 @@ const rememberVolume = throttle(remember, VOLUME_SAVE_MS);
  *  while the slider moves, and once more when it is let go (`final`). */
 export function setVolume(volume: number, final = false): void {
     const v = Math.max(0, Math.min(1, volume));
-    if (audio) audio.volume = v;
+    if (audio) audio.volume = owner === 'review' ? v * reviewGain : v;
     musicPlayback.update(s => ({ ...s, volume: v }));
     rememberVolume.call();
     if (final) rememberVolume.flush();
@@ -807,6 +867,20 @@ export async function unhideTrack(id: string): Promise<MusicAnswer<{ entry: Libr
 
 /** Stop the audio if it holds one of `ids`, and take them out of the queue. */
 function forgetInPlayback(ids: readonly string[]): void {
+    const r = get(musicReview);
+    if (owner === 'review' && r.trackId && ids.includes(r.trackId)) {
+        loadToken++;
+        if (audio) {
+            audio.pause();
+            audio.removeAttribute('src');
+            audio.load();
+        }
+        musicReview.update(x => ({ ...x, trackId: null, playing: false, loading: false, currentTime: 0 }));
+    }
+    for (const id of ids) {
+        reviewSources.get(id)?.release();
+        reviewSources.delete(id);
+    }
     const s = get(musicPlayback);
     if (s.loadedId && ids.includes(s.loadedId)) {
         loadToken++;
@@ -834,4 +908,182 @@ export async function deleteGeneratedFile(id: string): Promise<MusicAnswer<{ id:
     const a = noteAnswer(await deleteGeneratedMusicFile(id));
     await loadMusicLibrary(true);
     return a;
+}
+
+// -- review playback (the Create panel's A/B; see the header) --------------------
+
+export interface ReviewPlaybackState {
+    /** The review holds the audio element. */
+    active: boolean;
+    /** The library entry of the take loaded, or null. */
+    trackId: string | null;
+    playing: boolean;
+    loading: boolean;
+    currentTime: number;
+    duration: number;
+    /** The level-match gain applied on top of the person's volume (<= 1). */
+    gain: number;
+    notice: string;
+}
+
+const EMPTY_REVIEW: ReviewPlaybackState = {
+    active: false, trackId: null, playing: false, loading: false, currentTime: 0, duration: 0, gain: 1, notice: '',
+};
+
+export const musicReview = writable<ReviewPlaybackState>(EMPTY_REVIEW);
+
+let reviewGain = 1;
+/** The resolved sources of the takes heard in this review, kept so an A/B switch does not
+ *  read the file again; released when the review ends. */
+const reviewSources = new Map<string, Extract<PlaybackSource, { ok: true }>>();
+/** The queue's track and position when the review took the element over. */
+let queueHeld: { id: string; time: number } | null = null;
+
+function releaseReviewSources(): void {
+    for (const s of reviewSources.values()) s.release();
+    reviewSources.clear();
+}
+
+/** The review lets go of the element (the caller loads or stops it next). */
+function leaveReview(): void {
+    owner = 'queue';
+    queueHeld = null;
+    reviewGain = 1;
+    releaseReviewSources();
+    musicReview.set(EMPTY_REVIEW);
+}
+
+function clampGain(g: number | undefined): number {
+    return typeof g === 'number' && Number.isFinite(g) ? Math.max(0, Math.min(1, g)) : 1;
+}
+
+/** Load a take (its library entry `trackId`) into the element at `at` seconds (clamped to
+ *  the take's length), with the level-match `gain`, and play it when `autoplay`. The
+ *  first call takes the element from the queue (see the header). False when it could not
+ *  load, or a newer load overtook it; `musicReview.notice` says why. */
+export async function reviewPlay(trackId: string, opts: { at?: number; autoplay?: boolean; gain?: number } = {}): Promise<boolean> {
+    const token = ++loadToken;
+    const a0 = audio;
+    if (owner === 'queue') {
+        const s = get(musicPlayback);
+        queueHeld = s.loadedId && a0 ? { id: s.loadedId, time: a0.currentTime } : null;
+        owner = 'review';
+        a0?.pause();
+        // The queue's own source (a `blob:` on the Linux fallback) is let go; the queue
+        // resolves it again when it takes the element back.
+        releaseSource();
+        releaseSource = () => {};
+        musicPlayback.update(x => ({ ...x, loadedId: null, playing: false, loadingTrack: false }));
+    }
+    reviewGain = clampGain(opts.gain ?? reviewGain);
+    musicReview.update(r => ({ ...r, active: true, trackId, loading: true, gain: reviewGain, notice: '' }));
+    let source = reviewSources.get(trackId);
+    if (!source) {
+        let entry = entryOf(trackId);
+        if (!entry) {
+            await loadMusicLibrary(true);
+            entry = entryOf(trackId);
+        }
+        const s = await trackPlaybackUrl(entry, await getPlaybackEnv());
+        if (token !== loadToken || owner !== 'review') {
+            if (s.ok) s.release();
+            return false;
+        }
+        if (!s.ok) {
+            dlogEvent('source', `review source #${token} ${trackId} failed: ${s.problem}: ${s.reason}`);
+            musicReview.update(r => ({ ...r, loading: false, playing: false, notice: `This take cannot play: ${s.reason}.` }));
+            return false;
+        }
+        reviewSources.set(trackId, s);
+        source = s;
+    }
+    const a = ensureAudio();
+    if (!a) {
+        musicReview.update(r => ({ ...r, loading: false, notice: 'This webview has no audio element.' }));
+        return false;
+    }
+    dlogEvent('source', `review source #${token} ${trackId} via=${source.via} mime=${source.mime || 'none'} at=${(opts.at ?? 0).toFixed(2)} gain=${reviewGain.toFixed(3)}`);
+    seekRequested = null;
+    a.loop = false;
+    a.volume = get(musicPlayback).volume * reviewGain;
+    a.src = source.url;
+    audioToken = token;
+    // The seek needs the duration (WebKitGTK refuses it before), and so does the clamp.
+    await waitForDuration(a, DURATION_WAIT_MS, () => token !== loadToken);
+    if (token !== loadToken) return false;
+    const duration = resolveDuration(a.duration, entryOf(trackId)?.duration_s, 0);
+    const at = abSwitchPosition(opts.at ?? 0, duration);
+    if (at > 0) {
+        seekRequested = at;
+        a.currentTime = at;
+    }
+    musicReview.update(r => ({ ...r, loading: false, duration, currentTime: at }));
+    if (opts.autoplay) {
+        try {
+            await a.play();
+        } catch (e) {
+            if (token === loadToken) musicReview.update(r => ({ ...r, notice: `Could not start the take: ${e instanceof Error ? e.message : String(e)}` }));
+        }
+    }
+    return true;
+}
+
+/** Play / pause the take loaded in the review. False when the review holds nothing. */
+export async function reviewTogglePlay(): Promise<boolean> {
+    if (owner !== 'review' || !audio || !get(musicReview).trackId || !audio.getAttribute('src')) return false;
+    if (audio.paused) await audio.play().catch(e => musicReview.update(r => ({ ...r, notice: `Could not start: ${e instanceof Error ? e.message : String(e)}` })));
+    else audio.pause();
+    return true;
+}
+
+/** Seek the take loaded in the review (clamped to its length). */
+export function reviewSeek(seconds: number): void {
+    if (owner !== 'review' || !audio || !get(musicReview).trackId) return;
+    const target = abSwitchPosition(seconds, get(musicReview).duration);
+    seekRequested = target;
+    dlogEvent('seek', `seek request (review) target=${target.toFixed(2)} from=${audio.currentTime.toFixed(2)} ${snapshot(audio)}`);
+    audio.currentTime = target;
+}
+
+/** The review's position now (the element's; `timeupdate` reports only every ~250 ms). */
+export function reviewPosition(): number {
+    return owner === 'review' && audio ? audio.currentTime : get(musicReview).currentTime;
+}
+
+/** Change the level-match gain of the take playing (the person's volume stays on top). */
+export function reviewSetGain(gain: number): void {
+    reviewGain = clampGain(gain);
+    musicReview.update(r => ({ ...r, gain: reviewGain }));
+    if (owner === 'review' && audio) audio.volume = get(musicPlayback).volume * reviewGain;
+}
+
+/** End the review: the element goes back to the queue, whose track is loaded again,
+ *  paused, where it was. Nothing happens when the queue already took it back. */
+export async function endReview(): Promise<void> {
+    if (owner !== 'review') {
+        musicReview.set(EMPTY_REVIEW);
+        return;
+    }
+    const held = queueHeld;
+    loadToken++;
+    if (audio) {
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
+    }
+    leaveReview();
+    if (audio) audio.volume = get(musicPlayback).volume;
+    if (!held) return;
+    const q = freshQueueAt(held.id);
+    if (currentId(q) === held.id) await startAt(q, q.index, false, held.time);
+}
+
+/** Library entries the core hid (a discarded take): they leave the queue (the one
+ *  playing plays on), and the library is read again so every list drops them. */
+export async function noteTracksHidden(ids: readonly string[]): Promise<void> {
+    if (!ids.length) return;
+    const playing = currentId(get(musicPlayback).queue);
+    const drop = ids.filter(id => id !== playing);
+    if (drop.length) musicPlayback.update(s => ({ ...s, queue: queueDrop(s.queue, drop) }));
+    await loadMusicLibrary(true);
 }

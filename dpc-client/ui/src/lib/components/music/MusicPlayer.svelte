@@ -22,6 +22,11 @@
   Under Now playing sits the Lyrics area (MusicLyrics.svelte): the lyrics chain of
   the core (.lrc sidecar, file tags, LRCLIB, manual edit) for the current track.
 
+  The header's Create button opens the Create panel (MusicCreate.svelte: a song from
+  your own text, its jobs, and the A/B review of its takes) in place of the listening
+  columns; Listen is the default view on every opening. Keys inside the panel are the
+  panel's own (the review's A / B, Space), not the queue's.
+
   The library comes from the core music commands; until they are wired into
   local_api the window says "Music library not available on this backend yet" and
   the player stays usable for nothing else.
@@ -32,6 +37,7 @@
   import { connectionStatus } from '$lib/coreService';
   import { confirmAsync } from '$lib/utils/dialog';
   import MusicLyrics from './MusicLyrics.svelte';
+  import MusicCreate from './MusicCreate.svelte';
   import {
     HEADER_HEIGHT,
     isClick,
@@ -89,6 +95,7 @@
     musicNotice,
     musicPlayback,
     musicPosition,
+    musicReview,
     nextTrack,
     playList,
     playQueueAt,
@@ -158,10 +165,14 @@
   }
   const remember = () => saveWindowState(storage(), windowState(), MUSIC_PLAYER_WINDOW);
 
+  // Listen is the default view; Create is opened from the header.
+  let view = $state<'listen' | 'create'>('listen');
+
   // Each opening takes the remembered boxes, fitted to the viewport as it is now.
   $effect(() => {
     if (!open) return;
     untrack(() => {
+      view = 'listen';
       const w = loadWindowState(storage(), viewport(), MUSIC_PLAYER_WINDOW);
       apply(fitMusicPlayer({ ...w, minimised }, viewport()));
       tick().then(() => rootEl?.focus({ preventScroll: true }));
@@ -588,7 +599,9 @@
   let loaded = $derived(!!p.loadedId && p.loadedId === currentId(p.queue));
   let shownDuration = $derived(resolveDuration(loaded && p.duration > 0 ? p.duration : null, cur?.duration_s, loaded ? p.currentTime : 0));
   let summary = $derived(
-    cur ? `${p.playing ? 'Playing' : loaded ? 'Paused' : 'Up next'}: ${cur.title}` : `${$musicLibrary.entries.length} tracks`,
+    $musicReview.active
+      ? `Reviewing takes${$musicReview.playing ? ' (playing)' : ''}; the queue waits`
+      : cur ? `${p.playing ? 'Playing' : loaded ? 'Paused' : 'Up next'}: ${cur.title}` : `${$musicLibrary.entries.length} tracks`,
   );
 
   // The slider only moves the thumb while it is dragged; the seek is made once, on release
@@ -621,6 +634,8 @@
     const a = document.activeElement as HTMLElement | null;
     if (!a || !rootEl.contains(a)) return;
     if (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;
+    // The Create panel handles its own keys (the review's A / B, Space, arrows).
+    if (a.closest('[data-music-create]')) return;
     if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
       const row = a.closest<HTMLElement>('[data-row-index]');
       if (row && canReorder) {
@@ -731,7 +746,7 @@
         <div class="mini">
           {@render transport(true)}
           <span id="music-player-title" class="mini-title" title={cur?.title ?? 'Music Player'}>
-            {cur?.title ?? 'Music Player'}
+            {$musicReview.active ? 'Reviewing takes' : (cur?.title ?? 'Music Player')}
           </span>
           {#if $musicPosition && miniShows.position}<span class="mini-pos" title="Track k of n in Up next">{$musicPosition}</span>{/if}
           {#if miniShows.modes}{@render modeButtons(true)}{/if}
@@ -743,6 +758,16 @@
         </div>
       {/if}
       <div class="mp-buttons">
+        {#if !minimised}
+          <button
+            type="button"
+            class="view-btn"
+            class:on={view === 'create'}
+            aria-pressed={view === 'create'}
+            onclick={() => (view = view === 'create' ? 'listen' : 'create')}
+            title={view === 'create' ? 'Back to listening' : 'Make a song from your own text'}
+          >{view === 'create' ? 'Listen' : 'Create'}</button>
+        {/if}
         <button
           type="button"
           class="mp-button"
@@ -777,6 +802,9 @@
           {#if p.notice}<span>{p.notice}</span><button type="button" class="link-btn" onclick={clearNotice}>×</button>{/if}
         </div>
 
+        {#if view === 'create'}
+          <MusicCreate />
+        {:else}
         <div class="mp-columns">
           <div class="col-player">
             <section class="card now" aria-label="Now playing">
@@ -1057,10 +1085,11 @@
                   </li>
                 {/each}
               </ul>
-              <p class="muted tiny">Tracks play today only when their file is inside the DPC folder (~/.dpc). Files elsewhere are listed as "not playable yet" until the player can reach them.</p>
+              <p class="muted tiny">Tracks in any added folder play. On Windows and macOS files under ~/.dpc are read directly and files elsewhere play through DPC's local track stream (127.0.0.1 only); on Linux every track plays through that stream. If the stream is unavailable, files outside ~/.dpc show "not playable yet".</p>
             </section>
           </div>
         </div>
+        {/if}
       </div>
       <div
         class="resize-handle"
@@ -1137,7 +1166,22 @@
   .mini-title { font-size: 14px; flex: 1 1 auto; }
   .mini-pos { font-size: 12px; color: var(--text-secondary, #a9b0bb); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-  .mp-buttons { display: flex; gap: 2px; flex: 0 0 auto; }
+  .mp-buttons { display: flex; gap: 2px; flex: 0 0 auto; align-items: center; }
+  .view-btn {
+    margin-right: 8px;
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 1px solid #58a6ff;
+    background: transparent;
+    color: #58a6ff;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .view-btn:hover { background: #1d2a3d; }
+  .view-btn.on { background: #1d2a3d; }
+  .view-btn:focus-visible, .mp-button:focus-visible { outline: 2px solid #58a6ff; outline-offset: 1px; }
   .mp-button {
     width: 40px;
     height: 40px;

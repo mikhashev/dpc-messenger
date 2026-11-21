@@ -62,6 +62,8 @@ time; `start_music_jobs` starts it at service start (resuming queued jobs) and
 `stop_music_jobs` stops it and the server at shutdown. Each change the runner makes is
 broadcast as `music_job_updated` `{job}`, and each engine state change as
 `music_engine_status` `{engine}`; `get_music_job` answers the same state for a UI that polls.
+The person's own changes (propose, cancel, keep, discard, none of these) are broadcast the
+same way, so a second window sees them.
 "Stop X" on a job waiting for the card is the existing `stop_local_engine` command with the
 holder's alias from `job.card_wait.holders`; nothing here stops another engine.
 """
@@ -70,14 +72,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from ..local_api import slow_command
 from .acestep import AceStepError, AceStepServer, read_config
 from .capabilities import EngineStatus, MusicCapabilities
 from .jobs import MusicJobError, MusicJobStore
 from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
+from .loudness import LoudnessError, measure_loudness
 from .lyrics import MusicLyrics
 from .runner import MusicJobRunner
 from .stream import DEFAULT_STREAM_PORT, MusicStreamServer
@@ -119,6 +125,20 @@ def _opt_str(value: Any, field: str, code: str) -> Optional[str]:
     if not isinstance(value, str):
         raise _bad(code, field, "a string or null")
     return value
+
+
+def path_of_file_uri(uri: Any) -> Optional[Path]:
+    """The local path of a `file:` URI (`Path.as_uri()`'s form on every platform:
+    `file:///C:/x/y.flac` on Windows, `file:///home/x/y.flac` elsewhere), or None."""
+    if not isinstance(uri, str):
+        return None
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return None
+    path = url2pathname(parsed.path)
+    if parsed.netloc and parsed.netloc != "localhost":
+        path = ("//" if os.sep == "/" else "\\\\") + parsed.netloc + path
+    return Path(path)
 
 
 def _opt_str_list(value: Any, field: str, code: str) -> Optional[List[str]]:
@@ -618,6 +638,7 @@ class MusicCommandsMixin:
             job = await asyncio.to_thread(lambda: store.create_job(job_type, params, region=region, **strs))
             if job.get("state") == "queued":
                 self._music_wake_runner()
+            self._music_job_changed(job)
             return {"status": "ok", "job": job}
         except Exception as exc:
             return _error(exc)
@@ -650,6 +671,7 @@ class MusicCommandsMixin:
             store = await self._music_jobs()
             job = await asyncio.to_thread(store.cancel_job, jid, why)
             self._music_wake_runner()
+            self._music_job_changed(job)
             return {"status": "ok", "job": job}
         except Exception as exc:
             return _error(exc)
@@ -671,6 +693,7 @@ class MusicCommandsMixin:
             store = await self._music_jobs()
             take = await asyncio.to_thread(store.keep_take, tid)
             job = await asyncio.to_thread(store.get_job, take["job_id"])
+            self._music_job_changed(job)
             return {"status": "ok", "take": take, "job": job}
         except Exception as exc:
             return _error(exc)
@@ -685,7 +708,9 @@ class MusicCommandsMixin:
             store = await self._music_jobs()
             take = await asyncio.to_thread(lambda: store.discard_take(tid, reason_text=text, reason_class=cls))
             job = await asyncio.to_thread(store.get_job, take["job_id"])
-            return {"status": "ok", "take": take, "job": job, **await self._music_hide_for_discard(take)}
+            hidden = await self._music_hide_for_discard(take)
+            self._music_job_changed(job)
+            return {"status": "ok", "take": take, "job": job, **hidden}
         except Exception as exc:
             return _error(exc)
 
@@ -702,7 +727,32 @@ class MusicCommandsMixin:
             for take in takes:
                 if take.get("decision") == "rejected":
                     take.update(await self._music_hide_for_discard(take))
+            self._music_job_changed(job)
             return {"status": "ok", "job": job, "takes": takes}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
+    async def measure_music_take_loudness(self, take_id: Any = None, force: Any = False) -> Dict[str, Any]:
+        """Measure a take's integrated loudness, LRA and true peak with ffmpeg ebur128
+        (`loudness.py`) and record it on the take, for the level-matched A/B. A take that
+        has a measurement answers it as it is unless `force`. Slow: ffmpeg reads the
+        whole file. Errors: `not_found`, `measure_failed` (no ffmpeg, no file, no summary)."""
+        try:
+            tid = _need_str(take_id, "take_id", "invalid_take_id")
+            store = await self._music_jobs()
+            take = await asyncio.to_thread(store.get_take, tid)
+            if take.get("loudness") and force is not True:
+                return {"status": "ok", "take": take, "measured": False}
+            path = path_of_file_uri(take["file"]["uri"])
+            if path is None:
+                raise MusicJobError("measure_failed", f"take {tid} has no local file ({take['file']['uri']!r})")
+            try:
+                loudness = await asyncio.to_thread(measure_loudness, path)
+            except LoudnessError as exc:
+                raise MusicJobError("measure_failed", str(exc))
+            take = await asyncio.to_thread(store.set_take_loudness, tid, loudness)
+            return {"status": "ok", "take": take, "measured": True}
         except Exception as exc:
             return _error(exc)
 
@@ -850,6 +900,7 @@ MUSIC_COMMANDS = (
     "keep_music_take",
     "discard_music_take",
     "reject_all_music_takes",
+    "measure_music_take_loudness",
     "list_music_discard_reasons",
     "set_music_discard_reason_class",
     "list_music_playlists",

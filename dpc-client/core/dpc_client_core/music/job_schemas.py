@@ -41,6 +41,10 @@ record without them is valid against both shapes:
 - `mp.take/1.qa` may be null until stage-1 QA has measured the take (slice 1 step 4);
   the SPEC makes `mp.qa/1` required with numeric fields, which nothing can fill before
   the measurement runs.
+- `mp.take/1`: `loudness`, `{lufs_i, lra, true_peak_dbtp, measured_by, measured_at}` or
+  null: the ffmpeg ebur128 measurement the level-matched A/B needs (decision 37,
+  `loudness.py`). It is not `qa`, because a loudness-only record is not a valid `mp.qa/1`
+  (every field required, no extras). Advisory, never a gate (decision 29).
 """
 
 from __future__ import annotations
@@ -133,8 +137,9 @@ _TAKE_KEYS = set(_TAKE_REQUIRED) | {
     "variant", "source_track_id", "title", "qc", "simulated", "created_at",
     # extensions, see the module docstring
     "seed", "synth_batch_size", "synth_batch_index", "payload", "duration_requested_s",
-    "library_track_id", "reason_text", "reason_class", "decided_at",
+    "library_track_id", "reason_text", "reason_class", "decided_at", "loudness",
 }
+_LOUDNESS_KEYS = {"lufs_i", "lra", "true_peak_dbtp", "measured_by", "measured_at"}
 _FILE_KEYS = {"uri", "content_hash", "sample_rate", "channels", "duration_s"}
 
 
@@ -444,6 +449,8 @@ def validate_take(take: Any) -> None:
             _expect(s, take[k] is None or _is_str(take[k]), f"'{k}' must be a string or null")
     if "simulated" in take:
         _expect(s, isinstance(take["simulated"], bool), "'simulated' must be a boolean")
+    if take.get("loudness") is not None:
+        check_loudness(take["loudness"], s)
     text, cls = take.get("reason_text"), take.get("reason_class")
     _expect(s, text is None or (_is_str(text) and text.strip()), "'reason_text' must be non-blank text or null")
     _expect(s, cls is None or cls in FAILURE_CLASSES, f"'reason_class' must be one of {FAILURE_CLASSES} or null")
@@ -451,6 +458,18 @@ def validate_take(take: Any) -> None:
         _expect(s, text is not None or cls is not None, "a rejected take needs reason_text, reason_class or both")
     else:
         _expect(s, text is None and cls is None, "only a rejected take carries a reason")
+
+
+def check_loudness(loudness: Any, schema: str = TAKE) -> None:
+    """Raise `SchemaError` unless `loudness` is a take's loudness record: exactly the
+    five keys, the three numbers finite or null, `lufs_i` a number, the two strings set."""
+    _expect(schema, isinstance(loudness, Mapping) and set(loudness) == _LOUDNESS_KEYS,
+            f"'loudness' must have exactly {sorted(_LOUDNESS_KEYS)}")
+    _expect(schema, _is_number(loudness["lufs_i"]), "'loudness.lufs_i' must be a number")
+    for k in ("lra", "true_peak_dbtp"):
+        _expect(schema, loudness[k] is None or _is_number(loudness[k]), f"'loudness.{k}' must be a number or null")
+    for k in ("measured_by", "measured_at"):
+        _expect(schema, _is_str(loudness[k]) and bool(loudness[k]), f"'loudness.{k}' must be a string")
 
 
 def job_reason_needed(state: str) -> bool:

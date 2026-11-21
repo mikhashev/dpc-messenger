@@ -714,9 +714,11 @@ class MusicJobStore:
         duration_s: Optional[float] = None,
         library_track_id: Optional[str] = None,
         simulated: bool = False,
+        loudness: Optional[Mapping[str, Any]] = None,
     ) -> dict:
         """Record a finished take of a running `generate_from_text` job: a `new_track` take,
-        `pending`, `qa` null until QA runs. The file is written and registered by the runner
+        `pending`, `qa` null until QA runs, `loudness` the runner's ebur128 measurement or
+        null (`loudness.py`). The file is written and registered by the runner
         (`register_generated`). One take per variant and per file (decision 24:
         `duplicate_take`). `payload` must name a payload of this job. Raises
         `MusicJobError`."""
@@ -764,6 +766,7 @@ class MusicJobStore:
                 "reason_text": None,
                 "reason_class": None,
                 "decided_at": None,
+                "loudness": dict(loudness) if loudness is not None else None,
             }
             try:
                 js.validate_take(take)
@@ -777,6 +780,24 @@ class MusicJobStore:
             self._change(job_id, change)
             self._take_job[take["id"]] = job_id
             return copy.deepcopy(take)
+
+    def set_take_loudness(self, take_id: str, loudness: Mapping[str, Any]) -> dict:
+        """Record a take's loudness measurement (`loudness.py`), in any job state and for
+        any decision: it is a measurement of the file, not a decision. A later measurement
+        replaces an earlier one. Raises `MusicJobError` (`not_found`, `invalid_params`)."""
+        try:
+            js.check_loudness(loudness)
+        except SchemaError as exc:
+            raise MusicJobError("invalid_params", str(exc), field="loudness")
+        with self._lock:
+            self._ready()
+            job_id, _ = self._take(take_id)
+
+            def change(job: dict) -> None:
+                take = next(t for t in self._takes[job_id] if t["id"] == take_id)
+                take["loudness"] = dict(loudness)
+            self._change(job_id, change)
+            return copy.deepcopy(self._take(take_id)[1])
 
     def list_takes(self, job_id: str) -> List[dict]:
         with self._lock:
