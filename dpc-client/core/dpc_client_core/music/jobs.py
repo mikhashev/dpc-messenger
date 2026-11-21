@@ -662,9 +662,23 @@ class MusicJobStore:
                 raise MusicJobError("illegal_transition", f"job {job_id} is {job['state']}; payloads are written "
                                                           "before or during the run")
             path = self.payload_path(job_id, name)
-            if any(p["name"] == name for p in job["payloads"]) or path.exists():
+            if any(p["name"] == name for p in job["payloads"]):
                 raise MusicJobError("payload_exists", f"payload {name!r} of job {job_id} is already written")
-            atomic_write_bytes(path, body)
+            orphan = path.exists()
+            if orphan:
+                # A crash between the file write and the job record leaves the file alone. The
+                # same bytes are adopted; different bytes must not be sent in their place.
+                try:
+                    same = path.read_bytes() == body
+                except OSError:
+                    same = False
+                if not same:
+                    raise MusicJobError(
+                        "payload_exists",
+                        f"payload {name!r} of job {job_id} is on disk from an earlier start (not recorded) and "
+                        "differs from the request now built; the job cannot be resumed, propose it again")
+            else:
+                atomic_write_bytes(path, body)
             record = {"name": name, "sha256": _sha256(body), "size_bytes": len(body),
                       "written_at": self._now(), "endpoint": endpoint}
 
@@ -675,6 +689,8 @@ class MusicJobStore:
                 self._change(job_id, change)
             except BaseException:
                 # Not recorded, so not sent: remove the file, or a retry would be refused.
+                if orphan:
+                    raise
                 try:
                     path.unlink()
                 except OSError:
@@ -726,6 +742,9 @@ class MusicJobStore:
         loudness: Optional[Mapping[str, Any]] = None,
         engine: Optional[str] = None,
         lm_seed: Optional[int] = None,
+        engine_window_s: Optional[float] = None,
+        length_check: Optional[str] = None,
+        length_delta_s: Optional[float] = None,
     ) -> dict:
         """Record a finished take of a running `generate_from_text` job: a `new_track` take,
         `pending`, `qa` null until QA runs, `loudness` the runner's ebur128 measurement or
@@ -782,6 +801,11 @@ class MusicJobStore:
                 "engine": engine,
                 "lm_seed": lm_seed,
             }
+            # Advisory length check (acestep: codes x 0.2 s); absent when the engine has no such window.
+            if engine_window_s is not None:
+                take["engine_window_s"] = engine_window_s
+                take["length_check"] = length_check
+                take["length_delta_s"] = length_delta_s
             try:
                 js.validate_take(take)
             except SchemaError as exc:

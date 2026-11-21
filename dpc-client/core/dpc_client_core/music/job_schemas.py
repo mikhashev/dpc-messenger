@@ -199,7 +199,7 @@ _TAKE_KEYS = set(_TAKE_REQUIRED) | {
     # extensions, see the module docstring
     "seed", "synth_batch_size", "synth_batch_index", "payload", "duration_requested_s",
     "library_track_id", "reason_text", "reason_class", "decided_at", "loudness",
-    "engine", "lm_seed",
+    "engine", "lm_seed", "engine_window_s", "length_check", "length_delta_s",
 }
 _LOUDNESS_KEYS = {"lufs_i", "lra", "true_peak_dbtp", "measured_by", "measured_at"}
 _FILE_KEYS = {"uri", "content_hash", "sample_rate", "channels", "duration_s"}
@@ -587,6 +587,11 @@ def validate_take(take: Any) -> None:
     if "lm_seed" in take:
         _expect(s, take["lm_seed"] is None or (_is_int(take["lm_seed"]) and 0 <= take["lm_seed"] <= LM_SEED_MAX),
                 "'lm_seed' must be a whole number >= 0 or null")
+    if "engine_window_s" in take:
+        _expect(s, _is_number(take["engine_window_s"]) and take["engine_window_s"] >= 0,
+                "'engine_window_s' must be a number >= 0")
+        _expect(s, take.get("length_check") in ("ok", "mismatch"), "'length_check' must be 'ok' or 'mismatch'")
+        _expect(s, _is_number(take.get("length_delta_s")), "'length_delta_s' must be a number")
     if "duration_requested_s" in take:
         _expect(s, _is_number(take["duration_requested_s"]) and take["duration_requested_s"] > 0,
                 "'duration_requested_s' must be a positive number")
