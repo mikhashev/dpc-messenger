@@ -172,3 +172,26 @@ def test_the_setting_defaults_to_300_and_reads_zero_as_never(tmp_path):
     assert s.get_local_transcription_idle_unload_s() == 0.0
     s._config["local_transcription"]["idle_unload_s"] = "nonsense"
     assert s.get_local_transcription_idle_unload_s() == 300.0
+
+
+@pytest.mark.asyncio
+async def test_a_transcription_running_across_a_reload_holds_off_the_new_objects_unload(monkeypatch):
+    gate = asyncio.Event()
+    old = _provider(monkeypatch, idle_s=0.05, gate=gate)
+    run = asyncio.create_task(old.transcribe("x"))
+    await _running(old)
+    # The reload: a new object takes the pipeline and the lock, the old one is handed over.
+    new = _provider(monkeypatch, idle_s=0.05)
+    new.pipeline, new.model_loaded, new._load_lock = old.pipeline, True, old._load_lock
+    old.hand_over_to(new)
+    new.schedule_idle_unload()
+    assert new._active_transcriptions == 1
+    await asyncio.sleep(0.2)  # well past the idle timeout
+    assert new.unloads == 0 and new.is_model_loaded()
+    await asyncio.wait_for(new.unload_model_async(), 1)  # a deferred unload also waits
+    assert new.unloads == 0
+    gate.set()
+    assert (await asyncio.wait_for(run, 1)) == {"text": "x"}
+    assert new._active_transcriptions == 0
+    await _until(lambda: new.unloads == 1)
+    assert old.unloads == 0 and not new.is_model_loaded()

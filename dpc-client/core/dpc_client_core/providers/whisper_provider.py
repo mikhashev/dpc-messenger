@@ -101,6 +101,9 @@ class LocalWhisperProvider(AIProvider):
         self._idle_epoch = 0
         self._idle_committed = False  # the task is unloading: it must not be cancelled
         self._retired = False  # replaced by a reloaded provider object, or shut down
+        # The object that took over this one's model in a providers reload: a
+        # transcription still running here is counted and ended on that object.
+        self._successor: Optional["LocalWhisperProvider"] = None
 
         logger.info(f"LocalWhisperProvider '{alias}' initialized (model={self.model_name}, device={self.device})")
 
@@ -525,6 +528,27 @@ class LocalWhisperProvider(AIProvider):
         if self._idle_task is task:
             self._idle_task = None
 
+    def _current_owner(self) -> "LocalWhisperProvider":
+        owner = self
+        while owner._successor is not None:
+            owner = owner._successor
+        return owner
+
+    def hand_over_to(self, new: "LocalWhisperProvider") -> None:
+        """Providers reload: `new` took this object's model. Transcriptions still running
+        here now count on `new`, so its idle timer or a deferred unload waits for them,
+        and their end (see `transcribe`) restarts the timer there."""
+        if new is self:
+            return
+        new._active_transcriptions += self._active_transcriptions
+        self._active_transcriptions = 0
+        if new._active_transcriptions > 0:
+            new._drained.clear()
+            new._cancel_idle_task()
+        new._unload_when_idle = new._unload_when_idle or self._unload_when_idle
+        self._successor = new
+        self.retire()
+
     def retire(self) -> None:
         """This object is replaced (providers reload hands its model to the new one) or
         shut down: stop its timer and never schedule another."""
@@ -695,15 +719,16 @@ class LocalWhisperProvider(AIProvider):
         try:
             return await self._transcribe_loaded(audio_path)
         finally:
-            self._active_transcriptions -= 1
-            if self._active_transcriptions == 0:
-                self._drained.set()
+            owner = self._current_owner()
+            owner._active_transcriptions -= 1
+            if owner._active_transcriptions == 0:
+                owner._drained.set()
                 if release_if_loaded_here and loaded_here:
                     try:
-                        await self.unload_if_idle()
+                        await owner.unload_if_idle()
                     except Exception:
-                        logger.exception("Whisper '%s': releasing the model after the run failed", self.alias)
-                self.schedule_idle_unload()
+                        logger.exception("Whisper '%s': releasing the model after the run failed", owner.alias)
+                owner.schedule_idle_unload()
 
     async def _transcribe_loaded(self, audio_path: str) -> Dict[str, Any]:
         # Clear CUDA cache before transcription to free fragmented memory

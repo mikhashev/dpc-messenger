@@ -619,7 +619,8 @@ class LLMManager:
                             'model_loaded': True,
                             'pipeline': provider.pipeline,
                             'device': getattr(provider, '_detected_device', provider.device),
-                            'load_lock': getattr(provider, '_load_lock', None)
+                            'load_lock': getattr(provider, '_load_lock', None),
+                            'old_provider': provider
                         }
                         logger.debug(f"Preserving loaded Whisper model state for '{alias}'")
                 # The new object takes over the model and its own timer: the old one
@@ -665,6 +666,9 @@ class LLMManager:
                         if state.get('load_lock'):
                             provider._load_lock = state['load_lock']
                         logger.info(f"Restored loaded Whisper model state for '{alias}' (model stays in memory)")
+                        old = state.get('old_provider')
+                        if old is not None and hasattr(old, 'hand_over_to') and hasattr(provider, 'hand_over_to'):
+                            old.hand_over_to(provider)  # in-flight transcriptions keep counting
                         if hasattr(provider, 'schedule_idle_unload'):
                             provider.schedule_idle_unload()
 
