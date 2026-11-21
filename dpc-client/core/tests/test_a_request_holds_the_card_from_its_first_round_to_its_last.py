@@ -229,7 +229,8 @@ async def _finish(*tasks):
     for task in tasks:
         if not task.done():
             task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    # Bounded: a task that swallows its cancellation must fail the test, not hang the run.
+    await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 5)
 
 
 class TestTheReplay:

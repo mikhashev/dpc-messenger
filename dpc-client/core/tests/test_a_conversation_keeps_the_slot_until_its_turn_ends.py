@@ -32,6 +32,7 @@ from tests.test_a_callers_run_of_calls_keeps_its_alias_busy_for_the_window impor
     _gateway, _peer_door, _query_over,
 )
 from dpc_client_core.providers import StrataProvider
+from dpc_client_core.providers import base as providers_base
 from tests.test_one_local_engine_holds_the_card import _fake_child, _llama, card  # noqa: F401
 from tests.test_strata_supervisor import _install
 from tests.test_the_last_engine_call_names_owner_peer_or_gateway_from_the_calls_own_context import (
@@ -73,7 +74,10 @@ async def no_task_left():
             if task is not asyncio.current_task() and not task.done()]
     for task in left:
         task.cancel()
-    await asyncio.gather(*left, return_exceptions=True)
+    try:
+        await asyncio.wait_for(asyncio.gather(*left, return_exceptions=True), 5)
+    except asyncio.TimeoutError:
+        pytest.fail(f"tasks still running 5 s after cancel: {[repr(t) for t in left if not t.done()]}")
 
 
 class Clock:
@@ -235,6 +239,10 @@ class Turn:
                     raise RuntimeError("the turn failed")
                 try:
                     done.set_result(await make())
+                except asyncio.CancelledError:
+                    # Cancellation ends the turn; swallowing it left the worker looping forever.
+                    done.cancel()
+                    raise
                 except BaseException as e:  # noqa: BLE001 - handed to the test as it came
                     done.set_exception(e)
 
@@ -442,9 +450,19 @@ async def test_a_s_turn_gives_the_slot_to_b_however_it_ends(tmp_path, caplog, ho
 
 
 @pytest.mark.asyncio
-async def test_a_call_with_no_hold_keeps_its_grant_across_a_retry_and_gives_it_back_when_it_raises(tmp_path):
+async def test_a_call_with_no_hold_keeps_its_grant_across_a_retry_and_gives_it_back_when_it_raises(
+        tmp_path, monkeypatch):
     p, sup, engine, folder = await engine_on(tmp_path)
     p.max_retry_seconds = 0.6
+    # The backoff's first wait (3 s) is longer than the budget, so the sleep would end at the deadline
+    # and a retry would depend on timer slop (Linux wakes at the deadline, Windows a tick early).
+    # Short waits let several retries run well inside the budget on any clock.
+    real_sleep = providers_base.sleep_unless_cancelled
+
+    async def short_sleep(seconds, flag):
+        await real_sleep(min(seconds, 0.05), flag)
+
+    monkeypatch.setattr(providers_base, "sleep_unless_cancelled", short_sleep)
     engine.fail.add("background")
     background = asyncio.ensure_future(p.generate_response("summarise the day"))
     await until(lambda: "end:background" in engine.events)
