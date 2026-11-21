@@ -52,30 +52,19 @@ jobs:
       # index so a user's `uv sync` gets the GPU build; the tests never touch a
       # GPU, and that build drags in ~4.7 GB of nvidia-* wheels (venv ~6.5 GB,
       # ~1.8 GB with the CPU build). So this job points the same named index at
-      # the CPU wheels in its own checkout (pyproject.toml and uv.lock are
-      # edited here and never committed; user installs are unchanged) and holds
-      # torch at the version uv.lock already pins, so the tested torch does not
-      # drift. Every other package keeps its locked version. A command-line
-      # `--index` override does not work instead: it drops `explicit`, and uv
-      # then resolves certifi etc. from the PyTorch index.
+      # the CPU wheels in its own checkout (pyproject.toml is edited here and
+      # never committed; user installs are unchanged). uv.lock is gitignored in
+      # this repository, so CI resolves fresh on every run, as it did before
+      # this change, now against the CPU wheels. A command-line `--index`
+      # override does not work instead: it drops `explicit`, and uv then
+      # resolves certifi etc. from the PyTorch index.
       - name: Sync (with the extras whose tests exist here)
         working-directory: dpc-client/core
         run: |
           sed -i 's#download.pytorch.org/whl/cu128#download.pytorch.org/whl/cpu#' pyproject.toml
           grep -q 'download.pytorch.org/whl/cpu' pyproject.toml
-          python3 - <<'PY'
-          import tomllib
-          lock = tomllib.load(open("uv.lock", "rb"))
-          pins = {p["version"].split("+")[0] for p in lock["package"]
-                  if p["name"] == "torch" and "download.pytorch.org" in p["source"].get("registry", "")}
-          assert len(pins) == 1, pins
-          open("/tmp/torch-constraint.txt", "w").write("torch==%s\n" % pins.pop())
-          PY
-          cat /tmp/torch-constraint.txt
-          uv sync --upgrade-package "$(cat /tmp/torch-constraint.txt)" --extra browser --extra pdf --extra voice-memory
-          # The re-locked uv.lock now lives only in this workspace. Later `uv run`
-          # steps must not re-resolve (it would drop the torch constraint).
-          echo UV_FROZEN=1 >> "$GITHUB_ENV"
+          uv sync --extra browser --extra pdf --extra voice-memory
+          uv run python -c "import torch; assert torch.version.cuda is None, torch.__version__; print('torch', torch.__version__)"
       # The extra brings the playwright package and no browser. The snapshot
       # secret-field tests run the real walk in Chromium and skip cleanly
       # without a binary — which here would mean ~60 skips under a green run,
