@@ -71,7 +71,7 @@ fake_flac.calls = []
 
 def fake_loudness(flac: Path) -> dict:
     """A loudness record without ffmpeg: variant 1 reads -12.5 LUFS, the others -14.0."""
-    lufs = -12.5 if flac.stem.endswith("_v1") else -14.0
+    lufs = -12.5 if flac.name.split(".")[0].endswith("_v1") else -14.0
     return {"lufs_i": lufs, "lra": 3.2, "true_peak_dbtp": -1.4, "measured_by": "ffmpeg ebur128",
             "measured_at": "2026-11-21T20:00:00Z"}
 

@@ -688,6 +688,11 @@ class MusicLibrary:
         if ident.duration_s is not None:
             e["duration_s"] = round(float(ident.duration_s), 3)
         e["source"]["size_bytes"] = ident.size_bytes
+        # The summary of the file's own provenance record (engine, seed, has_codes); never a path.
+        if ident.provenance:
+            e["provenance"] = copy.deepcopy(ident.provenance)
+        else:
+            e.pop("provenance", None)
         # Why the hash is the kind it is ("ffmpeg absent"); empty for a normal hash.
         e["hash_notes"] = [str(n) for n in ident.notes]
 
@@ -804,6 +809,9 @@ class MusicLibrary:
         changed = False
         if e.get("duration_s") is None and meta.get("duration_s") is not None:
             e["duration_s"] = round(float(meta["duration_s"]), 3)
+            changed = True
+        if meta.get("provenance") and not e.get("provenance"):
+            e["provenance"] = copy.deepcopy(meta["provenance"])
             changed = True
         for key in ("artist", "album"):
             if not e.get(key) and meta.get(key):

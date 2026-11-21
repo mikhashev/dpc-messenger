@@ -190,8 +190,10 @@ async def test_the_runner_stores_each_takes_loudness(home, monkeypatch):
     measured = []
 
     def meter(flac):
-        measured.append(flac.name)
-        assert flac.is_file() and flac.suffix == ".flac"  # the final file, not a .part
+        measured.append(flac.name.removesuffix(".part"))
+        # The staged FLAC: measured before the file is final so the provenance record, written into
+        # the file once, can hold the loudness (PROVENANCE §2 phenotype).
+        assert flac.is_file() and flac.name.endswith(".flac.part")
         return {"lufs_i": -12.0 - len(measured), "lra": 2.0, "true_peak_dbtp": -1.0,
                 "measured_by": MEASURED_BY, "measured_at": "2026-11-21T20:00:00Z"}
     async with Rig(home, loudness_meter=meter) as rig:

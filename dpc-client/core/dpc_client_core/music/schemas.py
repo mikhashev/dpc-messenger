@@ -15,6 +15,10 @@ extensions, because ADR-051 Q4 and the metadata scope need them:
 - `artist`, `album`: read with ffprobe when it is present.
 - `hash_notes`: short strings saying why the hash is the kind it is (`"ffmpeg
   absent"`, `"ffmpeg could not read the audio"`); empty for a normal hash.
+- `provenance`: the small summary of the file's own `mp.provenance/1` record (`{engine, seed,
+  has_codes, codes_by_hash_only, genome_sha256?, render_sha256?}`), read on a scan with a size
+  cap and a strict check (`provenance.read_summary`). Never a path; absent when the file has no
+  good record.
 
 They are optional, so an entry without them is valid against both shapes.
 """
@@ -60,7 +64,7 @@ _ENTRY_KEYS = set(_ENTRY_REQUIRED) | {
     "needs_readd", "origin", "path", "folder_id", "alt_paths", "file_stat",
     "hash_state", "missing", "hidden", "deletable",
     # extensions, see the module docstring
-    "hash_kind", "artist", "album", "hash_notes",
+    "hash_kind", "artist", "album", "hash_notes", "provenance",
 }
 
 _FOLDER_REQUIRED = ("schema", "id", "path", "added_at", "last_scan_at", "watch", "file_count")
@@ -183,6 +187,10 @@ def validate_library_entry(entry: Any) -> None:
     for key in ("artist", "album"):
         if key in entry:
             _expect(s, entry[key] is None or _is_str(entry[key]), f"'{key}' must be a string or null")
+    if "provenance" in entry:
+        prov = entry["provenance"]
+        _expect(s, isinstance(prov, Mapping) and _is_str(prov.get("engine")) and isinstance(prov.get("has_codes"), bool),
+                "'provenance' must be the summary {engine, seed, has_codes, ...}")
     origin = entry.get("origin")
     if origin == "folder":
         _expect(s, _is_str(entry.get("path")) and _is_str(entry.get("folder_id")), "a folder entry needs 'path' and 'folder_id'")

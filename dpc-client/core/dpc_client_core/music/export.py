@@ -62,6 +62,13 @@ and `cmd_as_sent`, the ffmpeg argv of the encode that made the audio (Forge #209
 forbids local paths inside a file that may be shared, so exactly three elements of that argv
 are reduced to file names: the ffmpeg binary, the source and the output; the record says so.
 
+**The source's own record** (PROVENANCE §3, Mike 2026-11-21): a track made since then carries a
+full `mp.provenance/1` inside its FLAC (or WAV `DPCP` item), read straight from the file when
+ffprobe is absent. It is strictly validated (`provenance.parse_embedded`) and carried over whole
+as `source_record`; the sidecar, which is the same record, then adds only its ids to `take`. When
+the library has no lyrics for the track, `USLT` is written from the file's own lyrics tag, else
+from the record's `lyrics` (never for an instrumental).
+
 **True peak** (EVOLUTION §11, Forge #209 R-F3; the policy is not formally decided by Mike, so
 it is the default and it is shown): a lossy export is limited to -1 dBTP; the library file is
 never touched. When the source's true peak is known and at or below -1 dBTP (the take's
@@ -90,6 +97,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from . import provenance as mp_provenance
+from .audio_tags import WAV_INFO_PROVENANCE_KEY, flac_read_comments, wav_read_info
 from .identity import MediaTools, file_sha256, read_flac_streaminfo
 from .loudness import LoudnessError, measure_loudness
 from .store import atomic_write_text
@@ -397,7 +406,8 @@ class SkippedTrack:
 
 
 def read_take_sidecar(path: Path) -> Optional[Dict[str, Any]]:
-    """The take's `<name>.json` sidecar (`dpc.take-sidecar/1`) next to its file, or None."""
+    """The take's `<name>.json` sidecar next to its file, or None: the older `dpc.take-sidecar/1`, or
+    the `mp.provenance/1` record a take carries since 2026-11-21 (the same record as in the file)."""
     sidecar = Path(path).with_suffix(".json")
     try:
         if not sidecar.is_file() or sidecar.stat().st_size > SIDECAR_MAX_BYTES:
@@ -405,7 +415,7 @@ def read_take_sidecar(path: Path) -> Optional[Dict[str, Any]]:
         data = json.loads(sidecar.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
         return None
-    if isinstance(data, dict) and data.get("schema") == TAKE_SIDECAR_SCHEMA:
+    if isinstance(data, dict) and data.get("schema") in (TAKE_SIDECAR_SCHEMA, mp_provenance.SCHEMA):
         return data
     return None
 
@@ -846,17 +856,20 @@ class MusicExporter:
                 "exported_at": _now(),
             },
         }
-        carried = _tag_value(tags, PROVENANCE_TAG)
+        carried = (_tag_value(tags, PROVENANCE_TAG) or _tag_value(tags, WAV_INFO_PROVENANCE_KEY)
+                   or self._embedded_record_text(source.path))
+        parsed: Optional[Dict[str, Any]] = None
         if carried:
-            try:
-                parsed = json.loads(carried) if len(carried.encode("utf-8")) <= PROVENANCE_MAX_BYTES else None
-            except ValueError:
-                parsed = None
-            record["source_record"] = parsed if isinstance(parsed, dict) else None
-            if not isinstance(parsed, dict):
-                record["source_record_note"] = "the source's DPC_PROVENANCE was too large or not a JSON object"
+            parsed, problem = mp_provenance.parse_embedded(carried, max_bytes=PROVENANCE_MAX_BYTES)
+            record["source_record"] = parsed
+            if parsed is None:
+                record["source_record_note"] = f"the source's DPC_PROVENANCE was not carried over: {problem}"
         if source.take_record is not None:
-            record["take"] = source.take_record
+            take = source.take_record
+            if parsed is not None and take.get("schema") == mp_provenance.SCHEMA:
+                # The sidecar is the same record as the file's: only what the file cannot hold.
+                take = {k: take.get(k) for k in ("schema", "take_id", "library_track_id") if k in take}
+            record["take"] = take
         text = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
         if len(text.encode("utf-8")) > PROVENANCE_MAX_BYTES:
             for key in ("take", "source_record"):
@@ -865,6 +878,37 @@ class MusicExporter:
                     record[key] = {"omitted": f"over {PROVENANCE_MAX_BYTES} bytes",
                                    "sha256": "sha256:" + hashlib.sha256(blob).hexdigest()}
         return record
+
+    @staticmethod
+    def _embedded_record_text(path: Path) -> Optional[str]:
+        """The source's own provenance record read straight from a FLAC or WAV file, for when ffprobe
+        is absent or does not return it."""
+        cap = PROVENANCE_MAX_BYTES * 4
+        try:
+            if path.suffix.lower() == ".flac":
+                return flac_read_comments(path, max_block_bytes=cap).get(PROVENANCE_TAG)
+            if path.suffix.lower() == ".wav":
+                return wav_read_info(path, max_item_bytes=cap).get(WAV_INFO_PROVENANCE_KEY)
+        except Exception:
+            logger.info("music export: could not read the embedded record of %s", path.name, exc_info=True)
+        return None
+
+    @staticmethod
+    def _lyrics_for_tag(source: ExportSource, tags: Dict[str, str], record: Dict[str, Any]) -> Optional[str]:
+        """The text of the USLT frame: the library's lyrics, else the source file's own lyrics tag, else
+        the lyrics inside its provenance record (an instrumental has none)."""
+        if source.lyrics and source.lyrics.strip():
+            return source.lyrics
+        for name in ("unsyncedlyrics", "lyrics"):
+            text = _tag_value(tags, name)
+            if text:
+                return text
+        src = record.get("source_record")
+        if isinstance(src, dict) and not src.get("instrumental"):
+            lyrics = src.get("lyrics")
+            if isinstance(lyrics, str) and lyrics.strip() and lyrics != mp_provenance.NOT_STORED:
+                return lyrics
+        return None
 
     def _frames(self, source: ExportSource, preset: str, tags: Dict[str, str], record: Dict[str, Any]) -> List[bytes]:
         frames = [text_frame("TIT2", source.title or source.path.stem)]
@@ -882,8 +926,9 @@ class MusicExporter:
         comment = _tag_value(tags, "comment")
         if comment:
             frames.append(comm_frame(comment))
-        if source.lyrics and source.lyrics.strip():
-            frames.append(uslt_frame(source.lyrics, source.lyrics_language))
+        lyrics = self._lyrics_for_tag(source, tags, record)
+        if lyrics:
+            frames.append(uslt_frame(lyrics, source.lyrics_language))
         frames.append(text_frame("TSSE", f"DPC MP3 export, {PRESETS[preset]['label']}, "
                                          f"{self._ffmpeg_version or 'ffmpeg'} libmp3lame"))
         frames.append(txxx_frame(MARKER_TAG, source.content_hash))

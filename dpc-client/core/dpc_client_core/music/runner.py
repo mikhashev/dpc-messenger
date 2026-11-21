@@ -46,14 +46,22 @@ job store, which keeps the state machine; every store call goes through
    (`<DPC home>/music` may be watched) and for `delete_generated_music_file` to leave
    behind. Its sha256 and PCM MD5 stay in the sidecar. `.part` is not an audio extension,
    so the library never sees a half-written file.
-7. **Record.** Basic Vorbis tags (title, artist, genre, date, comment, `DPC_*` ids) and a
-   sidecar `<slug>_v<n>.json` (PROVENANCE §3: one sidecar per take, `<name>.json`) with the
-   job id, payload sha256s, seed, batch size and index, codes hash and count, engine and
-   model identity (file names, sizes, sha256; no local paths, PROVENANCE rule 3), and the
-   WAV-to-FLAC hash chain. It is `dpc.take-sidecar/1`, a subset of the proposed
-   `mp.provenance/1` (a later card), and only grows.
-8. **Loudness.** The FLAC is measured with ffmpeg `ebur128` (integrated LUFS, LRA, true
-   peak; `loudness.py`) for the review's level-matched A/B (decision 37). A failed
+7. **Record.** Basic Vorbis tags (title, artist, genre, date, comment, `DPC_*` ids) are written by
+   ffmpeg. Then the full provenance record `mp.provenance/1` (`provenance.py`, PROVENANCE §2:
+   genotype with the `audio_codes` or the YuE2 score and semantic tokens, substrate with the
+   weights and binaries by sha256 and the hidden genes batch size and index, phenotype with the
+   lengths, loudness and PCM md5, the output chain and the lineage ids) is built from the
+   payloads and the engine identity, checked by the privacy guard and the 64 KB limit, and
+   written once into the staged FLAC as the Vorbis comment `DPC_PROVENANCE` by `audio_tags.py`,
+   with `LYRICS` / `UNSYNCEDLYRICS` when there are lyrics. The audio is copied byte for byte; the
+   STREAMINFO MD5 is checked against the engine's PCM again after the write (rule 1). The sidecar
+   `<slug>_v<n>.json` (PROVENANCE §3) holds the same record plus the store's `take_id` and
+   `library_track_id`. A record the guard refuses or that cannot be built is logged, the file gets
+   no record, and the sidecar falls back to the older `dpc.take-sidecar/1` subset: a take is never
+   lost to its metadata.
+8. **Loudness.** The staged FLAC is measured with ffmpeg `ebur128` (integrated LUFS, LRA, true
+   peak; `loudness.py`) before the record is built, for the record and for the review's
+   level-matched A/B (decision 37). A failed
    measurement is logged and leaves the take's `loudness` null: it is advisory (decision
    29), never a reason to fail the job, and `measure_music_take_loudness` can retry it.
 9. `register_generated(flac, job_id=...)`, then `add_take(... library_track_id=entry id,
@@ -103,7 +111,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import job_schemas as js
+from . import provenance as prov
 from .acestep import MODEL_FILES
+from .audio_tags import AlreadyTagged, TagError, flac_add_comments
 from .engine_base import MusicEngineError
 from .engines import MusicEngines
 from .identity import MediaTools, read_flac_streaminfo
@@ -373,12 +383,7 @@ def ffmpeg_converter(tools: Optional[MediaTools] = None) -> Converter:
         if not found.ffmpeg:
             raise _JobFailure("ffmpeg is not on PATH; DPC converts the engine's wav24 to FLAC with it "
                               "(install ffmpeg and run the job again)")
-        cmd = [found.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-               "-f", "wav", "-i", str(wav), "-map", "0:a:0", "-map_metadata", "-1",
-               "-c:a", "flac", "-fflags", "+bitexact", "-flags:a", "+bitexact"]
-        for k, v in tags.items():
-            cmd += ["-metadata", f"{k}={v}"]
-        cmd += ["-f", "flac", str(flac)]
+        cmd = prov.flac_command(found.ffmpeg, str(wav), str(flac), tags)
         result = found.runner(cmd, timeout=FFMPEG_TIMEOUT_S)
         if result.returncode != 0:
             err = (result.stderr or b"").decode("utf-8", errors="replace").strip()[-400:]
@@ -408,6 +413,7 @@ class MusicJobRunner:
         engine_job_timeout_s: float = DEFAULT_ENGINE_JOB_TIMEOUT_S,
         draw_seed: Optional[Callable[[], int]] = None,
         loudness_meter: Optional[LoudnessMeter] = None,
+        device_probe: Optional[Callable[[], Dict[str, Any]]] = None,
     ):
         self.store = store
         # A `MusicEngines`, a mapping of engine word to supervisor, or one supervisor.
@@ -417,6 +423,9 @@ class MusicJobRunner:
         self._card_holders = card_holders or default_card_holders
         self._convert = converter or ffmpeg_converter()
         self._measure = loudness_meter or ffmpeg_loudness_meter()
+        self._device_probe = device_probe or prov.device_identity
+        self._ffmpeg_version: Optional[str] = None
+        self._ffmpeg_version_known = False
         self.on_job_change = on_job_change
         self.card_poll_s = card_poll_s
         self.engine_poll_s = engine_poll_s
@@ -771,7 +780,7 @@ class MusicJobRunner:
                 if index < len(latents):
                     latent_sha = await asyncio.to_thread(_range_sha256, multipart, latents[index][1], latents[index][2])
                 await self._one_take(job_id, params, out_dir, slug, multipart, start, end, index, variants, seed,
-                                     lm0, codes, payloads, identity, latent_sha)
+                                     lm0, codes, payloads, identity, latent_sha, lm_body, synth_body)
                 await self._progress(job_id, round(0.8 + 0.2 * (index + 1) / variants, 4))
         finally:
             try:
@@ -784,15 +793,23 @@ class MusicJobRunner:
     async def _one_take(self, job_id: str, params: Mapping[str, Any], out_dir: Path, slug: str, multipart: Path,
                         start: int, end: int, index: int, batch_size: int, seed: int, lm0: Mapping[str, Any],
                         codes: str, payloads: Dict[str, str], identity: Dict[str, Any],
-                        latent_sha: Optional[str]) -> None:
+                        latent_sha: Optional[str], lm_body: bytes, synth_body: bytes) -> None:
         variant = index + 1
+        lm_request = json.loads(lm_body.decode("utf-8"))
+        synth_request = json.loads(synth_body.decode("utf-8"))
         version = identity.get("version") or ""
         lm_seed = lm0.get("lm_seed")
         codes_count = len([c for c in codes.split(",") if c.strip()])
         window = round(codes_count * (1.0 / CODES_HZ), 3)
+        def make_record(facts: Dict[str, Any]) -> Dict[str, Any]:
+            return prov.build_acestep_record(
+                job_id=job_id, variant=variant, params=params, identity=identity, lm_request=lm_request,
+                lm_result=lm0, synth_request=synth_request, seed=seed, batch_size=batch_size, batch_index=index,
+                window_s=window, payloads=payloads, **facts)
+
         await self._store_take(
             job_id, params, out_dir, slug, variant, multipart, start, end, latent_sha=latent_sha,
-            window_s=window,
+            window_s=window, provenance=make_record,
             artist="DPC (acestep.cpp)",
             comment=(f"Generated by DPC with acestep.cpp {version}; job {job_id}, variant {variant}, seed {seed}, "
                      f"synth batch {index}/{batch_size}").replace("  ", " "),
@@ -902,8 +919,15 @@ class MusicJobRunner:
         adapters = identity.get("adapters") or []
         adapter_text = ", ".join(f"{a.get('name')} music {(a.get('music') or {}).get('scale')} "
                                  f"sound {(a.get('sound') or {}).get('scale')}" for a in adapters) or "none"
+        def make_record(facts: Dict[str, Any]) -> Dict[str, Any]:
+            return prov.build_yue2_record(
+                job_id=job_id, variant=variant, params=params, identity=identity, sent=sent, replay=replay,
+                seed=seed, variant_seed=v_seed, lm_seed=v_lm_seed, backbone=backbone, payloads=payloads,
+                **facts)
+
         await self._store_take(
             job_id, params, out_dir, slug, variant, multipart, start, end, latent_sha=latent_sha,
+            provenance=make_record,
             artist="DPC (yue2.cpp)",
             comment=(f"Generated by DPC with yue2.cpp {version}; job {job_id}, variant {variant}, seed {v_seed}, "
                      f"lm_seed {v_lm_seed}, backbone {backbone}, adapters {adapter_text}, batch 1").replace("  ", " "),
@@ -940,7 +964,8 @@ class MusicJobRunner:
     async def _store_take(self, job_id: str, params: Mapping[str, Any], out_dir: Path, slug: str, variant: int,
                           source: Path, start: int, end: int, *, latent_sha: Optional[str], artist: str,
                           comment: str, tags: Mapping[str, str], record: Mapping[str, Any],
-                          take: Mapping[str, Any], window_s: Optional[float] = None) -> None:
+                          take: Mapping[str, Any], window_s: Optional[float] = None,
+                          provenance: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None) -> None:
         """The engine's WAV bytes (`source[start:end]`) to a verified FLAC, a sidecar, a
         loudness measurement, a library entry and a take."""
         stem = f"{slug}_v{variant}"
@@ -951,6 +976,7 @@ class MusicJobRunner:
         style = " ".join(str(params.get("style") or "").split())
         title = f"{style[:60]} (v{variant})" if style else f"Generated take v{variant}"
 
+        length_take: Dict[str, Any] = {}
         await asyncio.to_thread(copy_range, source, start, end, wav_part)
         try:
             try:
@@ -975,6 +1001,21 @@ class MusicJobRunner:
             if info.md5 != wav_md5:
                 raise _JobFailure(f"variant {variant}: the FLAC's decoded audio (md5 {info.md5}) is not the engine's "
                                   f"PCM (md5 {wav_md5}); the conversion was not lossless")
+            # Advisory only (decision 29): the received length against what the engine's codes
+            # promise. Never fails the job.
+            if window_s is not None and info.duration_s is not None:
+                length_take = length_check_of(window_s, info.duration_s)
+                if length_take["length_check"] == "mismatch":
+                    logger.warning("music: variant %s of job %s is %.2f s long, its codes promise %.2f s",
+                                   variant, job_id, info.duration_s, window_s)
+            # Loudness of the staged FLAC: advisory (decision 29), and the provenance record holds it.
+            loudness = await self._measure_loudness(flac_part, job_id, variant)
+            created_at = _now()
+            record_obj, record_text = await self._take_record(
+                provenance, job_id, variant, flac_part, wav_part, all_tags, loudness, created_at, wav, wav_md5,
+                wav_sha, latent_sha, info, length_take)
+            embedded = await asyncio.to_thread(self._embed, flac_part, record_obj, record_text, wav_md5, job_id,
+                                               variant)
             os.replace(flac_part, flac)
         finally:
             for p in (wav_part, flac_part):
@@ -985,45 +1026,35 @@ class MusicJobRunner:
                 except OSError:
                     logger.warning("music: could not remove %s", p, exc_info=True)
 
-        # Advisory only (decision 29): the received length against what the engine's codes
-        # promise. Never fails the job.
-        length_take: Dict[str, Any] = {}
-        if window_s is not None and info.duration_s is not None:
-            length_take = length_check_of(window_s, info.duration_s)
-            if length_take["length_check"] == "mismatch":
-                logger.warning("music: variant %s of job %s is %.2f s long, its codes promise %.2f s",
-                               variant, job_id, info.duration_s, window_s)
-        sidecar_record: Dict[str, Any] = {
-            "schema": SIDECAR_SCHEMA,
-            "note": "a subset of the proposed mp.provenance/1 (docs/PROVENANCE.md); the full record is a later card",
-            "job_id": job_id,
-            "take_id": None,
-            "library_track_id": None,
-            "variant": variant,
-            "created_at": _now(),
-            **record,
-            **({"engine_window_s": window_s, **length_take} if length_take else {}),
-            "duration_requested_s": params.get("duration_s"),
-            "duration_received_s": info.duration_s,
-            "engine_output": {"format": js.ENGINE_OUTPUT_FORMAT, "sha256": wav_sha, "pcm_md5": wav_md5,
-                              "sample_rate": wav.sample_rate, "channels": wav.channels, "bits": wav.bits,
-                              "latent_sha256": latent_sha, "kept": False},
-            "dpc_postprocess": {"tool": "ffmpeg", "codec": "flac", "lossless_check": "flac streaminfo md5 == wav pcm md5"},
-            "output": {"container": js.LIBRARY_FORMAT, "file": flac.name, "pcm_md5": info.md5,
-                       "sample_rate": info.sample_rate, "channels": info.channels, "bits": info.bits_per_sample},
-        }
+        if record_obj is not None:
+            # The same record the file carries (PROVENANCE §3), plus the ids the store assigns once
+            # the file exists (the file's own copy is immutable and cannot hold them).
+            sidecar_record: Dict[str, Any] = {**record_obj, "take_id": None, "library_track_id": None,
+                                              "embedded_in_file": embedded}
+        else:
+            sidecar_record = {
+                "schema": SIDECAR_SCHEMA,
+                "note": "the mp.provenance/1 record could not be built for this take (see the log); this is the "
+                        "older subset",
+                "job_id": job_id,
+                "take_id": None,
+                "library_track_id": None,
+                "variant": variant,
+                "created_at": created_at,
+                **record,
+                **({"engine_window_s": window_s, **length_take} if length_take else {}),
+                "duration_requested_s": params.get("duration_s"),
+                "duration_received_s": info.duration_s,
+                "engine_output": {"format": js.ENGINE_OUTPUT_FORMAT, "sha256": wav_sha, "pcm_md5": wav_md5,
+                                  "sample_rate": wav.sample_rate, "channels": wav.channels, "bits": wav.bits,
+                                  "latent_sha256": latent_sha, "kept": False},
+                "dpc_postprocess": {"tool": "ffmpeg", "codec": "flac",
+                                    "lossless_check": "flac streaminfo md5 == wav pcm md5"},
+                "output": {"container": js.LIBRARY_FORMAT, "file": flac.name, "pcm_md5": info.md5,
+                           "sample_rate": info.sample_rate, "channels": info.channels,
+                           "bits": info.bits_per_sample},
+            }
         await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(sidecar_record, ensure_ascii=False, indent=1))
-
-        loudness: Optional[Dict[str, Any]] = None
-        try:
-            loudness = dict(await asyncio.to_thread(self._measure, flac))
-            js.check_loudness(loudness)
-        except LoudnessError as exc:
-            loudness = None
-            logger.warning("music: variant %s of job %s has no loudness measurement: %s", variant, job_id, exc)
-        except Exception:
-            loudness = None  # never a reason to fail the job (decision 29)
-            logger.exception("music: measuring the loudness of variant %s of job %s failed", variant, job_id)
 
         library_id: Optional[str] = None
         content_hash = f"md5:{info.md5}"
@@ -1049,6 +1080,102 @@ class MusicJobRunner:
         self._emit(await self._get(job_id))
         sidecar_record["take_id"], sidecar_record["library_track_id"] = added["id"], library_id
         await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(sidecar_record, ensure_ascii=False, indent=1))
+
+
+    async def _measure_loudness(self, path: Path, job_id: str, variant: int) -> Optional[Dict[str, Any]]:
+        """The take's ebur128 loudness, or None: advisory (decision 29), never a reason to fail."""
+        try:
+            loudness = dict(await asyncio.to_thread(self._measure, path))
+            js.check_loudness(loudness)
+            return loudness
+        except LoudnessError as exc:
+            logger.warning("music: variant %s of job %s has no loudness measurement: %s", variant, job_id, exc)
+        except Exception:
+            logger.exception("music: measuring the loudness of variant %s of job %s failed", variant, job_id)
+        return None
+
+    async def _ffmpeg_version_text(self) -> Optional[str]:
+        """ffmpeg's version line for the record's post step; asked once, None when it cannot be read."""
+        if not self._ffmpeg_version_known:
+            self._ffmpeg_version_known = True
+
+            def ask() -> Optional[str]:
+                tools = MediaTools.discover()
+                if not tools.ffmpeg:
+                    return None
+                done = tools.runner([tools.ffmpeg, "-version"], timeout=15.0)
+                text = done.stdout.decode("utf-8", "replace") if isinstance(done.stdout, bytes) else (done.stdout or "")
+                first = (text.splitlines() or [""])[0]
+                return first.split(" Copyright")[0].strip() or None
+            try:
+                self._ffmpeg_version = await asyncio.to_thread(ask)
+            except Exception:
+                self._ffmpeg_version = None
+        return self._ffmpeg_version
+
+    async def _take_record(self, make: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]], job_id: str,
+                           variant: int, flac_part: Path, wav_part: Path, tags: Mapping[str, str],
+                           loudness: Optional[Dict[str, Any]], created_at: str, wav: WavInfo, wav_md5: str,
+                           wav_sha: str, latent_sha: Optional[str], info: Any,
+                           length_take: Mapping[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """`(record, compact JSON)` of the take's `mp.provenance/1`, or `(None, None)` when it cannot
+        be built or the privacy guard refuses it: the take is kept either way, with the older
+        sidecar, and the reason is logged."""
+        if make is None:
+            return None, None
+        try:
+            device = await asyncio.to_thread(self._device_probe)
+            version = await self._ffmpeg_version_text()
+            cmd = prov.flac_command("ffmpeg", wav_part.name, flac_part.name, tags)
+            facts = {
+                "created_at": created_at,
+                "duration_received_s": info.duration_s,
+                "loudness": loudness,
+                "device": device,
+                "engine_output": {"format": js.ENGINE_OUTPUT_FORMAT, "sha256": wav_sha, "pcm_md5": wav_md5,
+                                  "sample_rate": wav.sample_rate, "channels": wav.channels, "bits": wav.bits,
+                                  "latent_sha256": latent_sha, "kept": False},
+                "postprocess": {"step": "wav24_to_flac", "tool": "ffmpeg", "tool_version": version or prov.NOT_STORED,
+                                "codec": "flac", "cmd_as_sent": cmd,
+                                "cmd_paths": "exact argv; the engine file and the output are file names, ffmpeg is "
+                                             "its bare name (PROVENANCE rule 3)",
+                                "lossless_check": "flac streaminfo md5 == wav pcm md5",
+                                "tags_written_by_dpc_after": [prov.TAG, "LYRICS", "UNSYNCEDLYRICS"]},
+                "output": {"container": js.LIBRARY_FORMAT, "pcm_md5": info.md5, "sample_rate": info.sample_rate,
+                           "channels": info.channels, "bits": info.bits_per_sample},
+            }
+            record = make(facts)
+            record.update(length_take)   # length_check, length_delta_s (advisory, decision 29)
+            record, text = prov.finalize(record)
+            return record, text
+        except prov.ProvenanceError as exc:
+            logger.warning("music: variant %s of job %s gets no provenance record: %s", variant, job_id, exc)
+        except Exception:
+            logger.exception("music: building the provenance record of variant %s of job %s failed", variant, job_id)
+        return None, None
+
+    def _embed(self, flac_part: Path, record: Optional[Dict[str, Any]], text: Optional[str], wav_md5: str,
+               job_id: str, variant: int) -> bool:
+        """Write `DPC_PROVENANCE` (and the lyrics tags) into the staged FLAC, once, and prove the
+        decoded audio did not change. A failure to tag is logged and leaves the file as it was: the
+        sidecar still holds the record (`embedded_in_file` says which). True when it is in the file."""
+        if record is None or text is None:
+            return False
+        comments = {prov.TAG: text}
+        lyrics = record.get("lyrics")
+        if isinstance(lyrics, str) and lyrics.strip() and not record.get("instrumental"):
+            comments["LYRICS"] = lyrics
+            comments["UNSYNCEDLYRICS"] = lyrics
+        try:
+            flac_add_comments(flac_part, comments)
+        except (AlreadyTagged, TagError, OSError) as exc:
+            logger.warning("music: variant %s of job %s: the provenance record is not in the file: %s",
+                           variant, job_id, exc)
+            return False
+        after = read_flac_streaminfo(flac_part)
+        if after is None or after.md5 != wav_md5:
+            raise _JobFailure(f"variant {variant}: tagging changed the FLAC's decoded audio (rule 1); the take is not kept")
+        return True
 
 
 LENGTH_TOLERANCE_S = 0.5

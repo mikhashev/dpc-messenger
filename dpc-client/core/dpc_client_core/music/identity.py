@@ -23,7 +23,8 @@ word for a short read-only probe bounded by its own timeout; a music-specific
 subsystem name would need `process_registry.SUBSYSTEMS` to grow (a question for
 the owner of the vocabulary, see the report).
 
-Nothing here opens a file for writing: tags in watched folders are never written.
+Nothing here opens a file for writing: tags in watched folders are never written. It does read
+the `DPC_PROVENANCE` record inside a FLAC or WAV file (`embedded_provenance`), defensively.
 """
 
 from __future__ import annotations
@@ -37,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
+from . import provenance as _provenance
+from .audio_tags import WAV_INFO_PROVENANCE_KEY, flac_read_comments, wav_read_info
 from .schemas import HASH_KIND_AUDIO, HASH_KIND_FILE, HASH_KIND_FLAC
 
 logger = logging.getLogger(__name__)
@@ -123,6 +126,9 @@ class Identity:
     # The source content hash in a `DPC_EXPORT_OF` tag: the file is one of DPC's own MP3
     # exports (`export.py`), which the library never takes in as a track.
     export_of: Optional[str] = None
+    # The small summary of the file's own `DPC_PROVENANCE` record (`provenance.read_summary`): engine,
+    # seed, has_codes. None when the file has none or its record is bad (ignored, with a log line).
+    provenance: Optional[Dict[str, Any]] = None
 
 
 def _skip_id3v2(head: bytes) -> int:
@@ -264,7 +270,28 @@ def probe_metadata(path: Path, tools: MediaTools) -> Dict[str, Any]:
         "channels": _as_int(stream.get("channels")),
         "export_of": _tag(tags, "dpc_export_of"),
     }
+    raw = _tag(tags, _provenance.TAG.casefold()) or _tag(tags, WAV_INFO_PROVENANCE_KEY.casefold())
+    if raw:
+        result["provenance"] = _provenance.read_summary(raw, where=Path(path).name)
     return {k: v for k, v in result.items() if v is not None}
+
+
+def embedded_provenance(path: Path) -> Optional[Dict[str, Any]]:
+    """The summary of the `mp.provenance/1` record inside a FLAC or WAV file, read straight from
+    the file with no ffprobe (PROVENANCE rules 5 and 6: a size cap, strict validation, a bad record
+    ignored with a log line, never a crash). None for any other format, or no record."""
+    suffix = Path(path).suffix.lower()
+    try:
+        if suffix == ".flac":
+            raw = flac_read_comments(path, max_block_bytes=2 * 1024 * 1024).get(_provenance.TAG)
+        elif suffix == ".wav":
+            raw = wav_read_info(path, max_item_bytes=2 * 1024 * 1024).get(WAV_INFO_PROVENANCE_KEY)
+        else:
+            return None
+        return _provenance.read_summary(raw, where=Path(path).name) if raw else None
+    except Exception:  # a scan must never fail on a tag
+        logger.info("music: could not read the provenance record of %s", Path(path).name, exc_info=True)
+        return None
 
 
 def identify(path: Path, tools: MediaTools) -> Identity:
@@ -287,6 +314,9 @@ def identify(path: Path, tools: MediaTools) -> Identity:
     if content_hash is None:
         hash_kind, content_hash = HASH_KIND_FILE, f"sha256:{file_sha256(path)}"
     meta = probe_metadata(path, tools)
+    embedded = embedded_provenance(path)
+    if embedded is not None:
+        meta["provenance"] = embedded
     ident = Identity(
         hash_kind=hash_kind, content_hash=content_hash,
         size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns, notes=notes, **meta,

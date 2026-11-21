@@ -64,15 +64,15 @@ async def test_a_job_yields_one_flac_take_per_variant_in_the_library(home, monke
             assert take["file"]["sample_rate"] == 48000 and take["file"]["channels"] == 2
 
         side = json.loads((out / "indie-rock-warm-guitars_v2.json").read_text(encoding="utf-8"))
-        assert side["schema"] == "dpc.take-sidecar/1"
+        assert side["schema"] == "mp.provenance/1"  # the same record the FLAC carries (PROVENANCE §3)
         assert side["take_id"] == takes[1]["id"] and side["library_track_id"] == takes[1]["library_track_id"]
         assert (side["seed"], side["variant_seed"], side["synth_batch_size"], side["synth_batch_index"]) == (42, 43, 2, 1)
         assert set(side["payloads"]) == {LM_PAYLOAD, LM_RESULT_PAYLOAD, SYNTH_PAYLOAD}
         assert side["payloads"][SYNTH_PAYLOAD] == next(p["sha256"] for p in job["payloads"] if p["name"] == SYNTH_PAYLOAD)
         assert side["codes_count"] == 150 and side["lm_seed"] == 876362762
-        assert side["engine"]["version"] == "fake0000 (2026-11-21)"
-        assert side["models"]["dit"]["file"] == "acestep-v15-turbo-Q8_0.gguf"
-        assert side["models"]["dit"]["sha256"].startswith("sha256:")
+        assert side["engine"] == "acestep.cpp" and side["engine_version"] == "fake0000 (2026-11-21)"
+        dit = next(m for m in side["models"] if m["role"] == "dit")
+        assert dit["file"] == "acestep-v15-turbo-Q8_0.gguf" and dit["sha256"].startswith("sha256:")
         assert side["engine_output"]["pcm_md5"] == side["output"]["pcm_md5"]
         assert side["engine_output"]["bits"] == 24 and side["output"]["bits"] == 24
         assert side["engine_output"]["kept"] is False

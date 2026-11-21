@@ -120,15 +120,15 @@ async def test_a_default_job_runs_on_yue2_one_request_per_variant_and_records_ea
 
         out = home / "music" / "generated" / job["id"]
         sidecar = json.loads((out / "indie-rock-male-vocal_v2.json").read_text(encoding="utf-8"))
-        assert sidecar["schema"] == "dpc.take-sidecar/1"
-        assert sidecar["engine"]["engine"] == "yue2.cpp" and sidecar["engine"]["commit"] == "e646d52"
-        assert sidecar["models"]["backbone"]["choice"] == "stock"
-        assert sidecar["models"]["backbone"]["sha256"].startswith("sha256:")
+        assert sidecar["schema"] == "mp.provenance/1"
+        assert sidecar["engine"] == "yue2.cpp" and sidecar["engine_commit"] == "e646d52"
+        backbone = next(m for m in sidecar["models"] if m["role"] == "backbone")
+        assert backbone["choice"] == "stock" and backbone["sha256"].startswith("sha256:")
         assert sidecar["backbone"] == "stock" and sidecar["adapters"] == []
         assert (sidecar["seed"], sidecar["variant_seed"], sidecar["lm_seed"]) == (42, 43, 43)
-        assert sidecar["synth_batch_size"] == 1 and sidecar["lm_batch_size"] == 1 and "ef4555b7" in sidecar["batch_note"]
-        assert sidecar["cot"] == "full" and sidecar["duration_cap_s"] == 60
-        assert sidecar["duration_received_s"] > 0 and sidecar["replay"]["semantic_tokens_count"] == 25
+        assert sidecar["synth_batch_size"] == 1 and sidecar["lm_batch_size"] == 1
+        assert sidecar["cot"] == "full" and sidecar["duration_requested_s"] == 60
+        assert sidecar["duration_received_s"] > 0 and sidecar["semantic_tokens_count"] == 25
         assert sidecar["take_id"] == takes[1]["id"] and str(tmp_path) not in json.dumps(sidecar)
         assert fake_flac.calls[-1]["DPC_ENGINE"] == "yue2.cpp" and fake_flac.calls[-1]["DPC_LM_SEED"] == "43"
         assert sorted(p.name for p in out.iterdir() if p.suffix == ".part") == []
