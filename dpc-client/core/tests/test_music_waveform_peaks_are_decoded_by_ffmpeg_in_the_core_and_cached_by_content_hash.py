@@ -94,7 +94,40 @@ def test_the_cache_is_written_by_hash_hit_again_and_survives_a_renamed_file(tmp_
     assert two["cached"] is True and two["peaks"] == one["peaks"] and len(calls) == 1
 
 
-def test_the_cache_is_recomputed_for_another_hash_bucket_count_or_version(tmp_path):
+def test_another_bucket_count_is_a_resample_of_the_cached_canonical_peaks_not_a_second_decode(tmp_path):
+    home = tmp_path / "home"
+    audio = tmp_path / "a.flac"
+    audio.write_bytes(b"x")
+    calls = []
+    # a ramp: bucket maxima rise, minima fall, so pooling is easy to check
+    pcm = list(range(-12000, 12000))
+    tools = _fake_tools(_pcm(pcm), calls=calls)
+    first = peaks.get_peaks(audio, "sha256:h1", home, 100, tools)
+    assert first["cached"] is False and len(first["peaks"]) == 100
+    canon = peaks.get_peaks(None, "sha256:h1", home, None, tools)
+    wide = peaks.get_peaks(None, "sha256:h1", home, 500, tools)
+    narrow = peaks.get_peaks(None, "sha256:h1", home, 100, tools)
+    assert len(calls) == 1 and canon["cached"] and wide["cached"] and narrow["cached"]
+    assert len(canon["peaks"]) == peaks.DEFAULT_BUCKETS and canon["n"] == peaks.DEFAULT_BUCKETS
+    assert len(wide["peaks"]) == 500 and narrow["peaks"] == first["peaks"]
+    saved = json.loads(peaks.cache_path(home, "sha256:h1").read_text(encoding="utf-8"))
+    assert saved["n"] == peaks.DEFAULT_BUCKETS
+    # each narrow bucket is the min of the mins and the max of the maxes of the canonical ones it covers
+    step = peaks.DEFAULT_BUCKETS // 100
+    for i, (lo, hi) in enumerate(narrow["peaks"]):
+        group = canon["peaks"][i * step:(i + 1) * step]
+        assert lo == min(g[0] for g in group) and hi == max(g[1] for g in group)
+
+
+def test_resample_never_invents_detail():
+    src = [[-0.5, 0.5], [-0.2, 0.9], [-0.7, 0.1]]
+    assert peaks.resample_peaks(src, 10) == src
+    assert peaks.resample_peaks(src, 3) == src
+    assert peaks.resample_peaks(src, 1) == [[-0.7, 0.9]]
+    assert peaks.resample_peaks(src, 2) == [[-0.5, 0.5], [-0.7, 0.9]]
+
+
+def test_the_cache_is_recomputed_for_another_hash_or_a_bad_version(tmp_path):
     home = tmp_path / "home"
     audio = tmp_path / "a.flac"
     audio.write_bytes(b"x")
@@ -102,8 +135,7 @@ def test_the_cache_is_recomputed_for_another_hash_bucket_count_or_version(tmp_pa
     tools = _fake_tools(_pcm([5, -5] * 3000), calls=calls)
     peaks.get_peaks(audio, "sha256:h1", home, 100, tools)
     assert peaks.get_peaks(audio, "sha256:h2", home, 100, tools)["cached"] is False      # another content
-    assert peaks.get_peaks(audio, "sha256:h1", home, 200, tools)["cached"] is False      # another n
-    assert peaks.get_peaks(audio, "sha256:h1", home, 200, tools)["cached"] is True
+    assert peaks.get_peaks(audio, "sha256:h1", home, 200, tools)["cached"] is True       # another n: a resample
     cache = peaks.cache_path(home, "sha256:h1")
     doc = json.loads(cache.read_text(encoding="utf-8"))
     doc["version"] = 0
@@ -111,7 +143,7 @@ def test_the_cache_is_recomputed_for_another_hash_bucket_count_or_version(tmp_pa
     assert peaks.get_peaks(audio, "sha256:h1", home, 200, tools)["cached"] is False      # old version
     cache.write_text("{not json", encoding="utf-8")
     assert peaks.get_peaks(audio, "sha256:h1", home, 200, tools)["cached"] is False      # corrupt
-    assert len(calls) == 5
+    assert len(calls) == 4
 
 
 def test_an_unsafe_hash_is_never_a_path(tmp_path):

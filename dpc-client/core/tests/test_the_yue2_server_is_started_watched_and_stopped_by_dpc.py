@@ -12,6 +12,7 @@ source's sha256. The server is `_fake_yue2_server.py`, a real child process.
 import asyncio
 import hashlib
 import json
+import struct
 import os
 import sys
 
@@ -134,6 +135,22 @@ def test_a_two_half_adapter_is_split_with_its_tensor_bytes_unchanged_and_cached_
     shutil.rmtree(source.parent)
     left = make_yue2(home).prepare_adapters()
     assert name not in left and not (split / f"{name}-music.safetensors").exists()
+
+
+def test_a_corrupt_adapter_is_skipped_with_its_reason_and_the_others_still_split(tmp_path):
+    home = tmp_path / "dpc"
+    models = install_fake_yue2(home)
+    bad_name, good_name = VOICES[1], VOICES[0]
+    source = models / "loras" / "ruach-voices" / "voices" / bad_name / f"{bad_name}-e029.safetensors"
+    # a valid header whose tensor entries are not objects: split_adapter raises TypeError, not OSError/ValueError
+    hb = json.dumps({"text_encoders.x.lora_A.weight": 5, "diffusion_model.y.lora_A.weight": 7}).encode()
+    hb += b" " * ((8 - len(hb) % 8) % 8)
+    source.write_bytes(struct.pack("<Q", len(hb)) + hb + bytes(16))
+    engine = make_yue2(home)
+    entries = engine.prepare_adapters()   # does not raise
+    assert bad_name not in entries and good_name in entries
+    assert bad_name in engine.skipped_adapters and engine.skipped_adapters[bad_name]
+    assert not (models / "loras" / ".split" / f"{bad_name}-music.safetensors").exists()
 
 
 @pytest.mark.asyncio

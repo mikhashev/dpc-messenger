@@ -385,6 +385,8 @@ class Yue2Server(SupervisedEngine):
         self._served_adapters: List[str] = []      # what `/props` said the child offers
         self._starting_lock: Optional[asyncio.Lock] = None
         self._split_lock = threading.Lock()
+        # adapter name -> why it was left out of the last prepare_adapters run
+        self.skipped_adapters: Dict[str, str] = {}
 
     # -- files ---------------------------------------------------------------------
 
@@ -431,26 +433,34 @@ class Yue2Server(SupervisedEngine):
         offered = self.offered_adapters()
         old = self.read_manifest()
         entries: Dict[str, Any] = {}
+        self.skipped_adapters = {}
         for a in offered:
-            source = a["path"]
-            ident = self._file_identity(source, with_sha=True)
-            entry = old.get(a["name"])
-            fresh = (isinstance(entry, dict) and entry.get("source_sha256") == ident["sha256"]
-                     and entry.get("source_bytes") == ident["bytes"]
-                     and all((self.split_dir / h.get("file", "")).is_file()
-                             and (self.split_dir / h["file"]).stat().st_size == h.get("bytes")
-                             for h in (entry.get("halves") or {}).values())
-                     and sorted((entry.get("halves") or {})) == sorted(a["halves"]))
-            if not fresh:
-                logger.info("yue2.cpp: splitting adapter %s into its halves (%s)", a["name"], ", ".join(a["halves"]))
-                try:
-                    halves = split_adapter(source, a["name"], self.split_dir)
-                except (OSError, ValueError) as exc:
-                    logger.warning("yue2.cpp: adapter %s could not be split: %s", a["name"], exc)
-                    continue
-                entry = {"source_file": source.name, "source_bytes": ident["bytes"],
-                         "source_sha256": ident["sha256"], "halves": halves}
-            entries[a["name"]] = entry
+            try:
+                source = a["path"]
+                ident = self._file_identity(source, with_sha=True)
+                entry = old.get(a["name"])
+                fresh = (isinstance(entry, dict) and entry.get("source_sha256") == ident["sha256"]
+                         and entry.get("source_bytes") == ident["bytes"]
+                         and all((self.split_dir / h.get("file", "")).is_file()
+                                 and (self.split_dir / h["file"]).stat().st_size == h.get("bytes")
+                                 for h in (entry.get("halves") or {}).values())
+                         and sorted((entry.get("halves") or {})) == sorted(a["halves"]))
+                if not fresh:
+                    logger.info("yue2.cpp: splitting adapter %s into its halves (%s)", a["name"], ", ".join(a["halves"]))
+                    try:
+                        halves = split_adapter(source, a["name"], self.split_dir)
+                    except (OSError, ValueError) as exc:
+                        logger.warning("yue2.cpp: adapter %s could not be split: %s", a["name"], exc)
+                        self.skipped_adapters[a["name"]] = f"{type(exc).__name__}: {exc}"
+                        continue
+                    entry = {"source_file": source.name, "source_bytes": ident["bytes"],
+                             "source_sha256": ident["sha256"], "halves": halves}
+                entries[a["name"]] = entry
+            except Exception as exc:  # a broken adapter (TypeError, KeyError, struct.error, ...) must not stop the engine
+                reason = f"{type(exc).__name__}: {exc}"
+                logger.warning("yue2.cpp: adapter %s skipped, it could not be prepared: %s", a["name"], reason)
+                self.skipped_adapters[a["name"]] = reason
+                continue
         keep = {SPLIT_MANIFEST} | {h["file"] for e in entries.values() for h in e["halves"].values()}
         if self.split_dir.is_dir():
             for f in self.split_dir.iterdir():

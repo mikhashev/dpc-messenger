@@ -14,8 +14,12 @@ content hash so it survives a rename or a relink::
     {"version": 1, "n": 2000, "duration_s": 183.4, "sample_rate_used": 8000,
      "peaks": [[-0.31, 0.29], ...]}
 
-It is written atomically (temp file, then `os.replace`) and read back only when its
-version and bucket count match; anything else is recomputed and replaced. An entry whose
+The core always computes and caches ONE canonical bucket count (`DEFAULT_BUCKETS`). A
+request for another `n` is served by resampling the cached canonical peaks (max-pooling
+down; asking for more buckets than the canonical gives the canonical array, no invented
+detail), so the now-playing card and the A/B review never make a second ffmpeg run for the
+same track. The file is written atomically (temp file, then `os.replace`) and read back only
+when its version and bucket count are the canonical ones; anything else is recomputed. An entry whose
 hash is not known yet is computed but not cached.
 
 Work is bounded: one ffmpeg at a time (a process-wide lock) with a timeout.
@@ -81,6 +85,24 @@ def reduce_pcm(samples: "array", n: int) -> List[List[float]]:
     return out
 
 
+def resample_peaks(peaks: List[List[float]], n: int) -> List[List[float]]:
+    """`peaks` max-pooled down to `n` buckets (min of the mins, max of the maxes). When `n`
+    is not smaller than the count, the peaks come back as they are: no detail is invented."""
+    total = len(peaks)
+    if n >= total:
+        return [list(p) for p in peaks]
+    out: List[List[float]] = []
+    for i in range(n):
+        chunk = peaks[i * total // n:(i + 1) * total // n]
+        out.append([min(p[0] for p in chunk), max(p[1] for p in chunk)])
+    return out
+
+
+def _serve(doc: Dict[str, Any], n: int, cached: bool) -> Dict[str, Any]:
+    peaks = resample_peaks(doc["peaks"], n)
+    return {**doc, "peaks": peaks, "n": len(peaks), "cached": cached}
+
+
 def _decode(path: Path, tools: MediaTools) -> "array":
     cmd = [tools.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(path),
            "-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-"]
@@ -107,7 +129,7 @@ def cache_path(dpc_home_dir: Path, content_hash: str) -> Path:
     return music_dir_of(dpc_home_dir) / PEAKS_DIR_NAME / f"{content_hash.replace(':', '-')}.json"
 
 
-def _read_cache(path: Path, n: int) -> Optional[Dict[str, Any]]:
+def _read_cache(path: Path, n: int = DEFAULT_BUCKETS) -> Optional[Dict[str, Any]]:
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -139,11 +161,12 @@ def get_peaks(path: Optional[Path], content_hash: Optional[str], dpc_home_dir: P
     """`{peaks, duration_s, n, sample_rate_used, cached}`. Blocking: call it through
     `asyncio.to_thread`. Raises `PeaksError`."""
     n = clamp_buckets(n)
+    canonical = DEFAULT_BUCKETS
     cache = cache_path(dpc_home_dir, content_hash) if content_hash and _SAFE_HASH.match(content_hash.replace(":", "-")) else None
     if cache is not None:
-        doc = _read_cache(cache, n)
+        doc = _read_cache(cache, canonical)
         if doc is not None:
-            return {**doc, "cached": True}
+            return _serve(doc, n, True)
     if path is None or not Path(path).is_file():
         raise PeaksError("no_file", "the track's file is not there")
     found = tools or MediaTools.discover()
@@ -151,22 +174,22 @@ def get_peaks(path: Optional[Path], content_hash: Optional[str], dpc_home_dir: P
         raise PeaksError("no_ffmpeg", "ffmpeg is not on PATH; the waveform is decoded with ffmpeg")
     with _lock:
         if cache is not None:  # another request may have made it while this one waited
-            doc = _read_cache(cache, n)
+            doc = _read_cache(cache, canonical)
             if doc is not None:
-                return {**doc, "cached": True}
+                return _serve(doc, n, True)
         samples = _decode(Path(path), found)
         if not len(samples):
             raise PeaksError("decode_failed", "the track has no audio to draw")
         doc = {
             "version": PEAKS_VERSION,
-            "n": n,
+            "n": canonical,
             "duration_s": round(len(samples) / SAMPLE_RATE, 3),
             "sample_rate_used": SAMPLE_RATE,
-            "peaks": reduce_pcm(samples, n),
+            "peaks": reduce_pcm(samples, canonical),
         }
         if cache is not None:
             try:
                 _write_cache(cache, doc)
             except OSError:
                 pass  # the answer is still good; it is computed again next time
-    return {**doc, "cached": False}
+    return _serve(doc, n, False)

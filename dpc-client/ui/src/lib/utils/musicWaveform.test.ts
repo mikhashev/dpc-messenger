@@ -12,6 +12,7 @@ import {
     timeToX,
     xToTime,
     type Peak,
+  rulerNeedsRedraw,
 } from './musicWaveform';
 
 describe('time and x', () => {
@@ -150,5 +151,19 @@ describe('tooltip time', () => {
         expect(formatTimeFine(75.99)).toBe('1:15.9');
         expect(formatTimeFine(0)).toBe('0:00.0');
         expect(formatTimeFine(-1)).toBe('–:––');
+    });
+});
+
+describe('ruler redraw on duration change', () => {
+    it('draws when the duration appears after the peaks, without a resize', () => {
+        expect(rulerNeedsRedraw(0, 183.4)).toBe(true);
+    });
+    it('redraws when the duration is refined, and not when it is unchanged', () => {
+        expect(rulerNeedsRedraw(180, 183.4)).toBe(true);
+        expect(rulerNeedsRedraw(183.4, 183.4)).toBe(false);
+    });
+    it('never draws for an unusable duration', () => {
+        expect(rulerNeedsRedraw(183.4, 0)).toBe(false);
+        expect(rulerNeedsRedraw(0, NaN)).toBe(false);
     });
 });

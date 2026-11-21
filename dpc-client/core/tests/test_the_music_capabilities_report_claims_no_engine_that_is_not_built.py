@@ -68,6 +68,12 @@ def test_the_qa_block_lists_the_spec_fields_and_says_qa_is_not_built():
                             "seam_end_jump_db", "seam_click_score", "clipped_samples", "lyrics_wer"]
     assert set(qa["advisory"]) <= set(qa["fields"])
     assert qa["status"] == "planned"
+    # every field says whether anything produces it; only the loudness ones are measured today
+    assert set(qa["field_status"]) == set(qa["fields"])
+    measured = {k for k, v in qa["field_status"].items() if v["status"] == "measured"}
+    assert measured == {"integrated_lufs", "true_peak_dbtp"}
+    for k in ("seam_start_jump_db", "seam_end_jump_db", "seam_click_score", "loudness_delta_lu"):
+        assert qa["field_status"][k]["status"] == "planned" and qa["field_status"][k]["reason"]
 
 
 def test_a_job_proposed_while_the_engine_is_not_built_comes_back_unsupported(tmp_path):

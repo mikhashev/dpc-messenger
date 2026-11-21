@@ -28,6 +28,13 @@ export function xToTime(x: number, duration: number, width: number): number {
     return clamp((x / width) * duration, 0, duration);
 }
 
+/** Whether the static time ruler must be redrawn when the total duration goes from `prev` to
+ *  `next`: the ruler cannot draw at 0, so a first real duration (or a changed one) needs a draw. */
+export function rulerNeedsRedraw(prev: number, next: number): boolean {
+    if (!(next > 0)) return false;
+    return !(prev > 0) || Math.abs(next - prev) > 1e-6;
+}
+
 export interface TickPlan {
     /** Seconds between labelled (long) ticks. */
     label: number;

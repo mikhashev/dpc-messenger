@@ -84,6 +84,21 @@ QA_FIELDS = ("integrated_lufs", "true_peak_dbtp", "loudness_delta_lu", "seam_sta
              "seam_click_score", "clipped_samples", "lyrics_wer")
 QA_ADVISORY = ("seam_start_jump_db", "seam_end_jump_db", "seam_click_score", "lyrics_wer")
 
+MEASURED = "measured"
+# What produces each field today. `measured` means a producer exists in DPC (loudness.py:
+# integrated LUFS, LRA and true peak through ffmpeg ebur128); `planned` means nothing
+# produces it yet, so a UI must not present it as a measurement.
+QA_FIELD_STATUS: Dict[str, Dict[str, str]] = {
+    "integrated_lufs": {"status": MEASURED, "reason": "loudness.py, ffmpeg ebur128"},
+    "true_peak_dbtp": {"status": MEASURED, "reason": "loudness.py, ffmpeg ebur128"},
+    "loudness_delta_lu": {"status": PLANNED, "reason": "nothing produces it yet"},
+    "seam_start_jump_db": {"status": PLANNED, "reason": "seam analysis is not built in DPC"},
+    "seam_end_jump_db": {"status": PLANNED, "reason": "seam analysis is not built in DPC"},
+    "seam_click_score": {"status": PLANNED, "reason": "seam analysis is not built in DPC"},
+    "clipped_samples": {"status": PLANNED, "reason": "nothing produces it yet"},
+    "lyrics_wer": {"status": PLANNED, "reason": "needs the judge; not built in DPC"},
+}
+
 _FEATURES: Dict[str, Dict[str, str]] = {
     "audio_reference": {"status": PLANNED, "reason": "reference audio for a new song is not built in DPC"},
     "cover": {"status": PLANNED, "reason": "not built in DPC"},
@@ -323,7 +338,8 @@ class MusicCapabilities:
                     "library_format": js.LIBRARY_FORMAT,
                 },
             },
-            "qa": {"tool": "ffmpeg", "fields": list(QA_FIELDS), "advisory": list(QA_ADVISORY),
+            "qa": {"tool": "ffmpeg", "fields": list(QA_FIELDS),
+                   "field_status": {k: dict(v) for k, v in QA_FIELD_STATUS.items()}, "advisory": list(QA_ADVISORY),
                    "status": PLANNED, "reason": "stage-1 QA through ffmpeg is not built in DPC"},
             "features": features,
             "take_decisions": {

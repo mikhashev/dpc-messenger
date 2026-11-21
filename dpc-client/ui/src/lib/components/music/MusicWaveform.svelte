@@ -24,6 +24,7 @@
     dragToRegion,
     formatTimeFine,
     hitMarker,
+    rulerNeedsRedraw,
     normalizeRegion,
     resamplePeaks,
     tickTimes,
@@ -274,6 +275,21 @@
       rebuildLayers();
       drawRuler();
       schedule();
+    });
+  });
+
+  // The ruler is a static offscreen layer drawn from width/data only; it must also follow the
+  // duration: peaks usually land before the element knows it (total 0), and it is refined later.
+  let rulerTotal = 0;
+  $effect(() => {
+    const t = total;
+    untrack(() => {
+      const redraw = rulerNeedsRedraw(rulerTotal, t);
+      rulerTotal = t;
+      if (redraw) {
+        drawRuler();
+        schedule();
+      }
     });
   });
 
