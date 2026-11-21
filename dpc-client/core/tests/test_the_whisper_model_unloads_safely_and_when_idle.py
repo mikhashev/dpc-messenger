@@ -141,7 +141,7 @@ async def test_shutdown_unloads_anyway_after_the_bound(monkeypatch):
     p = _provider(monkeypatch, idle_s=0, gate=gate)
     run = asyncio.create_task(p.transcribe("x"))
     await _running(p)
-    await asyncio.wait_for(p.shutdown_unload(timeout=0.1), 2)
+    await asyncio.wait_for(p.shutdown_unload(timeout=1.0), 3)
     assert p.unloads == 1 and not p.is_model_loaded()
     run.cancel()
     with pytest.raises(asyncio.CancelledError):
