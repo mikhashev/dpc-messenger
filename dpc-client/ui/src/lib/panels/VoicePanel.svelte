@@ -12,6 +12,7 @@
     voiceTranscriptionReceived,
     whisperModelLoadingStarted,
     whisperModelLoaded,
+    whisperModelUnloaded,
     whisperModelLoadingFailed,
     setConversationTranscription,
     getConversationTranscription,
@@ -106,6 +107,14 @@
       console.log(`[Whisper] Model loaded successfully: ${$whisperModelLoaded.provider}`);
       whisperModelLoading = false;
       whisperModelLoadError = null;
+    }
+  });
+
+  // Whisper model unloaded (idle timeout, switch, auto-transcribe off, end of a run)
+  $effect(() => {
+    if ($whisperModelUnloaded) {
+      console.log(`[Whisper] Model unloaded: ${$whisperModelUnloaded.provider ?? $whisperModelUnloaded.model_name}`);
+      whisperModelLoading = false;
     }
   });
 

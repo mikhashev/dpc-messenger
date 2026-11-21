@@ -1013,6 +1013,7 @@ export async function connectToCoreService() {
                 }
                 else if (message.event === "whisper_model_unloaded") {
                     console.log("Whisper model unloaded:", message.payload);
+                    whisperModelLoaded.set(null);
                     whisperModelUnloaded.set(message.payload);
                     // Optional: Show toast notification about VRAM freed
                     // console.log(`💾 Voice transcription model unloaded (~${message.payload.vram_freed_gb}GB VRAM freed)`);

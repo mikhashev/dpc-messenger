@@ -460,6 +460,7 @@ export interface WhisperModelEvent {
     provider?: string;         // Provider alias (used in loading events)
     provider_alias?: string;
     vram_freed_gb?: number;
+    reason?: string;           // Unload events: idle, released, switched_provider, ...
     download_url?: string;
     size_mb?: number;
 }
