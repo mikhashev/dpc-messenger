@@ -154,6 +154,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # The track stream (ADR-051 N8): its loopback base URL and token, for the <audio> element
     "get_music_stream_info",
     # Timecoded listening notes on a library track (mp.comment/1)
+    "get_music_track_peaks",
     "list_music_comments", "add_music_comment", "update_music_comment", "delete_music_comment",
     "list_strata_models",
     "install_strata_model",

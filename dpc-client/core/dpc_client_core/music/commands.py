@@ -96,6 +96,7 @@ from .jobs import MusicJobError, MusicJobStore
 from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
 from .loudness import LoudnessError, measure_loudness
 from .lyrics import MusicLyrics
+from .peaks import PeaksError, get_peaks
 from .runner import MusicJobRunner
 from .stream import DEFAULT_STREAM_PORT, MusicStreamServer
 from .yue2 import Yue2Server, read_config as read_yue2_config
@@ -854,6 +855,27 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    @slow_command
+    async def get_music_track_peaks(self, track_id: Any = None, n: Any = None) -> Dict[str, Any]:
+        """The waveform peaks of a library track (`peaks.py`): `{status, peaks, duration_s,
+        cached}`. The file is the library's own path for `track_id`; the UI never sends
+        one. Slow: the first request decodes the track with ffmpeg, later ones read
+        `<DPC home>/music/peaks/<content_hash>.json`. Errors: `unknown_track`, `no_file`,
+        `no_ffmpeg`, `decode_failed`, `timeout`, `invalid_params`."""
+        try:
+            library = await self._music()
+            entry = library.get_entry(_need_str(track_id, "track_id", "invalid_params"))
+            path = library.get_track_path(entry["id"])
+            try:
+                doc = await asyncio.to_thread(
+                    get_peaks, path, entry.get("content_hash"), self.settings.dpc_home_dir, n, library._tools)
+            except PeaksError as exc:
+                return {"status": "error", "code": exc.code, "message": exc.message}
+            return {"status": "ok", "peaks": doc["peaks"], "duration_s": doc["duration_s"],
+                    "n": doc["n"], "cached": doc["cached"]}
+        except Exception as exc:
+            return _error(exc)
+
     # -- playlists ---------------------------------------------------------------
 
     async def list_music_playlists(self) -> Dict[str, Any]:
@@ -997,6 +1019,7 @@ MUSIC_COMMANDS = (
     "rescan_music_folder",
     "list_music_library",
     "get_music_track",
+    "get_music_track_peaks",
     "hide_music_track",
     "unhide_music_track",
     "remove_missing_music_tracks",
