@@ -597,6 +597,19 @@ export function originTag(entry: LibraryEntry): string {
     }
 }
 
+/** Whether the origin badge can open the file's folder: the track is a file on this
+ *  machine (not a web track), it is not missing, and the library knows its path. */
+export function canRevealFile(entry: LibraryEntry | null | undefined): boolean {
+    if (!entry || entry.missing) return false;
+    if (entry.origin === 'web' || entry.source?.kind === 'web') return false;
+    return typeof entry.path === 'string' && entry.path.length > 0;
+}
+
+/** The badge's hover text: "Show in folder" when it opens one, else just the origin. */
+export function originBadgeTitle(entry: LibraryEntry): string {
+    return canRevealFile(entry) ? 'Show in folder' : originTag(entry);
+}
+
 /** Whether a track matches the library filter (title, artist, album, file name), without case. */
 export function matchesFilter(entry: LibraryEntry | null | undefined, text: string): boolean {
     const t = text.trim().toLowerCase();

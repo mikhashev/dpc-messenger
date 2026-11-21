@@ -52,6 +52,9 @@
   } from '$lib/services/music';
   import { discardTake, fetchTakes, keepTake, measureTakeLoudness, musicTakes, rejectAllTakes } from '$lib/services/musicJobs';
   import MusicReasonBox from './MusicReasonBox.svelte';
+  import MusicComments from './MusicComments.svelte';
+  import CommentMarkers from './CommentMarkers.svelte';
+  import { musicComments } from '$lib/services/musicComments';
 
   let { job, classes = [], onclose }: { job: MusicJob; classes?: FailureClass[]; onclose: () => void } = $props();
 
@@ -156,6 +159,13 @@
     if (loaded) reviewSeek(v);
     else parked = abSwitchPosition(v, duration);
   }
+
+  /** A comment's time was clicked: seek the take being heard (or park the bar before it loads). */
+  function seekComment(t: number) {
+    if (loaded) reviewSeek(t);
+    else parked = abSwitchPosition(t, duration);
+  }
+  let takeComments = $derived($musicComments[take?.library_track_id ?? ''] ?? []);
 
   function seekBy(delta: number) {
     if (loaded) reviewSeek(reviewPosition() + delta);
@@ -305,19 +315,22 @@
     </div>
     <div class="seek-row">
       <span class="time">{formatTime(scrub ?? position)}</span>
-      <input
-        class="seek"
-        type="range"
-        min="0"
-        max={duration || 0}
-        step="0.1"
-        value={scrub ?? position}
-        oninput={onScrub}
-        onchange={onSeekCommit}
-        onblur={() => (scrub = null)}
-        disabled={!duration}
-        aria-label="Position in take {takeLetter(current)}"
-      />
+      <div class="seek-col">
+        <input
+          class="seek"
+          type="range"
+          min="0"
+          max={duration || 0}
+          step="0.1"
+          value={scrub ?? position}
+          oninput={onScrub}
+          onchange={onSeekCommit}
+          onblur={() => (scrub = null)}
+          disabled={!duration}
+          aria-label="Position in take {takeLetter(current)}"
+        />
+        <CommentMarkers comments={takeComments} {duration} onseek={seekComment} />
+      </div>
       <span class="time">{formatTime(duration || null)}</span>
     </div>
     <p class="level" class:warn={!lm.matched} role="status">{lm.label}</p>
@@ -326,6 +339,17 @@
     {#if rv.notice || notice}<p class="muted small" role="status" aria-live="polite">{rv.notice || notice}</p>{/if}
     {#if actionError}<p class="field-error" role="alert">{actionError}</p>{/if}
     <p class="muted tiny">A / B{takes.length > 2 ? ` / ${takes.slice(2).map((_, i) => takeLetter(i + 2)).join(' / ')}` : ''} pick a take at the same position · Space play/pause · ← → seek · your volume applies on top</p>
+
+    {#if take?.library_track_id}
+      <MusicComments
+        trackId={take.library_track_id}
+        currentTime={position}
+        {duration}
+        {loaded}
+        onseek={seekComment}
+        label="COMMENTS ON {takeLetter(current)}"
+      />
+    {/if}
 
     <ol class="rows takes">
       {#each takes as t, i (t.id)}

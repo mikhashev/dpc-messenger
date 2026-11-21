@@ -572,6 +572,8 @@
   .mc-root :global(.t-btn:disabled) { opacity: 0.5; cursor: default; }
   .mc-root :global(.seek-row) { display: flex; align-items: center; gap: 10px; }
   .mc-root :global(.seek) { flex: 1 1 auto; min-width: 0; }
+  .mc-root :global(.seek-col) { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+  .mc-root :global(.seek-col .seek) { width: 100%; }
   .mc-root :global(.time) { font-size: 12px; color: var(--text-secondary, #a9b0bb); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .mc-root :global(.level) { font-size: 13px; color: #9fd29f; }
   .mc-root :global(.level.warn) { color: #f0c674; }

@@ -145,6 +145,7 @@ import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, ag
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionCancelled, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
+import type { MusicComment } from './utils/musicComments';
 import { callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
 import type { DiscardReason, MusicCapabilities, MusicEngine, MusicJob, MusicTake } from './utils/musicCreate';
 
@@ -932,6 +933,11 @@ export async function connectToCoreService() {
                 else if (message.event === "music_job_updated" || message.event === "music_engine_status") {
                     const { noteMusicEvent } = await import("$lib/services/musicJobs");
                     noteMusicEvent(message.event, message.payload);
+                }
+                // Another window changed a track's comments (music/comments.py).
+                else if (message.event === "music_comments_updated") {
+                    const { noteCommentsUpdated } = await import("$lib/services/musicComments");
+                    noteCommentsUpdated(message.payload);
                 }
                 else if (message.event === "schedule_approval_request") {
                     console.log("Schedule approval request:", message.payload);
@@ -2007,6 +2013,31 @@ export async function listAgentProfiles(): Promise<any> {
 // `{status: "ok", ...}`, or `{ok: false, unavailable, code, message}`. `unavailable`
 // is true while the backend does not have the music commands yet (not wired into
 // local_api), so the Music Player can say so instead of failing.
+
+// Timecoded listening notes (`mp.comment/1`); times are `t_start` / `t_end` in the answers,
+// `start_s` / `end_s` in the requests. `end_s: null` makes a point.
+export function listMusicComments(trackId: string): Promise<MusicAnswer<{ track_id: string; comments: MusicComment[] }>> {
+    return callMusic(sendCommand, 'list_music_comments', { track_id: trackId });
+}
+
+export function addMusicComment(
+    trackId: string,
+    c: { start_s: number; end_s: number | null; text: string; action?: string },
+): Promise<MusicAnswer<{ comment: MusicComment }>> {
+    return callMusic(sendCommand, 'add_music_comment', { track_id: trackId, ...c });
+}
+
+export function updateMusicComment(
+    trackId: string,
+    commentId: string,
+    c: { start_s?: number; end_s?: number | null; text?: string; action?: string },
+): Promise<MusicAnswer<{ comment: MusicComment }>> {
+    return callMusic(sendCommand, 'update_music_comment', { track_id: trackId, comment_id: commentId, ...c });
+}
+
+export function deleteMusicComment(trackId: string, commentId: string): Promise<MusicAnswer<{ deleted: string }>> {
+    return callMusic(sendCommand, 'delete_music_comment', { track_id: trackId, comment_id: commentId });
+}
 
 export function listMusicFolders(): Promise<MusicAnswer<{ folders: MusicFolder[] }>> {
     return callMusic(sendCommand, 'list_music_folders', {});

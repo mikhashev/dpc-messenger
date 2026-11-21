@@ -38,6 +38,12 @@
   import { confirmAsync } from '$lib/utils/dialog';
   import MusicLyrics from './MusicLyrics.svelte';
   import MusicCreate from './MusicCreate.svelte';
+  import MusicComments from './MusicComments.svelte';
+  import CommentMarkers from './CommentMarkers.svelte';
+  import { revealItemInDir } from '@tauri-apps/plugin-opener';
+  import { revealInFolder } from '$lib/utils/revealInFolder';
+  import { isCommentShortcut } from '$lib/utils/musicComments';
+  import { ensureComments, musicComments } from '$lib/services/musicComments';
   import {
     HEADER_HEIGHT,
     isClick,
@@ -54,6 +60,7 @@
     SMART_ALL_ID,
     TRACK_ROWS_STEP,
     canDeleteFile,
+    canRevealFile,
     currentId,
     dropIndex,
     fitMusicPlayer,
@@ -68,6 +75,7 @@
     moveItem,
     moveMiniPlayer,
     nextPlaylistName,
+    originBadgeTitle,
     originTag,
     playbackProblem,
     repeatLabel,
@@ -321,6 +329,16 @@
   function fail(message: string) {
     actionError = message;
   }
+
+  /** The origin badge: opens the file's folder with the file selected (Explorer, Finder, or the
+   *  Linux file manager through the opener plugin) when the track is a file we can reach. */
+  async function revealEntry(entry: LibraryEntry) {
+    const failure = await revealInFolder(entry.path, revealItemInDir);
+    if (failure) fail(failure);
+  }
+
+  // -- comments (mp.comment/1): the C key and the card's Comment button open the form ---------
+  let commentSignal = $state(0);
 
   // -- playlist forms --------------------------------------------------------------
 
@@ -595,6 +613,10 @@
 
   let p = $derived($musicPlayback);
   let cur = $derived($musicCurrentEntry);
+  let curComments = $derived($musicComments[cur?.id ?? ''] ?? []);
+  $effect(() => {
+    ensureComments(cur?.id);
+  });
   let curProblem = $derived(cur ? problemOf(cur) : null);
   let loaded = $derived(!!p.loadedId && p.loadedId === currentId(p.queue));
   let shownDuration = $derived(resolveDuration(loaded && p.duration > 0 ? p.duration : null, cur?.duration_s, loaded ? p.currentTime : 0));
@@ -649,7 +671,11 @@
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const k = e.key;
     const kl = k.toLowerCase();
-    if (k === ' ') {
+    if (isCommentShortcut(e, a)) {
+      if (!cur) return;
+      e.preventDefault();
+      commentSignal += 1;
+    } else if (k === ' ') {
       if (a.tagName === 'BUTTON') return; // the button presses itself
       e.preventDefault();
       togglePlay();
@@ -674,6 +700,14 @@
 </script>
 
 <svelte:window onkeydown={handleKeydown} onresize={refit} />
+
+{#snippet originBadge(entry: LibraryEntry)}
+  {#if canRevealFile(entry)}
+    <button type="button" class="tag link" title={originBadgeTitle(entry)} aria-label="Show in folder: {entry.title}" onclick={() => revealEntry(entry)}>{originTag(entry)}</button>
+  {:else}
+    <span class="tag">{originTag(entry)}</span>
+  {/if}
+{/snippet}
 
 {#snippet icon(name: 'prev' | 'next' | 'play' | 'pause' | 'shuffle' | 'repeat' | 'repeat-one')}
   <!-- Inline SVG: glyphs such as U+23EE render as emoji, or not at all, on some Linux fonts. -->
@@ -814,40 +848,46 @@
                   {#if cur && trackSubtitle(cur)}<span class="muted small">{trackSubtitle(cur)}</span>{/if}
                 </div>
                 {#if cur}
-                  <span class="tag">{originTag(cur)}</span>
+                  {@render originBadge(cur)}
                   {#if curProblem}<span class="tag warn" title={curProblem.reason}>{curProblem.problem === 'missing' ? 'missing' : 'not playable yet'}</span>{/if}
                 {/if}
               </div>
               {#if curProblem}<p class="muted small">{curProblem.reason}</p>{/if}
               <div class="seek-row">
                 <span class="time">{formatTime(loaded ? (scrub ?? p.currentTime) : 0)}</span>
-                <input
-                  class="seek"
-                  type="range"
-                  min="0"
-                  max={shownDuration || 0}
-                  step="0.1"
-                  value={loaded ? (scrub ?? p.currentTime) : 0}
-                  oninput={onScrub}
-                  onchange={onSeekCommit}
-                  onblur={() => (scrub = null)}
-                  disabled={!loaded}
-                  aria-label="Position in the track"
-                />
+                <div class="seek-col">
+                  <input
+                    class="seek"
+                    type="range"
+                    min="0"
+                    max={shownDuration || 0}
+                    step="0.1"
+                    value={loaded ? (scrub ?? p.currentTime) : 0}
+                    oninput={onScrub}
+                    onchange={onSeekCommit}
+                    onblur={() => (scrub = null)}
+                    disabled={!loaded}
+                    aria-label="Position in the track"
+                  />
+                  <CommentMarkers comments={curComments} duration={shownDuration} onseek={(t) => seekTo(t, 'ui')} />
+                </div>
                 <span class="time">{formatTime(shownDuration || null)}</span>
               </div>
               <div class="controls-row">
                 {@render transport(false)}
                 <div class="modes">{@render modeButtons(false)}</div>
+                <button type="button" class="small-btn" onclick={() => (commentSignal += 1)} disabled={!cur} title="Comment at the current position (C)">Comment</button>
                 <label class="volume">
                   <span class="muted small">Volume</span>
                   <input type="range" min="0" max="1" step="0.05" value={p.volume} oninput={onVolume} onchange={onVolumeEnd} aria-label="Volume" />
                 </label>
               </div>
-              <p class="muted tiny">Space play/pause · N next · P previous · Shift+S shuffle · Shift+R repeat · ← → seek</p>
+              <p class="muted tiny">Space play/pause · N next · P previous · Shift+S shuffle · Shift+R repeat · ← → seek · C comment</p>
             </section>
 
             <MusicLyrics entry={cur} currentTime={loaded ? p.currentTime : 0} duration={shownDuration} {loaded} />
+
+            <MusicComments trackId={cur?.id ?? null} currentTime={loaded ? p.currentTime : 0} duration={shownDuration} {loaded} openSignal={commentSignal} />
 
             <section class="card" aria-labelledby="up-next-label">
               <div class="section-head">
@@ -972,7 +1012,7 @@
                       {#if row.entry && trackSubtitle(row.entry)}<span class="muted tiny">{trackSubtitle(row.entry)}</span>{/if}
                     </button>
                     <span class="tags">
-                      {#if row.entry}<span class="tag">{originTag(row.entry)}</span>{/if}
+                      {#if row.entry}{@render originBadge(row.entry)}{/if}
                       {#if problem}<span class="tag warn" title={problem.reason}>{problem.problem === 'missing' ? 'missing' : 'not playable yet'}</span>{/if}
                     </span>
                     <span class="time">{formatTime(row.entry?.duration_s ?? null)}</span>
@@ -1023,7 +1063,7 @@
                         {#if trackSubtitle(entry)}<span class="muted tiny">{trackSubtitle(entry)}</span>{/if}
                       </span>
                       <span class="tags">
-                        <span class="tag">{originTag(entry)}</span>
+                        {@render originBadge(entry)}
                         {#if entry.missing}<span class="tag warn">missing</span>{/if}
                       </span>
                       <span class="row-actions">
@@ -1267,6 +1307,8 @@
 
   .seek-row { display: flex; align-items: center; gap: 10px; }
   .seek { flex: 1 1 auto; min-width: 0; }
+  .seek-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+  .seek-col .seek { width: 100%; }
   .time { font-size: 12px; color: var(--text-secondary, #a9b0bb); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
   .controls-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -1410,6 +1452,8 @@
 
   .tag { font-size: 11px; padding: 1px 6px; border-radius: 5px; background: #31353d; color: #c9d1d9; white-space: nowrap; }
   .tag.warn { background: #3d3016; color: #f0c674; }
+  button.tag.link { border: 0; font: inherit; font-size: 11px; cursor: pointer; }
+  button.tag.link:hover, button.tag.link:focus-visible { background: #3d4a63; color: #ffffff; text-decoration: underline; }
   .hidden-head { margin: 8px 0 4px; }
   .row-main.static { cursor: default; }
 
