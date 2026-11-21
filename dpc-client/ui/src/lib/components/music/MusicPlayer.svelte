@@ -22,7 +22,7 @@
   Under Now playing sits the Lyrics area (MusicLyrics.svelte): the lyrics chain of
   the core (.lrc sidecar, file tags, LRCLIB, manual edit) for the current track.
 
-  The header's Create button opens the Create panel (MusicCreate.svelte: a song from
+  The Create button in the controls row opens the Create panel (MusicCreate.svelte: a song from
   your own text, its jobs, and the A/B review of its takes) in place of the listening
   columns; Listen is the default view on every opening. Keys inside the panel are the
   panel's own (the review's A / B, Space), not the queue's.
@@ -173,7 +173,7 @@
   }
   const remember = () => saveWindowState(storage(), windowState(), MUSIC_PLAYER_WINDOW);
 
-  // Listen is the default view; Create is opened from the header.
+  // Listen is the default view; Create is opened from the controls row, Listen from the header.
   let view = $state<'listen' | 'create'>('listen');
 
   // Each opening takes the remembered boxes, fitted to the viewport as it is now.
@@ -790,14 +790,17 @@
       {/if}
       <div class="mp-buttons">
         {#if !minimised}
-          <button
-            type="button"
-            class="view-btn"
-            class:on={view === 'create'}
-            aria-pressed={view === 'create'}
-            onclick={() => (view = view === 'create' ? 'listen' : 'create')}
-            title={view === 'create' ? 'Back to listening' : 'Make a song from your own text'}
-          >{view === 'create' ? 'Listen' : 'Create'}</button>
+          <!-- In Create the player card is hidden, so the way back lives here; in Listen the
+               Create button sits in the player's controls row (Mike, 2026-11-22). -->
+          {#if view === 'create'}
+            <button
+              type="button"
+              class="view-btn on"
+              aria-pressed="true"
+              onclick={() => (view = 'listen')}
+              title="Back to listening"
+            >Listen</button>
+          {/if}
         {/if}
         <button
           type="button"
@@ -872,6 +875,7 @@
                 {@render transport(false)}
                 <div class="modes">{@render modeButtons(false)}</div>
                 <button type="button" class="small-btn" onclick={() => (commentSignal += 1)} disabled={!cur} title="Comment at the current position (C)">Comment</button>
+                <button type="button" class="small-btn" onclick={() => (view = 'create')} title="Make a song from your own text">Create</button>
                 <label class="volume">
                   <span class="muted small">Volume</span>
                   <input type="range" min="0" max="1" step="0.05" value={p.volume} oninput={onVolume} onchange={onVolumeEnd} aria-label="Volume" />

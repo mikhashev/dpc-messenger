@@ -1,6 +1,6 @@
 <!-- MusicCreate.svelte — the Music Player's Create panel: a song from your own text (SPEC flow "song from own text", slice 1). -->
 <!--
-  Opened from the window header's Create button; Listen stays the default view. Four parts:
+  Opened from the Create button in the player's controls row; Listen stays the default view. Four parts:
 
   - the engine line of the engine the form has selected (yue2.cpp, the default since Mike
     #198, or acestep.cpp; both supervised by DPC, one on the card at a time): not installed

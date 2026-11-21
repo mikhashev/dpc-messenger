@@ -14,11 +14,14 @@ import coreRaw from '../coreService.ts?raw';
 const service = serviceRaw.replace(/\r\n/g, '\n');
 const core = coreRaw.replace(/\r\n/g, '\n');
 
-describe('the Create panel is opened from the header and Listen stays the default', () => {
-    it('a header button switches the view; each opening starts in Listen', () => {
+describe('the Create panel is opened from the controls row and Listen stays the default', () => {
+    it('Create sits in the controls row, Listen in the header while in Create; each opening starts in Listen', () => {
         expect(player).toContain("let view = $state<'listen' | 'create'>('listen');");
         expect(player).toContain("view = 'listen';");
-        expect(player).toContain("{view === 'create' ? 'Listen' : 'Create'}");
+        // Mike 2026-11-22: not in the window header beside minimise/close.
+        expect(player).toContain(`onclick={() => (view = 'create')} title="Make a song from your own text">Create</button>`);
+        expect(player).toContain('title="Back to listening"\n            >Listen</button>'.replace(/\n/g, player.includes('\r\n') ? '\r\n' : '\n'));
+        expect(player).not.toContain("{view === 'create' ? 'Listen' : 'Create'}");
         expect(player).toContain('<MusicCreate />');
     });
 
