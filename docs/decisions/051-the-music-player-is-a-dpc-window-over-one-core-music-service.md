@@ -431,6 +431,9 @@ consensus 2026-11-20)") and are not decisions.
   with seed and lm_seed `seed + i`; the duration is a cap (default 180 s, 30-360) with a
   short-cap warning; backbone `stock` or `rs-tw`; voice adapters for local listening only, none
   by default, split by DPC into music and sound halves (music 0.45 / sound 0.35).
+  **Backbone default resolved (Mike, 2026-11-21, CC window):** "ну сток по умолчанию это
+  правильно" (stock by default is right): `stock` is the default, RS-TW is picked per job in
+  the Create form.
 
   *Numbering: ADR D30-D35 mirror SPEC §12 decisions 31, 34, 35, 37, 38, 40 in that order. SPEC
   decisions 32 (GPU card), 33 (song from own text) and 39 (stress dictionary) have no ADR entry
