@@ -805,15 +805,20 @@ class LocalWhisperProvider(AIProvider):
             segments.append({"start": float(start), "end": float(end), "text": text})
         return segments
 
-    async def transcribe(self, audio_path: str, release_if_loaded_here: bool = False) -> Dict[str, Any]:
+    async def transcribe(self, audio_path: str, release_if_loaded_here: bool = False,
+                         language: Optional[str] = None, task: Optional[str] = None) -> Dict[str, Any]:
         """Transcribe `audio_path`. With `release_if_loaded_here`, a model this very call
         had to load is unloaded as the call ends, unless another transcription is using
-        it (the decision is made under the load lock, so it cannot race)."""
+        it (the decision is made under the load lock, so it cannot race).
+
+        `language` ("auto" = detect) and `task` apply to this call only; None keeps the
+        provider's configured value. Nothing here mutates the shared provider."""
         # A stale reference to a replaced object forwards to the object that replaced it,
         # so a use is counted and ended on one object.
         current = self._current_owner()
         if current is not self:
-            return await current.transcribe(audio_path, release_if_loaded_here)
+            return await current.transcribe(audio_path, release_if_loaded_here,
+                                            language=language, task=task)
         self._refuse_if_retired()
         # The lock is taken even when the model is loaded, so the use is counted
         # atomically with the load and an unload in progress is waited for.
@@ -831,7 +836,12 @@ class LocalWhisperProvider(AIProvider):
             counted._drained.clear()
             counted._cancel_idle_task()
         try:
-            return await self._transcribe_loaded(audio_path)
+            overrides = {}
+            if language is not None:
+                overrides["language"] = language
+            if task is not None:
+                overrides["task"] = task
+            return await self._transcribe_loaded(audio_path, **overrides)
         finally:
             owner = counted._current_owner()
             if owner._active_transcriptions > 0:
@@ -851,7 +861,17 @@ class LocalWhisperProvider(AIProvider):
                 finally:
                     owner.schedule_idle_unload()  # also when this await was cancelled
 
-    async def _transcribe_loaded(self, audio_path: str) -> Dict[str, Any]:
+    async def _transcribe_loaded(self, audio_path: str, language: Optional[str] = None,
+                                 task: Optional[str] = None) -> Dict[str, Any]:
+        # Per-call values, resolved once: the MLX thread and the HF generate call both use
+        # these locals, never `self.language` / `self.task`, which another call may change.
+        call_language = self.language if language is None else language
+        call_task = self.task if task is None else task
+        call_generate_kwargs: Dict[str, Any] = {}
+        if language is not None:
+            call_generate_kwargs["language"] = None if language == "auto" else language
+        if task is not None:
+            call_generate_kwargs["task"] = task
         # Clear CUDA cache before transcription to free fragmented memory
         # (MLX transcribes without torch, so its absence is not an error here)
         try:
@@ -882,8 +902,8 @@ class LocalWhisperProvider(AIProvider):
                     return mlx_whisper.transcribe(
                         audio_path,
                         path_or_hf_repo=self.model_name,
-                        language=self.language if self.language != "auto" else None,
-                        task=self.task
+                        language=call_language if call_language != "auto" else None,
+                        task=call_task
                     )
 
                 result = await asyncio.to_thread(mlx_transcribe)
@@ -945,7 +965,8 @@ class LocalWhisperProvider(AIProvider):
                     self.pipeline,
                     audio_array,
                     batch_size=adaptive_batch_size,
-                    return_timestamps=True
+                    return_timestamps=True,
+                    **({"generate_kwargs": call_generate_kwargs} if call_generate_kwargs else {})
                 )
 
                 elapsed = asyncio.get_event_loop().time() - start_time

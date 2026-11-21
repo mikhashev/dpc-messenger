@@ -166,21 +166,13 @@ async def transcribe_audio_file(
     if provider is None:
         return f"⚠️ {error}"
 
-    previous_language = None
-    if language:
-        previous_language = getattr(provider, "language", None)
-        provider.language = language
-
     ctx.emit_progress(f"Transcribing {source.name}...")
 
     try:
-        result = await provider.transcribe(str(source))
+        result = await provider.transcribe(str(source), **({"language": language} if language else {}))
     except Exception as e:
         log.error("Transcription failed for %s: %s", source, e, exc_info=True)
         return f"⚠️ Transcription failed: {e}"
-    finally:
-        if previous_language is not None:
-            provider.language = previous_language
 
     text = (result or {}).get("text", "") or ""
     if not text.strip():

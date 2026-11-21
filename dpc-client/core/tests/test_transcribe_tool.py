@@ -26,8 +26,8 @@ class FakeWhisperProvider:
         self._language = language
         self._segments = segments
 
-    async def transcribe(self, audio_path):
-        self.calls.append({"audio_path": audio_path, "language": self.language})
+    async def transcribe(self, audio_path, language=None):
+        self.calls.append({"audio_path": audio_path, "language": language})
         result = {"text": self._text, "language": self._language, "duration": 1816.28}
         if self._segments is not None:
             result["segments"] = self._segments
@@ -168,7 +168,7 @@ class TestProviderSelection:
 
 class TestLanguageOverride:
     @pytest.mark.asyncio
-    async def test_language_passed_and_restored(self, agent_root, audio_file):
+    async def test_language_is_passed_as_an_argument_and_the_provider_is_not_touched(self, agent_root, audio_file):
         provider = FakeWhisperProvider()
         ctx = make_ctx(agent_root, {"whisper": provider})
 
@@ -178,10 +178,10 @@ class TestLanguageOverride:
         assert provider.language == "auto"
 
     @pytest.mark.asyncio
-    async def test_language_restored_after_failure(self, agent_root, audio_file):
+    async def test_a_failure_leaves_the_provider_language_alone(self, agent_root, audio_file):
         provider = FakeWhisperProvider()
 
-        async def boom(_path):
+        async def boom(_path, language=None):
             raise RuntimeError("cuda oom")
 
         provider.transcribe = boom

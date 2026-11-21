@@ -1388,12 +1388,13 @@ class P2PCoordinator:
             if not hasattr(provider_instance, 'transcribe'):
                 raise ValueError(f"Provider '{provider_alias_to_use}' does not support transcription")
 
+            overrides = {}
             if language != "auto":
-                provider_instance.language = language
+                overrides["language"] = language
             if task:
-                provider_instance.task = task
+                overrides["task"] = task
 
-            result = await provider_instance.transcribe(temp_audio_path)
+            result = await provider_instance.transcribe(temp_audio_path, **overrides)
             logger.info("Transcription completed successfully for %s", peer_id)
 
             success_response = create_remote_transcription_response(
