@@ -508,3 +508,46 @@ async def test_a_late_shutdown_unload_reports_its_outcome(llm, world, caplog):
         await asyncio.wait_for(p.shutdown_unload(timeout=0.3), 3)
         world.unload_release.set()
         await _until(lambda: "finished unloading after the shutdown bound" in caplog.text)
+
+
+def _worker_task():
+    return next(t for t in asyncio.all_tasks()
+                if getattr(t.get_coro(), "__name__", "") == "to_thread")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_worker_task_does_not_free_the_model_under_its_thread(llm, world):
+    p = llm.providers[ALIAS]
+    await p.transcribe("warm")
+    world.unload_release.clear()
+    world.unload_started.clear()
+    unloading = asyncio.create_task(p.unload_model_async())
+    await asyncio.wait_for(asyncio.to_thread(world.unload_started.wait, 2), 3)
+    _worker_task().cancel()  # loop teardown cancels the worker, not the caller
+    await asyncio.sleep(0.05)
+    assert p._unloading and p._load_lock.locked() and not unloading.done()
+
+    after = asyncio.create_task(p.transcribe("after"))
+    await asyncio.sleep(0.1)
+    assert not after.done()
+    world.unload_release.set()
+    await asyncio.wait_for(unloading, 2)  # no InvalidStateError escapes
+    assert (await asyncio.wait_for(after, 2)) == {"text": "after"}
+    assert world.inference_during_unload == 0 and not p._unloading
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_worker_task_during_a_load_does_not_let_a_second_load_start(llm, world):
+    p = llm.providers[ALIAS]
+    world.load_release.clear()
+    world.load_started.clear()
+    first = asyncio.create_task(p.transcribe("one"))
+    await asyncio.wait_for(asyncio.to_thread(world.load_started.wait, 2), 3)
+    _worker_task().cancel()
+    second = asyncio.create_task(p.transcribe("two"))
+    await asyncio.sleep(0.1)
+    assert not first.done() and not second.done()
+    world.load_release.set()
+    assert (await asyncio.wait_for(first, 2)) == {"text": "one"}
+    assert (await asyncio.wait_for(second, 2)) == {"text": "two"}
+    assert world.loads == 1

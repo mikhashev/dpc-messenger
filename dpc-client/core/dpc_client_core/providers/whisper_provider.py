@@ -4,6 +4,7 @@ import asyncio
 import gc
 import os
 import logging
+import threading
 from typing import Callable, Dict, Any, Optional, List
 
 from .base import AIProvider, ModelNotCachedError
@@ -469,21 +470,48 @@ class LocalWhisperProvider(AIProvider):
 
     @staticmethod
     async def _finish_thread(fn):
-        """Run `fn` in a worker thread and wait for it even when the caller is cancelled
-        (a thread cannot be stopped, and the lock must not be released under it).
-        Returns (result, error, cancelled); the caller re-raises the cancel once its
+        """Run `fn` in a worker thread and return only once the thread has really ended,
+        even when the caller or the worker task is cancelled (a thread cannot be stopped,
+        and the lock must not be released under it). Returns (result, error, cancelled);
+        `cancelled` is True only for a cancel of the caller, which re-raises it once its
         bookkeeping is done."""
-        worker = asyncio.ensure_future(asyncio.to_thread(fn))
+        guard = threading.Lock()
+        state = {"started": False, "abandoned": False, "result": None, "error": None}
+        ended = threading.Event()
+
+        def run():
+            with guard:
+                if state["abandoned"]:
+                    ended.set()
+                    return
+                state["started"] = True
+            try:
+                state["result"] = fn()
+            except BaseException as exc:
+                state["error"] = exc
+            finally:
+                ended.set()
+
+        worker = asyncio.ensure_future(asyncio.to_thread(run))
         cancelled = False
         while not worker.done():
             try:
                 await asyncio.shield(worker)
             except asyncio.CancelledError:
-                cancelled = True
+                if not worker.cancelled():
+                    cancelled = True
             except Exception:
                 break
-        error = worker.exception()
-        return (None if error else worker.result()), error, cancelled
+        if worker.cancelled():
+            with guard:
+                if not state["started"]:
+                    state["abandoned"] = True  # never started: it never will
+        while not ended.is_set():
+            try:
+                await asyncio.to_thread(ended.wait, 0.05)
+            except asyncio.CancelledError:
+                cancelled = True
+        return state["result"], state["error"], cancelled
 
     async def unload_if_idle(self, reason: str = "released") -> bool:
         """Unload the model unless a transcription is using it now. True when it was
