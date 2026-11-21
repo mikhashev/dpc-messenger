@@ -510,9 +510,10 @@ async def test_a_late_shutdown_unload_reports_its_outcome(llm, world, caplog):
         await _until(lambda: "finished unloading after the shutdown bound" in caplog.text)
 
 
-def _worker_task():
+def _worker_task(name="to_thread"):
+    """The live worker task wrapping a to_thread call."""
     return next(t for t in asyncio.all_tasks()
-                if getattr(t.get_coro(), "__name__", "") == "to_thread")
+                if not t.done() and getattr(t.get_coro(), "__name__", "") == name)
 
 
 @pytest.mark.asyncio
@@ -551,3 +552,38 @@ async def test_a_cancelled_worker_task_during_a_load_does_not_let_a_second_load_
     assert (await asyncio.wait_for(first, 2)) == {"text": "one"}
     assert (await asyncio.wait_for(second, 2)) == {"text": "two"}
     assert world.loads == 1
+
+
+async def _never_started_thread(fn, *args, **kwargs):
+    await asyncio.sleep(3600)  # stands for an executor too busy to start the thread
+
+
+@pytest.mark.asyncio
+async def test_a_worker_cancelled_before_its_thread_starts_returns_an_error_and_frees_the_lock(llm, world, monkeypatch):
+    seen = []
+    whisper_provider.set_unloaded_listener(lambda alias, model, reason: seen.append(reason))
+    p = llm.providers[ALIAS]
+    await p.transcribe("warm")
+    with monkeypatch.context() as patched:
+        patched.setattr(asyncio, "to_thread", _never_started_thread)
+        unloading = asyncio.create_task(p.unload_model_async())
+        await asyncio.sleep(0.05)
+        _worker_task("_never_started_thread").cancel()
+    with pytest.raises(RuntimeError, match="before its thread started"):
+        await asyncio.wait_for(unloading, 2)
+    assert not p._load_lock.locked() and not p._unloading
+    assert p.is_model_loaded() and seen == [] and world.unloads == 0  # nothing happened
+
+
+@pytest.mark.asyncio
+async def test_a_load_whose_worker_never_started_leaves_nothing_counted(llm, world, monkeypatch):
+    p = llm.providers[ALIAS]
+    with monkeypatch.context() as patched:
+        patched.setattr(asyncio, "to_thread", _never_started_thread)
+        call = asyncio.create_task(p.transcribe("x"))
+        await asyncio.sleep(0.05)
+        _worker_task("_never_started_thread").cancel()
+    with pytest.raises(RuntimeError, match="before its thread started"):
+        await asyncio.wait_for(call, 2)
+    assert not p._load_lock.locked() and p._active_transcriptions == 0 and not p.is_model_loaded()
+    assert (await asyncio.wait_for(p.transcribe("again"), 2)) == {"text": "again"}

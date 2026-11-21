@@ -500,12 +500,14 @@ class LocalWhisperProvider(AIProvider):
             except asyncio.CancelledError:
                 if not worker.cancelled():
                     cancelled = True
-            except Exception:
-                break
         if worker.cancelled():
             with guard:
                 if not state["started"]:
-                    state["abandoned"] = True  # never started: it never will
+                    state["abandoned"] = True  # never started, and `run` will now do nothing
+            if state["abandoned"]:
+                if cancelled:
+                    raise asyncio.CancelledError
+                return None, RuntimeError("the worker was cancelled before its thread started"), False
         while not ended.is_set():
             try:
                 await asyncio.to_thread(ended.wait, 0.05)
