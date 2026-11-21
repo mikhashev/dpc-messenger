@@ -19,6 +19,11 @@
   for files outside ~/.dpc, `asset:` for files under ~/.dpc on Windows and macOS. The
   one place that decides is `trackPlaybackUrl` in utils/musicPlayer.ts.
 
+  MP3 export (Mike #210; core music/export.py, services/musicExports.ts): "Export MP3" in a
+  row's ⋯ menu and on the now-playing card, "Export playlist as MP3" on a playlist. The
+  core names the file, keeps one export per track and preset, and answers "Already
+  exported" for a repeat; a track with an export shows an "mp3" chip that reveals the file.
+
   Under Now playing sits the Lyrics area (MusicLyrics.svelte): the lyrics chain of
   the core (.lrc sidecar, file tags, LRCLIB, manual edit) for the current track.
 
@@ -44,6 +49,16 @@
   import { revealInFolder } from '$lib/utils/revealInFolder';
   import { isCommentShortcut } from '$lib/utils/musicComments';
   import { ensureComments, musicComments } from '$lib/services/musicComments';
+  import {
+    clearExportStatus,
+    exportPlaylistMp3,
+    exportTrackMp3,
+    loadMusicExports,
+    musicExportInfo,
+    musicExportPreset,
+    musicExportStatus,
+  } from '$lib/services/musicExports';
+  import { EXPORT_PRESETS, exportChip, exportFolderWarning, presetShortLabel } from '$lib/utils/musicExport';
   import {
     HEADER_HEIGHT,
     isClick,
@@ -336,6 +351,35 @@
     const failure = await revealInFolder(entry.path, revealItemInDir);
     if (failure) fail(failure);
   }
+
+  // -- MP3 export (services/musicExports.ts) -----------------------------------------
+  let exportInfo = $derived($musicExportInfo);
+  let exportPresets = $derived(exportInfo?.presets?.length ? exportInfo.presets : EXPORT_PRESETS);
+  let exportWarning = $derived(exportFolderWarning(exportInfo));
+  function chipOf(entry: LibraryEntry | null | undefined) {
+    return entry ? exportChip(exportInfo?.exports?.[entry.id]) : null;
+  }
+  function exportRunning(id: string | null | undefined): boolean {
+    return !!id && !!$musicExportStatus[id]?.running;
+  }
+  async function revealPath(path: string | null | undefined) {
+    const failure = await revealInFolder(path, revealItemInDir);
+    if (failure) fail(failure);
+  }
+  function exportRow(entry: LibraryEntry) {
+    menuId = null;
+    void exportTrackMp3(entry.id, entry.title);
+  }
+  function exportSelectedList() {
+    const pl = selectedList;
+    if (pl && pl.kind === 'user') void exportPlaylistMp3(pl.id, pl.name);
+  }
+  // The chips: read when the window opens and when the library gains or loses a track.
+  $effect(() => {
+    if (!active || $musicLibrary.status !== 'ready') return;
+    void $musicLibrary.entries.length;
+    untrack(() => loadMusicExports());
+  });
 
   // -- comments (mp.comment/1): the C key and the card's Comment button open the form ---------
   let commentSignal = $state(0);
@@ -706,6 +750,31 @@
   {/if}
 {/snippet}
 
+{#snippet exportChipTag(entry: LibraryEntry | null | undefined)}
+  {@const chip = chipOf(entry)}
+  {#if chip}
+    <button type="button" class="tag link mp3" title={chip.title} aria-label="Show the MP3 export in its folder" onclick={() => revealPath(chip.path)}>{chip.label}</button>
+  {/if}
+{/snippet}
+
+{#snippet exportLine(id: string | null | undefined)}
+  {@const st = id ? $musicExportStatus[id] : undefined}
+  {#if id && st}
+    <div class="export-line" class:error={st.error} role="status" aria-live="polite">
+      {#if st.running}<span class="spinner" aria-hidden="true"></span>{/if}
+      <span class="export-text">{st.text}</span>
+      {#if st.path && !st.running}<button type="button" class="small-btn" onclick={() => revealPath(st.path)}>Show in folder</button>{/if}
+      {#if !st.running}<button type="button" class="link-btn" aria-label="Dismiss" onclick={() => clearExportStatus(id)}>×</button>{/if}
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet presetSelect(label: string)}
+  <select class="add-to" bind:value={$musicExportPreset} aria-label={label} title="MP3 preset: V0 is the default">
+    {#each exportPresets as preset (preset.id)}<option value={preset.id}>{presetShortLabel(preset.id)}</option>{/each}
+  </select>
+{/snippet}
+
 {#snippet icon(name: 'prev' | 'next' | 'play' | 'pause' | 'shuffle' | 'repeat' | 'repeat-one')}
   <!-- Inline SVG: glyphs such as U+23EE render as emoji, or not at all, on some Linux fonts. -->
   <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -849,6 +918,7 @@
                 </div>
                 {#if cur}
                   {@render originBadge(cur)}
+                  {@render exportChipTag(cur)}
                   {#if curProblem}<span class="tag warn" title={curProblem.reason}>{curProblem.problem === 'missing' ? 'missing' : 'not playable yet'}</span>{/if}
                 {/if}
               </div>
@@ -876,11 +946,14 @@
                 <div class="modes">{@render modeButtons(false)}</div>
                 <button type="button" class="small-btn" onclick={() => (commentSignal += 1)} disabled={!cur} title="Comment at the current position (C)">Comment</button>
                 <button type="button" class="small-btn" onclick={() => (view = 'create')} title="Make a song from your own text">Create</button>
+                <button type="button" class="small-btn" onclick={() => cur && exportTrackMp3(cur.id, cur.title)} disabled={!cur || cur.missing || exportRunning(cur?.id)}
+                  title="Save this track as MP3 in the export folder ({presetShortLabel($musicExportPreset)}; limited to −1 dBTP when it peaks above)">Export MP3</button>
                 <label class="volume">
                   <span class="muted small">Volume</span>
                   <input type="range" min="0" max="1" step="0.05" value={p.volume} oninput={onVolume} onchange={onVolumeEnd} aria-label="Volume" />
                 </label>
               </div>
+              {@render exportLine(cur?.id)}
               <p class="muted tiny">Space play/pause · N next · P previous · Shift+S shuffle · Shift+R repeat · ← → seek · C comment · R region</p>
             </section>
 
@@ -948,10 +1021,17 @@
                   <button type="button" class="small-btn" onclick={closePlForm} disabled={plBusy}>Cancel</button>
                 </div>
               {/if}
+              {#if exportWarning}<p class="muted tiny warn-line" role="note">{exportWarning}</p>{/if}
               <div class="list-bar">
                 <button type="button" class="small-btn primary" onclick={playSelectedList} disabled={!selectedList?.track_ids.length}>Play this list</button>
+                {#if isUserList && selectedList}
+                  <button type="button" class="small-btn" onclick={exportSelectedList} disabled={!selectedList.track_ids.length || exportRunning(selectedList.id)}
+                    title="One folder of numbered MP3s in the export folder; tracks already exported are linked, not encoded again">Export playlist as MP3</button>
+                  {@render presetSelect('MP3 preset for the playlist export')}
+                {/if}
                 <input class="text-input filter" type="search" placeholder="Filter tracks" bind:value={filter} aria-label="Filter tracks" />
               </div>
+              {#if isUserList}{@render exportLine(selectedList?.id)}{/if}
               {#if hiddenList.length || missingList.length}
                 <div class="list-bar">
                   {#if hiddenList.length}
@@ -1011,7 +1091,7 @@
                       {#if row.entry && trackSubtitle(row.entry)}<span class="muted tiny">{trackSubtitle(row.entry)}</span>{/if}
                     </button>
                     <span class="tags">
-                      {#if row.entry}{@render originBadge(row.entry)}{/if}
+                      {#if row.entry}{@render originBadge(row.entry)}{@render exportChipTag(row.entry)}{/if}
                       {#if problem}<span class="tag warn" title={problem.reason}>{problem.problem === 'missing' ? 'missing' : 'not playable yet'}</span>{/if}
                     </span>
                     <span class="time">{formatTime(row.entry?.duration_s ?? null)}</span>
@@ -1035,6 +1115,10 @@
                           aria-label="More actions for {row.entry.title}" aria-expanded={menuId === row.id} title="More">⋯</button>
                         {#if menuId === row.id}
                           <button type="button" class="small-btn" onclick={() => hideRow(row.entry!)}>Hide</button>
+                          {#if !row.entry.missing}
+                            <button type="button" class="small-btn" onclick={() => exportRow(row.entry!)} disabled={exportRunning(row.id)}>Export MP3…</button>
+                            {@render presetSelect(`MP3 preset for ${row.entry.title}`)}
+                          {/if}
                           {#if row.entry.missing}
                             <button type="button" class="small-btn danger" onclick={() => removeMissingRow(row.entry!)}>Remove from library</button>
                           {/if}
@@ -1045,6 +1129,9 @@
                       {/if}
                     </span>
                   </li>
+                  {#if $musicExportStatus[row.id]}
+                    <li class="row-note">{@render exportLine(row.id)}</li>
+                  {/if}
                 {/each}
               </ol>
               {#if filteredRows.length > shownRows.length}
@@ -1397,6 +1484,21 @@
   .small-btn.icon { padding: 3px 7px; }
   .small-btn.more { align-self: center; }
   .link-btn { border: 0; background: transparent; color: var(--text-secondary, #a9b0bb); cursor: pointer; font-size: 14px; }
+
+  /* MP3 export: the result line, its spinner, the chip and the folder warning */
+  .export-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: #c9d1d9; min-width: 0; }
+  .export-line.error { color: #f5a5a5; }
+  .export-text { min-width: 0; overflow-wrap: anywhere; }
+  .spinner {
+    width: 12px; height: 12px; flex: 0 0 auto; border-radius: 50%;
+    border: 2px solid #3d4a63; border-top-color: #b6d4ff;
+    animation: export-spin 0.8s linear infinite;
+  }
+  @keyframes export-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+  .row-note { padding: 0 8px 4px 32px; }
+  button.tag.mp3 { background: #22382a; color: #9fd8a8; }
+  .warn-line { color: #f0c674; margin: 0; }
 
   .rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .row {

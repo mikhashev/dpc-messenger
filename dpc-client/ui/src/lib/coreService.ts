@@ -148,6 +148,7 @@ import { historyRestored, newSessionProposal, newSessionResult, conversationRese
 import type { MusicComment } from './utils/musicComments';
 import { callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
 import type { DiscardReason, MusicCapabilities, MusicEngine, MusicJob, MusicTake } from './utils/musicCreate';
+import type { MusicExportInfo, PlaylistExportAnswer, TrackExportAnswer } from './utils/musicExport';
 
 // Re-export all service stores for backward compatibility.
 // NOTE: When adding new UI-reactive fields from privacy_rules.json, add the store in
@@ -934,6 +935,11 @@ export async function connectToCoreService() {
                     const { noteMusicEvent } = await import("$lib/services/musicJobs");
                     noteMusicEvent(message.event, message.payload);
                 }
+                // An MP3 export finished (music/export.py): the "mp3" chips are read again.
+                else if (message.event === "music_export_done") {
+                    const { noteMusicExportDone } = await import("$lib/services/musicExports");
+                    noteMusicExportDone(message.payload);
+                }
                 // Another window changed a track's comments (music/comments.py).
                 else if (message.event === "music_comments_updated") {
                     const { noteCommentsUpdated } = await import("$lib/services/musicComments");
@@ -1492,6 +1498,13 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     // its adapters and stop the other engine), a stop drains a running generation,
                     // and ebur128 reads a whole take (up to 10 minutes of audio).
                     timeout = 180000;
+                } else if (command === 'export_music_track') {
+                    // 600s: an MP3 encode of a long track, its ebur128 check and, when it overshoots
+                    // -1 dBTP, up to three more encodes (music/export.py MAX_ENCODES).
+                    timeout = 600000;
+                } else if (command === 'export_music_playlist') {
+                    // 1800s: every track of the playlist that has no MP3 yet is encoded in turn.
+                    timeout = 1800000;
                 } else if (command === 'send_image') {
                     // Image vision analysis timeout: 240s (v0.20.0+), for the plain AI chat;
                     // in an agent chat it is a turn command and waits for the turn instead.
@@ -2109,6 +2122,25 @@ export function removeMissingMusic(trackId?: string): Promise<MusicAnswer<{ remo
 /** Delete a DPC-made file under music/generated/ and its .json sidecar, and drop the entry. */
 export function deleteGeneratedMusicFile(trackId: string): Promise<MusicAnswer<{ id: string; title: string; deleted: string[] }>> {
     return callMusic(sendCommand, 'delete_generated_music_file', { track_id: trackId });
+}
+
+// --- MP3 export (Mike #210; dpc_client_core/music/export.py) ---
+// The core resolves the file from the library by id and decides the name, the folder and
+// whether the export already exists; the UI sends only ids and a preset.
+
+/** Export one track as MP3; the same track and preset again answers the existing file. */
+export function exportMusicTrack(trackId: string, preset?: string): Promise<MusicAnswer<TrackExportAnswer>> {
+    return callMusic(sendCommand, 'export_music_track', preset ? { track_id: trackId, preset } : { track_id: trackId });
+}
+
+/** Export a playlist into one folder of numbered MP3s; tracks already exported are linked, not encoded again. */
+export function exportMusicPlaylist(playlistId: string, preset?: string): Promise<MusicAnswer<PlaylistExportAnswer>> {
+    return callMusic(sendCommand, 'export_music_playlist', preset ? { playlist_id: playlistId, preset } : { playlist_id: playlistId });
+}
+
+/** Where exports go, the presets, and the exports that exist (for one track, or every track). */
+export function getMusicExportInfo(trackId?: string): Promise<MusicAnswer<MusicExportInfo>> {
+    return callMusic(sendCommand, 'get_music_export_info', trackId ? { track_id: trackId } : {});
 }
 
 // --- Lyrics (ADR-051 D6; dpc_client_core/music/lyrics.py) ---

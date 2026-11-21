@@ -156,6 +156,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Timecoded listening notes on a library track (mp.comment/1)
     "get_music_track_peaks",
     "list_music_comments", "add_music_comment", "update_music_comment", "delete_music_comment",
+    # MP3 export (music/export.py, Mike #210): one root, an index against duplicates
+    "export_music_track", "export_music_playlist", "get_music_export_info",
     "list_strata_models",
     "install_strata_model",
     # The process registry (ADR-046 point 8): what runs now, who started it

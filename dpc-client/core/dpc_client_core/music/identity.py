@@ -120,6 +120,9 @@ class Identity:
     sample_rate: Optional[int] = None
     channels: Optional[int] = None
     notes: list = field(default_factory=list)
+    # The source content hash in a `DPC_EXPORT_OF` tag: the file is one of DPC's own MP3
+    # exports (`export.py`), which the library never takes in as a track.
+    export_of: Optional[str] = None
 
 
 def _skip_id3v2(head: bytes) -> int:
@@ -259,6 +262,7 @@ def probe_metadata(path: Path, tools: MediaTools) -> Dict[str, Any]:
         "duration_s": _as_float(fmt.get("duration")) or _as_float(stream.get("duration")),
         "sample_rate": _as_int(stream.get("sample_rate")),
         "channels": _as_int(stream.get("channels")),
+        "export_of": _tag(tags, "dpc_export_of"),
     }
     return {k: v for k, v in result.items() if v is not None}
 

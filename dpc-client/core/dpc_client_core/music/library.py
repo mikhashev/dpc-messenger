@@ -66,6 +66,14 @@ marked `unavailable` with the code in `state_reason`, and is not walked. A
 `folders.json` edited by hand to hold more than `MAX_FOLDERS` folders keeps the first
 `MAX_FOLDERS` by `added_at` active; the rest stay, `unavailable` and unscanned.
 
+**DPC's own MP3 exports are never tracks** (`export.py`, Mike #210). A walked file that
+`exclude_path` names (a file the export index lists) is skipped, and a file whose tags carry
+`DPC_EXPORT_OF` (read from the ID3 tag before the hash, and from ffprobe's tags after it, so
+any format is caught) is dropped from the scan with a log line, wherever it was copied: it
+is a copy of a track the library already holds, not a second track. A skipped file is
+remembered by path, size and mtime for the life of the process, so the poll does not read
+it again until it changes; it is not counted in the folder's `file_count`.
+
 Known limits: a change to a file listed only in `alt_paths` (a duplicate) is not
 noticed until it becomes the primary path; folders may not nest.
 """
@@ -87,6 +95,7 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 from . import schemas
+from .export import read_export_marker
 from .identity import AUDIO_EXTENSIONS, MIME_BY_EXTENSION, Identity, MediaTools, identify, probe_metadata
 from .store import (
     FOLDERS_FILE, LIBRARY_FILE, PLAYLISTS_FILE, atomic_write_text, load_records, music_dir_of,
@@ -323,6 +332,11 @@ class MusicLibrary:
         self._over_limit: Set[str] = set()
         self._background: Set[asyncio.Task] = set()
         self._dirty = False
+        # Set by the service to the exporter's index check: `exclude_path(path)` answers why a
+        # walked file is not a track (an MP3 export it listed), or None.
+        self.exclude_path: Optional[Callable[[str], Optional[str]]] = None
+        # Walked files left out as exports: path key -> (size, mtime_ns) when skipped.
+        self._ignored: Dict[str, Tuple[int, int]] = {}
 
     # -- storage -----------------------------------------------------------------
 
@@ -721,6 +735,10 @@ class MusicLibrary:
                             self._apply_probe(current, meta)
                         continue
                     # Not hashed (changed meanwhile): the full pass below reads it.
+                marker = await asyncio.to_thread(read_export_marker, Path(path))
+                if marker is not None:
+                    self._ignore_export(track_id, path, marker[0])
+                    continue
                 try:
                     ident = await asyncio.to_thread(identify, Path(path), tools)
                 except OSError as exc:
@@ -735,9 +753,50 @@ class MusicLibrary:
                     logger.exception("music: hashing %s failed", path)
                     self._verify.pop(track_id, None)
                     continue
+                if ident.export_of:
+                    self._ignore_export(track_id, path, ident.export_of)
+                    continue
                 self._apply_identity(track_id, path, ident)
             self._wake.clear()
             self._idle.set()
+
+    def _ignore_export(self, track_id: str, path: str, source_hash: str) -> None:
+        """Drop the entry of a walked file that turned out to be a DPC export, and remember
+        the file so the next poll skips it (see the module docstring)."""
+        e = self._entries.get(track_id)
+        if e is None or path_key(e.get("path") or "") != path_key(path):
+            return
+        try:
+            st = os.stat(path)
+            self._ignored[path_key(path)] = (st.st_size, st.st_mtime_ns)
+        except OSError:
+            pass
+        logger.info("music: %s is a DPC export of %s, not a new track; it is left out of the library",
+                    path, source_hash)
+        self._verify.pop(track_id, None)
+        self._delete_entry(track_id)
+        self._mark_dirty()
+
+    def _without_exports(self, found: List[Tuple[str, int, int]]) -> List[Tuple[str, int, int]]:
+        """The walked files minus the ones already known as exports and the ones the export
+        index lists."""
+        kept: List[Tuple[str, int, int]] = []
+        for path, size, mtime in found:
+            key = path_key(path)
+            if self._ignored.get(key) == (size, mtime):
+                continue
+            reason = None
+            if self.exclude_path is not None:
+                try:
+                    reason = self.exclude_path(path)
+                except Exception:
+                    logger.exception("music: the export check failed for %s", path)
+            if reason:
+                logger.info("music: %s is left out of the library: %s", path, reason)
+                self._ignored[key] = (size, mtime)
+                continue
+            kept.append((path, size, mtime))
+        return kept
 
     def _apply_probe(self, e: dict, meta: Dict[str, Any]) -> None:
         """Fill what a late ffprobe found on a hashed entry: the duration, and the tags
@@ -1022,6 +1081,7 @@ class MusicLibrary:
         process and without hashing: its mtime did not change, so nothing else would."""
         folder_id = folder["id"]
         fkey = path_key(folder["path"])
+        found = self._without_exports(found)
         found_by_key = {path_key(p): (p, size, mtime) for p, size, mtime in found}
         primary: Dict[str, dict] = {}
         alternate: Dict[str, dict] = {}

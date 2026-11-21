@@ -71,6 +71,16 @@ take an optional `engine` (`yue2` or `acestep`); without it they act on the defa
 yue2 (before 2026-11-21 there was only acestep, and a call without `engine` meant it).
 The person's own changes (propose, cancel, keep, discard, none of these) are broadcast the
 same way, so a second window sees them.
+
+**MP3 export** (`music/export.py`, Mike #210; the design is CC's proposal [P]):
+`export_music_track {track_id, preset?}`, `export_music_playlist {playlist_id, preset?}` and
+`get_music_export_info {track_id?}`. The source file is always the library's own path for the
+track id; the UI never sends a path. The root is `[music] export_dir`
+(`DPC_MUSIC_EXPORT_DIR`), by default `<DPC home>/exports/music`, outside every watched folder;
+`get_music_export_info` says when a chosen root is inside one. A finished single export is
+broadcast as `music_export_done {track_id, path}`, a playlist as `{playlist_id, path}` (the
+folder). The take's measured true peak (`loudness.true_peak_dbtp`) decides whether the -1 dBTP
+limiter runs; its sidecar and stored lyrics go into the MP3's tags.
 "Stop X" on a job waiting for the card is the existing `stop_local_engine` command with the
 holder's alias from `job.card_wait.holders`; nothing here stops another engine.
 """
@@ -92,6 +102,10 @@ from .comments import MusicComments
 from .capabilities import EngineStatus, MusicCapabilities
 from .engine_base import MusicEngineError
 from .engines import MusicEngines
+from .export import (
+    DEFAULT_PRESET, PRESETS, ExportError, ExportSource, MusicExporter, SkippedTrack, default_export_root,
+    read_take_sidecar,
+)
 from .jobs import MusicJobError, MusicJobStore
 from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
 from .loudness import LoudnessError, measure_loudness
@@ -117,6 +131,8 @@ def _error(exc: Exception) -> Dict[str, Any]:
     if isinstance(exc, MusicJobError):
         return {"status": "error", "code": exc.code, "message": exc.message, "field": exc.field}
     if isinstance(exc, MusicEngineError):
+        return {"status": "error", "code": exc.code, "message": exc.message}
+    if isinstance(exc, ExportError):
         return {"status": "error", "code": exc.code, "message": exc.message}
     logger.exception("music command failed")
     return {"status": "error", "code": "internal", "message": str(exc)}
@@ -192,6 +208,8 @@ class MusicCommandsMixin:
             comments = MusicComments(self.settings.dpc_home_dir, self._music_library_instance)
             self._music_comments_instance = comments
             self._music_library_instance.on_merged = comments.merge
+            # The scan skips the files the MP3 export index lists (export.py).
+            self._music_library_instance.exclude_path = self._music_export_excluded
         await self._music_library_instance.start()
         return self._music_library_instance
 
@@ -1011,6 +1029,190 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    # -- MP3 export (music/export.py, Mike #210) -----------------------------------------
+
+    _music_exporter_instance: Optional[MusicExporter] = None
+
+    def _music_export_root(self) -> Path:
+        """`[music] export_dir`, or `<DPC home>/exports/music`. Refused (`invalid_export_dir`)
+        when it is not absolute or is a filesystem root."""
+        raw = str(self._music_config_value("export_dir", "") or "").strip()
+        if not raw:
+            return default_export_root(self.settings.dpc_home_dir)
+        chosen = Path(os.path.expandvars(os.path.expanduser(raw)))
+        if not chosen.is_absolute():
+            raise ExportError("invalid_export_dir", f"[music] export_dir must be an absolute path: {raw}")
+        chosen = Path(os.path.normpath(chosen))
+        if chosen.parent == chosen:
+            raise ExportError("invalid_export_dir", f"[music] export_dir cannot be a filesystem root: {chosen}")
+        return chosen
+
+    def _music_exporter(self) -> MusicExporter:
+        root = self._music_export_root()
+        current = self._music_exporter_instance
+        if current is None or current.root != root:
+            self._music_exporter_instance = MusicExporter(root)
+        return self._music_exporter_instance
+
+    def _music_export_excluded(self, path: str) -> Optional[str]:
+        """The library scan's question: is this walked file an export the index lists?"""
+        try:
+            return self._music_exporter().is_export_path(path)
+        except ExportError:
+            return None
+
+    async def _music_take_of(self, entry: Dict[str, Any]) -> tuple:
+        """`(take, job)` of a generated library entry, from the job its lineage names, or
+        `(None, None)`."""
+        lineage = (entry.get("source") or {}).get("lineage") or {}
+        job_id = lineage.get("job_id")
+        if entry.get("origin") != "generated" or not isinstance(job_id, str) or not job_id:
+            return None, None
+        try:
+            store = await self._music_jobs()
+            takes = await asyncio.to_thread(store.list_takes, job_id)
+            job = await asyncio.to_thread(store.get_job, job_id)
+        except Exception as exc:
+            logger.info("music export: the take of %s is not known (%s)", entry.get("id"), exc)
+            return None, None
+        uri = (entry.get("source") or {}).get("uri")
+        take = next((t for t in takes if t.get("library_track_id") == entry["id"]), None)
+        if take is None:
+            take = next((t for t in takes if (t.get("file") or {}).get("uri") == uri), None)
+        return take, job
+
+    async def _music_export_source(self, library: MusicLibrary, entry: Dict[str, Any]) -> ExportSource:
+        """What the exporter needs for one entry, resolved from the library by id: its file,
+        content hash, names, stored lyrics, and for a generated take its sidecar and
+        measured true peak."""
+        title = entry.get("title") or entry["id"]
+        path = library.get_track_path(entry["id"])
+        if path is None:
+            raise ExportError("no_file", f"{title!r} has no file now (it is missing)")
+        if entry.get("hash_state") != "done" or not entry.get("content_hash"):
+            raise ExportError("not_hashed", f"{title!r} is still being identified; try again in a moment")
+        lyrics_text: Optional[str] = None
+        lyrics_lang: Optional[str] = None
+        try:
+            stored = await (await self._music_lyrics()).load_stored(entry["id"])
+        except Exception:
+            stored = None
+        if stored:
+            lines = [str(line.get("text") or "") for line in stored.get("lines") or []]
+            lyrics_text = "\n".join(lines).strip() or None
+            lyrics_lang = stored.get("language")
+        take, job = await self._music_take_of(entry)
+        take_record = await asyncio.to_thread(read_take_sidecar, path) if entry.get("origin") == "generated" else None
+        tp = basis = None
+        loudness = (take or {}).get("loudness") or {}
+        if isinstance(loudness.get("true_peak_dbtp"), (int, float)):
+            tp, basis = float(loudness["true_peak_dbtp"]), "the take's ebur128 measurement (loudness.py)"
+        if lyrics_text is None and job is not None:
+            sent = (job.get("params") or {}).get("lyrics")
+            if isinstance(sent, str) and sent.strip() and sent.strip() != "[Instrumental]":
+                lyrics_text = sent.strip()
+        return ExportSource(
+            track_id=entry["id"], path=path, content_hash=entry["content_hash"], title=title,
+            artist=entry.get("artist"), album=entry.get("album"), lyrics=lyrics_text, lyrics_language=lyrics_lang,
+            true_peak_dbtp=tp, true_peak_basis=basis, take_record=take_record, origin=entry.get("origin"))
+
+    @staticmethod
+    def _music_watched_folder_of(library: MusicLibrary, root: Path) -> Optional[str]:
+        """The watched folder that holds `root` (or is it), or None."""
+        from .library import _is_inside, path_key
+        key = path_key(str(root))
+        for folder in library.list_folders():
+            if _is_inside(key, path_key(folder["path"])):
+                return folder["path"]
+        return None
+
+    @slow_command
+    async def export_music_track(self, track_id: Any = None, preset: Any = None) -> Dict[str, Any]:
+        """Export one library track as MP3 (`music/export.py`): `{status, track_id, path, name,
+        already_exported, relinked, preset, limited_db, true_peak_out_dbtp}`. The same track
+        and preset again answers the existing file. Slow: ffmpeg encodes and measures.
+        Errors: `unknown_track`, `no_file`, `not_hashed`, `invalid_preset`, `no_ffmpeg`,
+        `no_mp3_encoder`, `encode_failed`, `invalid_export_dir`."""
+        try:
+            tid = _need_str(track_id, "track_id", "invalid_params")
+            chosen = MusicExporter.check_preset(_opt_str(preset, "preset", "invalid_preset"))
+            library = await self._music()
+            entry = library.get_entry(tid)
+            source = await self._music_export_source(library, entry)
+            exporter = self._music_exporter()
+            answer = await asyncio.to_thread(exporter.export_track, source, chosen)
+        except Exception as exc:
+            return _error(exc)
+        if not answer["already_exported"] or answer["relinked"]:
+            self._music_broadcast("music_export_done", {"track_id": tid, "path": answer["path"]})
+        return {"status": "ok", **answer}
+
+    @slow_command
+    async def export_music_playlist(self, playlist_id: Any = None, preset: Any = None) -> Dict[str, Any]:
+        """Export a playlist as MP3 into `<root>/<Playlist>/NN - <Artist> - <Title>.mp3`: each
+        track is exported once as a single (or found), then linked or copied in; hidden and
+        missing tracks are skipped. `{status, folder, tracks: [{track_id, status, path |
+        reason}], removed, kept}`. Errors: `unknown_playlist`, `smart_list`,
+        `empty_playlist`, and the single-track ones."""
+        try:
+            pid = _need_str(playlist_id, "playlist_id", "invalid_params")
+            chosen = MusicExporter.check_preset(_opt_str(preset, "preset", "invalid_preset"))
+            library = await self._music()
+            playlist = next((p for p in library.list_playlists() if p["id"] == pid), None)
+            if playlist is None:
+                raise MusicLibraryError("unknown_playlist", f"no playlist {pid}")
+            if playlist.get("kind") != "user":
+                raise MusicLibraryError("smart_list", "a smart list is not exported; make a playlist of its tracks")
+            items: List[Any] = []
+            for tid in playlist["track_ids"]:
+                try:
+                    entry = library.get_entry(tid)
+                except MusicLibraryError:
+                    items.append(SkippedTrack(tid, None, "not in the library", "unknown_track"))
+                    continue
+                if entry.get("hidden"):
+                    items.append(SkippedTrack(tid, entry.get("title"), "hidden", "hidden"))
+                    continue
+                try:
+                    items.append(await self._music_export_source(library, entry))
+                except ExportError as exc:
+                    items.append(SkippedTrack(tid, entry.get("title"), exc.message, exc.code))
+            exporter = self._music_exporter()
+            done: List[Dict[str, Any]] = []
+            answer = await asyncio.to_thread(exporter.export_playlist, pid, playlist["name"], items, chosen, done.append)
+        except Exception as exc:
+            return _error(exc)
+        for single in done:
+            if not single["already_exported"] or single["relinked"]:
+                self._music_broadcast("music_export_done", {"track_id": single["track_id"], "path": single["path"]})
+        self._music_broadcast("music_export_done", {"playlist_id": pid, "path": answer["folder"]})
+        return {"status": "ok", "playlist_id": pid, **answer}
+
+    @slow_command
+    async def get_music_export_info(self, track_id: Any = None) -> Dict[str, Any]:
+        """Where exports go and what exists: `{export_root, default_root, inside_watched_folder,
+        watched_folder, presets, default_preset, exports: {track_id: [{preset, path, name,
+        exported_at, limited_db, true_peak_out_dbtp}]}}`, for one track with `track_id`, else
+        for every track. Only exports whose file is there now are listed."""
+        try:
+            tid = _opt_str(track_id, "track_id", "invalid_params")
+            library = await self._music()
+            entries = [library.get_entry(tid)] if tid is not None else library.list_entries()
+            hashes: Dict[str, List[str]] = {}
+            for e in entries:
+                if e.get("content_hash"):
+                    hashes.setdefault(e["content_hash"], []).append(e["id"])
+            exporter = self._music_exporter()
+            exports = await asyncio.to_thread(exporter.exports_for, hashes)
+            watched = self._music_watched_folder_of(library, exporter.root)
+            return {"status": "ok", "export_root": str(exporter.root),
+                    "default_root": str(default_export_root(self.settings.dpc_home_dir)),
+                    "inside_watched_folder": watched is not None, "watched_folder": watched,
+                    "presets": [{"id": k, "label": v["label"], "format": v["format"]} for k, v in PRESETS.items()],
+                    "default_preset": DEFAULT_PRESET, "exports": exports}
+        except Exception as exc:
+            return _error(exc)
+
 
 MUSIC_COMMANDS = (
     "list_music_folders",
@@ -1052,4 +1254,7 @@ MUSIC_COMMANDS = (
     "add_music_comment",
     "update_music_comment",
     "delete_music_comment",
+    "export_music_track",
+    "export_music_playlist",
+    "get_music_export_info",
 )

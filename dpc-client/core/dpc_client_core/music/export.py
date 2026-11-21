@@ -1,0 +1,1138 @@
+"""MP3 export of library tracks (Mike, AI Studio group #210, 2026-11-22: "export or save to
+mp3 is missing; think how to avoid duplicates and not turn the folder and its subfolders into
+organisational chaos"). The design is CC's proposal [P]; only the ask is Mike's.
+
+**One export root, outside every watched folder.** The default is `<DPC home>/exports/music/`.
+The library refuses to watch anything inside the DPC home except `<DPC home>/music/`
+(`library._check_watchable`), so nothing written here is ever scanned in as a second track.
+`[music] export_dir` (`DPC_MUSIC_EXPORT_DIR`) points it elsewhere, `~/Music` say; when that
+place is inside a watched folder the export marker below still keeps the copies out of the
+library, and `get_music_export_info` says so for the UI to warn.
+
+**Flat and predictable.** A single track is `<root>/<Artist> - <Title>.mp3` (`<Title>.mp3`
+without an artist), with ` (320 kbps)` added for the 320 preset; a name another source already
+holds gets a short suffix from this source's content hash, `Title (a1b2c3).mp3`. The only
+subfolders are playlists, one level: `<root>/<Playlist>/NN - <Artist> - <Title>.mp3`. Names are
+portable on Windows, Linux and macOS: no `<>:"/\\|?*` or control characters (`:` reads as
+` -`, `?` and `*` are dropped, `"` becomes `'`, the rest `_`), no leading dots
+(hidden on Unix), no trailing dots or spaces, no reserved Windows device names, at most 120
+UTF-8 bytes for a file stem and 60 for a folder (the whole path stays under Windows' 260), and
+collisions are compared case-insensitively after NFC (macOS hands out NFD names).
+
+**No duplicates, by identity.** `<root>/.dpc-exports.json` (written atomically) maps
+`(source content hash, format, preset)` to the file's path relative to the root, its sha256
+and `exported_at`. The source is the library's own content hash (`md5:<pcm md5>` for a FLAC
+take), so a renamed or moved library file is still the same source.
+
+- The same source with the same preset is answered with the existing file
+  (`already_exported`), never encoded again.
+- When the indexed file is gone, the root (flat, not its playlist folders) is searched for
+  an MP3 whose ID3 `TXXX:DPC_EXPORT_OF` and `TXXX:DPC_EXPORT_PRESET` name this source and
+  preset: a file the person renamed by hand is found that way and the index follows it
+  (`relinked`). Reading the tag is a few KB per file, in pure Python. Only when no such file
+  exists is it encoded again, under the expected name.
+- A playlist export runs the same rule per track and then hard-links the single file into
+  the playlist folder (no second encode, no second copy of the bytes); where a hard link is
+  refused (another volume, FAT/exFAT, a share) the file is copied. Each run of the same
+  playlist and preset replaces the folder's previous run: files it no longer lists are
+  removed when they still carry this source's marker, a renamed playlist renames its folder,
+  and a file the person put there is never touched.
+
+**The scanner** (`library.py`) never takes an export in as a track: a file the index lists is
+skipped, and any file whose tags carry `DPC_EXPORT_OF` is dropped from the scan with a log line,
+wherever it was copied. The whole export root is not skipped by path: with `export_dir` set to
+the person's own music folder that would hide their own music.
+
+**The encode** goes to `<name>.mp3.audio.part` (ffmpeg, libmp3lame, no tags), is measured, and
+is written with its ID3v2.4 tag in front to `<name>.mp3.part`, which is moved to `<name>.mp3`
+only when complete and never over an existing file. `.part` is not an audio extension, so the
+library never sees a half file, and a failure removes both parts.
+
+**Tags.** ffmpeg 8.1.2's ID3 muxer writes `comment` and `lyrics` as `TXXX` frames, not `COMM`
+and `USLT` (checked on this machine), so the tag is built here, by hand, as PROVENANCE §3 asks:
+ID3v2.4, UTF-8, `TIT2` `TPE1` `TALB` `TCON` `TDRC` `COMM` `USLT` `TSSE`, and `TXXX` frames
+`DPC_EXPORT_OF`, `DPC_EXPORT_PRESET` and `DPC_PROVENANCE`. Writing the tag after the encode
+also keeps a 20 KB provenance record off the command line (Windows caps it at 32 767 chars).
+
+**Provenance** (`TXXX:DPC_PROVENANCE`, `dpc.export-provenance/1`): the source's identity (track
+id, content hash, file sha256 and PCM MD5), the source file's own `DPC_PROVENANCE` carried over
+unchanged when it has one (PROVENANCE rule 7), the take's sidecar (`dpc.take-sidecar/1`) for a
+generated take, and the post step: tool and version, encoder, preset and settings, the limiter,
+and `cmd_as_sent`, the ffmpeg argv of the encode that made the audio (Forge #209 R-F3). Rule 3
+forbids local paths inside a file that may be shared, so exactly three elements of that argv
+are reduced to file names: the ffmpeg binary, the source and the output; the record says so.
+
+**True peak** (EVOLUTION §11, Forge #209 R-F3; the policy is not formally decided by Mike, so
+it is the default and it is shown): a lossy export is limited to -1 dBTP; the library file is
+never touched. When the source's true peak is known and at or below -1 dBTP (the take's
+`loudness.true_peak_dbtp`, else a measurement of the source) there is no limiter. Otherwise the
+chain is `aresample=4x, alimiter (sample peak, -1.5 dBFS, lookahead), aresample back`. The
+decoded MP3 is then measured with ebur128: an MP3 can overshoot the limiter (measured on this
+machine: dense clipped pink noise limited to -1.2 dBTP came back at +0.5 dBTP from V0), so
+while the result is above -1 dBTP it is encoded again with the limit lowered by the overshoot,
+at most `MAX_ENCODES` times in all. An unlimited encode that lands above -1 dBTP is redone with
+the limiter. The answer carries the measured result.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import threading
+import unicodedata
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+
+from .identity import MediaTools, file_sha256, read_flac_streaminfo
+from .loudness import LoudnessError, measure_loudness
+from .store import atomic_write_text
+
+logger = logging.getLogger(__name__)
+
+INDEX_FILE = ".dpc-exports.json"
+INDEX_SCHEMA = "dpc.music-exports/1"
+PROVENANCE_SCHEMA = "dpc.export-provenance/1"
+TAKE_SIDECAR_SCHEMA = "dpc.take-sidecar/1"
+MARKER_TAG = "DPC_EXPORT_OF"
+PRESET_TAG = "DPC_EXPORT_PRESET"
+PROVENANCE_TAG = "DPC_PROVENANCE"
+DEFAULT_EXPORT_SUBDIR = ("exports", "music")
+
+FORMAT_MP3 = "mp3"
+DEFAULT_PRESET = "mp3-v0"
+PRESETS: Dict[str, Dict[str, Any]] = {
+    "mp3-v0": {
+        "format": FORMAT_MP3, "label": "MP3 V0 (VBR, about 245 kbps)", "name_suffix": "",
+        "args": ["-c:a", "libmp3lame", "-q:a", "0"],
+        "settings": {"encoder": "libmp3lame", "mode": "vbr", "vbr_quality": 0},
+    },
+    "mp3-320": {
+        "format": FORMAT_MP3, "label": "MP3 320 kbps (CBR)", "name_suffix": " (320 kbps)",
+        "args": ["-c:a", "libmp3lame", "-b:a", "320k"],
+        "settings": {"encoder": "libmp3lame", "mode": "cbr", "bitrate_kbps": 320},
+    },
+}
+
+TRUE_PEAK_CEILING_DBTP = -1.0
+LIMITER_START_DBFS = -1.5
+LIMITER_FLOOR_DBFS = -24.0          # alimiter's lowest limit (0.0625)
+LIMITER_STEP_MARGIN_DB = 0.2
+MAX_ENCODES = 4
+OVERSAMPLE = 4
+MP3_SAMPLE_RATES = frozenset({8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000})
+
+ENCODE_TIMEOUT_S = 600.0
+PROBE_TIMEOUT_S = 15.0
+STEM_MAX_BYTES = 120
+FOLDER_MAX_BYTES = 60
+HASH_SUFFIX_RESERVE = 9              # " (abcdef)"
+PROVENANCE_MAX_BYTES = 64 * 1024
+SIDECAR_MAX_BYTES = 256 * 1024
+ID3_READ_MAX_BYTES = 1024 * 1024
+ID3_PADDING = 1024
+_COPY_CHUNK = 1024 * 1024
+
+_FORBIDDEN = frozenset('<>:"/\\|?*')
+# How a forbidden character reads in a name: `Title: Part` -> `Title - Part`, `Why?` -> `Why`.
+_REPLACE = {":": " -", '"': "'", "?": "", "*": "", "<": "_", ">": "_", "|": "_", "/": "_", "\\": "_"}
+_RESERVED = frozenset({"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                       *(f"LPT{i}" for i in range(1, 10))})
+_DATE_RE = re.compile(r"^\d{4}(-\d{2}(-\d{2})?)?$")
+
+Measure = Callable[[Path], Dict[str, Any]]
+
+
+class ExportError(Exception):
+    """An export the exporter refuses or cannot make; `code` is a short machine word."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def default_export_root(dpc_home: Path) -> Path:
+    return Path(dpc_home).joinpath(*DEFAULT_EXPORT_SUBDIR)
+
+
+def name_key(name: str) -> str:
+    """How two names in one folder are compared: NFC, case-folded (NTFS and APFS are
+    case-insensitive by default; ext4 is not, but a name that differs only by case would
+    still be two exports of one name)."""
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _path_key(path: Path) -> str:
+    return os.path.normcase(unicodedata.normalize("NFC", os.path.normpath(str(path))))
+
+
+# -- names ---------------------------------------------------------------------------------
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def sanitize_component(text: Any, max_bytes: int = STEM_MAX_BYTES, fallback: str = "Untitled") -> str:
+    """One portable file or folder name part (see the module docstring)."""
+    s = unicodedata.normalize("NFC", str(text or ""))
+    s = "".join(_REPLACE[c] if c in _FORBIDDEN else " " if (ord(c) < 32 or ord(c) == 127) else c for c in s)
+    s = " ".join(s.split()).strip(" .")
+    s = _truncate_utf8(s, max(1, max_bytes)).rstrip(" .")
+    if not s:
+        s = fallback
+    if s.split(".")[0].rstrip(" ").upper() in _RESERVED:
+        s = "_" + s
+    return s
+
+
+def track_stem(artist: Optional[str], title: Optional[str], preset: str = DEFAULT_PRESET,
+               max_bytes: int = STEM_MAX_BYTES) -> str:
+    """`<Artist> - <Title>` (or `<Title>`), sanitized, with the preset's suffix, short enough
+    for a collision suffix to fit."""
+    suffix = PRESETS.get(preset, {}).get("name_suffix", "")
+    room = max_bytes - len(suffix.encode("utf-8")) - HASH_SUFFIX_RESERVE
+    t = sanitize_component(title, room)
+    a = sanitize_component(artist, room, fallback="") if artist and str(artist).strip() else ""
+    base = f"{a} - {t}" if a else t
+    return sanitize_component(base, room) + suffix
+
+
+def hash_digest(content_hash: str) -> str:
+    """The hex part of a content hash (`md5:ab..` -> `ab..`); letters and digits only."""
+    tail = str(content_hash).split(":", 1)[-1]
+    return "".join(c for c in tail.lower() if c in "0123456789abcdef") or "0"
+
+
+def pick_name(stem: str, ext: str, taken: Set[str], content_hash: str) -> str:
+    """The first free name: `stem.ext`, then `stem (<6 hex>).ext`, `stem (<12 hex>).ext`,
+    then `stem (<6 hex>-n).ext`. `taken` holds `name_key`s."""
+    h = hash_digest(content_hash)
+    candidates = [stem, f"{stem} ({h[:6]})", f"{stem} ({h[:12]})"]
+    candidates += [f"{stem} ({h[:6]}-{n})" for n in range(2, 1000)]
+    for cand in candidates:
+        name = cand + ext
+        if name_key(name) not in taken:
+            return name
+    raise ExportError("name_taken", f"no free name for {stem}{ext}")
+
+
+def number_width(count: int) -> int:
+    return max(2, len(str(count)))
+
+
+# -- ID3v2.4, written and read by hand ------------------------------------------------------
+
+
+def _syncsafe(n: int) -> bytes:
+    return bytes([(n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F])
+
+
+def _unsyncsafe(b: bytes) -> Optional[int]:
+    if len(b) != 4 or any(x & 0x80 for x in b):
+        return None
+    return (b[0] << 21) | (b[1] << 14) | (b[2] << 7) | b[3]
+
+
+def _clean(text: Any) -> str:
+    return str(text).replace("\x00", "")
+
+
+def _frame(fid: str, payload: bytes) -> bytes:
+    return fid.encode("ascii") + _syncsafe(len(payload)) + b"\x00\x00" + payload
+
+
+def text_frame(fid: str, text: str) -> bytes:
+    return _frame(fid, b"\x03" + _clean(text).encode("utf-8"))
+
+
+def txxx_frame(desc: str, value: str) -> bytes:
+    return _frame("TXXX", b"\x03" + _clean(desc).encode("utf-8") + b"\x00" + _clean(value).encode("utf-8"))
+
+
+def _lang3(language: Optional[str]) -> bytes:
+    lang = (language or "").strip().lower()
+    return lang.encode("ascii") if len(lang) == 3 and lang.isascii() and lang.isalpha() else b"xxx"
+
+
+def comm_frame(text: str, language: Optional[str] = None) -> bytes:
+    return _frame("COMM", b"\x03" + _lang3(language) + b"\x00" + _clean(text).encode("utf-8"))
+
+
+def uslt_frame(text: str, language: Optional[str] = None) -> bytes:
+    return _frame("USLT", b"\x03" + _lang3(language) + b"\x00" + _clean(text).encode("utf-8"))
+
+
+def build_id3v24(frames: Sequence[bytes], padding: int = ID3_PADDING) -> bytes:
+    """An ID3v2.4 tag: no unsynchronisation, no extended header, `padding` zero bytes so an
+    editor can change it in place."""
+    body = b"".join(frames) + b"\x00" * padding
+    return b"ID3\x04\x00\x00" + _syncsafe(len(body)) + body
+
+
+def _split_encoded(enc: int, data: bytes) -> Tuple[str, str]:
+    if enc in (1, 2):
+        cut = next((i for i in range(0, len(data) - 1, 2) if data[i:i + 2] == b"\x00\x00"), len(data))
+        codec = "utf-16" if enc == 1 else "utf-16-be"
+        head, tail = data[:cut], data[cut + 2:]
+        return (head.decode(codec, errors="replace").strip("\x00"),
+                tail.decode(codec, errors="replace").strip("\x00"))
+    cut = data.find(b"\x00")
+    head, tail = (data, b"") if cut < 0 else (data[:cut], data[cut + 1:])
+    codec = "utf-8" if enc == 3 else "latin-1"
+    return head.decode(codec, errors="replace"), tail.decode(codec, errors="replace").strip("\x00")
+
+
+def read_id3_txxx(path: Path, max_bytes: int = ID3_READ_MAX_BYTES) -> Dict[str, str]:
+    """The `TXXX` frames (description -> value) of a leading ID3v2.3 or 2.4 tag; {} when
+    there is none or it cannot be read safely. Reads at most `max_bytes` of the tag."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(10)
+            if len(head) < 10 or head[:3] != b"ID3" or head[3] not in (3, 4):
+                return {}
+            flags = head[5]
+            size = _unsyncsafe(head[6:10])
+            if size is None or flags & 0x80:  # tag-wide unsynchronisation: not ours, not parsed
+                return {}
+            data = f.read(min(size, max_bytes))
+    except OSError:
+        return {}
+    major = head[3]
+    pos = 0
+    if flags & 0x40 and len(data) >= 4:  # an extended header
+        if major == 4:
+            ext = _unsyncsafe(data[:4])
+            pos = ext if ext is not None else len(data)
+        else:
+            pos = int.from_bytes(data[:4], "big") + 4
+    out: Dict[str, str] = {}
+    while pos + 10 <= len(data):
+        fid = data[pos:pos + 4]
+        if fid[0] == 0 or not all(48 <= c <= 57 or 65 <= c <= 90 for c in fid):
+            break
+        raw_size = data[pos + 4:pos + 8]
+        fsize = _unsyncsafe(raw_size) if major == 4 else int.from_bytes(raw_size, "big")
+        if fsize is None:
+            break
+        fflags = data[pos + 9]
+        payload = data[pos + 10:pos + 10 + fsize]
+        pos += 10 + fsize
+        if fid != b"TXXX" or len(payload) < 2:
+            continue
+        if (major == 4 and fflags & 0x0F) or (major == 3 and fflags & 0xC0):
+            continue  # compressed, encrypted or unsynchronised frame
+        desc, value = _split_encoded(payload[0], payload[1:])
+        out[desc] = value
+    return out
+
+
+def _tag_value(tags: Dict[str, str], name: str) -> Optional[str]:
+    for key, value in tags.items():
+        if key.casefold() == name.casefold() and value and value.strip():
+            return value.strip()
+    return None
+
+
+def read_export_marker(path: Path) -> Optional[Tuple[str, Optional[str]]]:
+    """`(source content hash, preset or None)` when `path` is an MP3 that DPC exported, by
+    its `TXXX:DPC_EXPORT_OF`; None otherwise. Cheap: reads the leading tag only."""
+    if Path(path).suffix.lower() != ".mp3":
+        return None
+    tags = read_id3_txxx(Path(path))
+    marker = _tag_value(tags, MARKER_TAG)
+    if not marker:
+        return None
+    return marker, _tag_value(tags, PRESET_TAG)
+
+
+# -- the source ---------------------------------------------------------------------------------
+
+
+@dataclass
+class ExportSource:
+    """One library track as the exporter sees it; the command layer fills it from the library
+    by id (the UI never names a file)."""
+
+    track_id: str
+    path: Path
+    content_hash: str
+    title: str
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    lyrics: Optional[str] = None
+    lyrics_language: Optional[str] = None
+    true_peak_dbtp: Optional[float] = None
+    true_peak_basis: Optional[str] = None
+    take_record: Optional[Dict[str, Any]] = None
+    origin: Optional[str] = None
+
+
+@dataclass
+class SkippedTrack:
+    """A playlist position the exporter does not export, and why."""
+
+    track_id: str
+    title: Optional[str]
+    reason: str
+    code: str = "skipped"
+
+
+def read_take_sidecar(path: Path) -> Optional[Dict[str, Any]]:
+    """The take's `<name>.json` sidecar (`dpc.take-sidecar/1`) next to its file, or None."""
+    sidecar = Path(path).with_suffix(".json")
+    try:
+        if not sidecar.is_file() or sidecar.stat().st_size > SIDECAR_MAX_BYTES:
+            return None
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if isinstance(data, dict) and data.get("schema") == TAKE_SIDECAR_SCHEMA:
+        return data
+    return None
+
+
+# -- the exporter ---------------------------------------------------------------------------------
+
+
+@dataclass
+class _Encoded:
+    cmd_as_sent: List[str]
+    limiter: Dict[str, Any]
+    true_peak_out_dbtp: Optional[float]
+
+
+@dataclass
+class _Index:
+    exports: List[Dict[str, Any]] = field(default_factory=list)
+    playlists: List[Dict[str, Any]] = field(default_factory=list)
+
+
+class MusicExporter:
+    """Exports library tracks as MP3 under one root. Blocking: the commands call it through
+    `asyncio.to_thread`. One lock serialises every export, so two clicks never write the
+    same index or name at once."""
+
+    def __init__(self, root: Path, *, tools: Optional[MediaTools] = None, measure: Optional[Measure] = None):
+        self.root = Path(root)
+        self._tools = tools
+        self._tools_given = tools is not None
+        self._measure_fn = measure
+        self._lock = threading.RLock()
+        self._index: Optional[_Index] = None
+        self._export_keys: frozenset = frozenset()
+        self._encoder_checked = False
+        self._ffmpeg_version: Optional[str] = None
+
+    # -- tools ----------------------------------------------------------------------------
+
+    @property
+    def tools(self) -> MediaTools:
+        if self._tools is None:
+            self._tools = MediaTools.discover()
+        return self._tools
+
+    def _measure(self, path: Path) -> Dict[str, Any]:
+        if self._measure_fn is not None:
+            return self._measure_fn(path)
+        return measure_loudness(path, self.tools)
+
+    def check_encoder(self) -> None:
+        """Raise `no_ffmpeg` or `no_mp3_encoder` unless ffmpeg with libmp3lame is there.
+        Asked once per exporter; a missing ffmpeg is asked again on the next export."""
+        tools = self.tools
+        if not tools.ffmpeg and not self._tools_given:
+            self._tools = tools = MediaTools.discover()  # installed since the last try?
+            self._encoder_checked = False
+        if not tools.ffmpeg:
+            raise ExportError("no_ffmpeg", "ffmpeg is not on PATH; MP3 export encodes with ffmpeg's libmp3lame "
+                                           "(install ffmpeg and try again)")
+        if self._encoder_checked:
+            return
+        try:
+            done = tools.runner([tools.ffmpeg, "-hide_banner", "-encoders"], timeout=PROBE_TIMEOUT_S)
+        except Exception as exc:
+            raise ExportError("no_ffmpeg", f"ffmpeg could not run: {exc}")
+        out = done.stdout.decode("utf-8", "replace") if isinstance(done.stdout, bytes) else (done.stdout or "")
+        if "libmp3lame" not in out:
+            raise ExportError("no_mp3_encoder", "this ffmpeg has no libmp3lame encoder; install an ffmpeg build "
+                                                "with LAME (distribution packages and the gyan.dev and "
+                                                "evermeet builds have it) and try again")
+        try:
+            ver = tools.runner([tools.ffmpeg, "-version"], timeout=PROBE_TIMEOUT_S)
+            text = ver.stdout.decode("utf-8", "replace") if isinstance(ver.stdout, bytes) else (ver.stdout or "")
+            first = (text.splitlines() or [""])[0]
+            self._ffmpeg_version = first.split(" Copyright")[0].strip() or None
+        except Exception:
+            self._ffmpeg_version = None
+        self._encoder_checked = True
+
+    def _probe(self, path: Path) -> Tuple[Dict[str, str], Optional[int], Optional[int]]:
+        """`(tags, sample rate, channels)` of the source from ffprobe; FLAC STREAMINFO
+        gives the rate and channels without it."""
+        tags: Dict[str, str] = {}
+        rate = channels = None
+        tools = self.tools
+        if tools.ffprobe:
+            cmd = [tools.ffprobe, "-v", "error", "-show_format", "-show_streams", "-select_streams", "a:0",
+                   "-of", "json", str(path)]
+            try:
+                done = tools.runner(cmd, timeout=PROBE_TIMEOUT_S)
+                raw = done.stdout.decode("utf-8", "replace") if isinstance(done.stdout, bytes) else (done.stdout or "")
+                data = json.loads(raw) if done.returncode == 0 else {}
+            except Exception:
+                data = {}
+            streams = data.get("streams") or []
+            stream = streams[0] if streams and isinstance(streams[0], dict) else {}
+            for src in (stream.get("tags") or {}, (data.get("format") or {}).get("tags") or {}):
+                for k, v in src.items():
+                    if isinstance(k, str) and isinstance(v, str):
+                        tags[k] = v
+            try:
+                rate = int(stream.get("sample_rate")) if stream.get("sample_rate") else None
+                channels = int(stream.get("channels")) if stream.get("channels") else None
+            except (TypeError, ValueError):
+                rate = channels = None
+        if rate is None and path.suffix.lower() == ".flac":
+            try:
+                info = read_flac_streaminfo(path)
+            except OSError:
+                info = None
+            if info is not None:
+                rate, channels = info.sample_rate or None, info.channels or None
+        return tags, rate, channels
+
+    # -- the index ----------------------------------------------------------------------------
+
+    @property
+    def index_path(self) -> Path:
+        return self.root / INDEX_FILE
+
+    def _abs(self, rel: str) -> Path:
+        return self.root.joinpath(*[p for p in str(rel).split("/") if p])
+
+    def _rel(self, path: Path) -> str:
+        return Path(os.path.relpath(path, self.root)).as_posix()
+
+    def _load(self) -> _Index:
+        if self._index is not None:
+            return self._index
+        index = _Index()
+        path = self.index_path
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("not a JSON object")
+                index.exports = [e for e in data.get("exports") or [] if self._valid_export(e)]
+                index.playlists = [p for p in data.get("playlists") or [] if self._valid_playlist(p)]
+            except (OSError, ValueError, UnicodeDecodeError) as exc:
+                aside = path.with_name(f"{path.name}.corrupt-{_stamp()}")
+                logger.error("music export: %s does not parse (%s); moved aside to %s", path, exc, aside.name)
+                try:
+                    os.replace(path, aside)
+                except OSError:
+                    logger.warning("music export: could not move %s aside", path, exc_info=True)
+        self._index = index
+        self._refresh_keys()
+        return index
+
+    @staticmethod
+    def _valid_export(e: Any) -> bool:
+        return (isinstance(e, dict) and all(isinstance(e.get(k), str) and e.get(k)
+                                            for k in ("source_hash", "format", "preset", "path")))
+
+    @staticmethod
+    def _valid_playlist(p: Any) -> bool:
+        return (isinstance(p, dict) and isinstance(p.get("playlist_id"), str) and isinstance(p.get("preset"), str)
+                and isinstance(p.get("folder"), str) and isinstance(p.get("files"), list))
+
+    def _save(self) -> None:
+        index = self._load()
+        doc = {"schema": INDEX_SCHEMA,
+               "note": "DPC's record of its MP3 exports; delete it and DPC finds its files again by their tags",
+               "exports": index.exports, "playlists": index.playlists}
+        atomic_write_text(self.index_path, json.dumps(doc, ensure_ascii=False, indent=1))
+        self._refresh_keys()
+
+    def _refresh_keys(self) -> None:
+        index = self._index or _Index()
+        keys = {_path_key(self._abs(e["path"])) for e in index.exports}
+        for p in index.playlists:
+            keys.update(_path_key(self._abs(f["path"])) for f in p["files"] if isinstance(f, dict) and f.get("path"))
+        self._export_keys = frozenset(keys)
+
+    def is_export_path(self, path: Any) -> Optional[str]:
+        """Why the library must not take `path` in as a track (a file this index lists), or
+        None. Called by the library's scan on the event loop: the index is read once, then
+        kept in memory."""
+        try:
+            if self._index is None:
+                with self._lock:
+                    self._load()
+            if _path_key(Path(path)) in self._export_keys:
+                return f"an MP3 export listed in {self.index_path}"
+        except Exception:
+            logger.debug("music export: the index check failed for %s", path, exc_info=True)
+        return None
+
+    def _find_record(self, source_hash: str, preset: str) -> Optional[Dict[str, Any]]:
+        fmt = PRESETS[preset]["format"]
+        for e in self._load().exports:
+            if e["source_hash"] == source_hash and e["format"] == fmt and e["preset"] == preset:
+                return e
+        return None
+
+    def _taken(self, folder: Path, *, skip: Optional[Dict[str, Any]] = None) -> Set[str]:
+        """The names in `folder` on disk, and the names the index holds there for other
+        exports (a file deleted by hand keeps its name for its own source)."""
+        taken: Set[str] = set()
+        try:
+            for name in os.listdir(folder):
+                taken.add(name_key(name))
+        except FileNotFoundError:
+            pass
+        for e in self._load().exports:
+            if e is skip:
+                continue
+            p = self._abs(e["path"])
+            if _path_key(p.parent) == _path_key(folder):
+                taken.add(name_key(p.name))
+        return taken
+
+    def _find_by_marker(self, source_hash: str, preset: str) -> Optional[Path]:
+        """An MP3 directly in the root whose tag names this source and preset."""
+        try:
+            names = sorted(os.listdir(self.root))
+        except FileNotFoundError:
+            return None
+        for name in names:
+            if not name.lower().endswith(".mp3"):
+                continue
+            path = self.root / name
+            marker = read_export_marker(path)
+            if marker and marker[0] == source_hash and (marker[1] or DEFAULT_PRESET) == preset and path.is_file():
+                return path
+        return None
+
+    # -- one track ----------------------------------------------------------------------------
+
+    def export_track(self, source: ExportSource, preset: Optional[str] = None) -> Dict[str, Any]:
+        """Export one track (see the module docstring); returns `{track_id, path, name,
+        already_exported, relinked, preset, limited_db, true_peak_out_dbtp, exported_at}`.
+        Raises `ExportError`."""
+        preset = self.check_preset(preset)
+        with self._lock:
+            index = self._load()
+            record = self._find_record(source.content_hash, preset)
+            if record is not None and self._abs(record["path"]).is_file():
+                return self._answer(source, record, already=True)
+            found = self._find_by_marker(source.content_hash, preset)
+            if found is not None:
+                logger.info("music export: %s found by its tag at %s; the index follows it",
+                            source.content_hash, found.name)
+                fresh = self._record_for(source, preset, found, previous=record)
+                if record is not None:
+                    index.exports.remove(record)
+                index.exports.append(fresh)
+                self._save()
+                return self._answer(source, fresh, already=True, relinked=True)
+            self.check_encoder()
+            if not source.path.is_file():
+                raise ExportError("no_file", f"the track's file is not there: {source.path.name}")
+            self.root.mkdir(parents=True, exist_ok=True)
+            stem = track_stem(source.artist, source.title, preset)
+            name = pick_name(stem, ".mp3", self._taken(self.root, skip=record), source.content_hash)
+            final = self._write_export(source, preset, self.root / name)
+            if record is not None:
+                index.exports.remove(record)
+            record = self._record_for(source, preset, final.path, encoded=final)
+            index.exports.append(record)
+            self._save()
+            return self._answer(source, record, already=False)
+
+    @staticmethod
+    def check_preset(preset: Optional[str]) -> str:
+        chosen = preset or DEFAULT_PRESET
+        if chosen not in PRESETS:
+            raise ExportError("invalid_preset", f"preset must be one of {', '.join(PRESETS)}")
+        return chosen
+
+    def _record_for(self, source: ExportSource, preset: str, path: Path, *,
+                    encoded: Optional["_Written"] = None, previous: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if encoded is not None:
+            sha, size, limiter, tp_out, exported_at = (encoded.sha256, encoded.size, encoded.limiter,
+                                                       encoded.true_peak_out_dbtp, encoded.exported_at)
+        else:
+            sha, size = f"sha256:{file_sha256(path)}", path.stat().st_size
+            limiter = (previous or {}).get("limiter")
+            tp_out = (previous or {}).get("true_peak_out_dbtp")
+            exported_at = (previous or {}).get("exported_at") or _now()
+        return {"source_hash": source.content_hash, "format": PRESETS[preset]["format"], "preset": preset,
+                "path": self._rel(path), "sha256": sha, "size_bytes": size, "exported_at": exported_at,
+                "track_id": source.track_id, "title": source.title, "artist": source.artist,
+                "limiter": limiter, "true_peak_out_dbtp": tp_out}
+
+    def _answer(self, source: ExportSource, record: Dict[str, Any], *, already: bool,
+                relinked: bool = False) -> Dict[str, Any]:
+        path = self._abs(record["path"])
+        limiter = record.get("limiter") or {}
+        return {"track_id": source.track_id, "path": str(path), "name": path.name,
+                "already_exported": already, "relinked": relinked, "preset": record["preset"],
+                "limited_db": limiter.get("ceiling_dbtp") if limiter.get("applied") else None,
+                "true_peak_out_dbtp": record.get("true_peak_out_dbtp"),
+                "exported_at": record.get("exported_at"), "export_root": str(self.root)}
+
+    # -- the encode ---------------------------------------------------------------------------
+
+    def _write_export(self, source: ExportSource, preset: str, final: Path) -> "_Written":
+        audio_part = final.with_name(final.name + ".audio.part")
+        tag_part = final.with_name(final.name + ".part")
+        try:
+            tags, rate, channels = self._probe(source.path)
+            tp_in, basis = source.true_peak_dbtp, source.true_peak_basis
+            if tp_in is None:
+                try:
+                    tp_in = self._measure(source.path).get("true_peak_dbtp")
+                    basis = "measured on the source before the export (ffmpeg ebur128)" if tp_in is not None else None
+                except LoudnessError as exc:
+                    logger.info("music export: the source's true peak is unknown (%s); the limiter is on", exc)
+            encoded = self._encode(source.path, audio_part, preset, tp_in, basis, rate, channels)
+            record = self._provenance(source, preset, tags, encoded)
+            tag = build_id3v24(self._frames(source, preset, tags, record))
+            sha, size = self._join(tag, audio_part, tag_part)
+            placed = _move_no_clobber(tag_part, final)
+            return _Written(path=placed, sha256=sha, size=size, limiter=encoded.limiter,
+                            true_peak_out_dbtp=encoded.true_peak_out_dbtp, exported_at=record["dpc_postprocess"]["exported_at"])
+        finally:
+            for p in (audio_part, tag_part):
+                try:
+                    p.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logger.warning("music export: could not remove %s", p, exc_info=True)
+
+    @staticmethod
+    def _out_rate(rate: Optional[int]) -> Optional[int]:
+        if rate is None or rate in MP3_SAMPLE_RATES:
+            return None
+        return 48000 if rate > 48000 else 44100 if rate > 32000 else 32000
+
+    @staticmethod
+    def limiter_filter(rate: int, limit_dbfs: float, latency: bool = True) -> str:
+        lin = max(0.0625, min(1.0, 10 ** (limit_dbfs / 20.0)))
+        opts = f"limit={lin:.5f}:level=false" + (":latency=true" if latency else "")
+        return f"aresample={rate * OVERSAMPLE},alimiter={opts},aresample={rate}"
+
+    def _encode_cmd(self, src: Path, out: Path, preset: str, filt: Optional[str], out_rate: Optional[int],
+                    channels: Optional[int]) -> List[str]:
+        cmd = [self.tools.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+               "-map", "0:a:0", "-map_metadata", "-1", "-map_chapters", "-1"]
+        if filt:
+            cmd += ["-af", filt]
+        if out_rate:
+            cmd += ["-ar", str(out_rate)]
+        if channels and channels > 2:
+            cmd += ["-ac", "2"]
+        cmd += list(PRESETS[preset]["args"])
+        cmd += ["-id3v2_version", "0", "-write_id3v1", "0", "-f", "mp3", str(out)]
+        return cmd
+
+    def _run(self, cmd: List[str]) -> Tuple[int, str]:
+        try:
+            done = self.tools.runner(cmd, timeout=ENCODE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            raise ExportError("encode_failed", f"ffmpeg did not finish the MP3 within {ENCODE_TIMEOUT_S:.0f} s")
+        except Exception as exc:
+            raise ExportError("encode_failed", f"ffmpeg could not run: {exc}")
+        err = done.stderr.decode("utf-8", "replace") if isinstance(done.stderr, bytes) else (done.stderr or "")
+        return done.returncode, err
+
+    def _encode(self, src: Path, out: Path, preset: str, tp_in: Optional[float], basis: Optional[str],
+                rate: Optional[int], channels: Optional[int]) -> _Encoded:
+        out_rate = self._out_rate(rate)
+        work_rate = out_rate or rate or 48000
+        apply = tp_in is None or tp_in > TRUE_PEAK_CEILING_DBTP
+        limit = LIMITER_START_DBFS
+        latency = True
+        encodes = 0
+        tp_out: Optional[float] = None
+        cmd: List[str] = []
+        while True:
+            filt = self.limiter_filter(work_rate, limit, latency) if apply else None
+            cmd = self._encode_cmd(src, out, preset, filt, out_rate, channels)
+            rc, err = self._run(cmd)
+            if rc != 0 and apply and latency and "latency" in err:
+                latency = False  # an ffmpeg older than alimiter's latency option
+                continue
+            encodes += 1
+            if rc != 0:
+                raise ExportError("encode_failed", f"ffmpeg could not encode the MP3 (rc {rc}): {err.strip()[-400:]}")
+            try:
+                tp_out = self._measure(out).get("true_peak_dbtp")
+            except LoudnessError as exc:
+                logger.warning("music export: the MP3's true peak could not be measured: %s", exc)
+                tp_out = None
+            if tp_out is None or tp_out <= TRUE_PEAK_CEILING_DBTP or encodes >= MAX_ENCODES:
+                break
+            if not apply:
+                apply = True
+                continue
+            limit = max(LIMITER_FLOOR_DBFS, limit - (tp_out - TRUE_PEAK_CEILING_DBTP) - LIMITER_STEP_MARGIN_DB)
+        limiter: Dict[str, Any] = {
+            "applied": apply,
+            "ceiling_dbtp": TRUE_PEAK_CEILING_DBTP,
+            "policy": "limit to -1 dBTP on lossy export only; the library file is never changed "
+                      "(EVOLUTION §11, Forge #209 R-F3; [P], not decided by Mike)",
+            "true_peak_in_dbtp": tp_in,
+            "true_peak_in_basis": basis,
+            "true_peak_out_dbtp": tp_out,
+            "reached": tp_out is not None and tp_out <= TRUE_PEAK_CEILING_DBTP,
+            "encodes": encodes,
+        }
+        if apply:
+            limiter.update({"method": f"ffmpeg alimiter (sample peak, lookahead) at {OVERSAMPLE}x oversampling; "
+                                      "the decoded MP3 measured with ebur128 and encoded again with a lower limit "
+                                      "while above the ceiling",
+                            "limit_dbfs": round(limit, 2), "latency_compensated": latency})
+        return _Encoded(cmd_as_sent=cmd, limiter=limiter, true_peak_out_dbtp=tp_out)
+
+    def _redact(self, cmd: List[str], src: Path, out: Path) -> List[str]:
+        swap = {str(self.tools.ffmpeg): "ffmpeg", str(src): src.name, str(out): out.name}
+        return [swap.get(a, a) for a in cmd]
+
+    def _provenance(self, source: ExportSource, preset: str, tags: Dict[str, str], encoded: _Encoded) -> Dict[str, Any]:
+        audio_part = Path(encoded.cmd_as_sent[-1])
+        flac = read_flac_streaminfo(source.path) if source.path.suffix.lower() == ".flac" else None
+        pcm_md5 = f"md5:{flac.md5}" if flac is not None and flac.md5_is_set else None
+        record: Dict[str, Any] = {
+            "schema": PROVENANCE_SCHEMA,
+            "note": "the post step of a lossy export; the source's own record, when it has one, is carried as "
+                    "source_record (PROVENANCE rule 7)",
+            "export_of": {
+                "track_id": source.track_id, "content_hash": source.content_hash, "file": source.path.name,
+                "container": source.path.suffix.lower().lstrip("."), "sha256": f"sha256:{file_sha256(source.path)}",
+                "pcm_md5": pcm_md5,
+                "pcm_md5_basis": "FLAC STREAMINFO MD5 of the decoded audio" if pcm_md5 else "not a FLAC with a stored MD5",
+                "origin": source.origin,
+            },
+            "dpc_postprocess": {
+                "step": "lossy_export", "tool": "ffmpeg", "tool_version": self._ffmpeg_version,
+                "encoder": PRESETS[preset]["settings"]["encoder"], "preset": preset,
+                "settings": dict(PRESETS[preset]["settings"]), "limiter": encoded.limiter,
+                "cmd_as_sent": self._redact(encoded.cmd_as_sent, source.path, audio_part),
+                "cmd_paths": "exact argv, except the ffmpeg binary, the source and the output, which are reduced to "
+                             "file names (PROVENANCE rule 3: no local paths in a file that may be shared)",
+                "tags": "ID3v2.4 written by DPC after the encode (ffmpeg writes COMM and USLT as TXXX)",
+                "exported_at": _now(),
+            },
+        }
+        carried = _tag_value(tags, PROVENANCE_TAG)
+        if carried:
+            try:
+                parsed = json.loads(carried) if len(carried.encode("utf-8")) <= PROVENANCE_MAX_BYTES else None
+            except ValueError:
+                parsed = None
+            record["source_record"] = parsed if isinstance(parsed, dict) else None
+            if not isinstance(parsed, dict):
+                record["source_record_note"] = "the source's DPC_PROVENANCE was too large or not a JSON object"
+        if source.take_record is not None:
+            record["take"] = source.take_record
+        text = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        if len(text.encode("utf-8")) > PROVENANCE_MAX_BYTES:
+            for key in ("take", "source_record"):
+                if record.get(key) is not None:
+                    blob = json.dumps(record[key], ensure_ascii=False, sort_keys=True).encode("utf-8")
+                    record[key] = {"omitted": f"over {PROVENANCE_MAX_BYTES} bytes",
+                                   "sha256": "sha256:" + hashlib.sha256(blob).hexdigest()}
+        return record
+
+    def _frames(self, source: ExportSource, preset: str, tags: Dict[str, str], record: Dict[str, Any]) -> List[bytes]:
+        frames = [text_frame("TIT2", source.title or source.path.stem)]
+        if source.artist:
+            frames.append(text_frame("TPE1", source.artist))
+        album = source.album or _tag_value(tags, "album")
+        if album:
+            frames.append(text_frame("TALB", album))
+        genre = _tag_value(tags, "genre")
+        if genre:
+            frames.append(text_frame("TCON", genre))
+        date = _tag_value(tags, "date")
+        if date and _DATE_RE.match(date):
+            frames.append(text_frame("TDRC", date))
+        comment = _tag_value(tags, "comment")
+        if comment:
+            frames.append(comm_frame(comment))
+        if source.lyrics and source.lyrics.strip():
+            frames.append(uslt_frame(source.lyrics, source.lyrics_language))
+        frames.append(text_frame("TSSE", f"DPC MP3 export, {PRESETS[preset]['label']}, "
+                                         f"{self._ffmpeg_version or 'ffmpeg'} libmp3lame"))
+        frames.append(txxx_frame(MARKER_TAG, source.content_hash))
+        frames.append(txxx_frame(PRESET_TAG, preset))
+        frames.append(txxx_frame(PROVENANCE_TAG, json.dumps(record, ensure_ascii=False, separators=(",", ":"))))
+        return frames
+
+    @staticmethod
+    def _join(tag: bytes, audio: Path, out: Path) -> Tuple[str, int]:
+        h = hashlib.sha256(tag)
+        size = len(tag)
+        with open(audio, "rb") as fi, open(out, "wb") as fo:
+            fo.write(tag)
+            for chunk in iter(lambda: fi.read(_COPY_CHUNK), b""):
+                fo.write(chunk)
+                h.update(chunk)
+                size += len(chunk)
+            fo.flush()
+            os.fsync(fo.fileno())
+        return f"sha256:{h.hexdigest()}", size
+
+    # -- a playlist ---------------------------------------------------------------------------
+
+    def export_playlist(self, playlist_id: str, name: str, items: Sequence[Any],
+                        preset: Optional[str] = None,
+                        on_track: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
+        """Export a playlist into `<root>/<name>/NN - <Artist> - <Title>.mp3` (see the module
+        docstring). `items` are `ExportSource`s and `SkippedTrack`s in playlist order; the
+        skipped ones get no number. `on_track` is called with each single track's answer.
+        Returns `{folder, tracks: [...], removed, kept}`."""
+        preset = self.check_preset(preset)
+        sources = [i for i in items if isinstance(i, ExportSource)]
+        if not sources:
+            raise ExportError("empty_playlist", "the playlist has no track that can be exported")
+        with self._lock:
+            index = self._load()
+            self.root.mkdir(parents=True, exist_ok=True)
+            previous = next((p for p in index.playlists
+                             if p["playlist_id"] == playlist_id and p["preset"] == preset), None)
+            folder = self._playlist_folder(playlist_id, name, preset, previous)
+            folder.mkdir(parents=True, exist_ok=True)
+            width = number_width(len(sources))
+            owned = {name_key(Path(f["path"]).name): f for f in (previous or {}).get("files", [])
+                     if isinstance(f, dict) and f.get("path")}
+            results: List[Dict[str, Any]] = []
+            planned: List[Dict[str, Any]] = []
+            n = 0
+            for item in items:
+                if isinstance(item, SkippedTrack):
+                    results.append({"track_id": item.track_id, "title": item.title, "status": "skipped",
+                                    "code": item.code, "reason": item.reason})
+                    continue
+                n += 1
+                try:
+                    single = self.export_track(item, preset)
+                except ExportError as exc:
+                    results.append({"track_id": item.track_id, "title": item.title, "status": "error",
+                                    "code": exc.code, "reason": exc.message})
+                    continue
+                if on_track is not None:
+                    on_track(single)
+                fname = f"{n:0{width}d} - {track_stem(item.artist, item.title, DEFAULT_PRESET)}.mp3"
+                dst = folder / fname
+                placed = self._place(Path(single["path"]), dst, item.content_hash, owned)
+                if placed["status"] == "error":
+                    results.append({"track_id": item.track_id, "title": item.title, "status": "error",
+                                    "code": placed["code"], "reason": placed["reason"]})
+                    continue
+                planned.append({"path": self._rel(dst), "source_hash": item.content_hash,
+                                "track_id": item.track_id})
+                results.append({"track_id": item.track_id, "title": item.title, "status": "ok",
+                                "path": str(dst), "name": dst.name, "single_path": single["path"],
+                                "already_exported": single["already_exported"], "placed": placed["how"],
+                                "limited_db": single["limited_db"]})
+            keep_keys = {name_key(Path(p["path"]).name) for p in planned}
+            removed, kept = self._prune(folder, owned, keep_keys)
+            record = {"playlist_id": playlist_id, "name": name, "preset": preset, "folder": self._rel(folder),
+                      "exported_at": _now(), "files": planned}
+            if previous is not None:
+                index.playlists.remove(previous)
+            index.playlists.append(record)
+            self._save()
+            return {"folder": str(folder), "folder_name": folder.name, "preset": preset, "tracks": results,
+                    "removed": removed, "kept": kept, "export_root": str(self.root)}
+
+    def _playlist_folder(self, playlist_id: str, name: str, preset: str,
+                         previous: Optional[Dict[str, Any]]) -> Path:
+        suffix = PRESETS[preset]["name_suffix"]
+        base = sanitize_component(name, FOLDER_MAX_BYTES - len(suffix.encode("utf-8")), fallback="Playlist") + suffix
+        others = {name_key(self._abs(p["folder"]).name) for p in self._load().playlists
+                  if p["playlist_id"] != playlist_id or p["preset"] != preset}
+        prev_dir = self._abs(previous["folder"]) if previous else None
+        try:
+            on_disk = {name_key(n) for n in os.listdir(self.root)}
+        except FileNotFoundError:
+            on_disk = set()
+
+        def free(folder_name: str) -> bool:
+            key = name_key(folder_name)
+            if key in others:
+                return False
+            if prev_dir is not None and key == name_key(prev_dir.name):
+                return True  # this playlist's own folder from its last run
+            return key not in on_disk
+
+        short = "".join(c for c in playlist_id.lower() if c.isalnum())[-6:] or "list"
+        target_name = base if free(base) else f"{base} ({short})"
+        target = self.root / target_name
+        if prev_dir is not None and prev_dir.is_dir() and prev_dir.name != target_name:
+            # The playlist was renamed (or only its case changed): its folder follows.
+            same_folder = name_key(prev_dir.name) == name_key(target_name)
+            if not target.exists():
+                return target if self._rename(prev_dir, target) else prev_dir
+            if same_folder:
+                # A case-only rename: one folder on NTFS and APFS, but on a case-sensitive
+                # filesystem `target` may be another folder that a rename would replace.
+                try:
+                    one = os.path.samefile(prev_dir, target)
+                except OSError:
+                    one = False
+                if one:
+                    return target if self._rename(prev_dir, target) else prev_dir
+                return prev_dir
+        return target
+
+    @staticmethod
+    def _rename(src: Path, dst: Path) -> bool:
+        try:
+            os.rename(src, dst)
+            return True
+        except OSError:
+            logger.warning("music export: could not rename %s to %s", src, dst.name, exc_info=True)
+            return False
+
+    def _place(self, single: Path, dst: Path, source_hash: str, owned: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Put the single export at `dst`: unchanged when it is already there, else a hard link,
+        else a copy. A file in the way is replaced only when an earlier run of this playlist
+        wrote it."""
+        if dst.exists():
+            try:
+                if os.path.samefile(single, dst):
+                    return {"status": "ok", "how": "unchanged"}
+            except OSError:
+                pass
+            marker = read_export_marker(dst)
+            if marker and marker[0] == source_hash and dst.stat().st_size == single.stat().st_size:
+                return {"status": "ok", "how": "unchanged"}
+            if name_key(dst.name) not in owned:
+                return {"status": "error", "code": "name_taken",
+                        "reason": f"{dst.name} is already in the folder and DPC did not write it"}
+            try:
+                dst.unlink()
+            except OSError as exc:
+                return {"status": "error", "code": "write_failed", "reason": f"could not replace {dst.name}: {exc}"}
+        try:
+            os.link(single, dst)
+            return {"status": "ok", "how": "hardlink"}
+        except (OSError, NotImplementedError, AttributeError):
+            pass
+        part = dst.with_name(dst.name + ".part")
+        try:
+            shutil.copyfile(single, part)
+            os.replace(part, dst)
+            return {"status": "ok", "how": "copy"}
+        except OSError as exc:
+            try:
+                part.unlink()
+            except OSError:
+                pass
+            return {"status": "error", "code": "write_failed", "reason": f"could not write {dst.name}: {exc}"}
+
+    @staticmethod
+    def _prune(folder: Path, owned: Dict[str, Dict[str, Any]], keep: Set[str]) -> Tuple[List[str], List[str]]:
+        """Remove the files an earlier run of this playlist wrote that this run does not list,
+        when they still carry the source marker they were written with; keep the others."""
+        removed: List[str] = []
+        kept: List[str] = []
+        for key, f in owned.items():
+            if key in keep:
+                continue
+            path = folder / Path(f["path"]).name
+            if not path.exists():
+                continue
+            marker = read_export_marker(path)
+            if marker and marker[0] == f.get("source_hash"):
+                try:
+                    path.unlink()
+                    removed.append(path.name)
+                    continue
+                except OSError:
+                    logger.warning("music export: could not remove the stale %s", path, exc_info=True)
+            kept.append(path.name)
+        return removed, kept
+
+    # -- what exists ------------------------------------------------------------------------------
+
+    def exports_for(self, hashes: Dict[str, List[str]]) -> Dict[str, List[Dict[str, Any]]]:
+        """`{track_id: [export, ...]}` for the single exports whose file is there now, for
+        the track ids `hashes` maps each content hash to."""
+        with self._lock:
+            out: Dict[str, List[Dict[str, Any]]] = {}
+            for e in self._load().exports:
+                ids = hashes.get(e["source_hash"])
+                if not ids:
+                    continue
+                path = self._abs(e["path"])
+                if not path.is_file():
+                    continue
+                limiter = e.get("limiter") or {}
+                item = {"preset": e["preset"], "format": e["format"], "path": str(path), "name": path.name,
+                        "exported_at": e.get("exported_at"),
+                        "limited_db": limiter.get("ceiling_dbtp") if limiter.get("applied") else None,
+                        "true_peak_out_dbtp": e.get("true_peak_out_dbtp")}
+                for tid in ids:
+                    out.setdefault(tid, []).append(dict(item))
+            return out
+
+
+@dataclass
+class _Written:
+    path: Path
+    sha256: str
+    size: int
+    limiter: Dict[str, Any]
+    true_peak_out_dbtp: Optional[float]
+    exported_at: str
+
+
+def _move_no_clobber(src: Path, dst: Path) -> Path:
+    """Move `src` to `dst` without replacing a file that appeared there meanwhile; such a
+    file makes it `dst` with a numbered suffix instead. `os.rename` refuses an existing target
+    on Windows; on POSIX `os.link` does (where links work), else the check is made first."""
+    candidate = dst
+    for n in range(1, 100):
+        try:
+            if os.name == "nt":
+                os.rename(src, candidate)
+                return candidate
+            try:
+                os.link(src, candidate)
+            except FileExistsError:
+                raise
+            except OSError:
+                if candidate.exists():
+                    raise FileExistsError(str(candidate))
+                os.rename(src, candidate)
+                return candidate
+            os.unlink(src)
+            return candidate
+        except FileExistsError:
+            candidate = dst.with_name(f"{dst.stem} ({n + 1}){dst.suffix}")
+    raise ExportError("name_taken", f"no free name for {dst.name}")
