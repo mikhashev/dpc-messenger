@@ -29,6 +29,11 @@ class _World:
         self.unload_release = threading.Event()
         self.unload_release.set()
         self.unload_ok = True
+        self.unload_active = False
+        self.inference_during_unload = 0
+        self.load_started = threading.Event()
+        self.load_release = threading.Event()
+        self.load_release.set()
         self.gate = None  # an asyncio.Event the inference waits on
 
 
@@ -37,20 +42,30 @@ def world(monkeypatch):
     w = _World()
 
     def load(self):
+        w.load_started.set()
+        assert w.load_release.wait(5)
         self.pipeline = object()
         self.model_loaded = True
 
     def unload(self):
+        if not self.model_loaded:
+            return None
         w.unloads += 1
+        w.unload_active = True
         w.unload_started.set()
         assert w.unload_release.wait(5)
         self.pipeline = None
         self.model_loaded = False
+        w.unload_active = False
         return w.unload_ok
 
     async def run(self, path):
+        if w.unload_active:
+            w.inference_during_unload += 1
         if w.gate is not None:
             await w.gate.wait()
+        if w.unload_active:
+            w.inference_during_unload += 1
         return {"text": path}
 
     monkeypatch.setattr(LocalWhisperProvider, "_load_model", load)
@@ -108,16 +123,20 @@ async def test_a_deferred_unload_asked_on_the_old_object_survives_the_reload(llm
     old = llm.providers[ALIAS]
     run = asyncio.create_task(old.transcribe("x"))
     await _until(lambda: old._active_transcriptions == 1)
+    seen = []
+    whisper_provider.set_unloaded_listener(lambda alias, model, reason: seen.append(reason))
     await asyncio.wait_for(old.unload_model_async(reason="auto_transcribe_disabled"), 1)
     assert old._unload_when_idle and world.unloads == 0
 
     llm.reload_providers()
     new = llm.providers[ALIAS]
     assert world.unloads == 0
+    await asyncio.sleep(0.15)  # past the 0.05 s idle timeout: only the carried flag may unload
     world.gate.set()
     await asyncio.wait_for(run, 1)
-    await _until(lambda: world.unloads == 1)
-    assert not new.is_model_loaded()
+    await _until(lambda: seen)
+    assert world.unloads == 1 and not new.is_model_loaded()
+    assert seen == ["auto_transcribe_disabled"]  # the carried reason, not "idle"
 
 
 @pytest.mark.asyncio
@@ -294,3 +313,126 @@ async def test_shutdown_uses_one_total_bound_and_says_so_when_the_lock_is_stuck(
     assert time.monotonic() - started < 1.5
     assert "left loaded at exit" in caplog.text
     p._load_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_a_reload_during_the_idle_wait_leaves_exactly_one_owner_and_one_unload(llm, world):
+    for provider in llm.providers.values():
+        provider.config["idle_unload_s"] = 0.2
+    seen = []
+    whisper_provider.set_unloaded_listener(lambda alias, model, reason: seen.append(reason))
+    old = llm.providers[ALIAS]
+    await old.ensure_model_loaded()  # arms the 0.2 s idle timer
+    await asyncio.sleep(0.05)
+
+    llm.reload_providers()
+    new = llm.providers[ALIAS]
+    assert [old.is_model_loaded(), new.is_model_loaded()].count(True) == 1
+    assert new.is_model_loaded() and old._idle_task is None
+
+    await asyncio.wait_for(old.unload_model_async(), 1)  # a stale reference asks too
+    await asyncio.sleep(0.5)
+    assert world.unloads == 1
+    assert seen.count("idle") + seen.count("requested") == 1
+    assert not old.is_model_loaded() and not new.is_model_loaded()
+
+
+@pytest.mark.asyncio
+async def test_a_second_unload_of_an_already_unloaded_model_announces_nothing(llm, world):
+    seen = []
+    whisper_provider.set_unloaded_listener(lambda alias, model, reason: seen.append(reason))
+    p = llm.providers[ALIAS]
+    await p.transcribe("x")
+    async with p._load_lock:
+        assert await p._unload_locked("first") is True
+        assert await p._unload_locked("second") is True
+    assert seen == ["first"] and world.unloads == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_unload_keeps_the_lock_until_its_thread_is_done(llm, world):
+    p = llm.providers[ALIAS]
+    await p.transcribe("warm")
+    world.unload_release.clear()
+    world.unload_started.clear()
+    unloading = asyncio.create_task(p.unload_model_async())
+    await asyncio.wait_for(asyncio.to_thread(world.unload_started.wait, 2), 3)
+    unloading.cancel()
+    await asyncio.sleep(0.05)
+    assert p._unloading and p._load_lock.locked() and not unloading.done()
+
+    after = asyncio.create_task(p.transcribe("after"))
+    await asyncio.sleep(0.1)
+    assert not after.done()  # no inference beside the running unload
+    world.unload_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(unloading, 2)
+    assert (await asyncio.wait_for(after, 2)) == {"text": "after"}
+    assert world.inference_during_unload == 0 and not p._unloading
+
+
+@pytest.mark.asyncio
+async def test_a_transcription_queued_on_the_old_object_across_a_reload_counts_on_the_new_one(llm, world):
+    old = llm.providers[ALIAS]
+    await old.transcribe("warm")
+    await _until(lambda: world.unloads == 1)  # the 0.05 s idle timer, so the next call loads
+    world.gate = asyncio.Event()
+    await old._load_lock.acquire()
+    queued = asyncio.create_task(old.transcribe("queued", release_if_loaded_here=True))
+    await asyncio.sleep(0.05)
+
+    llm.reload_providers()
+    new = llm.providers[ALIAS]
+    old._load_lock.release()
+    await _until(lambda: new._active_transcriptions == 1)
+    assert old._active_transcriptions == 0 and new.is_model_loaded()
+    await asyncio.sleep(0.15)  # past the idle timeout
+    assert world.unloads == 1 and await new.unload_if_idle() is False
+    world.gate.set()
+    assert (await asyncio.wait_for(queued, 2)) == {"text": "queued"}
+    assert world.unloads == 2 and not new.is_model_loaded()  # released: this call loaded it
+    assert world.inference_during_unload == 0
+
+
+@pytest.mark.asyncio
+async def test_a_preload_finishing_across_a_reload_arms_the_successors_timer(llm, world):
+    old = llm.providers[ALIAS]
+    world.load_release.clear()
+    loading = asyncio.create_task(old.ensure_model_loaded())
+    await asyncio.wait_for(asyncio.to_thread(world.load_started.wait, 2), 3)
+    llm.reload_providers()
+    new = llm.providers[ALIAS]
+    assert not new.is_model_loaded()
+    world.load_release.set()
+    await asyncio.wait_for(loading, 2)
+    assert new.is_model_loaded() and new._idle_task is not None
+    await _until(lambda: world.unloads == 1)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_lets_a_running_transcription_finish_and_is_one_bounded_wait(llm, world):
+    world.gate = asyncio.Event()
+    p = llm.providers[ALIAS]
+    run = asyncio.create_task(p.transcribe("x"))
+    await _until(lambda: p._active_transcriptions == 1)
+    stopping = asyncio.create_task(p.shutdown_unload(timeout=2))
+    await asyncio.sleep(0.05)
+    assert not p._retired  # not retired while a transcription runs
+    world.gate.set()
+    assert (await asyncio.wait_for(run, 1)) == {"text": "x"}
+    await asyncio.wait_for(stopping, 2)
+    assert not p.is_model_loaded()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_bound_covers_a_hung_unload_too(llm, world, caplog):
+    p = llm.providers[ALIAS]
+    await p.transcribe("x")
+    world.unload_release.clear()
+    started = time.monotonic()
+    with caplog.at_level("ERROR"):
+        await asyncio.wait_for(p.shutdown_unload(timeout=0.3), 3)
+    assert time.monotonic() - started < 1.5
+    assert "left loaded at exit" in caplog.text
+    world.unload_release.set()
+    await _until(lambda: not p._unloading)

@@ -351,7 +351,7 @@ class LocalWhisperProvider(AIProvider):
             successor = self._current_owner()
             if successor is not self:  # a reload handed this object over while it loaded
                 self._copy_state_to(successor)
-            self.schedule_idle_unload()  # a preload nobody uses must not hold the card
+            successor.schedule_idle_unload()  # a preload nobody uses must not hold the card
 
     def _unload_model(self) -> Optional[bool]:
         """Free the model. False when the release raised (the reference is dropped anyway)."""
@@ -444,11 +444,25 @@ class LocalWhisperProvider(AIProvider):
     async def _unload_locked(self, reason: str, detail: str = "") -> bool:
         """Unload now. The caller holds `_load_lock`. Logs success or failure distinctly
         and tells the listener; True when the model is no longer loaded."""
+        was_loaded = self.model_loaded
         self._unloading = True
+        worker = asyncio.ensure_future(asyncio.to_thread(self._unload_model))
+        cancelled = False
         try:
-            released = await asyncio.to_thread(self._unload_model)
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    cancelled = True  # keep the lock and the flag until the thread is done
+                except Exception:
+                    break
         finally:
             self._unloading = False
+        if cancelled:
+            raise asyncio.CancelledError
+        released = worker.result()
+        if not was_loaded:
+            return True  # nothing was loaded here: not a release, nothing to announce
         if released is False:
             logger.error("Whisper '%s' (%s): the unload failed (%s); the model reference was dropped "
                          "but its memory may not be free", self.alias, self.model_name, reason)
@@ -496,28 +510,32 @@ class LocalWhisperProvider(AIProvider):
             await self._unload_locked(reason)
 
     async def shutdown_unload(self, timeout: float = SHUTDOWN_DRAIN_S) -> None:
-        """Shutdown path: wait up to `timeout` s in total for running transcriptions and
-        the load lock, then unload the model anyway (logged) so the card is free before
-        the process exits."""
-        self.retire()
+        """Shutdown path, `timeout` s in total: running transcriptions get 80% of it to
+        finish, then the model is unloaded (logged) so the card is free before the process
+        exits. A transcription still running at that point is unloaded under, as logged."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         try:
-            await asyncio.wait_for(self._drained.wait(), max(0.0, deadline - loop.time()))
+            await asyncio.wait_for(self._drained.wait(), timeout * 0.8)
         except asyncio.TimeoutError:
             logger.warning("Whisper '%s': %d transcription(s) still running after %g s at shutdown; "
-                           "unloading anyway", self.alias, self._active_transcriptions, timeout)
+                           "unloading anyway", self.alias, self._active_transcriptions, timeout * 0.8)
+        self.retire()
+
+        async def unload_under_lock():
+            async with self._load_lock:
+                if self.model_loaded:
+                    await self._unload_locked("shutdown")
+
+        job = asyncio.ensure_future(unload_under_lock())
         try:
-            await asyncio.wait_for(self._load_lock.acquire(), max(0.5, deadline - loop.time()))
+            await asyncio.wait_for(asyncio.shield(job), max(0.0, deadline - loop.time()))
         except asyncio.TimeoutError:
-            logger.error("Whisper '%s': the load lock was not free within the %g s shutdown bound; "
+            if not self._unloading:
+                job.cancel()
+            logger.error("Whisper '%s': not unloaded within the %g s shutdown bound; "
                          "the model is left loaded at exit", self.alias, timeout)
             return
-        try:
-            if self.model_loaded:
-                await self._unload_locked("shutdown")
-        finally:
-            self._load_lock.release()
         if self.model_loaded:
             logger.error("Whisper '%s': the model is still loaded at exit", self.alias)
 
@@ -628,6 +646,8 @@ class LocalWhisperProvider(AIProvider):
         if self._unload_when_idle:
             new._unload_when_idle = True
             new._unload_reason = self._unload_reason
+        if new.model_loaded:
+            self.model_loaded = False  # one owner of the shared pipeline: `new`
         self._successor = new
         self.retire()
 
@@ -817,8 +837,8 @@ class LocalWhisperProvider(AIProvider):
             if owner._active_transcriptions > 0:
                 owner._active_transcriptions -= 1
             else:
-                logger.error("Whisper '%s': a transcription ended with no use counted; "
-                             "the counter is kept at 0", owner.alias)
+                logger.error("Whisper '%s' (object %x, called on %x): a transcription ended with no "
+                             "use counted; the counter is kept at 0", owner.alias, id(owner), id(self))
             if owner._active_transcriptions == 0:
                 owner._drained.set()
                 try:
