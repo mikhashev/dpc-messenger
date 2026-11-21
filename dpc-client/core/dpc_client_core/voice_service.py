@@ -145,8 +145,7 @@ class VoiceService:
                 json.dump(config, f, indent=2)
 
             # Reload providers
-            self.llm_manager.providers.clear()
-            self.llm_manager._load_providers_from_config()
+            self.llm_manager.reload_providers()
 
             # Broadcast event
             await self.local_api.broadcast_event("default_providers_updated", {
@@ -221,7 +220,7 @@ class VoiceService:
                 if alias != provider_alias and p.config.get("type") == "local_whisper":
                     if hasattr(p, 'is_model_loaded') and p.is_model_loaded():
                         logger.info(f"Unloading Whisper provider '{alias}' before loading '{provider_alias}'")
-                        await p.unload_model_async()
+                        await p.unload_model_async(reason="switched_provider")
 
             # Load model (this runs in thread pool, so it won't block)
             logger.info(f"Pre-loading Whisper model for provider '{provider_alias}'...")
@@ -577,14 +576,9 @@ class VoiceService:
                     # Unload the model
                     if whisper_provider:
                         try:
-                            await whisper_provider.unload_model_async()
+                            await whisper_provider.unload_model_async(reason="auto_transcribe_disabled")
 
-                            # Broadcast unload event to UI
-                            await self.local_api.broadcast_event("whisper_model_unloaded", {
-                                "reason": "auto_transcribe_disabled"
-                            })
-
-                            logger.info("Whisper model unloaded successfully")
+                            logger.info("Whisper model unload requested")
                         except Exception as e:
                             logger.error(f"Failed to unload Whisper model: {e}", exc_info=True)
                     else:

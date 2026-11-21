@@ -600,99 +600,87 @@ class LLMManager:
             logger.error("Error parsing provider config file: %s", e, exc_info=True)
 
     def save_config(self, config_dict: Dict[str, Any]):
-        """
-        Save provider configuration to JSON file and reload providers.
-
-        Preserves the loaded Whisper model state across reloads (v0.14.1+).
-
-        Args:
-            config_dict: Dictionary containing providers configuration
-        """
+        """Save provider configuration to the JSON file and reload providers."""
         try:
-            # Preserve Whisper model state before clearing providers
-            whisper_state = {}
-            for alias, provider in list(self.providers.items()):
-                if provider.config.get('type') == 'local_whisper':
-                    if hasattr(provider, 'is_model_loaded') and provider.is_model_loaded():
-                        # Save the loaded state
-                        whisper_state[alias] = {
-                            'model_loaded': True,
-                            'pipeline': provider.pipeline,
-                            'device': getattr(provider, '_detected_device', provider.device),
-                            'load_lock': getattr(provider, '_load_lock', None),
-                            'old_provider': provider
-                        }
-                        logger.debug(f"Preserving loaded Whisper model state for '{alias}'")
-                # The new object takes over the model and its own timer: the old one
-                # must not unload the pipeline they now share.
-                if hasattr(provider, 'retire'):
-                    provider.retire()
-
             with open(self.config_path, 'w') as f:
                 json.dump(config_dict, f, indent=2)
             logger.info("Provider configuration saved to %s", self.config_path)
-
-            preserved_managers = {
-                alias: provider._managers
-                for alias, provider in list(self.providers.items())
-                if getattr(provider, "_managers", None)
-            }
-
-            # Reload providers
-            self.providers.clear()
-            self._load_providers_from_config()
-
-            # A dropped alias takes its provider object with it; the child it started
-            # is only reachable through the supervisor registry after that.
-            from .providers.llamacpp_server_provider import retire_absent
-            retire_absent(self.providers.keys())
-
-            for alias, managers in preserved_managers.items():
-                new_provider = self.providers.get(alias)
-                if new_provider is not None and hasattr(new_provider, "_managers"):
-                    new_provider._managers.update(managers)
-                    logger.info("Preserved %d agent manager(s) for '%s' across providers reload", len(managers), alias)
-
-            # Restore Whisper model state for providers that were loaded
-            for alias, state in whisper_state.items():
-                if alias in self.providers:
-                    provider = self.providers[alias]
-                    if hasattr(provider, 'pipeline') and hasattr(provider, 'model_loaded'):
-                        # Restore the loaded state
-                        provider.pipeline = state['pipeline']
-                        provider.model_loaded = state['model_loaded']
-                        if hasattr(provider, '_detected_device'):
-                            provider._detected_device = state['device']
-                        if state.get('load_lock'):
-                            provider._load_lock = state['load_lock']
-                        logger.info(f"Restored loaded Whisper model state for '{alias}' (model stays in memory)")
-                        old = state.get('old_provider')
-                        if old is not None and hasattr(old, 'hand_over_to') and hasattr(provider, 'hand_over_to'):
-                            old.hand_over_to(provider)  # in-flight transcriptions keep counting
-                        if hasattr(provider, 'schedule_idle_unload'):
-                            provider.schedule_idle_unload()
-
-            # Call callback to re-inject CoreService into dpc_agent/remote_peer providers
-            if self._on_providers_reload_callback:
-                try:
-                    self._on_providers_reload_callback()
-                    logger.debug("Providers reload callback executed")
-                except Exception as cb_err:
-                    logger.warning("Error in providers reload callback: %s", cb_err)
-
-            # A saved edit may have moved an alias's window under a running agent.
-            for managers in preserved_managers.values():
-                for manager in managers.values():
-                    refresh = getattr(manager, "refresh_context_window", None)
-                    if callable(refresh):
-                        try:
-                            refresh()
-                        except Exception as refresh_err:
-                            logger.warning("Window refresh failed after a providers reload: %s", refresh_err)
-
+            self.reload_providers()
         except Exception as e:
             logger.error("Error saving provider config: %s", e, exc_info=True)
             raise
+
+    def reload_providers(self):
+        """Rebuild `self.providers` from the config file, keeping agent managers and each
+        local Whisper alias's model state, load lock, running transcriptions and pending
+        unload. The one reload path (config save, voice-provider switch). It awaits
+        nothing; an unload's thread is flagged `_unloading` first, so its model is carried
+        as not loaded, and the shared load lock makes the new object's load wait for it."""
+        old_whisper = {alias: provider for alias, provider in self.providers.items()
+                       if provider.config.get('type') == 'local_whisper'}
+        whisper_state = {}
+        for alias, provider in old_whisper.items():
+            if (hasattr(provider, 'is_model_loaded') and provider.is_model_loaded()
+                    and not getattr(provider, '_unloading', False)):
+                whisper_state[alias] = {
+                    'pipeline': provider.pipeline,
+                    'device': getattr(provider, '_detected_device', provider.device),
+                }
+                logger.debug(f"Preserving loaded Whisper model state for '{alias}'")
+
+        preserved_managers = {
+            alias: provider._managers
+            for alias, provider in list(self.providers.items())
+            if getattr(provider, "_managers", None)
+        }
+
+        self.providers.clear()
+        self._load_providers_from_config()
+
+        from .providers.llamacpp_server_provider import retire_absent
+        retire_absent(self.providers.keys())
+
+        for alias, managers in preserved_managers.items():
+            new_provider = self.providers.get(alias)
+            if new_provider is not None and hasattr(new_provider, "_managers"):
+                new_provider._managers.update(managers)
+                logger.info("Preserved %d agent manager(s) for '%s' across providers reload", len(managers), alias)
+
+        for alias, old in old_whisper.items():
+            new = self.providers.get(alias)
+            if (new is None or not hasattr(new, 'hand_over_to') or not hasattr(old, 'hand_over_to')
+                    or not hasattr(new, 'model_loaded')):
+                if hasattr(old, 'retire'):
+                    old.retire()
+                continue
+            if getattr(old, '_load_lock', None) is not None:
+                new._load_lock = old._load_lock
+            state = whisper_state.get(alias)
+            if state:
+                new.pipeline = state['pipeline']
+                new.model_loaded = True
+                if hasattr(new, '_detected_device'):
+                    new._detected_device = state['device']
+                logger.info(f"Restored loaded Whisper model state for '{alias}' (model stays in memory)")
+            old.hand_over_to(new)
+            if hasattr(new, 'schedule_idle_unload'):
+                new.schedule_idle_unload()
+
+        if self._on_providers_reload_callback:
+            try:
+                self._on_providers_reload_callback()
+                logger.debug("Providers reload callback executed")
+            except Exception as cb_err:
+                logger.warning("Error in providers reload callback: %s", cb_err)
+
+        for managers in preserved_managers.values():
+            for manager in managers.values():
+                refresh = getattr(manager, "refresh_context_window", None)
+                if callable(refresh):
+                    try:
+                        refresh()
+                    except Exception as refresh_err:
+                        logger.warning("Window refresh failed after a providers reload: %s", refresh_err)
 
     def get_active_model_name(self) -> str:
         """

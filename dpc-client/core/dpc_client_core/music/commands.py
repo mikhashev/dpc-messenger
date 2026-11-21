@@ -21,7 +21,7 @@ existing transcription the way a voice message does, with the same provider choi
 - the voice provider in `providers.json` (`voice_provider`, `llm_manager.voice_provider`)
   when it names a loaded provider; without one, the first `local_whisper` provider when
   `[local_transcription] enabled` (default on);
-- a `local_whisper` provider is called as `provider.transcribe(path)`, the call
+- a `local_whisper` provider is called as `provider.transcribe(path, release_if_loaded_here=True)`, the call
   `service.transcribe_audio` and the agent's `transcribe_audio_file` make: the provider
   loads its own model under its own lock, and its result carries Whisper's segment
   timestamps (`return_timestamps=True`, a9e2c8c3). The file must be within

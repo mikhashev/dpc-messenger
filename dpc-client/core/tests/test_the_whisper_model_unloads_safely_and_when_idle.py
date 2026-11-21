@@ -117,7 +117,7 @@ async def test_the_timeout_comes_from_the_settings_source(monkeypatch):
     monkeypatch.setattr(whisper_provider, "_idle_unload_source", lambda: 7)
     assert p._idle_unload_s() == 7.0
     monkeypatch.setattr(whisper_provider, "_idle_unload_source", None)
-    assert p._idle_unload_s() == whisper_provider.DEFAULT_IDLE_UNLOAD_S
+    assert p._idle_unload_s() == 0.0  # no source and no key: the timer is off
 
 
 @pytest.mark.asyncio

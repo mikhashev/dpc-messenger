@@ -815,8 +815,9 @@ class CoreService(MusicCommandsMixin):
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
         self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
-        from .providers.whisper_provider import set_idle_unload_source
+        from .providers.whisper_provider import set_idle_unload_source, set_unloaded_listener
         set_idle_unload_source(self.settings.get_local_transcription_idle_unload_s)
+        set_unloaded_listener(self._on_whisper_unloaded)
 
         # Register callback for re-injecting CoreService after providers reload
         self.llm_manager.set_on_providers_reload(self._inject_service_into_providers)
@@ -3555,6 +3556,21 @@ class CoreService(MusicCommandsMixin):
                 "status": "error",
                 "message": str(e)
             }
+
+    def _on_whisper_unloaded(self, alias: str, model_name: str, reason: str) -> None:
+        """Tell the UI about every Whisper unload; it keeps showing a warm model otherwise."""
+        api = getattr(self, "local_api", None)
+        if api is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(api.broadcast_event("whisper_model_unloaded", {
+            "provider": alias, "model_name": model_name, "reason": reason}))
+        tasks = self.__dict__.setdefault("_whisper_event_tasks", set())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
     async def _follow_alias_renames(
         self,

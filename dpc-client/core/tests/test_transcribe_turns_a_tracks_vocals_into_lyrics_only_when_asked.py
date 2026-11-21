@@ -210,8 +210,10 @@ async def test_own_lyrics_saved_during_the_run_are_kept(tmp_path, audio):
     transcriber = FakeTranscriber(gate=gate)
     svc = make(tmp_path, FakeLibrary(audio), transcriber)
     task = asyncio.create_task(svc.transcribe(TRACK_ID))
-    while not transcriber.calls:
-        await asyncio.sleep(0)
+    async def _called():
+        while not transcriber.calls:
+            await asyncio.sleep(0)
+    await asyncio.wait_for(_called(), 5)
     # While it runs: the player still reads the track's lyrics, sees the run, and a
     # second click is refused.
     during = await svc.get(TRACK_ID)
