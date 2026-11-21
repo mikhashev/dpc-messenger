@@ -34,7 +34,9 @@ session: "AI Studio group chat (group-60aff6110f02), 2026-11-21 — Whisper plan
 > **[unverified]** was not confirmed.
 >
 > **Second revision** (same day): answers Zcode #59, Ark #60 and #61, and Mike #62, checked
-> against `dev` HEAD `d80d76f7`.
+> against `dev` HEAD `d80d76f7`. **Third revision:** answers Ark #64 on the GPU/CPU choice
+> (L12 compares times, counts the CPU's cold start and contention, and the CPU route is a
+> separate provider object), same HEAD.
 >
 > **ADR-051 N11** (how an external GPU job joins the card queue) is answered here as
 > "(b)+(c)" **only once Mike confirms**. He has not chosen N11. Until he does, this ADR
@@ -468,7 +470,7 @@ bound plus the margin), so the local path and both Telegram paths are no longer 
 | music Transcribe | L12 first; in the line: `wait_s=None`, until `check()` raises (cancel) | a track's vocals are usually minutes long, so L12 mostly sends it to the line |
 | music jobs | `wait_s=None`: until `check()` raises (cancel) | |
 | peer (`p2p_coordinator.py:1398`) | 0: refused at once ("right now"), with the holder's ETA when known; no CPU route unless Mike says so (decision 6, sub-choice C) | rule 7, no place |
-| background transcription | L12: short audio on the CPU, long audio skipped (`LeaseSkipped`) | rule 10 |
+| background transcription | L12: on the CPU twin when its estimate passes, otherwise skipped (`LeaseSkipped`) | rule 10 |
 | background, other (Whisper preload, embedder steady state) | never waits: `LeaseSkipped` | rule 10 |
 
 **The ETA routes and informs; it never refuses on its own** (Ark #53, #60, #61). It feeds
@@ -607,9 +609,22 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
   never 0.
 - `eta_s` comes from the holder:
   - Whisper: audio duration times the last measured real-time ratio, else None.
-  - Music: a rough figure from the YuE2 duration cap and variants left (about 3.5x real
-    time per `runner.py:93`), marked as an estimate, else None. The engines have
-    `estimate_ms` today, not an ETA.
+  - Music, **a job that has not started:** the text estimate (`estimate_yue2_seconds`
+    per variant, `music/job_schemas.py:271-279`) times the recorded YuE2 real-time factor
+    times the variants, marked as an estimate; it may route (L12), never refuse.
+  - Music, **a running job** (Ark #64 §5): the remaining time must come from the job's own
+    progress, not from the text estimate, which counts sung lines only and gives an
+    instrumental its intro alone. **Today there is no usable progress signal:** the YuE2
+    runner sets progress to 0.05, 0.1, and then one step per finished variant
+    (`runner.py:846-900`), nothing inside a variant, which is where the minutes go; the
+    job records no start time (`created_at`, `updated_at` only, `jobs.py:420-425`); and the
+    "about 3.5x real time" figure is a comment from the trial card (`runner.py:94, 856`),
+    not a measurement this machine keeps. So in v1 **a running music job's ETA is unknown,
+    and L12 treats it as long.** S4 may add the signal: the start time of each variant and
+    a per-machine YuE2 factor recorded from finished variants (wall time over the take's
+    audio length); then `eta = variants left × duration_s × factor − elapsed in the current
+    variant`, floored at 0 and marked as an estimate. Acestep's progress is as coarse
+    (`runner.py:734-784`).
   - Supervisors: None.
 
 **L11. One shared cell: Whisper beside a busy music engine when it provably fits**
@@ -699,35 +714,79 @@ pending Mike's OK**).
 - This pulls a fit check into S3 for the Whisper+music cell only. The general fit check
   (Whisper beside llama-server) stays in S9; the CPU route moved to S3 with L12.
 
-**L12. The GPU/CPU choice for a transcription** (Mike #62, a product decision; the numbers
-and points 4–6 are proposals). Before a transcription takes a place in the line:
+**L12. The GPU/CPU choice for a transcription** (Mike #62, a product decision; restated
+after Ark #64 to compare times, not audio length; the numbers are proposals until the
+measurement below). Before a transcription takes a place in the line:
 
 1. **The card is free, or L11 says `fits`** → the GPU, at once.
-2. **The card is busy and L11 says `does_not_fit` or `unknown`** → compare two figures:
-   - **the GPU wait:** the busy holders' ETA plus the ETAs of the waiters ahead in the line
-     (L10); any unknown part makes it **long**;
-   - **the CPU time:** audio duration × the measured CPU real-time factor of this machine,
-     plus the CPU model's load time when it is not loaded.
+2. **The card is busy and L11 says `does_not_fit` or `unknown`** → compare two estimates:
+   - **`gpu_wait`:** the busy holders' remaining time plus the remaining times of the
+     waiters ahead in the line (L10). Any unknown part makes it **long** (infinite for the
+     comparison). A running music job is unknown in v1 (L10), so it is long.
+   - **`cpu_estimate`:** what the CPU twin (section 3.1) would take, **cold or warm** (Ark
+     #64 §2):
+     - warm (the twin is loaded): `warm_s(audio_s)`, the measured inference time for that
+       length;
+     - cold (the twin is not loaded): `cold_load_s + first_call_s + warm_s(audio_s)`, the
+       measured load into RAM and the first call's warm-up added. For a 20 s dictation the
+       load dominates, so a cold short file goes to the CPU only when it pays for its load.
+     - `warm_s` is interpolated from measurements at two or more lengths (load dominates at
+       10 s, inference at 40 min), never extrapolated from one "seconds per minute" figure.
+     - **Contention** (Ark #64 §3): when a resident that computes on the CPU is **busy**
+       (Strata in a turn), there is no CPU route: the CPU twin would slow the very holder
+       the line waits for. When such a resident is idle, `cpu_estimate` is multiplied by
+       `[local_transcription] cpu_contention_factor` (proposed 2.0, to be measured). Music
+       engines are treated as not CPU-contended (GPU-bound) **[unverified: the
+       measurement includes the CPU load of a running YuE2 job]**.
 
-   **The CPU** when the audio is short (`[local_transcription] cpu_max_audio_s`, proposed
-   120) **and** the CPU time is below the GPU wait. **Otherwise the line** for the GPU,
-   bounded by the door's deadline (L4; the dictation bound `queue_wait_s` = 600 s for a
-   person's doors), with the status line and a cancel.
-3. **Background transcriptions:** short audio goes to the CPU, long audio is skipped
+   **The CPU twin** when `cpu_estimate < gpu_wait` **and** `cpu_estimate <= cpu_max_s`
+   **and** `audio_s <= cpu_max_audio_s`. **Otherwise the line** for the GPU, bounded by the
+   door's deadline (L4; `queue_wait_s` = 600 s for a person's doors), with the status line
+   and a cancel.
+   - **`[local_transcription] cpu_max_s`, proposed 600 s = `queue_wait_s`.** Neither route
+     makes a person wait longer than the dictation bound: when the GPU wait is unknown, the
+     CPU is taken only if it finishes within the time the line would have been allowed.
+   - **`[local_transcription] cpu_max_audio_s`, proposed 1200 s (20 min), only as an upper
+     guard** (decision 6D). With `cpu_max_s` = 600 it binds only when the measured factor
+     reads better than 0.5× real time on a long file, which is exactly the case where a
+     factor taken on short files may be wrong. It is no longer the deciding rule: a 130 s
+     file whose CPU estimate is 260 s goes to the CPU against a 600 s GPU wait, and a 90 s
+     file stays on the GPU when the card frees in 10 s (Ark #64 §1).
+3. **Background transcriptions:** the same test, and when the CPU does not pass, skipped
    (`LeaseSkipped`), as rule 10 skips today.
-4. **Peers:** unchanged, refused at once with "busy right now". Spending the owner's CPU
-   on a peer's file needs Mike's word (decision 6, sub-choice C; default no).
-5. **No measured CPU factor yet** → no CPU route; the transcription takes the line (CC's
-   proposal, pending review). The factor is recorded from every CPU transcription (the
-   provider already computes a real-time ratio for its log, `_realtime_ratio`, 816) and
-   from the measurement in step 5 of the Whisper plan.
-6. **Enough RAM:** the CPU route is taken only when available host RAM covers the CPU
-   model plus a margin (`psutil`), because Strata keeps experts in host RAM; otherwise the
-   line (proposal).
+4. **Peers:** refused at once with "busy right now"; no CPU route (decision 6C: no, Ark
+   #64 §7 agrees).
+5. **No measurement yet** (cold, warm at two or more lengths) → no CPU route; the line
+   (CC's proposal, Ark #64 §6 agrees). The figures are kept per machine and updated from
+   every CPU-twin run (warm or cold, by length).
+6. **Enough RAM:** a cold CPU route is taken only when available host RAM covers the twin
+   plus a margin (`psutil`); otherwise the line (proposal).
 
-The CPU route holds **no card lease** and touches no VRAM. It uses a second, CPU pipeline
-(section 3.1). The choice in point 2 is final for that call: a call sent to the line does
-not later jump to the CPU, and a CPU call takes no place.
+**Cold or resident: the choice and why** (Ark #64 §2). The estimate always counts the load
+when the twin is cold, so a short file never goes to a cold CPU twin unless that is still
+quicker than the line. Once the twin has loaded for a call, **it stays loaded while the
+same holder keeps the card**, and its own idle timer starts only when that holder lets go:
+a second dictation during the same long music job then pays only the warm cost. The twin is
+never loaded speculatively just because the card became busy (3 GB of RAM for a dictation
+that may never come). Residency mostly coincides with music jobs, because a busy Strata
+turns the CPU route off.
+
+**The measurement** (being run now by another agent; numbers to be filled in here):
+
+| Figure | turbo on this CPU | Notes |
+|---|---|---|
+| `cold_load_s` (load into RAM) | [pending] | |
+| `first_call_s` (warm-up of the first call) | [pending] | |
+| `warm_s` at 10 s of audio | [pending] | load-free inference |
+| `warm_s` at 60 s of audio | [pending] | |
+| `warm_s` at ≥10 min of audio | [pending] | |
+| host RAM of the twin | [pending] | ~3 GB expected (fp32, from the parameter count) |
+| CPU load of a running YuE2 job | [pending] | decides whether music counts as CPU-contended |
+| slowdown of a Strata turn with the twin running | [pending] | sizes `cpu_contention_factor` |
+
+The CPU route holds **no card lease** and touches no VRAM. The choice in point 2 is final
+for that call: a call sent to the line does not later jump to the CPU, and a CPU call takes
+no place.
 
 ### 2. Integration
 
@@ -741,7 +800,7 @@ Mike's words and the cost of a reload.
 | llama-server start | arithmetic, as today | excludes | **excludes: waits while busy, yields while idle** | **excludes: waits while busy, yields while idle** |
 | strata start | excludes | excludes | **same** | **same** |
 | music start | excludes: waits, **never stops it** (decision 32 kept; L5a point 3) | same | music engines: `exclusive()` as today; their leases agree | **excludes: waits while busy, yields while idle** |
-| whisper load | **not excluded in v1** (loads beside, as today, and now says so in the log) | **not excluded in v1** | **busy: the one shared cell, beside if it provably fits (L11), else L12: short audio on the CPU when that is quicker, otherwise the lease line; idle: yields** | same holder: re-entrant; another whisper alias: excludes |
+| whisper load | **not excluded in v1** (loads beside, as today, and now says so in the log) | **not excluded in v1** | **busy: the one shared cell, beside if it provably fits (L11), else L12: the CPU twin when its estimate beats the GPU wait, otherwise the lease line; idle: yields** | same holder: re-entrant; another whisper alias: excludes |
 | embedder / ner (background) | granted only if the card is free, otherwise CPU | CPU | CPU | CPU |
 
 **Why Whisper does not wait for supervisors in v1.**
@@ -1005,13 +1064,17 @@ touched in 2.2:
      lock order above), so a waiting dictation holds no lock: a peer's request is refused
      at once instead of after waiting for the lock, and the player's Transcribe and the
      agent tool take their own places in the line instead of queueing on a lock.
-  2. **A card refusal ends the provider cascade, and one call keeps one place.** In the
-     received-voice loop (`service.py:5152-5160`), a `CardQueueRefusal` (any `Lease*`
-     refusal) is caught before the generic `except Exception: continue` and stops the walk
-     over local aliases. Otherwise each next local alias would queue again on the same busy
-     card (up to N × the bound; four names by default) and load another model. A cloud
-     alias later in the list (`openai`) does not touch the card and may still be tried
-     (proposal). The wait happens once, inside the first local alias's `transcribe`.
+  2. **A card refusal ends the cascade over GPU aliases, and one call keeps one place**
+     (reconciled with the CPU twin, Ark #64 §4). In the received-voice loop
+     (`service.py:5152-5160`), a `CardQueueRefusal` (any `Lease*` refusal) is caught before
+     the generic `except Exception: continue` and stops the walk over **further GPU
+     aliases** (any alias whose provider holds a card lease). Otherwise each next GPU alias
+     would queue again on the same busy card (up to N × the bound; four names by default)
+     and load another model. The walk **may move on to a CPU alias**: the CPU twin, when
+     L12 routed there (`RoutedToCpu`, below), or a configured `device: cpu` alias, when L12
+     passes for it; and a cloud alias later in the list (`openai`) does not touch the card
+     and may still be tried (proposal). The wait happens at most once, inside the first GPU
+     alias's `transcribe`.
   3. **The peer check runs again after the wait.** Step 8 (`service.py:5141-5145`) checks
      "has the peer already sent the transcript?" before the call, and the wait now happens
      inside it. The received-voice path passes a `check` to the lease that raises when
@@ -1031,28 +1094,36 @@ touched in 2.2:
        when a receiver stops waiting for a sender's transcript and transcribes itself
        (`service.py:5102`). A sender queued behind music for longer than that means both
        sides transcribe, each on its own node; condition 3 and step 9a keep the text single.
-- **The CPU route (L12, Mike #62), in S3.** A second pipeline on the CPU, beside the GPU
-  one:
-  - **What it is:** the same model and revision as the alias, loaded by transformers on the
-    CPU in fp32, about 3 GB of host RAM for turbo **[unverified: from the parameter count,
-    ~0.8 B × 4 bytes; S3 measures it]**. On macOS, where the GPU route is MLX or MPS, the
-    CPU route is the transformers CPU pipeline **[unverified on macOS]**.
-  - **Loaded on demand**, on the first call L12 sends to the CPU, under its own lock
-    (`_cpu_load_lock`), never under `_load_lock`, so a CPU load never blocks the GPU route
-    or a yield; with **its own idle unload** timer (the same setting as the GPU idle
-    unload, proposal) and its own `shutdown_unload` step.
-  - **No card lease and no release:** it holds no lease, appears in no holder row, and its
-    load and unload never touch the lease. Its RAM is guarded by L12 point 6.
-  - **Per call, like the GPU route:** `language` and `task` are per-call arguments (the
-    precedent of `b9725990`), so a CPU call never mutates the shared provider; `purpose`
-    and the door's `on_wait` behave the same, and its result says `device: "cpu"` so the
-    caller and the log can tell.
-  - **The CPU real-time factor** is recorded per machine after every CPU transcription and
-    read by L12; until there is one, L12 does not route to the CPU (point 5). The
-    measurement of turbo on this CPU joins step 5 of the Whisper plan (beside turbo
-    against large-v3).
-  - Hand-over across a providers reload moves the CPU pipeline with the GPU state, the same
-    way `hand_over_to` moves the GPU one.
+- **The CPU route (L12, Mike #62), in S3: a separate provider object, the CPU twin** (Ark
+  #64 §4). Not a second pipeline inside the same `LocalWhisperProvider`: there,
+  `model_loaded` means "the pipeline exists", and the hand-over machinery
+  (`_copy_state_to`, 685; `_settle_finished_load`, 692; `hand_over_to`, 700) moves **one**
+  model state, the one-owner invariant closed from `b796af4a` to `d80d76f7`. A second
+  pipeline in the same object would make `model_loaded` ambiguous and break it.
+  - **What it is:** an ordinary `local_whisper` provider (`llm_manager.py:62`) with
+    `device: "cpu"`, the same model and revision as its GPU alias, created by the providers
+    manager beside each GPU Whisper alias as `<alias>@cpu` (not written to
+    `providers.json`), or an alias the owner configures with `device: cpu`. It has its own
+    `model_loaded`, `_load_lock`, idle timer, hand-over and per-call `language`/`task`
+    (the precedent of `b9725990`); its result says `device: "cpu"`.
+  - **No card lease:** a CPU device builds none (section 3.1, first bullet), so L11, the
+    lines and "who holds the card" do not apply to it, and its load and unload never touch
+    the lease. Its RAM is guarded by L12 point 6. Fp32 turbo is about 3 GB of host RAM
+    **[unverified: from the parameter count, ~0.8 B × 4 bytes; measured below L12]**. On
+    macOS, where the GPU route is MLX or MPS, the twin is the transformers CPU pipeline
+    **[unverified on macOS]**.
+  - **Selection:** the GPU alias's `transcribe` runs L12 at entry. When L12 says CPU it
+    raises `RoutedToCpu(twin_alias)` (not a refusal; nothing waited), and the caller's
+    selector calls the twin with the same arguments. One helper,
+    `transcribe_with_route(provider, ...)`, is the selector for every door:
+    `service.transcribe_audio` (the owner's dictation, voice messages, both Telegram
+    paths), the received-voice cascade, the agent tool and music Transcribe. A configured
+    `device: cpu` alias later in `provider_priority` is reached the same way.
+  - **Residency:** the twin stays loaded while the holder it was loaded for keeps the card,
+    and its idle timer starts when that holder lets go (L12, "Cold or resident").
+  - **The measured figures** (cold, warm by length) are recorded per machine after every
+    twin run and read by L12; until there are any, L12 does not route to the CPU. The
+    measurement joins step 5 of the Whisper plan.
 - **Later (S9, not in the first slice):** `excludable=True`, Whisper waiting for
   supervisors. With the CPU route already in S3, S9 still needs three things: L12 applied
   against supervisor holders (a short file beside a busy local LLM goes to the CPU instead
@@ -1131,10 +1202,11 @@ Flow on a card where it does not fit (or where L11's answer is `unknown`):
 
 1. YuE2 job runs; `music:yue2` is granted and busy.
 2. `transcribe` calls `use()`.
-3. L11: `does_not_fit` or `unknown`. L12: a 20 s voice message with a measured CPU factor
-   goes to the CPU route and is transcribed there at once (no lease, no wait; the flow
-   ends here). A 40-minute recording, or any file while no CPU factor is measured, goes
-   on: the Whisper lease is excluded and enters `_LEASE_LINE`, before `_load_lock`.
+3. L11: `does_not_fit` or `unknown`. L12: the running job's ETA is unknown, so the GPU
+   wait is long; a 20 s voice message whose CPU estimate (cold or warm, as measured) is
+   under `cpu_max_s` goes to the CPU twin and is transcribed there (no lease, no wait; the
+   flow ends here). A 40-minute recording, or any file while nothing is measured, goes on:
+   the Whisper lease is excluded and enters `_LEASE_LINE`, before `_load_lock`.
 4. Log line: `card: whisper[whisper-large-v3-turbo] waits for yue2.cpp (busy: music job
    01J…); wait about 6 min (estimate), up to 600 s`.
 5. `card_queue()` shows the Whisper row with `wait.behind == ["yue2.cpp (music job …)"]`.
@@ -1356,9 +1428,16 @@ Unify-versus-replace of `_CARD_CLAIMS` is a separate sub-choice (section 2.3).
 - **Positive:** dictation during music keeps working where it fits (L11), now visible; where
   it does not, a short file goes to the CPU when that is quicker and a long one queues
   (L12, Mike #62), instead of an unchecked out-of-memory failure on a small card.
-- **Negative:** the CPU route keeps a second copy of the model in host RAM while it is
-  loaded (about 3 GB for turbo, unverified), and a CPU transcription competes for CPU time
-  with whatever else runs, Strata's expert offload included.
+- **Negative:** the CPU twin keeps a second copy of the model in host RAM while it is
+  loaded (about 3 GB for turbo, unverified), and stays loaded through a long music job once
+  used.
+- **Negative: CPU contention** (Ark #64 §3). Strata keeps its experts in host RAM (the
+  resident budget, `docs/GLOSSARY.md`; the help text at `ProvidersEditor.svelte:2366`) and,
+  by Ark's reading of `strata_details.md` (not in this repo), computes missed experts on
+  the CPU in parallel with the GPU. A CPU transcription during a Strata turn would slow
+  the holder of the card and add ~3 GB beside the expert cache. L12 therefore turns the CPU
+  route off while a CPU-computing resident is busy, and penalises it while one is idle.
+  Music engines are assumed GPU-bound until measured.
 - **Positive:** music no longer reads a failed holder list as a free card: the lease
   registry is in-process and has no read that can fail. Unreadable probe results are never
   "free".
@@ -1441,13 +1520,18 @@ Unify-versus-replace of `_CARD_CLAIMS` is a separate sub-choice (section 2.3).
 - **A thread that never ends** holds `_load_lock` and the grant until the shutdown bound;
   `_finish_thread` cannot bound it (stated in `d80d76f7`). The lease does not make this
   worse, and does not fix it.
-- **The CPU route under memory pressure.** A 3 GB CPU model loaded while Strata keeps its
-  experts in host RAM could push the machine into paging; L12 point 6 checks available
-  RAM first, and the CPU pipeline has its own idle unload.
-- **A wrong CPU factor.** A factor measured on an idle machine under-reads a busy one, and
-  a short file could then take longer on the CPU than the line would have. The file is
-  short by definition (`cpu_max_audio_s`), so the loss is bounded; the factor is updated
-  after every CPU run.
+- **The CPU twin under memory pressure.** A 3 GB model loaded while Strata keeps its
+  experts in host RAM could push the machine into paging; L12 point 6 checks available RAM
+  before a cold route, a busy Strata turns the route off, and the twin has its own idle
+  timer.
+- **A wrong CPU estimate.** Figures measured on an idle machine under-read a busy one, a
+  single-length figure misjudges both ends, and a cold start ignored makes short files look
+  cheap (Ark #64 §1–2). L12 uses cold and warm figures at several lengths, the contention
+  factor, `cpu_max_s` and the `cpu_max_audio_s` guard, and refreshes the figures after
+  every twin run; a wrong choice costs at most `cpu_max_s`.
+- **A wrong music ETA.** A running job's remaining time is unknown in v1 (L10) and counts
+  as long, so L12 leans to the CPU twin during music; the text estimate is never used for a
+  running job (Ark #64 §5).
 - **Starvation.**
   - Both lines are FIFO on one clock (L5a). L5 stops new uses of a granted lease while
     someone waits for it.
@@ -1639,17 +1723,28 @@ New test files:
     does not start, the job shows its `card_wait`, it is neither failed nor dropped as
     cancelled, and it starts when the holder lets go; a real cancel during that wait ends
     it.
-30. `test_a_short_transcription_goes_to_the_cpu_only_when_that_is_quicker.py` (L12, Mike
-    #62): card free → GPU; L11 `fits` → GPU beside; busy and short with a measured factor
-    and a long ETA → CPU, no lease taken, no holder row; busy and short with an unknown
-    ETA → CPU (unknown counts as long); busy and longer than `cpu_max_audio_s` → the line;
-    CPU slower than the known GPU wait → the line; no measured factor → the line; too
-    little RAM → the line; background short → CPU, background long → `LeaseSkipped`; a
-    peer → refused at once, never CPU.
-31. `test_the_cpu_pipeline_holds_no_lease_and_unloads_on_its_own.py`: the CPU pipeline
-    loads on demand under its own lock while a GPU yield holds `_load_lock`; it never
-    touches the lease; its idle timer unloads it; `language` and `task` are per call; the
-    result carries `device: "cpu"`; the CPU factor is recorded after the run.
+30. `test_the_gpu_cpu_choice_compares_times_not_audio_length.py` (L12, Mike #62, Ark #64):
+    card free → GPU; L11 `fits` → GPU beside; Ark's two examples: a 130 s file, CPU 260 s,
+    GPU wait 600 s → CPU twin; a 90 s file with the card freeing in 10 s → GPU; unknown GPU
+    wait → CPU only when `cpu_estimate <= cpu_max_s`; a file over `cpu_max_audio_s` → the
+    line whatever the estimate; nothing measured → the line; too little RAM for a cold
+    twin → the line; background passing → CPU, failing → `LeaseSkipped`; a peer → refused
+    at once, never CPU.
+31. `test_a_cold_cpu_twin_counts_its_load_and_a_warm_one_does_not.py` (Ark #64 §2): with a
+    long load and a 20 s file, a cold twin loses to a short GPU wait and a warm twin wins;
+    after one twin run during a music job the twin stays loaded until that holder lets go,
+    then its idle timer runs; the twin is never loaded because the card became busy.
+32. `test_a_busy_strata_turns_the_cpu_route_off.py` (Ark #64 §3): a busy Strata resident →
+    no CPU route, the line; an idle Strata resident → the estimate is multiplied by
+    `cpu_contention_factor`; a busy music holder → no penalty.
+33. `test_the_cpu_twin_is_its_own_provider.py` (Ark #64 §4): the twin is a separate
+    `local_whisper` object with `device: "cpu"`, no lease, its own `model_loaded`, lock and
+    idle timer; a GPU alias's hand-over moves only the GPU model state; `RoutedToCpu` sends
+    the call to the twin with the same `language` and `task`; in the received-voice cascade
+    a card refusal skips further GPU aliases and still reaches the twin or a cloud alias.
+34. `test_a_running_music_jobs_eta_is_unknown_until_it_has_progress.py` (Ark #64 §5): a
+    running YuE2 job with only per-variant progress → ETA unknown (long); a queued job →
+    the text estimate, marked as an estimate; an instrumental never reads as "almost done".
 
 Compliance checks beyond tests:
 
@@ -1695,7 +1790,7 @@ the 5,555-line file, so land it after the Whisper editing settles.
 |---|---|---|---|---|
 | S0 | docs: this ADR (the design proposed an ADR-044 amendment; this record carries the matrix, L1–L11 and the six decisions instead), revised after reviews #41, #44, #45 | `docs/decisions/052-…md` | — | This commit |
 | S1 | feat(card-lease): lease registry, lease line, one order across both lines (L5a), refusals, wait estimate; `card_holders`/`card_queue` include lease rows through the hook (supervisor rows first, `until_cancelled`); `card_holder()` stays supervisor-only | new `managers/card_lease.py`; `llama_server_supervisor.py` (`_LEASE_HOLDERS`, `_LEASE_WAITERS`, `_live_holders`, `card_holders`, `card_queue`); `tests/conftest.py` | tests 1–3, 6–8, 14 with fake clients only | Pending |
-| S3 | feat(whisper): the local model holds a card lease, yields by unloading when idle (`yield_card`, releasing only when the unload ran), loads beside busy music only in the one shared cell when it provably fits (L11), otherwise chooses the CPU route for a short file when that is quicker (L12, Mike #62) or queues before `_load_lock`; a second, CPU pipeline with no lease; doors pass `purpose` and their bounds; every caller gets a deadline and the queue's is shorter; a card refusal ends the provider cascade; the peer check runs again after a wait; llama-server children record `predicted_vram_mib` | `providers/whisper_provider.py`; `service.py` (`transcribe_audio` bound, the cascade at 5152, the peer check), `music/commands.py:324`, `tools/transcribe.py:172` (`purpose`, `on_wait`); `p2p_coordinator.py:1398` (`serving_a_peer`); `coordinators/telegram_coordinator.py:509`, `managers/agent_telegram_bridge.py:1674`; `settings.py` (`queue_wait_s`, `cpu_max_audio_s`); `ui/src/lib/coreService.ts:1492`; `llama_server_supervisor.py` (`predicted_vram_mib`, one attribute set at launch) | 9, 10, 18–24, 26–28, 30, 31 | Pending; lands with S4 |
+| S3 | feat(whisper): the local model holds a card lease, yields by unloading when idle (`yield_card`, releasing only when the unload ran), loads beside busy music only in the one shared cell when it provably fits (L11), otherwise chooses the CPU twin when its estimate beats the GPU wait (L12, Mike #62, Ark #64) or queues before `_load_lock`; the CPU twin is a separate `local_whisper` provider with `device: cpu` and no lease, selected by `transcribe_with_route`; doors pass `purpose` and their bounds; every caller gets a deadline and the queue's is shorter; a card refusal ends the provider cascade; the peer check runs again after a wait; llama-server children record `predicted_vram_mib` | `providers/whisper_provider.py`; `service.py` (`transcribe_audio` bound, the cascade at 5152, the peer check), `music/commands.py:324`, `tools/transcribe.py:172` (`purpose`, `on_wait`); `p2p_coordinator.py:1398` (`serving_a_peer`); `coordinators/telegram_coordinator.py:509`, `managers/agent_telegram_bridge.py:1674`; `settings.py` (`queue_wait_s`, `cpu_max_s`, `cpu_max_audio_s`, `cpu_contention_factor`); `ui/src/lib/coreService.ts:1492`; `llama_server_supervisor.py` (`predicted_vram_mib`, one attribute set at launch) | 9, 10, 18–24, 26–28, 30–34 | Pending; lands with S4 |
 | S4 | feat(music): music engines hold the card lease (acquired before `_the_lock`); the runner waits through it and names lease holders; a `running` job may wait for the card (both gates: `jobs.py` and the runner's wait loop) | `music/engine_base.py`, `music/runner.py`, `music/commands.py` (start by hand), `music/jobs.py`, `music/acestep.py`/`yue2.py`, test helpers, `ui/src/lib/utils/musicCreate.ts` | **4 (Done-when)**, 11, 13, 15, 17, 29 | Pending; lands with S3 |
 | S2 | feat(card): llama-server and Strata wait for a busy lease and unload an idle one, with the swap on or off | `llama_server_supervisor.py` (2.2 items 3–10), `providers/llamacpp_server_provider.py` (`stop_local_engine`, then `card_holder` may return lease rows) | 5, 16, and the full list of existing card tests green | Pending |
 | S5 | feat(ui): lease rows and lease waiters in the existing holder and queue lines, "until cancelled", unknown ETA as "—"; whether the block shows without a local LLM provider | `ProvidersEditor.svelte`, `cardQueue.ts`, `cardQueue.test.ts`, `MusicCreate.svelte`; the status payload | 25 and manual | Pending |
@@ -1815,40 +1910,55 @@ before S3.
    **pending Mike's OK of the details**:*
    1. The card is free, or Whisper provably fits beside a busy music engine (L11, the one
       shared cell) → the GPU at once, visible as two holder rows when shared.
-   2. The card is busy and it does not fit (or the fit is unknown) → compare the GPU wait
-      (the holders' ETA plus the line ahead; unknown counts as long) with the CPU time
-      (audio duration × the measured CPU real-time factor). **The CPU** when the audio is
-      short (`[local_transcription] cpu_max_audio_s`, proposed 120 s) and the CPU is
-      quicker; **otherwise the line** for the GPU: before `_load_lock`, one place per call
-      (a card refusal ends the provider cascade), the peer check again after the wait,
-      deadline `min(caller's remaining − margin, dictation bound)`, visible
-      ("transcription queued behind yue2.cpp (song, ≈6 min | time unknown)") and
-      cancellable.
-   3. Background transcriptions: short on the CPU, long skipped.
+   2. The card is busy and it does not fit (or the fit is unknown) → compare **times**
+      (Ark #64): the GPU wait (the holders' remaining time plus the line ahead; unknown,
+      including any running music job in v1, counts as long) against the CPU twin's
+      estimate (cold load and warm-up counted when the twin is not loaded; times a
+      contention factor when an idle CPU-computing engine such as Strata is resident; no
+      CPU route at all while such an engine is busy). **The CPU twin** when its estimate
+      is below the GPU wait and at most `cpu_max_s`, and the audio is within the
+      `cpu_max_audio_s` guard; **otherwise the line** for the GPU: before `_load_lock`, one
+      place per call (a card refusal ends the cascade over GPU aliases but may still reach
+      the twin), the peer check again after the wait, deadline `min(caller's remaining −
+      margin, dictation bound)`, visible ("transcription queued behind yue2.cpp (song, time
+      unknown)") and cancellable.
+   3. Background transcriptions: the same test; failing it, skipped.
    4. Peers: refused at once, "busy right now" (sub-choice C).
-   5. No measured CPU factor yet → no CPU route; the line (CC's proposal, pending review).
-   6. Not enough free RAM for the CPU model → the line (proposal).
-   This moves (b), the CPU route, from S9 into S3 (section 3.1). (a) survives only as the
-   peer's immediate refusal; the ETA never refuses on its own.
+   5. Nothing measured yet → no CPU route; the line.
+   6. Not enough free RAM for a cold twin → the line.
+   This moves (b), the CPU route, from S9 into S3 as a separate provider object, the CPU
+   twin (section 3.1). (a) survives only as the peer's immediate refusal; the ETA never
+   refuses on its own.
    **Sub-choices for Mike:**
    - **A. The dictation bound:** `[local_transcription] queue_wait_s` = 600 s. *Votes:*
      Zcode #52 and Ark #60/#61 both for 600 s; CC leans the same way. The alternative,
      inheriting `swap_wait_s` (1800 s here), would leave the agent tool (1800 s timeout)
      no time to transcribe after the wait (Ark #60 §7).
    - **B. An unknown ETA:** **replaced by Mike's #62.** An unknown ETA counts as a long
-     GPU wait: a short file goes to the CPU, a long one waits with "time unknown" up to
-     the bound. Neither reviewer's former option (refuse at once, Zcode #52; wait, Ark
-     #53/#60/#61) is needed any more.
-   - **C. Peers on the owner's CPU.** *Proposed default:* no; a peer is refused at once
-     while the card is busy, as today. Spending the owner's CPU on a peer's file needs
-     Mike's word (#62/#63).
-   - **D. The short-file threshold:** `cpu_max_audio_s` = 120 s proposed (Mike's "1–2
-     minutes" at #62); to be checked against the CPU factor measured in step 5 of the
-     Whisper plan.
+     GPU wait, so the CPU twin takes the file when its estimate passes; otherwise the file
+     waits with "time unknown" up to the bound.
+   - **C. Peers on the owner's CPU:** *proposed* **no**; a peer is refused at once while
+     the card is busy, as today. *Votes:* Ark #64 §7 — no. Zcode — not yet.
+   - **D. The long-audio guard** `cpu_max_audio_s`: *proposed* 1200 s (20 min), an upper
+     guard only, binding when the CPU factor reads better than 0.5× real time on a long
+     file (L12). It replaces the 120 s "short file" threshold, which Ark #64 §1 showed
+     fights the time comparison in both directions.
+   - **E. The CPU's own bound** `cpu_max_s`: *proposed* 600 s, equal to the dictation
+     bound, so neither route makes a person wait longer than the line would.
+   - **F. Contention with a local LLM engine:** *proposed* no CPU route while a
+     CPU-computing resident (Strata) is busy; times `cpu_contention_factor` = 2.0 while it
+     is idle; music engines not counted until measured. *Alternative:* a penalty factor
+     only, never a hard stop.
+   - **G. Residency of the CPU twin:** *proposed* count the cold load in every estimate,
+     keep the twin loaded while the holder it was loaded for keeps the card, never load it
+     speculatively. *Alternative:* keep the twin resident whenever the card is held by a
+     long job, so short files never pay the load (3 GB of RAM held on speculation).
    *Votes:* on (d) + queue, Zcode #52 and Ark #53 accept with conditions, all of them in
-   this record (L4, L5a, L11, section 3.1, tests 18–24). On Mike's #62 GPU/CPU choice, the
-   short threshold and the unmeasured-CPU rule, neither reviewer has voted yet (CC asked
-   at #63).
+   this record (L4, L5a, L11, section 3.1, tests 18–24). On the GPU/CPU choice, Ark #64
+   accepts the direction with the changes above (times not length, cold start, contention,
+   a separate provider object, progress-based music ETA) and agrees on C (no) and on
+   "nothing measured → the line"; D–G are new and have no votes yet. Zcode has not voted
+   on #62 or #64's points.
 
 Also open, and not among the six: whether `auto` means `lease` on CUDA for the embedder
 and GLiNER (section 3.4), whether L11 should also spare an *idle* music engine its stop
@@ -1873,9 +1983,13 @@ Mike confirms.
   **[unverified]** — CC
 - **Q7:** The reload times behind decision 2's cost difference (Whisper vs an idle music
   engine). **[unverified]** — CC
-- **Q8:** The CPU route's figures: host RAM of turbo in fp32 (~3 GB from the parameter
-  count) and its real-time factor on this CPU (step 5 of the Whisper plan). Until
-  measured, L12 does not route to the CPU. **[unverified]** — CC
+- **Q8:** The CPU twin's figures: cold load, first call, warm inference at two or more
+  lengths, host RAM, and the contention figures (L12's measurement table, being run now).
+  Until measured, L12 does not route to the CPU. **[unverified]** — CC
+- **Q10:** Whether Strata computes missed experts on the CPU in parallel with the GPU.
+  Host-RAM residency is documented here (the resident budget); the CPU computation is
+  Ark's reading of `strata_details.md`, which is not in the dpc-messenger repo.
+  **[unverified]** — CC
 - **Q9:** Whether the KV type a llama-server child was started with is readable on the
   supervisor at launch, so `predicted_vram_mib` can be recorded without re-running the
   ladder (the ladder writes it to the fit memo, 3514–3639). **[unverified]** — CC
@@ -1960,6 +2074,15 @@ was done instead. The underlying concern is kept wherever it stands on its own.
 - **Zcode #52 vs Ark #53 on how to compute the fit** (actual use plus peaks vs declared
   sizes): not an error on either side; reconciled in L11 as declared peaks against total
   with a live reading that may only veto, and any unknown queues.
+- **Ark #64, checked.** §1 (length vs time) and §2 (cold start) are design points, adopted
+  in L12. §3: Strata's experts live in host RAM (confirmed: the resident budget in
+  `docs/GLOSSARY.md`, `ProvidersEditor.svelte:2366`); that it computes missed experts on
+  the CPU is from `strata_details.md`, which this repo does not contain (Q10), so the
+  contention rule rests on Ark's reading until measured. §4: confirmed, `hand_over_to`
+  (700), `_copy_state_to` (685) and `_settle_finished_load` (692) move one model state;
+  the second-pipeline design of the previous revision is removed. §5: confirmed, and
+  sharper than stated: the running job has no finer progress than per finished variant
+  and no start time, so its ETA is unknown in v1, not merely mis-estimated.
 - **Ark #60 §4: "with a mid-job wait in state `running`, `_wait_for_card` would report the
   card free and start the engine over a holder."** The gate is real (`runner.py:661-662`,
   `state != QUEUED` → `return False`), but False means "the job was cancelled" (its
@@ -2038,12 +2161,21 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   transcription. Led to L12, the CPU route in S3, S9 reduced to `excludable=True` against
   supervisors, decision 6 rewritten, sub-choice B replaced, sub-choices C (peers on CPU)
   and D (the short threshold) added.
+- **#64, Ark** (the GPU/CPU choice: direction right, three wrong answers in it). Taken: §1
+  compare times, not audio length; 120 s threshold dropped, a 1200 s long-audio guard and
+  `cpu_max_s` in its place (L12, test 30); §2 cold and warm CPU figures at several lengths,
+  the load counted when the twin is cold, the twin kept while the same holder keeps the
+  card (test 31); §3 contention with a CPU-computing resident such as Strata, named in
+  Consequences (test 32); §4 the CPU route as a separate provider object, the CPU twin, and
+  the cascade reconciled (test 33); §5 a running music job's ETA from progress, unknown in
+  v1 (L10, test 34); §6 nothing measured → the line, with the measurement table left for
+  the numbers; §7 peers not on the CPU.
 
 ## Authors
 
 - **Mike** — Decisions (#20 and #62, 2026-11-21); question at #49–#50
 - **CC** — Request, review, this record
-- **Ark, Zcode** — Consulted; reviews #41, #44, #45, #52, #53, #59, #60, #61
+- **Ark, Zcode** — Consulted; reviews #41, #44, #45, #52, #53, #59, #60, #61, #64
 
 ## References
 
@@ -2058,5 +2190,5 @@ was done instead. The underlying concern is kept wherever it stands on its own.
 - `ai-studio/experiments/music-player/SPEC.md` — decision 32
 - Design source: the card-lease design, `dev` HEAD `b9725990`; revision checked at
   `5099b326`
-- Reviews: AI Studio group chat, messages #41, #52 and #59 (Zcode), #44, #45, #53, #60
-  and #61 (Ark), #49–#50 and #62 (Mike)
+- Reviews: AI Studio group chat, messages #41, #52 and #59 (Zcode), #44, #45, #53, #60,
+  #61 and #64 (Ark), #49–#50 and #62 (Mike)
