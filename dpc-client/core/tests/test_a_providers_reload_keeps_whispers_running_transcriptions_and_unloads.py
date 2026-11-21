@@ -25,6 +25,7 @@ ALIAS = "w"
 class _World:
     def __init__(self):
         self.unloads = 0
+        self.loads = 0
         self.unload_started = threading.Event()
         self.unload_release = threading.Event()
         self.unload_release.set()
@@ -44,6 +45,7 @@ def world(monkeypatch):
     def load(self):
         w.load_started.set()
         assert w.load_release.wait(5)
+        w.loads += 1
         self.pipeline = object()
         self.model_loaded = True
 
@@ -406,6 +408,7 @@ async def test_a_preload_finishing_across_a_reload_arms_the_successors_timer(llm
     world.load_release.set()
     await asyncio.wait_for(loading, 2)
     assert new.is_model_loaded() and new._idle_task is not None
+    assert not old.is_model_loaded()
     await _until(lambda: world.unloads == 1)
 
 
@@ -436,3 +439,72 @@ async def test_shutdown_bound_covers_a_hung_unload_too(llm, world, caplog):
     assert "left loaded at exit" in caplog.text
     world.unload_release.set()
     await _until(lambda: not p._unloading)
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_during_a_load_that_crosses_a_reload_leaves_one_owner_and_one_copy(llm, world):
+    old = llm.providers[ALIAS]
+    world.load_release.clear()
+    world.load_started.clear()
+    caller = asyncio.create_task(old.transcribe("x"))
+    await asyncio.wait_for(asyncio.to_thread(world.load_started.wait, 2), 3)
+    caller.cancel()
+    llm.reload_providers()
+    new = llm.providers[ALIAS]
+    world.load_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, 2)
+
+    assert [old.is_model_loaded(), new.is_model_loaded()].count(True) == 1 and new.is_model_loaded()
+    assert new._active_transcriptions == 0 and old._active_transcriptions == 0
+    await asyncio.sleep(0.01)
+    assert new._idle_task is not None or world.unloads == 1  # the timer was armed
+    await _until(lambda: world.unloads == 1)
+    await new.transcribe("again")
+    assert world.loads == 2  # one load for the cancelled call, one after the idle unload
+    assert world.unloads == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_during_a_load_without_a_reload_still_keeps_the_model(llm, world):
+    p = llm.providers[ALIAS]
+    world.load_release.clear()
+    world.load_started.clear()
+    caller = asyncio.create_task(p.transcribe("x"))
+    await asyncio.wait_for(asyncio.to_thread(world.load_started.wait, 2), 3)
+    caller.cancel()
+    await asyncio.sleep(0.05)
+    assert not caller.done() and p._load_lock.locked()  # waits for the thread
+    world.load_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, 2)
+    assert p.is_model_loaded() and p._active_transcriptions == 0
+    assert world.loads == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_landing_on_a_finishing_unload_still_announces_it(llm, world):
+    seen = []
+    whisper_provider.set_unloaded_listener(lambda alias, model, reason: seen.append(reason))
+    p = llm.providers[ALIAS]
+    await p.transcribe("warm")
+    world.unload_release.clear()
+    world.unload_started.clear()
+    unloading = asyncio.create_task(p.unload_model_async(reason="requested"))
+    await asyncio.wait_for(asyncio.to_thread(world.unload_started.wait, 2), 3)
+    unloading.cancel()
+    world.unload_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(unloading, 2)
+    assert seen == ["requested"] and not p.is_model_loaded()
+
+
+@pytest.mark.asyncio
+async def test_a_late_shutdown_unload_reports_its_outcome(llm, world, caplog):
+    p = llm.providers[ALIAS]
+    await p.transcribe("x")
+    world.unload_release.clear()
+    with caplog.at_level("WARNING"):
+        await asyncio.wait_for(p.shutdown_unload(timeout=0.3), 3)
+        world.unload_release.set()
+        await _until(lambda: "finished unloading after the shutdown bound" in caplog.text)

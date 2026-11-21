@@ -28,7 +28,7 @@ class RemoteTranscriptionRequestHandler(MessageHandler):
         model = payload.get("model")
         provider = payload.get("provider")
         language = payload.get("language", "auto")
-        task = payload.get("task", "transcribe")
+        task = payload.get("task")
 
         await self.service._handle_transcription_request(
             sender_node_id, request_id, audio_base64, mime_type, model, provider, language, task

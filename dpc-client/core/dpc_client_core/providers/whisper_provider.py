@@ -347,11 +347,12 @@ class LocalWhisperProvider(AIProvider):
             if self.model_loaded:
                 return
             self._refuse_if_retired()
-            await asyncio.to_thread(self._load_model)
-            successor = self._current_owner()
-            if successor is not self:  # a reload handed this object over while it loaded
-                self._copy_state_to(successor)
-            successor.schedule_idle_unload()  # a preload nobody uses must not hold the card
+            _, error, cancelled = await self._finish_thread(self._load_model)
+            if error is not None:
+                raise error
+            self._settle_finished_load()
+            if cancelled:
+                raise asyncio.CancelledError
 
     def _unload_model(self) -> Optional[bool]:
         """Free the model. False when the release raised (the reference is dropped anyway)."""
@@ -446,22 +447,15 @@ class LocalWhisperProvider(AIProvider):
         and tells the listener; True when the model is no longer loaded."""
         was_loaded = self.model_loaded
         self._unloading = True
-        worker = asyncio.ensure_future(asyncio.to_thread(self._unload_model))
-        cancelled = False
         try:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    cancelled = True  # keep the lock and the flag until the thread is done
-                except Exception:
-                    break
+            released, error, cancelled = await self._finish_thread(self._unload_model)
         finally:
             self._unloading = False
-        if cancelled:
-            raise asyncio.CancelledError
-        released = worker.result()
+        if error is not None:
+            raise error
         if not was_loaded:
+            if cancelled:
+                raise asyncio.CancelledError
             return True  # nothing was loaded here: not a release, nothing to announce
         if released is False:
             logger.error("Whisper '%s' (%s): the unload failed (%s); the model reference was dropped "
@@ -469,7 +463,27 @@ class LocalWhisperProvider(AIProvider):
         else:
             logger.info("Whisper '%s' (%s) unloaded: %s", self.alias, self.model_name, detail or reason)
         self._notify_unloaded(reason)
+        if cancelled:
+            raise asyncio.CancelledError
         return not self.model_loaded
+
+    @staticmethod
+    async def _finish_thread(fn):
+        """Run `fn` in a worker thread and wait for it even when the caller is cancelled
+        (a thread cannot be stopped, and the lock must not be released under it).
+        Returns (result, error, cancelled); the caller re-raises the cancel once its
+        bookkeeping is done."""
+        worker = asyncio.ensure_future(asyncio.to_thread(fn))
+        cancelled = False
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:
+                break
+        error = worker.exception()
+        return (None if error else worker.result()), error, cancelled
 
     async def unload_if_idle(self, reason: str = "released") -> bool:
         """Unload the model unless a transcription is using it now. True when it was
@@ -528,9 +542,22 @@ class LocalWhisperProvider(AIProvider):
                     await self._unload_locked("shutdown")
 
         job = asyncio.ensure_future(unload_under_lock())
+
+        def report_late_outcome(done):
+            if done.cancelled():
+                return
+            if done.exception() is not None:
+                logger.error("Whisper '%s': the shutdown unload failed: %s", self.alias, done.exception())
+            elif not self.model_loaded and timed_out:
+                logger.warning("Whisper '%s': the model finished unloading after the shutdown bound",
+                               self.alias)
+
+        timed_out = False
+        job.add_done_callback(report_late_outcome)
         try:
             await asyncio.wait_for(asyncio.shield(job), max(0.0, deadline - loop.time()))
         except asyncio.TimeoutError:
+            timed_out = True
             if not self._unloading:
                 job.cancel()
             logger.error("Whisper '%s': not unloaded within the %g s shutdown bound; "
@@ -630,6 +657,15 @@ class LocalWhisperProvider(AIProvider):
             new.pipeline = self.pipeline
             new.model_loaded = True
             new._detected_device = self._detected_device
+            self.model_loaded = False  # one owner of the shared pipeline: `new`
+
+    def _settle_finished_load(self) -> None:
+        """A load just finished under the lock. When a reload replaced this object meanwhile,
+        the successor takes the model; either way the idle timer is armed for it."""
+        owner = self._current_owner()
+        if owner is not self:
+            self._copy_state_to(owner)
+        owner.schedule_idle_unload()
 
     def hand_over_to(self, new: "LocalWhisperProvider") -> None:
         """Providers reload: `new` replaces this object. Transcriptions still running here
@@ -826,7 +862,12 @@ class LocalWhisperProvider(AIProvider):
             self._refuse_if_retired()
             loaded_here = not self.model_loaded
             if loaded_here:
-                await asyncio.to_thread(self._load_model)
+                _, error, cancelled = await self._finish_thread(self._load_model)
+                if error is not None:
+                    raise error
+                if cancelled:
+                    self._settle_finished_load()
+                    raise asyncio.CancelledError
             # A reload may have replaced this object while it waited or loaded: count on
             # the replacement, which holds the shared model state.
             counted = self._current_owner()

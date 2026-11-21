@@ -1339,8 +1339,9 @@ class P2PCoordinator:
         except Exception as send_err:
             logger.error("Error sending inference error response to %s: %s", peer_id, send_err, exc_info=True)
 
-    async def handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
-        """Handle incoming remote transcription request from a peer."""
+    async def handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: Optional[str] = None):
+        """Handle incoming remote transcription request from a peer. `task` is None when the
+        peer sent none: the provider's configured task then applies."""
         from dpc_protocol.protocol import create_remote_transcription_response
         import base64
         import tempfile

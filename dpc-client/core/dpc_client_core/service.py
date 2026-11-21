@@ -9832,7 +9832,7 @@ class CoreService(MusicCommandsMixin):
             max_tokens=max_tokens,
         )
 
-    async def _handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
+    async def _handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: Optional[str] = None):
         """Delegated to P2PCoordinator."""
         await self.p2p_coordinator.handle_transcription_request(peer_id, request_id, audio_base64, mime_type, model, provider, language, task)
 

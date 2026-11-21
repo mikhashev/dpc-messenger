@@ -186,9 +186,11 @@ async def test_the_provider_does_not_unload_during_a_transcription(monkeypatch):
     gate = asyncio.Event()
     p = _provider(monkeypatch, gate)
     voice = asyncio.create_task(p.transcribe("voice"))
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert p._active_transcriptions == 1
+
+    async def running():
+        while p._active_transcriptions != 1:
+            await asyncio.sleep(0.001)
+    await asyncio.wait_for(running(), 2)
     assert await p.unload_if_idle() is False
     assert p.unloads == 0 and p.is_model_loaded()
     gate.set()

@@ -133,7 +133,7 @@ class _FakeWhisper:
         return {"text": "hello", "language": "ru"}
 
 
-async def _peer_request(language, task):
+async def _peer_request(language, task=None):
     provider = _FakeWhisper()
     service = MagicMock()
     service.p2p_manager.send_message_to_peer = AsyncMock()
@@ -141,8 +141,9 @@ async def _peer_request(language, task):
     service.firewall.can_request_transcription.return_value = True
     coordinator = P2PCoordinator(service)
     audio = base64.b64encode(b"RIFFxxxx").decode()
+    kwargs = {} if task is None else {"task": task}
     await coordinator.handle_transcription_request("peer-1", "req-1", audio, "audio/wav",
-                                                   provider="w", language=language, task=task)
+                                                   provider="w", language=language, **kwargs)
     return provider
 
 
@@ -157,3 +158,20 @@ async def test_a_peer_request_passes_its_values_and_leaves_the_provider_alone():
 async def test_a_peer_asking_for_auto_language_does_not_override_it():
     provider = await _peer_request("auto", "transcribe")
     assert provider.calls == [{"task": "transcribe"}]
+
+
+@pytest.mark.asyncio
+async def test_a_peer_that_sent_no_task_leaves_the_providers_configured_task_in_force():
+    provider = await _peer_request("ru")
+    assert provider.calls == [{"language": "ru"}]
+    assert provider.task == "translate"
+
+
+@pytest.mark.asyncio
+async def test_the_message_handler_passes_none_when_the_payload_has_no_task():
+    from dpc_client_core.message_handlers.transcription_handler import RemoteTranscriptionRequestHandler
+    service = MagicMock()
+    service._handle_transcription_request = AsyncMock()
+    handler = RemoteTranscriptionRequestHandler(service)
+    await handler.handle("peer-1", {"request_id": "r", "audio_base64": "QQ==", "mime_type": "audio/wav"})
+    assert service._handle_transcription_request.call_args[0][-1] is None
