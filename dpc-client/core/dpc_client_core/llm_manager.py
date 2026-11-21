@@ -622,6 +622,10 @@ class LLMManager:
                             'load_lock': getattr(provider, '_load_lock', None)
                         }
                         logger.debug(f"Preserving loaded Whisper model state for '{alias}'")
+                # The new object takes over the model and its own timer: the old one
+                # must not unload the pipeline they now share.
+                if hasattr(provider, 'retire'):
+                    provider.retire()
 
             with open(self.config_path, 'w') as f:
                 json.dump(config_dict, f, indent=2)
@@ -661,6 +665,8 @@ class LLMManager:
                         if state.get('load_lock'):
                             provider._load_lock = state['load_lock']
                         logger.info(f"Restored loaded Whisper model state for '{alias}' (model stays in memory)")
+                        if hasattr(provider, 'schedule_idle_unload'):
+                            provider.schedule_idle_unload()
 
             # Call callback to re-inject CoreService into dpc_agent/remote_peer providers
             if self._on_providers_reload_callback:

@@ -376,7 +376,8 @@ class Settings:
             'task': 'transcribe',  # Task: 'transcribe' or 'translate' (to English)
             'fallback_to_openai': 'true',  # Fallback to OpenAI API if local fails
             'max_file_size_mb': '25',  # Max audio file size for local transcription (VRAM limit)
-            'lazy_loading': 'true'  # Load model on first use (faster startup)
+            'lazy_loading': 'true',  # Load model on first use (faster startup)
+            'idle_unload_s': '300'  # Unload the model (frees VRAM) after this many idle seconds; 0 = never
         }
 
         self._config['vision'] = {
@@ -1291,6 +1292,17 @@ class Settings:
         """Check if lazy model loading is enabled (load on first use)."""
         value = self.get('local_transcription', 'lazy_loading', 'true')
         return value.lower() in ('true', '1', 'yes')
+
+    def get_local_transcription_idle_unload_s(self) -> float:
+        """`[local_transcription] idle_unload_s`: seconds after the last transcription
+        before the loaded model is unloaded to free the card. 0 = never. Default 300."""
+        raw = self.get('local_transcription', 'idle_unload_s', '300')
+        try:
+            value = float(str(raw).strip())
+        except (TypeError, ValueError):
+            logger.warning("[local_transcription] idle_unload_s is unreadable (%r); using 300", raw)
+            return 300.0
+        return value if value > 0 else 0.0
 
     # Telegram Bot Integration Settings (v0.14.0+)
 

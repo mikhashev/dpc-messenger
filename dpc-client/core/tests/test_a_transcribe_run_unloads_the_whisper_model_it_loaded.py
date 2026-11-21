@@ -50,12 +50,20 @@ class FakeWhisper:
     def is_model_loaded(self):
         return self.loaded
 
-    async def transcribe(self, path):
+    async def transcribe(self, path, release_if_loaded_here=False):
+        loaded_here = not self.loaded
         self.loaded = True
-        if self.error is not None:
-            raise self.error
-        return {"text": "a", "language": "en", "duration": 1.0, "provider": "local_whisper",
-                "segments": [{"start": 0.0, "end": 1.0, "text": "a"}]}
+        try:
+            if self.error is not None:
+                raise self.error
+            return {"text": "a", "language": "en", "duration": 1.0, "provider": "local_whisper",
+                    "segments": [{"start": 0.0, "end": 1.0, "text": "a"}]}
+        finally:
+            if release_if_loaded_here and loaded_here:
+                try:
+                    await self.unload_if_idle()
+                except Exception:
+                    pass  # the real provider logs it
 
     async def unload_if_idle(self):
         self.unload_calls += 1
@@ -127,10 +135,20 @@ async def test_a_failing_unload_does_not_change_the_answer(tmp_path, audio):
     assert result["text"] == "a"
 
 
+@pytest.mark.asyncio
+async def test_the_real_provider_releases_only_a_model_its_own_call_loaded(monkeypatch):
+    p = _provider(monkeypatch)
+    await p.transcribe("a", release_if_loaded_here=True)
+    assert p.unloads == 1 and not p.is_model_loaded()
+    await p.transcribe("warm")  # loads, stays loaded
+    await p.transcribe("b", release_if_loaded_here=True)  # was loaded already
+    assert p.unloads == 1 and p.is_model_loaded()
+
+
 # -- the provider: the use counter ---------------------------------------------------------
 
 def _provider(monkeypatch, gate=None):
-    p = LocalWhisperProvider("w", {"type": "local_whisper", "device": "cpu"})
+    p = LocalWhisperProvider("w", {"type": "local_whisper", "device": "cpu", "idle_unload_s": 0})
     p.unloads = 0
 
     def load():

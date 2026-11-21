@@ -815,6 +815,8 @@ class CoreService(MusicCommandsMixin):
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
         self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
+        from .providers.whisper_provider import set_idle_unload_source
+        set_idle_unload_source(self.settings.get_local_transcription_idle_unload_s)
 
         # Register callback for re-injecting CoreService after providers reload
         self.llm_manager.set_on_providers_reload(self._inject_service_into_providers)
@@ -1942,7 +1944,10 @@ class CoreService(MusicCommandsMixin):
                 if provider.config.get('type') == 'local_whisper':
                     if hasattr(provider, 'is_model_loaded') and provider.is_model_loaded():
                         logger.info(f"Unloading Whisper model during shutdown: {alias}")
-                        await provider.unload_model_async()
+                        if hasattr(provider, 'shutdown_unload'):
+                            await provider.shutdown_unload()
+                        else:
+                            await provider.unload_model_async()
         except Exception as e:
             logger.error(f"Error unloading Whisper model during shutdown: {e}", exc_info=True)
 

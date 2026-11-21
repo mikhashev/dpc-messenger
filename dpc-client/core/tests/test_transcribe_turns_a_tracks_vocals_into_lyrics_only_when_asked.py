@@ -323,7 +323,7 @@ class FakeWhisper:
         self.error = error
         self.calls = []
 
-    async def transcribe(self, path):
+    async def transcribe(self, path, **kw):
         self.calls.append(path)
         if self.error is not None:
             raise self.error

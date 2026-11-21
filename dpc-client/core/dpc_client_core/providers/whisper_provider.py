@@ -4,7 +4,7 @@ import asyncio
 import gc
 import os
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Callable, Dict, Any, Optional, List
 
 from .base import AIProvider, ModelNotCachedError
 from .model_sizes import model_size_bytes
@@ -19,6 +19,20 @@ _VOICE_MEMORY_HINT = (
     "local Whisper transcription needs the voice-memory extra (not installed); "
     "from dpc-client/core run: uv sync --extra voice-memory --inexact"
 )
+
+
+DEFAULT_IDLE_UNLOAD_S = 300.0
+# How long shutdown waits for running transcriptions before it unloads anyway.
+SHUTDOWN_DRAIN_S = 10.0
+
+_idle_unload_source: Optional[Callable[[], float]] = None
+
+
+def set_idle_unload_source(source: Optional[Callable[[], float]]) -> None:
+    """Where providers read `[local_transcription] idle_unload_s` (seconds, 0 = never).
+    A getter, read on every schedule, so a settings change applies without a restart."""
+    global _idle_unload_source
+    _idle_unload_source = source
 
 
 class LocalWhisperProvider(AIProvider):
@@ -76,6 +90,17 @@ class LocalWhisperProvider(AIProvider):
         # Transcriptions running on the loaded model now: counted under `_load_lock`
         # by `transcribe`, so `unload_if_idle` never pulls the model from under one.
         self._active_transcriptions = 0
+        # Set while no transcription runs; shutdown waits on it.
+        self._drained = asyncio.Event()
+        self._drained.set()
+        # An unload asked for while a transcription ran: done when the last one ends.
+        self._unload_when_idle = False
+        # The one pending idle/deferred unload task. `_idle_epoch` changes on every
+        # transcription start or end, so a task that wakes late sees it is stale.
+        self._idle_task: Optional["asyncio.Task"] = None
+        self._idle_epoch = 0
+        self._idle_committed = False  # the task is unloading: it must not be cancelled
+        self._retired = False  # replaced by a reloaded provider object, or shut down
 
         logger.info(f"LocalWhisperProvider '{alias}' initialized (model={self.model_name}, device={self.device})")
 
@@ -303,6 +328,7 @@ class LocalWhisperProvider(AIProvider):
             if self.model_loaded:
                 return
             await asyncio.to_thread(self._load_model)
+            self.schedule_idle_unload()  # a preload nobody uses must not hold the card
 
     def _unload_model(self) -> None:
         if not self.model_loaded:
@@ -395,12 +421,118 @@ class LocalWhisperProvider(AIProvider):
             return not self.model_loaded
 
     async def unload_model_async(self) -> None:
+        """Unload the model, never under a running transcription: when one runs, the
+        unload is deferred and happens as soon as the last one ends."""
         async with self._load_lock:
             if not self.model_loaded:
                 logger.debug("Whisper model not loaded, skipping unload")
+                self._unload_when_idle = False
                 return
+            if self._active_transcriptions > 0:
+                self._unload_when_idle = True
+                logger.info("Whisper model '%s' unload deferred: %d transcription(s) running",
+                            self.model_name, self._active_transcriptions)
+                return
+            self._unload_when_idle = False
+            self._cancel_idle_task()
             await asyncio.to_thread(self._unload_model)
             logger.info("Whisper model unloaded (async)")
+
+    async def shutdown_unload(self, timeout: float = SHUTDOWN_DRAIN_S) -> None:
+        """Shutdown path: wait up to `timeout` s for running transcriptions, then unload
+        the model anyway (logged) so the card is free before the process exits."""
+        self.retire()
+        try:
+            await asyncio.wait_for(self._drained.wait(), timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Whisper '%s': %d transcription(s) still running after %g s at shutdown; "
+                           "unloading anyway", self.alias, self._active_transcriptions, timeout)
+        try:
+            async with asyncio.timeout(timeout):
+                async with self._load_lock:
+                    if self.model_loaded:
+                        await asyncio.to_thread(self._unload_model)
+        except TimeoutError:
+            logger.warning("Whisper '%s': the load lock was not free after %g s at shutdown; "
+                           "model left to process exit", self.alias, timeout)
+
+    # -- idle self-unload ------------------------------------------------------------------
+
+    def _idle_unload_s(self) -> float:
+        raw = self.config.get("idle_unload_s")
+        if raw is None and _idle_unload_source is not None:
+            try:
+                raw = _idle_unload_source()
+            except Exception:
+                logger.debug("idle_unload_s source failed", exc_info=True)
+        if raw is None:
+            return DEFAULT_IDLE_UNLOAD_S
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return DEFAULT_IDLE_UNLOAD_S
+
+    def _cancel_idle_task(self) -> None:
+        """Drop the pending timer. A task already unloading is left to finish: cancelling
+        it would free the load lock while the unload still runs in its thread."""
+        self._idle_epoch += 1
+        task, self._idle_task = self._idle_task, None
+        if task is not None and not self._idle_committed and not task.done():
+            task.cancel()
+
+    def schedule_idle_unload(self) -> None:
+        """(Re)start the idle timer for the loaded model, or the deferred unload at once.
+        One task per provider; a new call replaces the pending one. No-op when the
+        provider is retired, nothing is loaded or no event loop runs."""
+        if self._retired:
+            return
+        self._cancel_idle_task()
+        if not self.model_loaded or self._active_transcriptions > 0:
+            return
+        delay = 0.0 if self._unload_when_idle else self._idle_unload_s()
+        if not self._unload_when_idle and delay <= 0:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._idle_unload_after(delay, self._idle_epoch))
+        task.add_done_callback(self._forget_idle_task)
+        self._idle_task = task
+
+    async def _idle_unload_after(self, delay: float, epoch: int) -> None:
+        try:
+            await asyncio.sleep(delay)
+            async with self._load_lock:
+                if (epoch != self._idle_epoch or self._retired or not self.model_loaded
+                        or self._active_transcriptions > 0):
+                    return
+                self._idle_committed = True
+                deferred, self._unload_when_idle = self._unload_when_idle, False
+                try:
+                    logger.info("Whisper '%s' (%s) unloaded: %s", self.alias, self.model_name,
+                                "deferred until its transcription ended" if deferred
+                                else f"idle for {delay:g} s")
+                    await asyncio.to_thread(self._unload_model)
+                finally:
+                    self._idle_committed = False
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Whisper '%s': idle unload failed", self.alias)
+
+    def _forget_idle_task(self, task: "asyncio.Task") -> None:
+        if self._idle_task is task:
+            self._idle_task = None
+
+    def retire(self) -> None:
+        """This object is replaced (providers reload hands its model to the new one) or
+        shut down: stop its timer and never schedule another."""
+        self._retired = True
+        self._cancel_idle_task()
+
+    async def shutdown(self) -> None:
+        self.retire()
 
     async def download_model_async(self, progress_callback=None) -> Dict[str, Any]:
         logger.info(f"Starting download of Whisper model '{self.model_name}'...")
@@ -547,17 +679,31 @@ class LocalWhisperProvider(AIProvider):
             segments.append({"start": float(start), "end": float(end), "text": text})
         return segments
 
-    async def transcribe(self, audio_path: str) -> Dict[str, Any]:
+    async def transcribe(self, audio_path: str, release_if_loaded_here: bool = False) -> Dict[str, Any]:
+        """Transcribe `audio_path`. With `release_if_loaded_here`, a model this very call
+        had to load is unloaded as the call ends, unless another transcription is using
+        it (the decision is made under the load lock, so it cannot race)."""
         # The lock is taken even when the model is loaded, so the use is counted
         # atomically with the load and an unload in progress is waited for.
         async with self._load_lock:
-            if not self.model_loaded:
+            loaded_here = not self.model_loaded
+            if loaded_here:
                 await asyncio.to_thread(self._load_model)
             self._active_transcriptions += 1
+            self._drained.clear()
+            self._cancel_idle_task()
         try:
             return await self._transcribe_loaded(audio_path)
         finally:
             self._active_transcriptions -= 1
+            if self._active_transcriptions == 0:
+                self._drained.set()
+                if release_if_loaded_here and loaded_here:
+                    try:
+                        await self.unload_if_idle()
+                    except Exception:
+                        logger.exception("Whisper '%s': releasing the model after the run failed", self.alias)
+                self.schedule_idle_unload()
 
     async def _transcribe_loaded(self, audio_path: str) -> Dict[str, Any]:
         # Clear CUDA cache before transcription to free fragmented memory
