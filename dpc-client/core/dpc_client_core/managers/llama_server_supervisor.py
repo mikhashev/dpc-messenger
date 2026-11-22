@@ -678,12 +678,34 @@ def _live_claims() -> List[Tuple["LlamaServerSupervisor", str]]:
     return out
 
 
+# The card lease (ADR-052): every other GPU client holds the card through `card_lease`, which
+# installs these when it is imported; this module never imports it, so neither imports the other in
+# a cycle. Until it is, no lease exists and every reader below sees the supervisors alone.
+# `_LEASE_HOLDERS`: (lease, state) of each granted lease. `_LEASE_WAITERS`: (arrival, lease, alias
+# wanted) of each lease waiter, on `_CARD_ARRIVAL`'s clock. `_LEASE_QUEUE_ROWS`: the waiters as
+# `card_queue` rows. `_live_claims` and every `_CARD_CLAIMS` access stay supervisor-only.
+_LEASE_HOLDERS: Callable[[], List[Tuple[Any, str]]] = lambda: []
+_LEASE_WAITERS: Callable[[], List[Tuple[int, Any, str]]] = lambda: []
+_LEASE_QUEUE_ROWS: Callable[[], List[Dict[str, Any]]] = lambda: []
+
+
+def _live_holders() -> List[Tuple[Any, str]]:
+    """(holder, state) of everything on the card: the supervisors first, then the granted leases.
+    With no lease granted it is `_live_claims()`."""
+    return _live_claims() + list(_LEASE_HOLDERS())
+
+
 def card_holders() -> List[Dict[str, Any]]:
-    """Each supervisor holding the card: alias, engine, state, port."""
-    return [
-        {"alias": sup.alias, "engine": sup.ENGINE, "state": state, "port": sup.port}
-        for sup, state in _live_claims()
-    ]
+    """Each holder of the card, the supervisors first: alias, engine, state, port and `kind`
+    ("inference" for a supervisor); a lease's row adds what ADR-052 L7 names."""
+    rows: List[Dict[str, Any]] = []
+    for holder, state in _live_holders():
+        if getattr(holder, "IS_CARD_LEASE", False):
+            rows.append(holder.card_holder_row(state))
+        else:
+            rows.append({"alias": holder.alias, "engine": holder.ENGINE, "state": state, "port": holder.port,
+                         "kind": "inference"})
+    return rows
 
 
 # What stands on an alias, so that its holder is busy between its calls too (ADR-044,
@@ -1041,7 +1063,8 @@ def card_queue() -> List[Dict[str, Any]]:
     """The line for `local_engine_status`, each request in position order (the position is the
     order; there is no position field): its alias, who it runs for where set, `queued_at` and
     `give_up_at`, both wall-clock seconds as `last_swap`'s `at` is. For the owner only: these are
-    ids of the owner's agents and chats, as in `_who_stands_on`."""
+    ids of the owner's agents and chats, as in `_who_stands_on`. The card lease's waiters follow,
+    in their own line's order, with their own keys (ADR-052 L7)."""
     now, clock = time.time(), _swap_clock()
     return [
         {
@@ -1053,7 +1076,7 @@ def card_queue() -> List[Dict[str, Any]]:
         }
         for place in _CARD_QUEUE
         for request in place.requests
-    ]
+    ] + list(_LEASE_QUEUE_ROWS())
 
 
 class _QueuedRequest:

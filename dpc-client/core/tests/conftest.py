@@ -79,10 +79,15 @@ def _no_card_claims_cross_tests():
     fake launch returns without a child leaves its claim behind, and the next
     test's start would be refused by an alias that only existed in the last one.
     The holds on an alias, the callers' last calls, the card queue, the slot queue and what a swap
-    leaves behind are module state beside it, cleared for the same reason."""
-    from dpc_client_core.managers import llama_server_supervisor
+    leaves behind are module state beside it, cleared for the same reason; so are the card leases,
+    their line and their yields (ADR-052)."""
+    from dpc_client_core.managers import card_lease, llama_server_supervisor
 
     def clear():
+        card_lease._CARD_LEASES.clear()
+        card_lease._LEASE_LINE.clear()
+        card_lease._YIELDS.clear()
+        card_lease._CLOSED = None
         llama_server_supervisor._CARD_CLAIMS.clear()
         llama_server_supervisor._CARD_HOLDS.clear()
         llama_server_supervisor._last_caller_call_at.clear()

@@ -1992,8 +1992,10 @@ def card_holder() -> Optional[Dict[str, Any]]:
     """The local engine holding the card — alias, engine, state, port — or None.
 
     Read-only, for the providers UI. Several are listed by `card_holders` only
-    when llama-server aliases share the card; across engines there is one."""
-    holders = card_holders()
+    when llama-server aliases share the card; across engines there is one.
+    Supervisor rows only (ADR-052 L7): the panel's Stop engine button must not
+    point at a card lease until `stop_local_engine` can let one go (S2)."""
+    holders = [row for row in card_holders() if row.get("kind") == "inference"]
     return holders[0] if holders else None
 
 

@@ -196,7 +196,9 @@ class TestOnlyTheOwnerReadsIt:
         assert made == ["LocalApiServer(core_service=self)"]
 
     def test_nothing_on_a_peers_path_names_the_status_or_what_it_reads(self):
-        owners = {"local_api.py", "service.py", "strata_provider.py", "llama_server_supervisor.py"}
+        # `card_lease.py` writes the lease waiters' `card_queue` rows and their wait estimate, whose
+        # `where` is the word "card_queue" (ADR-052 L7, L10); what it says to a peer names nothing.
+        owners = {"local_api.py", "service.py", "strata_provider.py", "llama_server_supervisor.py", "card_lease.py"}
         readers = {}
         for path in CORE.rglob("*.py"):
             if "__pycache__" in path.parts:
