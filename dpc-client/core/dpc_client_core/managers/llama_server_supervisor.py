@@ -681,11 +681,11 @@ def _live_claims() -> List[Tuple["LlamaServerSupervisor", str]]:
 # The card lease (ADR-052): every other GPU client holds the card through `card_lease`, which
 # installs these when it is imported; this module never imports it, so neither imports the other in
 # a cycle. Until it is, no lease exists and every reader below sees the supervisors alone.
-# `_LEASE_HOLDERS`: (lease, state) of each granted lease. `_LEASE_WAITERS`: (arrival, lease, alias
-# wanted) of each lease waiter, on `_CARD_ARRIVAL`'s clock. `_LEASE_QUEUE_ROWS`: the waiters as
+# `_LEASE_HOLDERS`: (lease, state) of each granted lease. `_LEASE_WAITERS`: (arrival, lease,
+# for_a_peer) of each lease waiter in line order, on `_CARD_ARRIVAL`'s clock (L5a). `_LEASE_QUEUE_ROWS`: the waiters as
 # `card_queue` rows. `_live_claims` and every `_CARD_CLAIMS` access stay supervisor-only.
 _LEASE_HOLDERS: Callable[[], List[Tuple[Any, str]]] = lambda: []
-_LEASE_WAITERS: Callable[[], List[Tuple[int, Any, str]]] = lambda: []
+_LEASE_WAITERS: Callable[[], List[Tuple[int, Any, bool]]] = lambda: []
 _LEASE_QUEUE_ROWS: Callable[[], List[Dict[str, Any]]] = lambda: []
 
 

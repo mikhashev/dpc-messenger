@@ -22,7 +22,7 @@
     KV_SNAPSHOTS_FOLDER_LABEL, KV_SNAPSHOTS_HELP, KV_SNAPSHOTS_UNC_WARNING, type KvSnapshotsRow,
   } from '$lib/utils/kvSnapshots';
   import {
-    backgroundSkipLines, cardQueueLines, otherCardHolderLines,
+    backgroundSkipLines, cardQueueLines, noLocalEngineText, otherCardHolderLines,
     type BackgroundSkipRow, type CardHolderRow, type CardQueueRow,
   } from '$lib/utils/cardQueue';
   import { trackRename } from '$lib/utils/aliasRenames';
@@ -2417,7 +2417,7 @@
           {engineActionBusy === `stop_local_engine:${holder.alias}` ? 'Stopping…' : 'Stop engine'}
         </button>
       {:else}
-        none — the card is free
+        {noLocalEngineText(engineStatus?.card_holders)}
       {/if}
     </p>
     {#each otherCardHolderLines(engineStatus?.card_holders) as line}

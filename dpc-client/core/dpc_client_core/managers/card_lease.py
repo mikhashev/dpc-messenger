@@ -149,6 +149,21 @@ def _positive(value: Any) -> Optional[float]:
     return seconds
 
 
+def seconds_from_ratio(audio_s: Any, audio_s_per_wall_s: Any) -> Optional[float]:
+    """Wall-clock seconds a piece of audio takes at a measured real-time ratio, or None for unknown.
+
+    The ratio's orientation (ADR-052 L10) is **audio seconds per wall second**, the number
+    `whisper_provider._realtime_ratio` prints (`duration / elapsed`): 20 means 20 s of audio per
+    second of work. So the time is a DIVISION, `audio_s / ratio`: 30 s of audio at 20x is 1.5 s (a
+    multiplication would say 600 s). A missing, zero, negative or NaN figure on either side is
+    unknown, never 0 (L10): the estimate then stays unknown and a peer is refused. The provider
+    (S3) turns its recorded ratio into `eta_s` and `expected_s` with this one function."""
+    audio, ratio = _positive(audio_s), _positive(audio_s_per_wall_s)
+    if audio is None or ratio is None:
+        return None
+    return _positive(audio / ratio)
+
+
 def _wait_words(wait_s: Optional[float]) -> str:
     if wait_s is None:
         return "unknown"
@@ -209,7 +224,11 @@ class CardLease:
     `EXCLUSIVE_ON_THE_CARD`, `DROPS_PARKED_ON_STOP`, the state word, `_draining`, `_swap_for`,
     `_busy_for_the_card`, `_begin_swap_drain`, `_end_swap_drain`, `_parked_conversations`,
     `give_up_for`, `stop_hint` and `who_uses`. A lease has no `_proc`, `props`, `port`,
-    `_start_lock` or `_in_flight`: those are a supervisor's and are never read for one."""
+    `_start_lock` or `_in_flight`: those are a supervisor's and are never read for one.
+
+    `eta_s` is the client's one callback for how long it will keep the card: seconds of work left
+    (wall clock), or None for unknown; 0, a negative figure and NaN also read as unknown. A client
+    that derives it from a real-time ratio uses `seconds_from_ratio`, which divides."""
 
     IS_CARD_LEASE = True
     # Read by `LlamaServerSupervisor._excludes` unchanged: every lease excludes every other holder.
@@ -525,14 +544,18 @@ class CardLease:
     async def let_go_by_hand(self, why: str, bound: Optional[float] = None) -> bool:
         """A person's Stop: an idle lease lets go now, a busy one raises `LeaseBusy` naming its uses.
         `bound` is seconds to wait for the yield (None: until it ends). True when the card was let
-        go (or nothing was loaded), False when the client refused or could not, or nothing is
-        granted."""
+        go (or nothing was loaded); False when the client refused or could not, nothing is granted,
+        or `bound` ran out first (the yield goes on and the lease stays marked until it ends: the
+        caller may ask again or look at the state)."""
         if not self._granted:
             return False
         if not self._draining and self._busy_for_the_card(self.state):
             raise LeaseBusy(f"{self.display} is busy with {self.who_uses()}", self.alias, self.ENGINE)
         deadline = None if bound is None else _clock() + bound
-        outcome = await self.give_up_for(why, deadline)
+        try:
+            outcome = await self.give_up_for(why, deadline)
+        except asyncio.TimeoutError:
+            return False
         return outcome in _RELEASING_OUTCOMES
 
     # -- what `card_holders` shows (L7) --
@@ -845,9 +868,15 @@ def _refusal_at_the_deadline(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any
     who, why = _why_it_waits(waiter, kind, what, state)
     alias, engine = _holder_of(kind, what)
     hint = getattr(what, "stop_hint", "") if kind == "holder" else ""
-    bound = "at once" if waiter.wait_s is not None and waiter.wait_s <= 0 else f"for {waiter.wait_s:g} s"
+    # `wait_s` None has no deadline of its own (an owner's deadline can come from elsewhere in S2).
+    if waiter.wait_s is None:
+        bound = ""
+    elif waiter.wait_s <= 0:
+        bound = " at once"
+    else:
+        bound = f" for {waiter.wait_s:g} s"
     return _refuse(waiter, LeaseWaitedTooLong(
-        f"{waiter.lease.display} waited {bound} for the card and was not granted it: {who} ({why})."
+        f"{waiter.lease.display} waited{bound} for the card and was not granted it: {who} ({why})."
         + (f" {hint}" if hint else ""),
         alias, engine, wait=estimate,
     ))
@@ -987,9 +1016,12 @@ def _lease_holders() -> List[Tuple[CardLease, str]]:
     return [(lease, lease.state) for lease in _granted_leases()]
 
 
-def _lease_waiters() -> List[Tuple[int, CardLease, str]]:
-    """(arrival, lease, alias wanted) of every lease waiter, for the card queue's side of L5a (S2)."""
-    return [(waiter.arrival, waiter.lease, waiter.lease.alias)
+def _lease_waiters() -> List[Tuple[int, CardLease, bool]]:
+    """(arrival, lease, for_a_peer) of every lease waiter, in line order, for the card queue's side of
+    L5a (S2): a supervisor's place stands behind a lease waiter with a lower arrival that the lease
+    keeps from going (`lease.alias` names it), but never behind a peer's waiter when the place is an
+    owner's (rule 7: an owner goes ahead of a peer). Nothing in the supervisor reads it in S1."""
+    return [(waiter.arrival, waiter.lease, waiter.for_a_peer)
             for waiter in sorted(_LEASE_LINE, key=_line_key) if not waiter.granted]
 
 

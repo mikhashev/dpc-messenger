@@ -222,7 +222,9 @@ export async function cancelJob(jobId: string): Promise<MusicAnswer<{ job: Music
 /** "Stop <holder>" on a job waiting for the GPU card: the person's press, through the
  *  existing stop_local_engine with the holder's alias. Nothing calls it by itself. The
  *  waiting job is asked for again at the next tick, since the runner sees the free card
- *  within a few seconds. */
+ *  within a few seconds. A card lease (ADR-052) is not an engine child: until S2 item 8,
+ *  `stop_local_engine` answers a lease alias with "no local engine child for alias ...", and the
+ *  job's `card_wait` holds only alias and engine, so this button cannot tell one apart (S4). */
 export async function stopCardHolder(alias: string): Promise<MusicAnswer<{ alias: string }>> {
     const a = await stopLocalEngine(alias);
     for (const j of get(musicJobs).jobs) if (j.state === 'queued') lastSeen[j.id] = 0;

@@ -17,6 +17,7 @@ import asyncio
 
 import pytest
 
+from dpc_client_core.managers import card_lease
 from dpc_client_core.managers import llama_server_supervisor as base_mod
 
 from tests._card_lease_helpers import (  # noqa: F401
@@ -56,7 +57,7 @@ class TestADictationStreamCannotStarveMusic:
         await until(lambda: len(waiting()) == 4)
         assert waiting() == ["music:yue2"] + ["whisper:turbo"] * 3, "each new use waits behind music"
         assert [u.what for u in w.lease._uses] == ["dictation 1"]
-        arrivals = [arrival for arrival, _lease, _alias in base_mod._LEASE_WAITERS()]
+        arrivals = [arrival for arrival, _lease, _for_a_peer in base_mod._LEASE_WAITERS()]
         assert arrivals == sorted(arrivals)
 
         first.set()
@@ -81,8 +82,8 @@ class TestOneOrderAcrossBothLines:
         w = whisper()
         acquire = asyncio.create_task(w.lease.acquire("dictation", wait_s=BOUND))
         await until(lambda: waiting() == ["whisper:turbo"])
-        [(arrival, lease, alias)] = base_mod._LEASE_WAITERS()
-        assert lease is w.lease and alias == "whisper:turbo"
+        [(arrival, lease, for_a_peer)] = base_mod._LEASE_WAITERS()
+        assert lease is w.lease and lease.alias == "whisper:turbo" and for_a_peer is False
         assert arrival > place.arrival, "one clock: the place came first"
         row = base_mod.card_queue()[-1]
         assert row["wait"]["where"] == "card_queue" and row["wait"]["behind"] == ["local engine 'flash'"]
@@ -93,6 +94,43 @@ class TestOneOrderAcrossBothLines:
         base_mod._CARD_QUEUE.remove(place)
         await asyncio.wait_for(acquire, BOUND)
         assert holding() == ["whisper:turbo"]
+        await nothing_left()
+
+    @pytest.mark.asyncio
+    async def test_a_place_under_the_leases_own_alias_is_no_exception_to_the_order(self):
+        """Johnny small 2 (review #56): `_blockers` does not compare aliases. Every lease excludes
+        every supervisor, so an earlier place blocks an ungranted lease whatever alias it stands
+        under, the lease's own name included; the grant is not at once."""
+        w = whisper()
+        place = base_mod._CardPlace(w.lease.alias)
+        base_mod._CARD_QUEUE.append(place)
+        try:
+            acquire = asyncio.create_task(w.lease.acquire("dictation", wait_s=BOUND))
+            await until(lambda: waiting() == ["whisper:turbo"])
+            await asyncio.sleep(0.05)
+            assert not acquire.done() and not w.lease.granted
+            assert [kind for kind, _what, _state in card_lease._blockers(
+                next(iter(card_lease._LEASE_LINE)))] == ["place"]
+        finally:
+            base_mod._CARD_QUEUE.remove(place)
+        await asyncio.wait_for(acquire, BOUND)
+        await nothing_left()
+
+    @pytest.mark.asyncio
+    async def test_in_s1_a_card_queue_place_does_not_hold_up_a_use_of_a_granted_lease(self):
+        """Intended for S1 (the comment in `_blockers`): a granted lease admits a new use unless it is
+        draining or an earlier lease waiter waits for it. A supervisor's place waiting for a lease
+        holder is S2's (`_blockers` gains it then); this pins today's behaviour so S2 changes it on
+        purpose."""
+        w = whisper()
+        await w.lease.acquire("preload", wait_s=BOUND)
+        place = base_mod._CardPlace("flash")
+        base_mod._CARD_QUEUE.append(place)
+        try:
+            async with w.lease.use("dictation", wait_s=BOUND):
+                assert [use.what for use in w.lease._uses] == ["dictation"]
+        finally:
+            base_mod._CARD_QUEUE.remove(place)
         await nothing_left()
 
     @pytest.mark.asyncio

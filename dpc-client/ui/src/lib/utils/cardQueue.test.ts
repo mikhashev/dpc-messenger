@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import src from '../components/ProvidersEditor.svelte?raw';
-import { backgroundSkipLines, cardQueueLines, otherCardHolderLines } from './cardQueue';
+import { backgroundSkipLines, cardQueueLines, noLocalEngineText, otherCardHolderLines } from './cardQueue';
 
 const time = (seconds: number) => new Date(seconds * 1000).toLocaleTimeString();
 const dateAndTime = (seconds: number) => new Date(seconds * 1000).toLocaleString();
@@ -36,6 +36,35 @@ describe('cardQueueLines', () => {
     });
 });
 
+describe('cardQueueLines on a card lease row (ADR-052 L7)', () => {
+    const lease = { alias: 'whisper:turbo', kind: 'transcription', what: 'dictation', queued_at: QUEUED };
+
+    it('says until cancelled for a lease with no bound, never "coming back from a description"', () => {
+        const [line] = cardQueueLines([{ ...lease, give_up_at: null, until_cancelled: true }]);
+        expect(line).toBe(`whisper:turbo (lease: dictation): in line since ${time(QUEUED)}, until cancelled`);
+        expect(line).not.toContain('description');
+    });
+
+    it('names what the lease asks for instead of an empty agent and chat, and its bound when it has one', () => {
+        const [line] = cardQueueLines([{ ...lease, give_up_at: GIVE_UP, until_cancelled: false }]);
+        expect(line).toBe(`whisper:turbo (lease: dictation): in line since ${time(QUEUED)}, gives up at ${time(GIVE_UP)}`);
+    });
+
+    it('keeps a lease row and a supervisor row apart in one list, in the order given', () => {
+        const lines = cardQueueLines([
+            { alias: 'flash', agent_id: 'agent_1', conversation_id: null, queued_at: QUEUED, give_up_at: null },
+            { ...lease, give_up_at: null, until_cancelled: true },
+        ]);
+        expect(lines[0]).toContain('coming back from a description');
+        expect(lines[1]).toContain('until cancelled');
+    });
+
+    it('reads a lease row by its kind even from a backend that omits until_cancelled', () => {
+        const [line] = cardQueueLines([{ ...lease, give_up_at: null }]);
+        expect(line).toContain('until cancelled');
+    });
+});
+
 describe('otherCardHolderLines', () => {
     it('leaves out the first holder, which the card holder line names', () => {
         expect(otherCardHolderLines([
@@ -44,6 +73,45 @@ describe('otherCardHolderLines', () => {
         ])).toEqual(['Also on the card: b (llama.cpp, starting)']);
         expect(otherCardHolderLines([{ alias: 'a', engine: 'strata', state: 'running', port: 1 }])).toEqual([]);
         expect(otherCardHolderLines(null)).toEqual([]);
+    });
+});
+
+describe('otherCardHolderLines on card lease rows (ADR-052 L7)', () => {
+    const engine = { alias: 'flash', engine: 'strata', state: 'running', port: 1, kind: 'inference' };
+    const lease = {
+        alias: 'whisper:turbo', engine: 'whisper', state: 'running', port: null, kind: 'transcription',
+        display: 'Whisper (turbo)', uses: [] as { what: string; since: number }[],
+    };
+
+    it('lists a lease beside an engine as a lease, not as an engine', () => {
+        expect(otherCardHolderLines([engine, lease])).toEqual(['Also on the card: Whisper (turbo) (lease, running)']);
+    });
+
+    it('says what a busy lease is busy with', () => {
+        const busy = { ...lease, uses: [{ what: 'dictation', since: QUEUED }, { what: 'music job J', since: QUEUED }] };
+        expect(otherCardHolderLines([engine, busy]))
+            .toEqual(['Also on the card: Whisper (turbo) (lease, running, busy with dictation, music job J)']);
+    });
+
+    it('still lists a lease that holds the card alone, because no engine row is named by the holder line', () => {
+        expect(otherCardHolderLines([lease])).toEqual(['Also on the card: Whisper (turbo) (lease, running)']);
+        expect(otherCardHolderLines([{ ...lease, display: undefined, state: 'draining' }]))
+            .toEqual(['Also on the card: whisper:turbo (lease, draining)']);
+    });
+
+    it('leaves out the first engine row only, even when a lease stands before it', () => {
+        const other = { ...engine, alias: 'qwen', engine: 'llama.cpp', state: 'starting', kind: 'inference' };
+        expect(otherCardHolderLines([lease, engine, other]))
+            .toEqual(['Also on the card: Whisper (turbo) (lease, running)', 'Also on the card: qwen (llama.cpp, starting)']);
+    });
+});
+
+describe('noLocalEngineText', () => {
+    it('says the card is free only when nothing holds it, and names a lease otherwise', () => {
+        expect(noLocalEngineText([])).toBe('none — the card is free');
+        expect(noLocalEngineText(undefined)).toBe('none — the card is free');
+        expect(noLocalEngineText([{ alias: 'whisper:turbo', engine: 'whisper', state: 'running', port: null, kind: 'transcription' }]))
+            .toBe('no local engine — a lease holds the card, below');
     });
 });
 
