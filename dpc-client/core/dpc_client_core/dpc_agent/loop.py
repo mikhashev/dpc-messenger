@@ -170,6 +170,55 @@ def _accumulate_cost(accumulated: Dict[str, Any], usage: Dict[str, Any]) -> None
         bases.append(usage.get("cost_basis"))
 
 
+# A turn that ends in round 1 with no tool call has asked nobody to run anything: a count such as
+# "553 passed" in its answer was produced by no test run. Logged only (decided with Mike, 2026-11-22):
+# the loop does not retry such a turn and the answer is not touched. The words are pytest's summary
+# line; "passed 3 checks" and "all tests pass" do not match, a digit run with a unit does.
+_TEST_RUN_COUNT = re.compile(r"\b\d+\s+(?:passed|failed|deselected|skipped|xfailed)\b", re.IGNORECASE)
+_SNIPPETS_LOGGED = 8
+
+
+def numbers_of_a_test_run_in(text: Optional[str]) -> List[str]:
+    """The test-run-looking counts in `text` (`553 passed`, `2 failed`, `4 deselected`), each once, in
+    the order they first appear; empty for no text."""
+    found: List[str] = []
+    for match in _TEST_RUN_COUNT.finditer(text or ""):
+        if match.group(0) not in found:
+            found.append(match.group(0))
+    return found
+
+
+def note_a_tool_less_turn(
+    response: Optional[str],
+    usage: Dict[str, Any],
+    trace: Optional[Dict[str, Any]],
+    *,
+    agent_id: str,
+    conversation_id: Optional[str],
+) -> bool:
+    """Log a turn that ended in round 1 with zero tool calls (INFO), and warn when its answer carries
+    test-run numbers no tool could have produced. Returns True for the warning's case, the value of the
+    task result's `unbacked_test_numbers`. A turn with a second round or any tool call is not one, and
+    the loop's behaviour and the answer are never changed; a failure here never reaches the turn."""
+    try:
+        trace = trace or {}
+        ran = len(trace.get("tool_calls") or []) or len(trace.get("accumulated_tool_calls") or [])
+        rounds = (usage or {}).get("rounds", 0)
+        if rounds != 1 or ran:
+            return False
+        log.info("Tool-less turn: agent=%s conversation=%s rounds=%d tool_calls=0",
+                 agent_id, conversation_id or "-", rounds)
+        numbers = numbers_of_a_test_run_in(response)
+        if not numbers:
+            return False
+        log.warning("Tool-less turn with test numbers no tool produced: agent=%s conversation=%s rounds=%d "
+                    "tool_calls=0 matched=%s", agent_id, conversation_id or "-", rounds,
+                    numbers[:_SNIPPETS_LOGGED])
+        return True
+    except Exception:
+        return False
+
+
 def task_cost_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
     """A task's cost as its burn line and result file carry it.
 

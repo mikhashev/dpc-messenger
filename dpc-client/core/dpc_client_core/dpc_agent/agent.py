@@ -39,7 +39,7 @@ from .context import (
 )
 from .sent_annotations import SentAnnotationStore
 from .loop import (
-    CallKilled, _chat_unless_killed, run_llm_loop, RECORDED_USAGE_FIELDS, task_cost_fields,
+    CallKilled, _chat_unless_killed, note_a_tool_less_turn, run_llm_loop, RECORDED_USAGE_FIELDS, task_cost_fields,
     unmeasured_task_cost,
 )
 from .utils import (
@@ -881,6 +881,11 @@ class DpcAgent:
 
         completed_at = utc_now_iso()
 
+        # A turn that ended in round 1 with no tool call is logged, and warned about when its answer
+        # carries test numbers no tool produced; the answer and the loop are left as they are.
+        unbacked_test_numbers = note_a_tool_less_turn(
+            response, usage, trace, agent_id=self.agent_root.name, conversation_id=conversation_id)
+
         # Log task completion
         append_jsonl(self.agent_root / "logs" / "events.jsonl", {
             "ts": completed_at,
@@ -914,6 +919,8 @@ class DpcAgent:
                 "prompt": message[:2000] if message else "",
                 "response": response or "",
                 "rounds": usage.get("rounds", 0),
+                "tool_calls": len((trace or {}).get("tool_calls") or []),
+                "unbacked_test_numbers": unbacked_test_numbers,
                 **task_cost_fields(usage),
                 "tokens": tokens_block(usage),
             }
