@@ -693,7 +693,7 @@ pending Mike's OK**).
      contender, and report a fit where the card would run out.
   1. `need = whisper_peak + Σ peak of every resident + _DESKTOP_RESERVE_MIB`, **every term in
      MiB**, where `whisper_peak = model_size_bytes(model, revision)[0] // 2**20` plus a new
-     `_WHISPER_OVERHEAD_MIB`, proposed **770**, and:
+     `_WHISPER_OVERHEAD_MIB`, proposed **2900**, and:
      - **One scale, one view** (Ark #18-3, Forge #21-3, Zcode #22-1). `model_size_bytes`
        (`providers/model_sizes.py:74-79`) returns **bytes** (turbo 1 622 443 339 B, row at
        `:48-49`, so 1547 MiB); `_total_vram_mib()` and `_DESKTOP_RESERVE_MIB` are MiB. MiB is
@@ -701,11 +701,15 @@ pending Mike's OK**).
        `need` is that figure. A peak is a **torch-view** figure plus the context, not the
        driver's `nvidia-smi used` (one load: 1826 MiB torch peak, +752…+967 MiB driver view,
        Forge #21); the torch view is the conservative one, and the declared check uses it.
-     - **The overhead, measured and where** (Forge #21, 2026-11-21; a fresh process in the
-       backend's venv, **not inside the backend**, a synthetic tone, **not speech**): CUDA
-       context ≈477–485 MiB; turbo fp16 weights 1544 MiB allocated, 1826 MiB peak on the
-       provider's pipeline path (chunk 30, batch 16), so activations ≈282 MiB. 485 + 282 → 770;
-       `whisper_peak` ≈ 1547 + 770 = 2317 MiB, against 3362 with the former 1740. That
+     - **The overhead, measured and where** (first Forge #21, 2026-11-21, then CC on speech,
+       2026-11-22; a fresh process in the backend's venv, **not inside the backend**): CUDA
+       context ≈477–485 MiB (280 on an empty card); turbo fp16 weights 1544 MiB allocated.
+       Forge's synthetic tone gave a 1826 MiB peak (chunk 30, batch 16), activations ≈282 MiB,
+       and so a first 770; **real speech shows the peak depends on the provider's adaptive
+       batch**: at batch 8 (clips of 60–120 s) activations reach ≈2.1 GiB (3650 MiB allocated,
+       3948 reserved; see "GPU figures"). The declared overhead is the worst case, torch
+       reserved peak 3948 + context 485 ≈ 4433, less the 1547 of weights, rounded up:
+       **2900**. `whisper_peak` ≈ 1547 + 2900 = 4447 MiB (the driver view peaked at 4240), against 3362 with the former 1740. That
        ~1.5–1.7 GiB was the **backend's own residency** (`bge-m3`, GLiNER; `040-…md:78`), not
        a Whisper context, and on top of the weights it counted the model twice (Ark #18-4,
        Johnny A, Forge #20-6, Zcode #22-2). A start value, tuned from operation.
@@ -933,13 +937,45 @@ machine, a Ryzen 9950X, Mike's own Telegram voice message; not re-measured here)
 The CPU route holds **no card lease** and touches no VRAM.
 
 **GPU figures, the first** (Forge #21, 2026-11-21; outside the backend, a synthetic tone, not
-speech): cold load of turbo fp16 ≈1–2.4 s (`from_pretrained` 0.1–0.2 s, `.to(cuda)` 0.8–2.2 s),
+speech; **speech figures follow below**): cold load of turbo fp16 ≈1–2.4 s (`from_pretrained` 0.1–0.2 s, `.to(cuda)` 0.8–2.2 s),
 reload after an unload 0.6–0.9 s; ratio 79× (30 s, `generate`) to 154× (120 s, pipeline), an
-**upper bound** because a tone compresses to a few tokens. The ratio on real speech on the GPU
-is unmeasured (CC is measuring it; Open for Mike). `torch.compile` fails on torch 2.11, so the
+**upper bound** because a tone compresses to a few tokens. `torch.compile` fails on torch 2.11, so the
 "4.5× speedup" comment at `whisper_provider.py:313` does not apply and these figures are not
 comparable with the CPU table. The provider docstring's "RTX 3060 ~10-13×" (`:63-66`) is not
 our figure. A CPU number is never used for a GPU route.
+
+**GPU figures on speech** (CC's measurement, 2026-11-22; Mike asked for it). The real
+`LocalWhisperProvider` (`_load_model`/`_unload_model`), alias `whisper-large-v3-turbo`, cuda,
+fp16, compile tried and failed (uncompiled, sdpa), chunk 30, the provider's adaptive batch
+(>60 s: 8, >120 s: 4, >180 s: 2, else 16), `return_timestamps=True`, a fresh process in the
+backend's venv, **the card empty** (0 MiB used, Strata not resident). Russian voice message and
+English podcast, language auto-detected, transcripts correct. Median of 3:
+
+| Clip | GPU time | Ratio | torch peak alloc / reserved, MiB | driver used after, MiB |
+|---|---|---|---|---|
+| RU 10 s | 0.23 s | 43× | 1766 / 1984 | 2274 |
+| RU 30 s | 1.18 s | 25.5× | 1830 / 2052 | 2342 |
+| RU 60 s | 1.65 s | 36× | 2385 / 2618 | 2910 |
+| RU 118 s (batch 8) | 4.31 s | 27× | 3499 / 3840 | 4132 |
+| EN 30 s | 1.42 s | 21× | 1852 / 2088 | 2380 |
+| EN 120 s (batch 8) | 4.08 s | 29× | 3650 / 3948 | 4240 |
+| EN 300 s (batch 2) | 18.89 s | 15.9× | 2355 / 2660 | 2952 |
+
+- **The ratio on speech is ≈16–36× on the GPU** (the tone's 79–154× was an upper bound). The
+  first call after a load costs ≈0.9 s more. These seed the GPU route's whole-trip estimate,
+  as the CPU table seeds the CPU route; the per-device recorded ratio takes over after the
+  first run. On a warm GPU a 300 s voice note (≈19 s) fits a peer's 120 s budget; so does a
+  cold first load after backend start (≈13 s more).
+- **Memory:** the context is 280 MiB on an empty card (Forge saw 477–485 with Strata
+  resident); after load 1543 allocated, 1674 reserved. The peak is **batch-dependent**: it is
+  highest at batch 8 (60–120 s clips), lower at 2 (300 s) and at 16 (short clips). That is
+  what sets `_WHISPER_OVERHEAD_MIB` in L11.
+- **Load:** cold load in a fresh process 12.8 s (includes first-use library init; Forge's
+  1–2.4 s is the load step alone); unload 0.35–0.61 s, VRAM back to the context only; reload
+  0.76–0.83 s (Forge: 0.6–0.9 s). That reload is the cost the 300 s idle unload rests on.
+- **The CPU on the same speech** (float32, same transcripts): 30 s in 20.3 s (1.5×), 118 s in
+  108 s (1.1×), in line with the step-5 table above (1.0–1.1×). The GPU is ≈17–25× faster.
+- Logs: `scratchpad/whisper_gpu_bench/` (`bench.py`, `gpu_run1.log`, `cpu_run.log`) of CC's session.
 
 **L13. A peer's wait builds on ADR-044's amendment of 2026-11-18, "a peer waits for the card
 behind every owner request"** (Mike #85: "why new? there are tasks in the backlog and the ADR
@@ -1280,7 +1316,7 @@ lease, nor with `swap_when_idle` off, when nothing is stopped.
   Strata restart is not, only bounded by `start_timeout_s`, 600 s. Both are learned in
   operation (Mike #11).
 - **With Strata on the card, nothing else fits** (Forge #15 §5): nvidia-smi read 1100 MiB free
-  of 32623 with Strata resident (2026-11-21 17:53), so Whisper (≈2.3 GB, its measured peak) and ComfyUI (≈25 GB)
+  of 32623 with Strata resident (2026-11-21 17:53), so Whisper (≈4.4 GB, its measured worst-case peak) and ComfyUI (≈25 GB)
   run only after a swap. That is Mike #68 working as decided.
 - **On Windows, `free` is not a wall** (Forge #21 §1; a property of the machine, no redesign,
   Zcode #22). With Strata resident `nvidia-smi` read 879–1100 MiB free while
@@ -2172,8 +2208,8 @@ New test files:
     would say "fits" and the test proves L11 says `does_not_fit`. With a Strata child as a
     resident the outcome is `unknown`. `dwm` in a fake per-process reading changes nothing.
     The test also **pins the value of `need` in MiB**, not only its outcome (Ark #18-3): Whisper
-    alone, no resident, from a fake turbo row of 1 622 443 339 B → `whisper_peak` 1547 + 770 =
-    2317 and `need` = 2317 + 2048 = 4365 MiB, logged with its `model_size_bytes` source; a
+    alone, no resident, from a fake turbo row of 1 622 443 339 B → `whisper_peak` 1547 + 2900 =
+    4447 and `need` = 4447 + 2048 = 6495 MiB, logged with its `model_size_bytes` source; a
     `need` left in bytes (≈1.6e9) fails it.
 29. `test_a_running_job_waiting_for_the_card_does_not_start_its_engine.py` (Ark #60 §4):
     a job in `running`, its engine's child gone, the card held by a busy holder: the engine
@@ -2414,8 +2450,8 @@ Recorded as decided; each line names the message.
     ship as proposed and are tuned from operation; the music player is a transcription caller
     (section 3.5, L4).
 - **2026-11-22, item 7: the GPU Whisper alias's idle unload stays at 300 s** ("ok 300s"),
-  because a reload costs 0.6–0.9 s and a cold load 1–2.4 s (Forge #21, outside the backend, a
-  tone), so holding the model costs less than a second when it is wanted again.
+  because a reload costs 0.6–0.9 s (Forge #21; CC on speech, 2026-11-22: 0.76–0.83 s) and a
+  cold load 1–2.4 s (12.8 s in a fresh process with library init), so holding the model costs less than a second when it is wanted again.
 - **2026-11-22, N11: in scope, and CC writes S10, the ComfyUI client half included.** The yield
   verb for ComfyUI is its own `POST /free {"unload_models": true, "free_memory": true}` plus
   `POST /interrupt` (Forge verified it live, 24.9 → 1.8 GB). Order: after S1.
@@ -2443,10 +2479,8 @@ Still open after #68–#71 and #11. Each has a proposed default.
   on them.
 - Items 10, 11 and 13 were answered at #11; item 12 by reading the flow, as he asked; item 8
   closes with item 10; item 7 was answered on 2026-11-22 (all in Decided by Mike).
-- **The reference for the GPU real-time ratio** (Forge #21, §5): real speech on the GPU, or the
-  CPU step-5 table only. Mike's answer, 2026-11-22: CC measures it on real speech. **Being
-  measured by CC; the figures are folded in when they exist.** Until then the GPU estimate is
-  unknown (L10).
+- **The reference for the GPU real-time ratio** (Forge #21, §5): **closed.** Mike's answer,
+  2026-11-22: CC measures it on real speech; done, ≈16–36× (L12, "GPU figures on speech").
 
 Also open, and not numbered: whether `auto` means `lease` on CUDA for the embedder and
 GLiNER (section 3.4); whether L11 should also spare an *idle* music engine its stop when
@@ -2474,8 +2508,9 @@ Whisper fits beside it; and, outside this ADR, whether Ark writes the track into
   2026-11-18 15:06:42). Whether `free` falls by the child's real use while a music child runs
   is still **[unverified]**. — CC
 - **Q7:** The reload times behind decision 2's cost difference (Whisper vs an idle music
-  engine). **Partly answered (Forge #21, 2026-11-21):** Whisper's GPU reload is 0.6–0.9 s and
-  its cold load 1–2.4 s, measured outside the backend (L12, "GPU figures"); an idle music
+  engine). **Whisper's side answered (Forge #21, 2026-11-21; CC on speech, 2026-11-22):** GPU
+  reload 0.6–0.9 s, cold load 1–2.4 s as the load step and 12.8 s in a fresh process, measured
+  outside the backend (L12, "GPU figures", "GPU figures on speech"); an idle music
   engine's reload is still **[unverified]**. The backend itself has not loaded Whisper on the
   GPU: the alias was
   configured `device: cpu` until 2026-11-20 and `cuda` since 2026-11-21 21:41 (the init line
@@ -2801,6 +2836,10 @@ was done instead. The underlying concern is kept wherever it stands on its own.
 - **Seventh revision, 2026-11-21/22.** **#18 Ark, #19 Johnny, #20 and #21 Forge, #22 Zcode** on
   `ffd06369` (Review notes), and Mike's answers of 2026-11-22 (item 7 at 300 s; N11 in scope, S10
   by CC; CC measures the GPU ratio on speech).
+- **Eighth revision, 2026-11-22 (text only).** CC's GPU measurement on speech folded in: the
+  Whisper peak is batch-dependent, so `_WHISPER_OVERHEAD_MIB` goes 770 → 2900, `whisper_peak`
+  2317 → 4447 and test 28's `need` 4365 → 6495 MiB; the GPU ratio is measured (≈16–36×); Q7
+  and the GPU-ratio open item are closed; the CPU same-speech figures sit beside step 5.
 
 ## Authors
 
