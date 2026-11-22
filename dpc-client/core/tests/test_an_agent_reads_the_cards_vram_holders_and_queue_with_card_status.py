@@ -33,8 +33,8 @@ WDDM_APPS = (
 
 
 def _reset():
-    cm._vram_reading.update(at=None, free=None, total=None)
-    cm._gpu_apps_reading.update(at=None, apps=None)
+    cm._vram_reading.update(at=None, wall=None, free=None, total=None)
+    cm._gpu_apps_reading.update(at=None, wall=None, apps=None)
 
 
 @pytest.fixture(autouse=True)
@@ -103,8 +103,8 @@ def test_the_answer_carries_vram_holders_queue_and_the_gpu_processes(monkeypatch
     assert [row["alias"] for row in out["queue"]] == ["music"], "the lease line's rows follow the card queue's"
     assert out["queue"][0]["position"] == 1
     assert out["gpu_processes"] == [
-        {"pid": 1234, "process_name": "C:\\Program Files\\llama\\llama-server.exe", "used_memory_mib": 7168},
-        {"pid": 5678, "process_name": "C:\\Windows\\explorer.exe", "used_memory_mib": 300},
+        {"pid": 1234, "process_name": "llama-server.exe", "used_memory_mib": 7168},
+        {"pid": 5678, "process_name": "explorer.exe", "used_memory_mib": 300},
     ]
     assert out["gpu_processes_note"] is None
 
@@ -221,3 +221,59 @@ class TestRegistration:
         from dpc_client_core.dpc_agent.agent import DpcAgent
 
         assert "card_status" not in DpcAgent.EXTERNAL_SOURCE_ALLOWED_TOOLS
+
+
+def test_the_answer_says_when_the_readings_were_taken_and_how_old_they_are(monkeypatch):
+    _Card().install(monkeypatch)
+    clock = {"mono": 1000.0, "wall": 1_800_000_000.0}
+    monkeypatch.setattr(cm.time, "monotonic", lambda: clock["mono"])
+    monkeypatch.setattr(cm.time, "time", lambda: clock["wall"])
+    first = _status()
+    assert first["vram_age_s"] == 0.0 and first["gpu_processes_age_s"] == 0.0
+    assert first["vram_read_at"] == first["gpu_processes_read_at"] == "2027-01-15T08:00:00+00:00"
+    clock["mono"] += 12.34
+    clock["wall"] += 12.34
+    again = _status()
+    assert again["vram_age_s"] == 12.3 and again["gpu_processes_age_s"] == 12.3
+    assert again["vram_read_at"] == "2027-01-15T08:00:00+00:00", "a cached reading keeps its own read time"
+
+
+def test_without_a_reading_the_age_is_none(monkeypatch):
+    _Card(free=None, total=None).install(monkeypatch, present=False)
+    out = _status()
+    assert out["vram_age_s"] is not None or out["vram_read_at"] is None  # a missing signal is cached too
+    assert out["gpu_processes_read_at"] is not None or out["gpu_processes_age_s"] is None
+
+
+def test_the_answer_names_the_instrument_and_that_free_is_no_proof_a_load_fits(monkeypatch):
+    _Card().install(monkeypatch)
+    note = _status()["vram_note"]
+    assert "memory.free" in note and "memory.total" in note and "nvidia-smi" in note
+    assert "WDDM" in note and "no proof" in note
+
+
+def test_an_unknown_per_process_figure_is_none_and_never_zero(monkeypatch):
+    _Card(apps=WDDM_APPS).install(monkeypatch)
+    out = _status()
+    assert all(p["used_memory_mib"] is None for p in out["gpu_processes"])
+    assert "0" not in [p["used_memory_mib"] for p in out["gpu_processes"]]
+
+
+@pytest.mark.parametrize("path", [
+    "C:\\Users\\alice\\AppData\\strata.exe",
+    "C:/Users/alice/AppData/strata.exe",
+    "/home/alice/bin/strata.exe",
+    "strata.exe",
+])
+def test_the_process_name_is_the_file_name_only(monkeypatch, path):
+    _Card(apps=f"42, {path}, [N/A]\n").install(monkeypatch)
+    text = json.dumps(_status())
+    assert _status()["gpu_processes"][0]["process_name"] == "strata.exe"
+    assert "alice" not in text
+
+
+def test_the_tool_description_says_what_it_does_not_answer():
+    from dpc_client_core.dpc_agent.tools import card
+
+    description = card.get_tools()[0].schema["description"]
+    assert "does NOT answer" in description and "WDDM" in description and "no proof" in description

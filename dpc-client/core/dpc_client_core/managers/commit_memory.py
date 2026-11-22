@@ -29,6 +29,7 @@ reader (PDH, in the registry's sampler).
 
 import ctypes
 import logging
+import ntpath
 import shutil
 import subprocess
 import sys
@@ -130,8 +131,28 @@ def describe_free_commit(reading: Optional[Dict[str, Any]]) -> str:
 # so the answer reuses a reading for this long; the total is the card's and is
 # kept for the backend's life once read.
 _VRAM_READING_TTL_S = 30.0
-_vram_reading: Dict[str, Any] = {"at": None, "free": None, "total": None}
+_vram_reading: Dict[str, Any] = {"at": None, "wall": None, "free": None, "total": None}
 _vram_reading_lock = threading.Lock()
+
+
+def _reading_age(reading: Dict[str, Any], lock: threading.Lock, now: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
+    with lock:
+        at, wall = reading["at"], reading["wall"]
+    if at is None or wall is None:
+        return None, None
+    age = max(0.0, (time.monotonic() if now is None else now) - at)
+    return wall, round(age, 1)
+
+
+def vram_reading_age(now: Optional[float] = None) -> Tuple[Optional[float], Optional[float]]:
+    """`(read_at, age_s)` of the cached VRAM reading: wall-clock epoch seconds of the nvidia-smi read
+    and its age on the monotonic clock; `(None, None)` when no reading is cached. Never probes."""
+    return _reading_age(_vram_reading, _vram_reading_lock, now)
+
+
+def gpu_apps_reading_age(now: Optional[float] = None) -> Tuple[Optional[float], Optional[float]]:
+    """Same as `vram_reading_age` for the GPU compute-apps reading."""
+    return _reading_age(_gpu_apps_reading, _gpu_apps_lock, now)
 
 
 def read_vram_mib(now: Optional[float] = None) -> Tuple[Optional[int], Optional[int]]:
@@ -154,14 +175,14 @@ def read_vram_mib(now: Optional[float] = None) -> Tuple[Optional[int], Optional[
         except Exception as e:  # a reading is advisory: the registry closed, a probe failed
             logger.debug("VRAM reading unavailable: %s", e)
             return None, None
-        _vram_reading.update(at=when, free=free, total=total)
+        _vram_reading.update(at=when, wall=time.time(), free=free, total=total)
         return free, total
 
 
 # `card_status` (the agent tool) lists the processes the driver shows on the card. The read is a
 # registered `device_probe` like the VRAM ones and reuses a reading for the same window. `apps` is
 # the parsed list (empty when the card has no compute process) or None without a signal.
-_gpu_apps_reading: Dict[str, Any] = {"at": None, "apps": None}
+_gpu_apps_reading: Dict[str, Any] = {"at": None, "wall": None, "apps": None}
 _gpu_apps_lock = threading.Lock()
 
 
@@ -179,7 +200,8 @@ def _parse_compute_apps(text: str) -> List[Dict[str, Any]]:
         except ValueError:
             continue
         used_text = used_text.strip().split(" ")[0]
-        apps.append({"pid": pid, "process_name": name.strip(),
+        # Only the file name: nvidia-smi gives the full path, which carries the user's home folder.
+        apps.append({"pid": pid, "process_name": ntpath.basename(name.strip().replace("/", "\\")),
                      "used_memory_mib": int(used_text) if used_text.isdigit() else None})
     return apps
 
@@ -210,5 +232,5 @@ def read_gpu_compute_apps(now: Optional[float] = None) -> Optional[List[Dict[str
             except Exception as e:  # the registry closed: advisory, answers None and is not cached
                 logger.debug("GPU compute apps reading unavailable: %s", e)
                 return None
-        _gpu_apps_reading.update(at=when, apps=apps)
+        _gpu_apps_reading.update(at=when, wall=time.time(), apps=apps)
         return apps

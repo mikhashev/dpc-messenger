@@ -12,6 +12,7 @@ queue. The owner's queue rows name conversations; those never leave through this
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -31,6 +32,19 @@ _WDDM_NOTE = (
     "used_memory_mib is None because nvidia-smi reports [N/A] per process under WDDM (the Windows "
     "display driver model); the card's total use is vram_total_mib minus vram_free_mib."
 )
+
+
+_VRAM_NOTE = (
+    "vram_free_mib and vram_total_mib are nvidia-smi memory.free and memory.total. Under WDDM free is "
+    "not an allocation wall: the driver can page to system RAM (measured on this card: nvidia-smi free "
+    "1108 MiB while torch mem_get_info free was ~30 GB). This reading is no proof that a load fits."
+)
+
+
+def _iso(epoch: Optional[float]) -> Optional[str]:
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec="seconds")
 
 
 def _holders() -> Optional[List[Dict[str, Any]]]:
@@ -59,7 +73,9 @@ def _queue() -> Optional[List[Dict[str, Any]]]:
 
 def _card_status(ctx: "ToolContext") -> str:
     """The card's VRAM, holders, queue and GPU processes as JSON (read-only, cached 30 s)."""
-    from ...managers.commit_memory import read_gpu_compute_apps, read_vram_mib
+    from ...managers.commit_memory import (
+        gpu_apps_reading_age, read_gpu_compute_apps, read_vram_mib, vram_reading_age,
+    )
 
     try:
         free, total = read_vram_mib()
@@ -71,6 +87,8 @@ def _card_status(ctx: "ToolContext") -> str:
     except Exception as e:
         log.warning("card_status: GPU processes unreadable: %s", e)
         apps = None
+    vram_at, vram_age = vram_reading_age()
+    apps_at, apps_age = gpu_apps_reading_age()
     note = None
     if apps is None:
         note = _NO_NVIDIA_NOTE
@@ -80,9 +98,14 @@ def _card_status(ctx: "ToolContext") -> str:
         {
             "vram_free_mib": free,
             "vram_total_mib": total,
+            "vram_read_at": _iso(vram_at),
+            "vram_age_s": vram_age,
+            "vram_note": _VRAM_NOTE,
             "holders": _holders(),
             "queue": _queue(),
             "gpu_processes": apps,
+            "gpu_processes_read_at": _iso(apps_at),
+            "gpu_processes_age_s": apps_age,
             "gpu_processes_note": note,
         },
         ensure_ascii=False, default=str,
@@ -102,7 +125,9 @@ def get_tools() -> List["ToolEntry"]:
                     "the holders of the card (alias, engine, kind, state, busy, eta_s), the card queue "
                     "in line order, and the GPU compute processes (pid, process_name, used_memory_mib; "
                     "None where the driver gives no figure, the note says why). Values are None without "
-                    "an NVIDIA GPU. Readings are cached for 30 s."
+                    "an NVIDIA GPU. Readings are cached for 30 s; vram_age_s and gpu_processes_age_s say how "
+                    "old they are. It does NOT answer per-process VRAM under WDDM (Windows: always None), "
+                    "and vram_free_mib is no proof that a load fits (the driver can page to system RAM)."
                 ),
                 "parameters": {"type": "object", "properties": {}, "required": []},
             },
