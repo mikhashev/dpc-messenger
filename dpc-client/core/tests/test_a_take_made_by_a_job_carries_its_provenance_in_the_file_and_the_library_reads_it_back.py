@@ -185,7 +185,8 @@ async def test_a_scan_reads_a_good_record_ignores_a_bad_or_oversized_one_and_kee
         assert set(entries) == set(files) and all(e["hash_state"] == "done" for e in entries.values())
         assert entries["good"]["provenance"] == {
             "schema": "mp.provenance/1", "engine": "acestep.cpp", "seed": 42, "has_codes": True,
-            "codes_by_hash_only": False, "genome_sha256": good["genome_sha256"], "render_sha256": good["render_sha256"]}
+            "codes_by_hash_only": False, "genome_basis": "audio_codes", "genome_sha256": good["genome_sha256"],
+            "intent_sha256": good["intent_sha256"], "render_sha256": good["render_sha256"]}
         for name in ("garbage", "wrong", "huge", "plain"):
             assert "provenance" not in entries[name]
         assert "ignoring the provenance record in garbage.flac" in caplog.text

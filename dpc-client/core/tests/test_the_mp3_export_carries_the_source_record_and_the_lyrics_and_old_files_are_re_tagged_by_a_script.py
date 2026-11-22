@@ -186,7 +186,11 @@ def test_a_trial_wav_gets_the_record_with_not_stored_where_the_trial_kept_nothin
     for key in ("caption_sent", "bpm_sent", "engine_binaries", "build", "loudness", "instrumental", "lyrics_prep"):
         assert rec[key] == pv.NOT_STORED, key
     assert all(m["sha256"] == pv.NOT_STORED for m in rec["models"]) and rec["pronunciation"]["stress_marks"] == pv.NOT_STORED
-    assert rec["genome_sha256"] == rec["render_sha256"] == pv.NOT_STORED and "no genome" in rec["ids_note"]
+    # the codes are stored, so the take keeps its genome (and render) id although the text it was made from is not;
+    # only the intent is unnamed (EVOLUTION section 3)
+    assert rec["genome_basis"] == "audio_codes" and rec["genome_sha256"].startswith("sha256:")
+    assert rec["render_sha256"].startswith("sha256:") and rec["intent_sha256"] == pv.NOT_STORED
+    assert "no intent id" in rec["ids_note"] and "no genome" not in rec["ids_note"]
     assert rec["dpc_postprocess"]["step"] == "retag" and rec["retagged"]["at"] == "2026-11-21T12:00:00Z"
     if FFMPEG:
         assert "MD5=" + rec["engine_output"]["ffmpeg_decoded_md5"] == _ffmpeg_md5(wav)         # the trial's own check, kept

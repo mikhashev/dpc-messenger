@@ -30,12 +30,34 @@ local ids the store assigns after the file exists); `export.py` carries it into 
   shape, and returns a small summary; a bad record is `None` with a reason, never an exception,
   and nothing in it is used as a path.
 
-**Ids.** `genome_sha256` is the sha256 of the canonical JSON (sorted keys, no spaces, UTF-8) of
-the genotype bucket, with the codes by their hash; `lm_seed` is left out of it (diagnostic
-only, PROVENANCE §1). `render_sha256` is the same over the genome id plus the substrate. A
-record with a `not_stored` genotype field has neither id (they would name a half-known thing).
-EVOLUTION §3 defines `genome_sha256` as `audio_codes_sha256` alone; that hash stays a field of
-its own here (PROVENANCE: reconcile).
+**Ids** (EVOLUTION v3 section 3, group decision 4:1 of 2026-11-21). Every hash is the sha256 of
+canonical JSON (sorted keys, no spaces, UTF-8).
+
+- `genome_sha256` is the hash of the engine's **inheritable unit only**, with the engine id inside
+  the hash so genomes of two engines can never be compared by mistake. The unit, named by
+  `genome_basis`: acestep.cpp `audio_codes` (hashed as `audio_codes_sha256`); yue2.cpp
+  `semantic_tokens` (as `semantic_tokens_sha256`), and `semantic_tokens+score_abc` for a cover
+  (`task_type == "cover"`). The hash input is `{"engine", "genome_basis", <the sha fields of the
+  unit>}`. The text, `lm_seed` and `dpc_lyrics_prep` are not in it: the codes already hold their
+  effect, and changing the preparation is a `mutate` edge, not another genome. A `not_stored`
+  unit means no genome id (`genome_sha256` is `not_stored`, `genome_basis` still names the unit);
+  a `not_stored` text field no longer does.
+- `intent_sha256` is the hash of the text bucket: `caption_sent`, `lyrics`, `bpm_sent`,
+  `keyscale_sent`, `timesignature_sent`, `vocal_language_sent` (all as sent; `None` when the
+  engine was not told) and `duration_requested_s`. It is `not_stored` when any of them is, which
+  is allowed on old files: the intent node is then unnamed and the take keeps its genome.
+- `render_sha256` is the hash of the genome id plus the substrate (the batch index is in it), so
+  it says "repeatable exactly like this". Group by genome, never by render.
+
+**Legacy records.** Until 2026-11-22 `genome_sha256` was the hash of the whole genotype bucket
+(the wide definition), and 55 re-tagged files carry that value. A record **without
+`genome_basis` is legacy**: its stored `genome_sha256` / `render_sha256` mean the wide
+definition and are never compared with the narrow ones. `summarize` therefore reports a legacy
+record's ids as `legacy_genome_sha256` / `legacy_render_sha256` and leaves `genome_sha256` out
+of the summary, so nothing groups old and new by accident. Stored files are not rewritten (the
+file's record is written once); `derive_ids(record)` computes the narrow ids of any record,
+legacy ones included, from the hash fields it already holds, for a caller that wants to regroup
+them.
 """
 
 from __future__ import annotations
@@ -60,6 +82,7 @@ NOT_STORED = "not_stored"
 PCM_MD5_BASIS = ("md5 of the packed little-endian samples at the file's bit depth, the FLAC STREAMINFO MD5; "
                  "ffmpeg -f md5 differs for 24-bit audio because it decodes to 32 bit")
 ENGINE_DEFAULT = "engine_default"
+_SHA_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 CODES_HZ = 5.0
 
 GENOTYPE_KEYS = (
@@ -417,21 +440,62 @@ def build_yue2_record(*, job_id: str, variant: int, created_at: str, params: Map
 # -- ids, size, serialization -------------------------------------------------------------------
 
 
-def _has_unknown(rec: Mapping[str, Any], keys: Sequence[str]) -> bool:
-    return any(rec.get(k) == NOT_STORED for k in keys)
+_INTENT_KEYS = ("caption_sent", "lyrics", "bpm_sent", "keyscale_sent", "timesignature_sent",
+                "vocal_language_sent", "duration_requested_s")
+_EMPTY_SHA = sha256_of(b"")
+_GENOME_UNITS = {
+    # engine -> (genome_basis, the hash fields hashed)
+    "acestep.cpp": ("audio_codes", ("audio_codes_sha256",)),
+    "yue2.cpp": ("semantic_tokens", ("semantic_tokens_sha256",)),
+}
+_COVER_UNIT = ("semantic_tokens+score_abc", ("semantic_tokens_sha256", "score_abc_sha256"))
+
+
+def _genome_unit(rec: Mapping[str, Any]) -> Optional[Tuple[str, Tuple[str, ...]]]:
+    engine = rec.get("engine")
+    if engine == "yue2.cpp" and rec.get("task_type") == "cover":
+        return _COVER_UNIT
+    return _GENOME_UNITS.get(engine) if isinstance(engine, str) else None
+
+
+def derive_ids(rec: Mapping[str, Any]) -> Dict[str, Any]:
+    """The narrow ids of a record (see the module docstring), from its own fields; the record is
+    not changed. Keys: `genome_basis`, `genome_sha256`, `intent_sha256`, `render_sha256` (each
+    `not_stored` when what it hashes is not known) and `ids_note` when something is missing."""
+    notes: List[str] = []
+    unit = _genome_unit(rec)
+    out: Dict[str, Any] = {"genome_basis": unit[0] if unit else NOT_STORED}
+    genome = NOT_STORED
+    if unit is None:
+        notes.append("the engine has no known inheritable unit, so the take has no genome or render id")
+    else:
+        basis, fields = unit
+        values = {f: rec.get(f) for f in fields}
+        if all(isinstance(v, str) and _SHA_RE.match(v) and v != _EMPTY_SHA for v in values.values()):
+            genome = sha256_of(canonical_json({"engine": rec["engine"], "genome_basis": basis, **values}))
+        else:
+            notes.append(f"the engine's inheritable unit ({basis}) is not_stored, so the take has no genome or render id")
+    out["genome_sha256"] = genome
+    intent = {k: rec.get(k) for k in _INTENT_KEYS}
+    if any(v == NOT_STORED for v in intent.values()):
+        out["intent_sha256"] = NOT_STORED
+        notes.append("a field of the intent (the text) is not_stored, so the take has no intent id")
+    else:
+        out["intent_sha256"] = sha256_of(canonical_json(intent))
+    if genome == NOT_STORED:
+        out["render_sha256"] = NOT_STORED
+    else:
+        substrate = {k: rec[k] for k in SUBSTRATE_KEYS if k in rec}
+        out["render_sha256"] = sha256_of(canonical_json({"genome_sha256": genome, "substrate": substrate}))
+    if notes:
+        out["ids_note"] = "; ".join(notes)
+    return out
 
 
 def add_ids(rec: Dict[str, Any]) -> None:
-    """`genome_sha256` and `render_sha256` (see the module docstring)."""
-    genotype = {k: rec[k] for k in GENOTYPE_KEYS if k in rec}
-    if _has_unknown(rec, GENOTYPE_KEYS):
-        rec["genome_sha256"] = rec["render_sha256"] = NOT_STORED
-        rec["ids_note"] = "a genotype field is not_stored, so the take has no genome or render id"
-        return
-    genome = sha256_of(canonical_json(genotype))
-    substrate = {k: rec[k] for k in SUBSTRATE_KEYS if k in rec}
-    rec["genome_sha256"] = genome
-    rec["render_sha256"] = sha256_of(canonical_json({"genome_sha256": genome, "substrate": substrate}))
+    """`genome_basis`, `genome_sha256`, `intent_sha256`, `render_sha256` (see the module docstring)."""
+    rec.pop("ids_note", None)
+    rec.update(derive_ids(rec))
 
 
 def serialize(rec: Mapping[str, Any]) -> str:
@@ -479,7 +543,7 @@ def finalize(rec: Dict[str, Any], *, extra_private: Sequence[str] = ()) -> Tuple
 
 _ENGINE_RE = re.compile(r"^[A-Za-z0-9._+ -]{1,48}$")
 _CODES_RE = re.compile(r"^[0-9, ]*$")
-_SHA_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_BASIS_RE = re.compile(r"^[a-z_+]{1,48}$")
 
 
 def _is_int(v: Any) -> bool:
@@ -502,10 +566,14 @@ def validate_embedded(rec: Any) -> None:
         v = rec.get(key)
         if v is not None and not (isinstance(v, str) and _CODES_RE.match(v)):
             raise ValueError(f"{key} is not a list of integers")
-    for key in ("audio_codes_sha256", "semantic_tokens_sha256", "genome_sha256", "render_sha256"):
+    for key in ("audio_codes_sha256", "semantic_tokens_sha256", "score_abc_sha256",
+                "genome_sha256", "intent_sha256", "render_sha256"):
         v = rec.get(key)
         if v is not None and v != NOT_STORED and not (isinstance(v, str) and _SHA_RE.match(v)):
             raise ValueError(f"{key} is not a sha256")
+    basis = rec.get("genome_basis")
+    if basis is not None and basis != NOT_STORED and not (isinstance(basis, str) and _BASIS_RE.match(basis)):
+        raise ValueError("genome_basis is not a plain name")
     for key in ("synth_batch_size", "synth_batch_index", "codes_count"):
         v = rec.get(key)
         if v is not None and v != NOT_STORED and not (_is_int(v) and v >= 0):
@@ -531,10 +599,16 @@ def summarize(rec: Mapping[str, Any]) -> Dict[str, Any]:
         "has_codes": bool(isinstance(codes, str) and codes.strip()),
         "codes_by_hash_only": bool(set(refs) & {"audio_codes", "semantic_tokens"}),
     }
-    for key in ("genome_sha256", "render_sha256"):
+    basis = rec.get("genome_basis")
+    narrow = isinstance(basis, str) and basis != NOT_STORED
+    if narrow:
+        out["genome_basis"] = basis
+    for key in ("genome_sha256", "intent_sha256", "render_sha256"):
         v = rec.get(key)
         if isinstance(v, str) and _SHA_RE.match(v):
-            out[key] = v
+            # A record without genome_basis is legacy: its ids are the wide definition and must not
+            # be grouped with the narrow ones (module docstring).
+            out[key if narrow or key == "intent_sha256" else f"legacy_{key}"] = v
     return out
 
 

@@ -14,7 +14,11 @@ record each file's own evidence allows and writes it into the file:
 **Never guessed** (rule 7). A field the evidence does not hold is `not_stored`: the text sent to
 `/lm` (the trial stored the LM's answer, not the request), the engine binaries' hashes, the
 weights' hashes of the acestep trials (the files installed today are not proof of the files used
-then), the GPU and driver. A genotype field that is `not_stored` means no genome or render id.
+then), the GPU and driver. Only the engine's inheritable unit (the codes, or the YuE2 tokens)
+decides the genome id: a `not_stored` text field leaves `intent_sha256` `not_stored` but the take keeps its
+genome (EVOLUTION section 3). A file that already has a record is not rewritten, so the 55 files re-tagged on
+2026-11-21 keep their wide ids and are read as legacy (`provenance.py`, "Legacy records");
+`provenance.derive_ids` gives their narrow ids.
 What *is* stored is copied exactly: the codes, the seeds, the sampling settings, the batch size
 and index, the yue2 weights' sha256 and adapters' sha256.
 

@@ -16,8 +16,9 @@ extensions, because ADR-051 Q4 and the metadata scope need them:
 - `hash_notes`: short strings saying why the hash is the kind it is (`"ffmpeg
   absent"`, `"ffmpeg could not read the audio"`); empty for a normal hash.
 - `provenance`: the small summary of the file's own `mp.provenance/1` record (`{engine, seed,
-  has_codes, codes_by_hash_only, genome_sha256?, render_sha256?}`), read on a scan with a size
-  cap and a strict check (`provenance.read_summary`). Never a path; absent when the file has no
+  has_codes, codes_by_hash_only, genome_basis?, genome_sha256?, intent_sha256?, render_sha256?};
+  an older record without `genome_basis` gives `legacy_genome_sha256?` / `legacy_render_sha256?`
+  instead, see provenance.py), read on a scan with a size cap and a strict check (`provenance.read_summary`). Never a path; absent when the file has no
   good record.
 
 They are optional, so an entry without them is valid against both shapes.

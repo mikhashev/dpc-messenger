@@ -146,6 +146,138 @@ def test_the_genome_id_ignores_lm_seed_and_the_render_id_follows_the_substrate()
     assert all(x.startswith("sha256:") and len(x) == 71 for x in (a["genome_sha256"], a["render_sha256"]))
 
 
+def _ids(rec):
+    pv.add_ids(rec)
+    return rec
+
+
+def test_the_acestep_genome_is_the_hash_of_the_codes_with_the_engine_id_inside():
+    rec = _ids(acestep())
+    assert rec["genome_basis"] == "audio_codes"
+    expected = pv.sha256_of(pv.canonical_json({"engine": "acestep.cpp", "genome_basis": "audio_codes",
+                                               "audio_codes_sha256": pv.text_sha256(CODES)}))
+    assert rec["genome_sha256"] == expected
+    # not the bare codes hash: another engine with the same string would not collide
+    assert rec["genome_sha256"] != pv.text_sha256(CODES)
+    other = pv.derive_ids({**rec, "engine": "other.cpp"})
+    assert other["genome_sha256"] == pv.NOT_STORED
+
+
+def test_the_yue2_genome_is_the_semantic_tokens_and_a_cover_adds_the_score():
+    rec = _ids(yue2())
+    assert rec["genome_basis"] == "semantic_tokens"
+    assert rec["genome_sha256"] == pv.sha256_of(pv.canonical_json(
+        {"engine": "yue2.cpp", "genome_basis": "semantic_tokens", "semantic_tokens_sha256": pv.text_sha256(TOKENS)}))
+    # the score is not in a plain take's genome: another score with the same tokens is the same genome
+    same_tokens = _ids(yue2(replay={"style": "rock", "abc": "X:2\nK:D\n", "semantic_tokens": TOKENS}))
+    assert same_tokens["score_abc_sha256"] != rec["score_abc_sha256"] and same_tokens["genome_sha256"] == rec["genome_sha256"]
+    # a cover: the score is part of the inherited unit
+    cover = yue2()
+    cover["task_type"] = "cover"
+    pv.add_ids(cover)
+    assert cover["genome_basis"] == "semantic_tokens+score_abc"
+    assert cover["genome_sha256"] == pv.sha256_of(pv.canonical_json(
+        {"engine": "yue2.cpp", "genome_basis": "semantic_tokens+score_abc",
+         "semantic_tokens_sha256": pv.text_sha256(TOKENS), "score_abc_sha256": rec["score_abc_sha256"]}))
+    assert cover["genome_sha256"] != rec["genome_sha256"]
+    other_score = yue2(replay={"style": "rock", "abc": "X:2\nK:D\n", "semantic_tokens": TOKENS})
+    other_score["task_type"] = "cover"
+    pv.add_ids(other_score)
+    assert other_score["genome_sha256"] != cover["genome_sha256"]
+    # the engines never meet: the same codes string in both engines gives two genomes
+    ace = _ids(acestep(lm_result={"caption": "c", "audio_codes": TOKENS, "lyrics": LYRICS}))
+    assert ace["genome_sha256"] != rec["genome_sha256"]
+
+
+def test_a_changed_text_with_the_same_codes_is_one_genome_and_two_intents():
+    a = _ids(acestep())
+    b = _ids(acestep(lm_request={"caption": "heavy metal", "lyrics": LYRICS + "[chorus]\nla\n", "duration": 30,
+                                 "vocal_language": "en", "seed": 42, "lm_model": "lm.gguf"}))
+    assert a["caption_sent"] != b["caption_sent"]
+    assert a["genome_sha256"] == b["genome_sha256"] and a["intent_sha256"] != b["intent_sha256"]
+    assert a["render_sha256"] == b["render_sha256"]               # genome + substrate only
+    # the codes decide the genome
+    c = _ids(acestep(lm_result={"caption": "x", "audio_codes": CODES + ",1", "lyrics": LYRICS}))
+    assert c["genome_sha256"] != a["genome_sha256"]
+
+
+def test_the_intent_id_hashes_exactly_the_text_bucket():
+    rec = _ids(acestep(params={"lyrics": LYRICS, "duration_s": 30, "lyrics_prep": {"vocal_language": "ru"}},
+                       lm_request={"caption": "indie rock", "lyrics": LYRICS, "bpm": 120, "keyscale": "E minor",
+                                   "timesignature": "4", "vocal_language": "ru", "seed": 42, "lm_model": "lm.gguf"}))
+    bucket = {"caption_sent": "indie rock", "lyrics": LYRICS, "bpm_sent": 120, "keyscale_sent": "E minor",
+              "timesignature_sent": "4", "vocal_language_sent": "ru", "duration_requested_s": 30}
+    assert rec["intent_sha256"] == pv.sha256_of(pv.canonical_json(bucket))
+    # each member moves it; what is not in the bucket does not
+    for key, new in (("caption_sent", "x"), ("lyrics", "y"), ("bpm_sent", 121), ("keyscale_sent", "A"),
+                     ("timesignature_sent", "3"), ("vocal_language_sent", "en"), ("duration_requested_s", 31)):
+        assert pv.derive_ids({**rec, key: new})["intent_sha256"] != rec["intent_sha256"], key
+    for key, new in (("lm_seed", 1), ("dpc_lyrics_prep", {"x": 1}), ("seed", 9), ("caption_chosen", "z"),
+                     ("bpm_chosen", 1), ("inference_steps", 99)):
+        assert pv.derive_ids({**rec, key: new})["intent_sha256"] == rec["intent_sha256"], key
+    # a YuE2 take has no bpm or key: those are None, not a missing id
+    y = _ids(yue2())
+    assert y["intent_sha256"].startswith("sha256:") and "bpm_sent" not in y
+
+
+def test_lm_seed_and_the_lyrics_preparation_are_outside_the_genome_and_the_render_id():
+    a = _ids(acestep())
+    for key, new in (("lm_seed", 5), ("dpc_lyrics_prep", {"changed": True}), ("caption_chosen", "other"),
+                     ("lyrics", "other lyrics"), ("bpm_sent", 99)):
+        assert pv.derive_ids({**a, key: new})["genome_sha256"] == a["genome_sha256"], key
+        assert pv.derive_ids({**a, key: new})["render_sha256"] == a["render_sha256"], key
+    y = _ids(yue2())
+    assert pv.derive_ids({**y, "lm_seed": 5, "dpc_lyrics_prep": {"x": 1}, "lyrics": "z"})["genome_sha256"] == y["genome_sha256"]
+
+
+def test_a_missing_text_field_costs_only_the_intent_id_a_missing_unit_costs_the_genome():
+    rec = _ids(acestep())
+    no_text = pv.derive_ids({**rec, "caption_sent": pv.NOT_STORED, "lyrics": pv.NOT_STORED})
+    assert no_text["genome_sha256"] == rec["genome_sha256"] and no_text["render_sha256"] == rec["render_sha256"]
+    assert no_text["intent_sha256"] == pv.NOT_STORED and "no intent id" in no_text["ids_note"]
+    no_codes = pv.derive_ids({**rec, "audio_codes_sha256": pv.NOT_STORED})
+    assert no_codes["genome_sha256"] == no_codes["render_sha256"] == pv.NOT_STORED
+    assert no_codes["genome_basis"] == "audio_codes" and "no genome" in no_codes["ids_note"]
+    assert no_codes["intent_sha256"] == rec["intent_sha256"]
+    empty = _ids(acestep(lm_result={"caption": "c", "audio_codes": "", "lyrics": LYRICS}))
+    assert empty["genome_sha256"] == pv.NOT_STORED                # the hash of nothing names nothing
+
+
+def test_the_ids_are_recomputed_from_the_hashes_when_the_codes_were_dropped_for_size():
+    rec = acestep(lm_result={"caption": "c", "audio_codes": ",".join(["12345"] * 30000), "lyrics": LYRICS})
+    done, _text = pv.finalize(rec)
+    assert "audio_codes" not in done and "omitted_for_size" in done
+    assert pv.derive_ids(done)["genome_sha256"] == done["genome_sha256"]
+    assert done["genome_basis"] == "audio_codes"
+
+
+def test_a_record_without_genome_basis_is_legacy_and_is_never_read_as_a_narrow_genome():
+    narrow, text = pv.finalize(acestep())
+    legacy = {k: v for k, v in narrow.items() if k not in ("genome_basis", "intent_sha256")}
+    legacy["genome_sha256"] = "sha256:" + "1" * 64            # a wide id as written before 2026-11-22
+    legacy["render_sha256"] = "sha256:" + "2" * 64
+    pv.validate_embedded(legacy)                                # still a good record
+    old = pv.summarize(legacy)
+    assert "genome_sha256" not in old and "render_sha256" not in old and "genome_basis" not in old
+    assert old["legacy_genome_sha256"] == legacy["genome_sha256"] and old["legacy_render_sha256"] == legacy["render_sha256"]
+    # the narrow ids of the same file can still be derived, from the hashes it holds
+    assert pv.derive_ids(legacy)["genome_sha256"] == narrow["genome_sha256"]
+    assert legacy["genome_sha256"] != narrow["genome_sha256"]
+    # a new record reads as narrow
+    new = pv.read_summary(text, where="a.flac")
+    assert new["genome_basis"] == "audio_codes" and new["genome_sha256"] == narrow["genome_sha256"]
+    assert new["intent_sha256"] == narrow["intent_sha256"] and "legacy_genome_sha256" not in new
+    assert pv.read_summary(json.dumps(legacy), where="old.wav")["legacy_genome_sha256"] == legacy["genome_sha256"]
+
+
+def test_the_reader_refuses_a_bad_genome_basis_or_intent_id():
+    base = {"schema": "mp.provenance/1", "engine": "acestep.cpp"}
+    pv.validate_embedded({**base, "genome_basis": "audio_codes", "intent_sha256": pv.NOT_STORED})
+    for bad in ({"genome_basis": "../x/y"}, {"genome_basis": 5}, {"intent_sha256": "nope"}):
+        with pytest.raises(ValueError):
+            pv.validate_embedded({**base, **bad})
+
+
 # -- privacy --------------------------------------------------------------------------------------
 
 
