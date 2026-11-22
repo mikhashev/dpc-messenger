@@ -58,9 +58,14 @@ session: "AI Studio group chat (group-60aff6110f02), 2026-11-21 — Whisper plan
 > it fixes contradictions and wrong facts, records the answers, and says what is left to tune
 > from operation.
 >
-> **ADR-051 N11** (how an external GPU job joins the card queue) is answered here as
-> "(b)+(c)" **only once Mike confirms**. He has not chosen N11. Until he does, this ADR
-> does not close it.
+> **Seventh revision:** the four reviews of `ffd06369` (new count #18–#22) and Mike's answers of
+> 2026-11-22 (item 7, N11). Text only, no new mechanism (Mike #11): one scale and one view for
+> `need`, Whisper's measured overhead, a carrier for the real-time ratio, the two doors of
+> "unknown", and the accepted consequences in one sentence each.
+>
+> **ADR-051 N11** (how an external GPU job joins the card queue): Mike decided on 2026-11-22
+> that it is in scope and that CC writes S10 (Decided by Mike). This ADR answers it as
+> "(b)+(c)".
 
 ## Context and Problem Statement
 
@@ -205,7 +210,10 @@ editing it)
 - Callers of `transcribe`: `service.py:4797` (owner's voice); `p2p_coordinator.py:1398`
   (peer; **not** wrapped in `serving_a_peer`); `dpc_agent/tools/transcribe.py:172` (agent
   tool, runs inside a turn that holds `accepted_request`; tool timeout 1800 s at 293);
-  `music/commands.py:324` (music Transcribe, `release_if_loaded_here=True`).
+  `music/commands.py:324` (music Transcribe, `release_if_loaded_here=True`). That is **four
+  doors** (Forge #20-7): Telegram has no call of its own and reaches the provider through
+  `service.transcribe_audio`; the fifth hit, `whisper_provider.py:886`, is the provider's own
+  forward to its successor.
 - `service.transcribe_audio` (4615–4657, the local provider call at 4797) serves the
   owner's dictation command, received voice messages, and both Telegram paths
   (`coordinators/telegram_coordinator.py:509`, `managers/agent_telegram_bridge.py:1674`).
@@ -267,8 +275,8 @@ ctranslate2 and mlx).
   (1814) is its twin for physical memory.
 - `_DESKTOP_RESERVE_MIB = 2048` (1779) is the desktop's share of the card in the admission
   arithmetic: `strata_provider.py:451` admits a peer start only when `free >= total -
-  _DESKTOP_RESERVE_MIB`. It is not a CUDA-context figure (Ark #44): a Whisper process's
-  ~1.5–1.7 GiB of residency needs its own constant.
+  _DESKTOP_RESERVE_MIB`. It is not a CUDA-context figure (Ark #44): Whisper's own overhead
+  needs its own constant (L11, `_WHISPER_OVERHEAD_MIB`).
 
 **The frontend already reads the card keys** (Zcode #41; this closes Q4). Twelve files under
 `dpc-client/ui/src`:
@@ -629,7 +637,15 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
 - If any part of the estimate is unknown, `wait_s` is None and `known` is False. It is
   never 0.
 - `eta_s` comes from the holder:
-  - Whisper: audio duration times the last measured real-time ratio, else None.
+  - Whisper: audio duration times the last measured real-time ratio, else None. **The ratio
+    has no carrier today** (Johnny B, Forge #21-5, Zcode #22-3): `_realtime_ratio()`
+    (`whisper_provider.py:817-822`) only formats a log string (`:986`, `:1060`). S1/S3 records
+    the ratio the provider already computes there, **per device**; the estimate uses the device
+    the route goes to (Forge #20-2), and with no figure for it the estimate is unknown (a peer
+    is then refused, L13). L12's table is the CPU's; the GPU's follow it. **The duration** is
+    ffprobe's (`service.py:515-523`), else the recorder's declared one (`:533-537`);
+    `_get_audio_duration` returns **0.0** on failure, not None (`whisper_provider.py:809-815`),
+    and 0.0 counts as unknown (Johnny E, Forge #21-6).
   - Music, **a job that has not started:** the text estimate (`estimate_yue2_seconds`
     per variant, `music/job_schemas.py:271-279`) times the recorded YuE2 real-time factor
     times the variants, marked as an estimate; it may route (L12), never refuse.
@@ -675,13 +691,32 @@ pending Mike's OK**).
      supervisor children and a co-living Whisper alias included. Building the fit from the
      "in the way" list would leave out exactly the residents that do not exclude the
      contender, and report a fit where the card would run out.
-  1. `need = whisper_peak + Σ peak of every resident + _DESKTOP_RESERVE_MIB`, where
-     `whisper_peak = model_size_bytes(model, revision)` (`providers/model_sizes.py:74`,
-     which returns `(size, "measured"|"hf_api"|None)`) plus a new
-     `_WHISPER_CUDA_CONTEXT_MIB` (the backlog measured ~1.5–1.7 GiB; proposed 1740), and:
+  1. `need = whisper_peak + Σ peak of every resident + _DESKTOP_RESERVE_MIB`, **every term in
+     MiB**, where `whisper_peak = model_size_bytes(model, revision)[0] // 2**20` plus a new
+     `_WHISPER_OVERHEAD_MIB`, proposed **770**, and:
+     - **One scale, one view** (Ark #18-3, Forge #21-3, Zcode #22-1). `model_size_bytes`
+       (`providers/model_sizes.py:74-79`) returns **bytes** (turbo 1 622 443 339 B, row at
+       `:48-49`, so 1547 MiB); `_total_vram_mib()` and `_DESKTOP_RESERVE_MIB` are MiB. MiB is
+       the one scale: bytes are converted once, where `whisper_peak` is built, and the logged
+       `need` is that figure. A peak is a **torch-view** figure plus the context, not the
+       driver's `nvidia-smi used` (one load: 1826 MiB torch peak, +752…+967 MiB driver view,
+       Forge #21); the torch view is the conservative one, and the declared check uses it.
+     - **The overhead, measured and where** (Forge #21, 2026-11-21; a fresh process in the
+       backend's venv, **not inside the backend**, a synthetic tone, **not speech**): CUDA
+       context ≈477–485 MiB; turbo fp16 weights 1544 MiB allocated, 1826 MiB peak on the
+       provider's pipeline path (chunk 30, batch 16), so activations ≈282 MiB. 485 + 282 → 770;
+       `whisper_peak` ≈ 1547 + 770 = 2317 MiB, against 3362 with the former 1740. That
+       ~1.5–1.7 GiB was the **backend's own residency** (`bge-m3`, GLiNER; `040-…md:78`), not
+       a Whisper context, and on top of the weights it counted the model twice (Ark #18-4,
+       Johnny A, Forge #20-6, Zcode #22-2). A start value, tuned from operation.
+     - **The source is logged** (Ark #18-8): `measured` or `hf_api`; `hf_api` overstates a model
+       that ships more than one format (`model_sizes.py:78-80`). `torch.compile` fails on torch
+       2.11 (guard at `whisper_provider.py:312-320`), so the figures carry no compile cost.
      - a music holder's peak is its declared `vram_mib` (YuE2 Q8 5.2–5.6 GB is already a
        peak; the larger figure is used);
-     - another Whisper lease's peak is computed the same way as `whisper_peak`;
+     - another loaded Whisper model's peak is computed the same way as `whisper_peak`, **once
+       per loaded model, not per lease or use** (Johnny C, Forge #20-4): two uses on one alias
+       are one model object (`_current_owner`, `whisper_provider.py:673-697`);
      - **a llama-server child's peak is the figure its own start already admitted it
        with**: `_predicted_total_mib(admission, cache_type)` (3554; weights + KV for its
        `n_ctx` and KV type + overhead, from `_admission`, 3539), recorded on the
@@ -693,7 +728,12 @@ pending Mike's OK**).
        (`_DEFAULT_OVERHEAD_MIB`, 4608);
      - **a Strata child, or a llama-server child whose start could not size its model**
        (`_admission` None), has no such figure: its peak is unknown, and the outcome is
-       `unknown`. S2 or a later refactor may give supervisors a `vram_mib`;
+       `unknown`. **[unverified]** why Strata has none: `_admission` reads
+       `self.config["gguf_path"]` (`llama_server_supervisor.py:3548-3549`) while Strata's
+       model keys are `native_gguf`, `ple_gguf`, `pack_dir`, `mtp_dir`
+       (`strata_supervisor.py:291-295`); whether `_admission` returns None or is never called
+       for it was not read (Johnny D). S2 or a later refactor may give supervisors a
+       `vram_mib`;
      - the desktop is counted **once, as `_DESKTOP_RESERVE_MIB`**. A measured `dwm.exe`
        figure is never added: `dwm` is not a resident (it is on S8's ignore list), so the
        declared check cannot pay for the desktop twice (Ark #60 §5.2).
@@ -721,8 +761,9 @@ pending Mike's OK**).
     figure the driver reports: all processes' use together, the desktop's and a foreign
     process's included, so it needs no desktop term and no per-process sum. Used only by
     the live veto (point 3), which can only narrow.
-  - **Declared peaks** (`vram_mib` of a lease, `model_size_bytes` plus the context
-    constant, `_predicted_total_mib` of a llama-server child): MiB, **not a reading**.
+  - **Declared peaks** (`vram_mib` of a lease, `model_size_bytes` converted to MiB plus the
+    overhead constant, `_predicted_total_mib` of a llama-server child): MiB, **not a
+    reading**.
   - **Not used: the per-process figures** (`peak_vram_mib`, PDH on Windows, NVML on Linux).
     Why, from the code: the registry keeps one running **peak** per engine entry, summed
     over the process tree, sampled every `SAMPLE_INTERVAL_S` = 2 s
@@ -750,6 +791,10 @@ pending Mike's OK**).
     a second nvidia-smi) on every grant and release and after a None reading, so a failure
     is not served for 30 s. The 30 s pin
     (`test_the_agent_map_reads_the_cards_vram_at_most_every_30_seconds.py`) stays green.
+    **Accepted** (Ark #18-5): the reader is shared, so the agent map's 5 s poll re-probes after
+    each lease event too; Forge measured one probe at about 30 ms. The reset never passes a
+    future `now` (`commit_memory.py:147, 155`: an `at` in the future switches the cache off for
+    the rest of the process).
   - **One reserve** (Forge #15 §4): Strata's admission budgets `total − _DESKTOP_RESERVE_MIB`
     (`llama_server_supervisor.py:1815-1817`, `3552`); L11's declared check is that same
     arithmetic with the same constant, and only its live veto reads `free`, which already
@@ -781,11 +826,14 @@ pending Mike's OK**).
   - **A peer** in either non-fit outcome takes no CPU route (Mike #71) and has one test,
     L13's: it waits in the line only when its estimated whole trip fits in 120 s, and is
     refused at once otherwise (Johnny #14 obj. 1). Background transcriptions follow L12 (L4).
-  - **One Whisper peak per lease**, whatever the number of open uses: the provider runs
+  - **One Whisper peak per loaded model**, whatever the number of open uses: the provider runs
     parallel calls on one model (`_active_transcriptions`; inference outside `_load_lock`,
     `whisper_provider.py:891-915`) and L1 makes a granted lease re-entrant, so the lease
-    stays multi-use (Ark #13 new #2). What a second parallel call adds is not counted;
-    learned in operation.
+    stays multi-use (Ark #13 new #2). The extra activation memory of parallel decodes is not
+    counted; learned in operation.
+  - **Which door "unknown" belongs to** (Zcode #22): waiting in the lease line is a
+    **person's** request meeting an unreadable card or an unsized resident; a **peer's** trip
+    estimate with any unknown part is refused at once (L13, test 37).
 - **The music lease is untouched by a co-holder:** its busy test, its yield and its stop
   read only its own uses and child.
 - **A third contender while two hold** (Zcode #52, Ark #53). A llama-server start or a
@@ -840,7 +888,10 @@ Around the rule:
   nothing, so the route could never open. The rows over 10 s are warm figures; a cold twin
   adds ≈9 s (Johnny #14).
 - **Enough RAM:** a cold CPU route is taken only when available host RAM covers the twin
-  plus a margin (`psutil`); otherwise the line (proposal).
+  plus a margin, read as `psutil.virtual_memory().available`, the one instrument for the
+  gate, the log and the UI; otherwise the line (proposal). `commit_memory.read_free_commit()`
+  also exists and reads commit too; it is not used here (Forge #20-3, who read 7.1 GB
+  available against the twin's ≈4 GB, up to ≈10 GB; the twin's RAM figure stays unverified).
 - **No switch in mid-flight** (Zcode #69): the choice is final for that call. A dictation
   that started on the CPU twin stays there even if the card frees a second later; only new
   calls take the GPU. A call sent to the line does not later jump to the CPU.
@@ -862,8 +913,8 @@ twin has **its own `idle_unload_s`**, the mechanism already built and pinned in 
 speculatively, and its life is not tied to "the card is held" (which would add a second
 unload trigger and a mid-dictation question). The first call after an idle period pays the
 cold start (≈9 s, below). Mike's sentence also covers the GPU Whisper alias, whose idle
-unload shipped in step 1 at 300 s; its default is an open follow-up for Mike (Open for
-Mike, item 7). Nothing in code changes here.
+unload shipped in step 1 at 300 s; Mike confirmed that default on 2026-11-22 (Decided by
+Mike). Nothing in code changes here.
 
 **The measurement** (CC's subagent, reported at #66: Whisper turbo on the CPU of this
 machine, a Ryzen 9950X, Mike's own Telegram voice message; not re-measured here):
@@ -880,6 +931,15 @@ machine, a Ryzen 9950X, Mike's own Telegram voice message; not re-measured here)
 | a Strata turn with the twin running | [pending] | sizes `cpu_contention_factor` |
 
 The CPU route holds **no card lease** and touches no VRAM.
+
+**GPU figures, the first** (Forge #21, 2026-11-21; outside the backend, a synthetic tone, not
+speech): cold load of turbo fp16 ≈1–2.4 s (`from_pretrained` 0.1–0.2 s, `.to(cuda)` 0.8–2.2 s),
+reload after an unload 0.6–0.9 s; ratio 79× (30 s, `generate`) to 154× (120 s, pipeline), an
+**upper bound** because a tone compresses to a few tokens. The ratio on real speech on the GPU
+is unmeasured (CC is measuring it; Open for Mike). `torch.compile` fails on torch 2.11, so the
+"4.5× speedup" comment at `whisper_provider.py:313` does not apply and these figures are not
+comparable with the CPU table. The provider docstring's "RTX 3060 ~10-13×" (`:63-66`) is not
+our figure. A CPU number is never used for a GPU route.
 
 **L13. A peer's wait builds on ADR-044's amendment of 2026-11-18, "a peer waits for the card
 behind every owner request"** (Mike #85: "why new? there are tasks in the backlog and the ADR
@@ -930,7 +990,12 @@ already decided, from the card queue to the lease line.
    new #1, #2): the handler has no engine gate (`_local_engine_refusal` is called only on the
    inference path, `p2p_coordinator.py:1135`), so a peer can load GPU Whisper beside a live
    Strata; and peers transcribe in parallel (`_peer_inference_lock`, 110, is taken only for
-   inference, 1119). The lease adds the gate; parallel uses stay (L11, one Whisper peak).
+   inference, 1119). The lease adds the gate; parallel uses stay (L11, one Whisper peak). **Accepted consequence** (Ark #18-1, Mike
+   #11): every refusal text reaches the foreign node verbatim, as `error=str(e)`
+   (`p2p_coordinator.py:1412`; the access-denied reply is a bare string too, `:1354-1357`),
+   and the response has no `code` or `retry_after_sec` (`protocol.py:392-399`; the inference
+   response has both). S1 writes its refusal texts for a foreign node (no alias, agent or
+   chat), and a guest cannot tell a card refusal from a broken provider.
 2. **The guest gives up at 120 s, for the whole trip.** Both call sites hard-code it
    (`service.py:4680`, `:10168`; defaults `service.py:10093`, `p2p_coordinator.py:1664`), from
    sending the audio to the answer, so the wait, a Whisper load and the transcription all count.
@@ -953,6 +1018,13 @@ already decided, from the card queue to the lease line.
    transcription), or when the guest's connection ends.
    **[unverified]** whether the handler task is cancelled when the peer disconnects mid-wait;
    if it is not, the waiter lives to its cap (Open Questions, Q11).
+   **Accepted consequence** (Ark #18-2): transcription has no cancel frame. A guest that gives
+   up drops only its own future (`p2p_coordinator.py:1690-1695`) and an answer to a request no
+   longer pending is dropped (`transcription_handler.py:65-68`), so the host keeps working for a
+   guest that left. One cheap guard: at the grant S3 re-checks `peer_id in
+   self.p2p_manager.peers` (pattern at `:1672`), and counts "transcription answer dropped,
+   request gone". A cancelled waiter leaves in the existing queue's form, `except
+   BaseException: request.leaves()` (`llama_server_supervisor.py:3221-3223`; Johnny F).
 
 ### 2. Integration
 
@@ -995,7 +1067,8 @@ Mike's words (#20, #68, #70) and the cost of a reload.
   gated by the switch. That matches the music idle stop and `MusicEngines.exclusive`
   today, and nothing is lost but a reload.
 - The two costs are not equal (Ark #45, D2): unloading Whisper costs a reload of about
-  3 GB in seconds; stopping an idle music engine costs the next job an engine boot and a
+  1.5 GB of weights, measured at 0.6–0.9 s outside the backend (Q7); stopping an idle music
+  engine costs the next job an engine boot and a
   5–9 GB model reload **[unverified: neither reload time is measured here]**. Neither
   loses anyone's work.
 - **Open for Mike, item 2.** It now interacts with Mike #70: music swapping an idle
@@ -1207,8 +1280,13 @@ lease, nor with `swap_when_idle` off, when nothing is stopped.
   Strata restart is not, only bounded by `start_timeout_s`, 600 s. Both are learned in
   operation (Mike #11).
 - **With Strata on the card, nothing else fits** (Forge #15 §5): nvidia-smi read 1100 MiB free
-  of 32623 with Strata resident (2026-11-21 17:53), so Whisper (≈3.3 GB) and ComfyUI (≈25 GB)
+  of 32623 with Strata resident (2026-11-21 17:53), so Whisper (≈2.3 GB, its measured peak) and ComfyUI (≈25 GB)
   run only after a swap. That is Mike #68 working as decided.
+- **On Windows, `free` is not a wall** (Forge #21 §1; a property of the machine, no redesign,
+  Zcode #22). With Strata resident `nvidia-smi` read 879–1100 MiB free while
+  `torch.cuda.mem_get_info()` read about 30 GB, and Forge allocated 10 GiB at "67 MiB free"
+  with no failure or slowdown (WDDM). So L11's live veto on `free` refuses whenever an engine is
+  resident, which agrees with Mike #68; whether to keep it on WDDM is learned in operation.
 - **Who is told.**
   - **The owner:** by `_note_swap` (3141-3168): one INFO line, "swapped 'X' out for 'Y'" with
     "; its parked conversations are dropped" whenever the engine's count was not zero, and a
@@ -1252,9 +1330,8 @@ lease, nor with `swap_when_idle` off, when nothing is stopped.
   - Holder `whisper:<alias>`, engine `"whisper"`, kind `transcription`,
     `yield_cost="cheap"`.
   - `vram_mib` comes from `model_sizes.model_size_bytes(model, revision)`
-    (`providers/model_sizes.py:74`) plus a **new** CUDA-context constant (the backlog
-    measured ~1.5–1.7 GiB process residency; `_DESKTOP_RESERVE_MIB` means something else),
-    else None.
+    (`providers/model_sizes.py:74`), converted to MiB, plus a **new** overhead constant
+    (`_WHISPER_OVERHEAD_MIB`, L11; `_DESKTOP_RESERVE_MIB` means something else), else None.
 - **`transcribe(..., purpose: Optional[str] = None)`.** `purpose` is per call, the same
   precedent as language and task in b9725990.
   - Wrap the **whole** existing body in `async with self._card_lease.use(purpose or
@@ -2045,7 +2122,8 @@ New test files:
     `card_holders()`**, `beside` set, the "loaded beside" line; `does_not_fit` (declared
     sum over total, or the live reading vetoes) → waits in the lease line; `unknown`
     (`model_size_bytes` source None, a holder with no declared peak, the reading None or
-    raising) → **waits in the lease line, neither beside nor refused**, logged as unknown;
+    raising) → **waits in the lease line, neither beside nor refused** (a person's door; a
+    peer is test 37's), logged as unknown;
     a live reading never turns a declared "no" into "yes"; an earlier waiter blocked by the
     music lease → no co-grant; the music lease's busy, yield and stop are unchanged by the
     co-holder; a peer or background call that does not fit is refused at once; no other
@@ -2093,6 +2171,10 @@ New test files:
     yield list holds only those that exclude the contender; a sum built from the yield list
     would say "fits" and the test proves L11 says `does_not_fit`. With a Strata child as a
     resident the outcome is `unknown`. `dwm` in a fake per-process reading changes nothing.
+    The test also **pins the value of `need` in MiB**, not only its outcome (Ark #18-3): Whisper
+    alone, no resident, from a fake turbo row of 1 622 443 339 B → `whisper_peak` 1547 + 770 =
+    2317 and `need` = 2317 + 2048 = 4365 MiB, logged with its `model_size_bytes` source; a
+    `need` left in bytes (≈1.6e9) fails it.
 29. `test_a_running_job_waiting_for_the_card_does_not_start_its_engine.py` (Ark #60 §4):
     a job in `running`, its engine's child gone, the card held by a busy holder: the engine
     does not start, the job shows its `card_wait`, it is neither failed nor dropped as
@@ -2171,6 +2253,9 @@ Compliance checks beyond tests:
 - [ ] No lease is acquired while a client lock is held.
 - [ ] No wait estimate ever reads 0 when unknown; no refusal text for a peer names an
       alias, agent or chat.
+- [ ] S3's Done-when includes one live run with `transcribe_audio_file` enabled (the in-turn
+      path, 3.5) and one with the local engine stopped (L11's arithmetic beside music), because
+      tests alone exercise neither (Ark #18-6, #18-7).
 
 ## Scope
 
@@ -2181,9 +2266,9 @@ Compliance checks beyond tests:
 - `providers/whisper_provider.py` (designed against its interface; coordinate with the
   agent editing it), `service.py:4797`, `music/commands.py:324`, `tools/transcribe.py:172`,
   `p2p_coordinator.py:1398`, `service.py` (`transcribe_audio`'s bound, the provider cascade
-  at 5152–5160, the peer check), `coordinators/telegram_coordinator.py:509`,
-  `managers/agent_telegram_bridge.py:1674`, `settings.py` (`[local_transcription]
-  queue_wait_s`), `ui/src/lib/coreService.ts:1492`
+  at 5152–5160, the peer check; Telegram, `coordinators/telegram_coordinator.py:509` and
+  `managers/agent_telegram_bridge.py:1674`, is covered through `transcribe_audio`),
+  `settings.py` (`[local_transcription] queue_wait_s`), `ui/src/lib/coreService.ts:1492`
 - `music/engine_base.py`, `music/runner.py`, `music/commands.py`, `music/jobs.py`
   (`running` in `set_waiting_for_card`), `music/acestep.py`/`yue2.py` (VRAM estimates),
   test helpers; `ui/src/lib/utils/musicCreate.ts`
@@ -2208,7 +2293,7 @@ coordinated with the agents editing it rather than postponed.
 |---|---|---|---|---|
 | S0 | docs: this ADR (the design proposed an ADR-044 amendment; this record carries the matrix, L1–L12 and the decisions instead), revised after reviews #41–#89, the new count's #10–#15, and Mike #68–#71 and #11 | `docs/decisions/052-…md` | — | This commit |
 | S1 | feat(card-lease): lease registry, lease line, one order across both lines (L5a), refusals, wait estimate; `card_holders`/`card_queue` include lease rows through the hook (supervisor rows first, `until_cancelled`); `card_holder()` stays supervisor-only | new `managers/card_lease.py`; `llama_server_supervisor.py` (`_LEASE_HOLDERS`, `_LEASE_WAITERS`, `_live_holders`, `card_holders`, `card_queue`); `tests/conftest.py` | tests 1–3, 6–8, 14 with fake clients only | Pending |
-| S3 | feat(whisper): the local model holds a card lease, yields by unloading when idle (`yield_card`, releasing only when the unload ran), loads beside busy music only in the one shared cell when it provably fits (L11), otherwise chooses the CPU twin when its estimate beats the GPU wait (L12, Mike #62, Ark #64) or queues before `_load_lock`; the CPU twin is a separate `local_whisper` provider with `device: cpu` and no lease, selected by `transcribe_with_route`; doors pass `purpose` and their bounds; every caller gets a deadline and the queue's is shorter; a card refusal ends the provider cascade; the peer check runs again after a wait; a peer's transcription waits only when its whole trip fits the guest's 120 s, else is refused at once (L13); a load that fell back to the CPU releases the lease; an agent's transcription inside its own turn on a local alias goes to the twin up to 300 s or is refused at once (3.5); the twin starts from L12's table; llama-server children record `predicted_vram_mib`; L11 reads `free` and `total` through `read_vram_mib` and never per-process figures | `providers/whisper_provider.py`; `service.py` (`transcribe_audio` bound, the cascade at 5152, the peer check), `music/commands.py:324`, `tools/transcribe.py:172` (`purpose`, `on_wait`); `p2p_coordinator.py:1398` (`serving_a_peer`); `coordinators/telegram_coordinator.py:509`, `managers/agent_telegram_bridge.py:1674`; `settings.py` (`queue_wait_s`, `cpu_max_s`, `cpu_max_audio_s`, `cpu_contention_factor`); `ui/src/lib/coreService.ts:1492`; `llama_server_supervisor.py` (`predicted_vram_mib`, one attribute set at launch); `managers/commit_memory.py` (a function that clears `at` and `free` of the 30 s VRAM reading, never `total`) | 9, 10, 18–24, 26–28, 30–34, 36–38, 40 | Pending; first slice |
+| S3 | feat(whisper): the local model holds a card lease, yields by unloading when idle (`yield_card`, releasing only when the unload ran), loads beside busy music only in the one shared cell when it provably fits (L11), otherwise chooses the CPU twin when its estimate beats the GPU wait (L12, Mike #62, Ark #64) or queues before `_load_lock`; the CPU twin is a separate `local_whisper` provider with `device: cpu` and no lease, selected by `transcribe_with_route`; doors pass `purpose` and their bounds; every caller gets a deadline and the queue's is shorter; a card refusal ends the provider cascade; the peer check runs again after a wait; a peer's transcription waits only when its whole trip fits the guest's 120 s, else is refused at once (L13); a load that fell back to the CPU releases the lease; an agent's transcription inside its own turn on a local alias goes to the twin up to 300 s or is refused at once (3.5); the twin starts from L12's table; llama-server children record `predicted_vram_mib`; L11 reads `free` and `total` through `read_vram_mib` and never per-process figures | `providers/whisper_provider.py`; `service.py` (`transcribe_audio` bound, the cascade at 5152, the peer check), `music/commands.py:324`, `tools/transcribe.py:172` (`purpose`, `on_wait`); `p2p_coordinator.py:1398` (`serving_a_peer`); Telegram needs no edit of its own, it reaches the provider through `service.transcribe_audio` (four doors, Forge #20-7); `settings.py` (`queue_wait_s`, `cpu_max_s`, `cpu_max_audio_s`, `cpu_contention_factor`); `ui/src/lib/coreService.ts:1492`; `llama_server_supervisor.py` (`predicted_vram_mib`, one attribute set at launch); `managers/commit_memory.py` (a function that clears `at` and `free` of the 30 s VRAM reading, never `total`) | 9, 10, 18–24, 26–28, 30–34, 36–38, 40 | Pending; first slice |
 | S4 | feat(music): music engines hold the card lease (acquired before `_the_lock`); the runner waits through it and names lease holders; a `running` job may wait for the card (both gates: `jobs.py` and the runner's wait loop) | `music/engine_base.py`, `music/runner.py`, `music/commands.py` (start by hand), `music/jobs.py`, `music/acestep.py`/`yue2.py`, test helpers, `ui/src/lib/utils/musicCreate.ts` | **4 (Done-when)**, 11, 13, 15, 17, 29 | Pending; first slice |
 | S2 | feat(card): llama-server and Strata wait for a busy lease and unload an idle one, with the swap on or off; a lease contender swaps an idle supervisor on the owner-start path, reading the parked count first (2.4); one order across both lines; an inference peer waits behind a lease only once ADR-044's amendment of 2026-11-18 is built (L13) | `llama_server_supervisor.py` (2.2 items 3–13), `providers/llamacpp_server_provider.py` (`stop_local_engine`, then `card_holder` may return lease rows) | 5, 16, 35, 39, and the full list of existing card tests green | Pending; first slice |
 | S5 | feat(ui): lease rows and lease waiters in the existing holder and queue lines, "until cancelled", unknown ETA as "—"; whether the block shows without a local LLM provider; the optional "let peers use the CPU twin" setting beside the device selector of a Whisper provider (Mike #71) | `ProvidersEditor.svelte`, `cardQueue.ts`, `cardQueue.test.ts`, `MusicCreate.svelte`; the status payload | 25 and manual | Pending |
@@ -2229,8 +2314,8 @@ coordinated with the agents editing it rather than postponed.
 - `EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-…` (1524): this ADR is its option (b)
   in-process plus (c) as S8. The HTTP surface in `local_api.py` (S10: a lease with a 90 s
   TTL and heartbeat, `kind="external"`) closes it. That card's Done is not met until S10.
-  Record that this answers ADR-051 **N11** as "(b)+(c)", but only after Mike confirms. He
-  has not chosen N11.
+  Record that this answers ADR-051 **N11** as "(b)+(c)"; Mike decided on 2026-11-22 that it
+  is in scope (Decided by Mike).
 - `THE-WHISPER-ALIAS-IS-THE-BACKENDS-LAST-STANDING-CUDA-RESIDENT` (7366): can close after
   S3, together with b796af4a.
 - `THE-EMBEDDING-DEVICE-IS-A-STANDING-CHOICE-…` (7507) and
@@ -2328,6 +2413,13 @@ Recorded as decided; each line names the message.
     queue in operation; the music player needs transcription too." Read as: start values
     ship as proposed and are tuned from operation; the music player is a transcription caller
     (section 3.5, L4).
+- **2026-11-22, item 7: the GPU Whisper alias's idle unload stays at 300 s** ("ok 300s"),
+  because a reload costs 0.6–0.9 s and a cold load 1–2.4 s (Forge #21, outside the backend, a
+  tone), so holding the model costs less than a second when it is wanted again.
+- **2026-11-22, N11: in scope, and CC writes S10, the ComfyUI client half included.** The yield
+  verb for ComfyUI is its own `POST /free {"unload_models": true, "free_memory": true}` plus
+  `POST /interrupt` (Forge verified it live, 24.9 → 1.8 GB). Order: after S1.
+- **2026-11-22: CC measures the GPU ratio** Forge asked about (#21), on real speech.
 
 ## Open for Mike
 
@@ -2340,10 +2432,6 @@ Still open after #68–#71 and #11. Each has a proposed default.
 - **Item 6A.** **The dictation bound** `[local_transcription] queue_wait_s`: *proposed* 600 s (CC #66
   question 8; Zcode and Ark for). The alternative, `swap_wait_s` (1800 s here), would
   leave the agent tool no time to transcribe after a full wait (Ark #60 §7).
-- **Item 7.** **The GPU Whisper alias's idle unload** (follow-up of #71). Step 1 shipped
-  `idle_unload_s` = 300 s; Mike's "only if there is a queue for it" suggests less. Options
-  (CC #75 A): 300 s, 60 s, or unload as soon as nothing waits. No code changes until Mike
-  chooses.
 - **Item 1a.** **An idle supervisor in front of a dictation** (follows from #68 and #70). *Proposed:*
   L12 first (a file up to 5 minutes goes to the CPU twin and costs the LLM nothing); a
   longer file, with the swap on and nothing waiting, swaps the idle supervisor out by the
@@ -2354,12 +2442,15 @@ Still open after #68–#71 and #11. Each has a proposed default.
   line); the numbers themselves are not decided. The in-turn path (3.5) no longer depends
   on them.
 - Items 10, 11 and 13 were answered at #11; item 12 by reading the flow, as he asked; item 8
-  closes with item 10 (Decided by Mike).
+  closes with item 10; item 7 was answered on 2026-11-22 (all in Decided by Mike).
+- **The reference for the GPU real-time ratio** (Forge #21, §5): real speech on the GPU, or the
+  CPU step-5 table only. Mike's answer, 2026-11-22: CC measures it on real speech. **Being
+  measured by CC; the figures are folded in when they exist.** Until then the GPU estimate is
+  unknown (L10).
 
 Also open, and not numbered: whether `auto` means `lease` on CUDA for the embedder and
 GLiNER (section 3.4); whether L11 should also spare an *idle* music engine its stop when
-Whisper fits beside it; ADR-051 N11, which this ADR answers as "(b)+(c)" only once Mike
-confirms; and, outside this ADR, whether Ark writes the track into his knowledge base (CC
+Whisper fits beside it; and, outside this ADR, whether Ark writes the track into his knowledge base (CC
 #75 D).
 
 ## Open Questions
@@ -2383,7 +2474,10 @@ confirms; and, outside this ADR, whether Ark writes the track into his knowledge
   2026-11-18 15:06:42). Whether `free` falls by the child's real use while a music child runs
   is still **[unverified]**. — CC
 - **Q7:** The reload times behind decision 2's cost difference (Whisper vs an idle music
-  engine). **[unverified]** No GPU Whisper load has run on this machine yet: the alias was
+  engine). **Partly answered (Forge #21, 2026-11-21):** Whisper's GPU reload is 0.6–0.9 s and
+  its cold load 1–2.4 s, measured outside the backend (L12, "GPU figures"); an idle music
+  engine's reload is still **[unverified]**. The backend itself has not loaded Whisper on the
+  GPU: the alias was
   configured `device: cpu` until 2026-11-20 and `cuda` since 2026-11-21 21:41 (the init line
   prints the configured device, `whisper_provider.py:76, 121`), and no load is logged
   since. The core venv's torch is CUDA-capable: `2.11.0+cu128 12.8 True` (`torch.__version__`,
@@ -2402,7 +2496,9 @@ confirms; and, outside this ADR, whether Ark writes the track into his knowledge
   **[unverified]** — CC
 - **Q11:** Whether the host's transcription handler is cancelled when the guest disconnects
   while its request waits in `_LEASE_LINE` (L13, point 3). Not read: `handle_transcription_request`
-  has no disconnect check, and the transport's behaviour was not traced. **[unverified]** — CC
+  has no disconnect check, and the transport's behaviour was not traced. **[unverified]**
+  The form to copy for the waiter is the existing queue's `except BaseException:
+  request.leaves()` (L13, point 3). — CC
 - **Q12:** Multi-GPU machines. `_free_vram_mib` and `_total_vram_mib` read the first line of
   `nvidia-smi --query-gpu` (`llama_server_supervisor.py:1807, 1825`), so a second card is
   invisible and L11 may judge the wrong one. Nothing in DPC chooses a GPU index that this
@@ -2548,7 +2644,8 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   "L3 means refusal, not waiting" is right for a file over 300 s and for a twin that cannot
   run; for a file up to 300 s the answer is the CPU twin (Mike #71).
 - **Ark #82 §1, Whisper's reload time:** unchanged here. His log lines show `device=cpu` on
-  this machine, so the idle-unload default (Open for Mike, item 7) waits for a GPU figure.
+  this machine, so the idle-unload default (item 7) waited for a GPU figure; Forge measured
+  it at #21 and Mike decided 300 s on 2026-11-22.
 - **Review of `c3852d75` (new count #12–#15), what held and what changed.** Zcode #12: ready
   for S1, four nits, all fixed (the response's success fields, `swap_wait_s` 300 by default
   with 1800 from this machine's `config.ini`, the history range, the order of Q9). Johnny #14
@@ -2578,6 +2675,22 @@ was done instead. The underlying concern is kept wherever it stands on its own.
 - **Forge #15 §4, "L11 measures `free − reserve`, Strata `total − reserve`":** half. L11's
   declared check is `total − reserve`, as Strata's; only its live veto reads `free`, with no
   reserve (L11, "One reserve").
+- **Review of `ffd06369` (new count #18–#22).** All four call it a base for S1 after text fixes
+  (Zcode #22). Held, and written in without new mechanism (Mike #11): `need` mixed bytes with MiB
+  (it ran toward "does not fit always", so a test awaiting only a refusal passes on the bug; test
+  28 pins the value); the 1740 was the backend's `bge-m3` + GLiNER residency, not Whisper's; the
+  ratio had no carrier; `free` is not a wall under WDDM; the estimate must come from the routed
+  device; "unknown" has two doors; verbatim refusals and the missing cancel frame are accepted;
+  0.0 duration, one RAM instrument, the cache reset's scope, two live runs, the logged size
+  source, multi-use counted once per model, Strata's missing figure marked unverified, four doors
+  not five. **Did not hold as written:** Zcode's `p2p_coordinator.py:1354` as `error=str(e)`
+  (the access-denied string; `str(e)` is `:1412`); Forge's `_realtime_ratio` call at `:857`
+  (the calls are `:986`, `:1060`); line numbers drifted by one to four (`:1672` not `:1673`,
+  `transcription_handler.py:65-68`, `_get_audio_duration` at `:809`, `_current_owner` at `:673`,
+  `llama_server_supervisor.py:3221-3223`). **Withdrawn:** Forge's #15 §2–3 (bytes and a
+  `vram_mb` fallback in `read_vram_mib`; the division he remembered is `whisper_provider.py:954`,
+  a log line) and Ark's #13 torch claim; Forge's item-7 vote moved from 60 s to 300 s after he
+  measured the reload.
 - **The first draft's own errors** found on the way: `_CARD_CLAIMS` is pruned in four
   places, not two; `_free_vram_mib` is in the supervisor; `p2p_coordinator.py:1397` is now
   1398; card 1925 is now at line 1967.
@@ -2685,6 +2798,9 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   measured; the factor as a decision), **#15, Forge** (live readings at 17:53: 1100 MiB free
   with Strata, 8.3 GB host RAM available; the reserve; the N11 offer of ComfyUI's
   `POST /free`, which waits on Mike). Taken and corrected: Review notes.
+- **Seventh revision, 2026-11-21/22.** **#18 Ark, #19 Johnny, #20 and #21 Forge, #22 Zcode** on
+  `ffd06369` (Review notes), and Mike's answers of 2026-11-22 (item 7 at 300 s; N11 in scope, S10
+  by CC; CC measures the GPU ratio on speech).
 
 ## Authors
 
@@ -2692,9 +2808,9 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   questions at #49–#50 and #85
 - **CC** — Request, review, this record
 - **Ark, Zcode** — Consulted; reviews #41, #44, #45, #52, #53, #59, #60, #61, #64, #67, #69, #82;
-  new count #12, #13
-- **Johnny** — Consulted; reviews #83, new count #14
-- **Forge** — Consulted; review and live readings, new count #15
+  new count #12, #13, #18, #22
+- **Johnny** — Consulted; reviews #83, new count #14, #19
+- **Forge** — Consulted; review and live readings, new count #15, #20, #21
 
 ## References
 
@@ -2713,4 +2829,5 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   `5099b326`
 - Reviews: AI Studio group chat, messages #41, #52 and #59 (Zcode), #44, #45, #53, #60,
   #61, #64, #67 and #82 (Ark), #69 (Zcode), #83 (Johnny), #49–#50, #62, #68, #70, #71 and #85
-  (Mike); new count #11 (Mike), #12 (Zcode), #13 (Ark), #14 (Johnny), #15 (Forge)
+  (Mike); new count #11 (Mike), #12 (Zcode), #13 (Ark), #14 (Johnny), #15 (Forge), #18 (Ark),
+  #19 (Johnny), #20 and #21 (Forge), #22 (Zcode)
