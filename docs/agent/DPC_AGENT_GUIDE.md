@@ -557,6 +557,7 @@ these as artifacts anywhere they appear.
 | `execute_skill` | Load a skill strategy by name (Memento-Skills router) | ✅ |
 | `list_my_skills` | List the agent's own skills | ✅ |
 | `list_my_tools` | List the tools available to this agent | ✅ |
+| `card_status` | GPU card in one read-only call: free/total VRAM, card holders, card queue (no chat ids), GPU compute processes; None without NVIDIA (30 s cache) | ✅ |
 | `list_local_agents` | List other agents on this node | ✅ |
 | `list_agent_skills` | List another agent's skills | ✅ |
 | `import_skill_from_agent` | Import a skill from another agent (firewall-gated) | ⛔ opt-in |

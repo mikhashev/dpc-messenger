@@ -29,10 +29,12 @@ reader (PDH, in the registry's sampler).
 
 import ctypes
 import logging
+import shutil
+import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -154,3 +156,59 @@ def read_vram_mib(now: Optional[float] = None) -> Tuple[Optional[int], Optional[
             return None, None
         _vram_reading.update(at=when, free=free, total=total)
         return free, total
+
+
+# `card_status` (the agent tool) lists the processes the driver shows on the card. The read is a
+# registered `device_probe` like the VRAM ones and reuses a reading for the same window. `apps` is
+# the parsed list (empty when the card has no compute process) or None without a signal.
+_gpu_apps_reading: Dict[str, Any] = {"at": None, "apps": None}
+_gpu_apps_lock = threading.Lock()
+
+
+def _parse_compute_apps(text: str) -> List[Dict[str, Any]]:
+    """`pid, process_name, used_memory` rows of `nvidia-smi --query-compute-apps ... --format=csv,noheader`.
+    `used_memory` is `[N/A]` under WDDM (Windows) and becomes None; a row that does not parse is skipped."""
+    apps: List[Dict[str, Any]] = []
+    for line in text.splitlines():
+        pid_text, sep, rest = line.partition(",")
+        name, sep2, used_text = rest.rpartition(",")
+        if not sep or not sep2:
+            continue
+        try:
+            pid = int(pid_text.strip())
+        except ValueError:
+            continue
+        used_text = used_text.strip().split(" ")[0]
+        apps.append({"pid": pid, "process_name": name.strip(),
+                     "used_memory_mib": int(used_text) if used_text.isdigit() else None})
+    return apps
+
+
+def read_gpu_compute_apps(now: Optional[float] = None) -> Optional[List[Dict[str, Any]]]:
+    """The compute processes of the NVIDIA card as `{pid, process_name, used_memory_mib}` rows, `[]`
+    when there is none and None without a signal (no nvidia-smi, or it failed). `used_memory_mib` is
+    None where the driver gives no per-process figure (WDDM). One nvidia-smi probe per
+    `_VRAM_READING_TTL_S`, a missing signal cached for the window too; blocking, so callers run it
+    off the event loop. A probe refused during the backend's stop answers None and is not cached."""
+    from . import llama_server_supervisor as engine
+
+    when = time.monotonic() if now is None else now
+    with _gpu_apps_lock:
+        at = _gpu_apps_reading["at"]
+        if at is not None and 0 <= when - at < _VRAM_READING_TTL_S:
+            return _gpu_apps_reading["apps"]
+        apps: Optional[List[Dict[str, Any]]] = None
+        if shutil.which("nvidia-smi"):
+            try:
+                out = engine._device_probe(
+                    ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader"],
+                    text=True, timeout=10,
+                )
+                apps = _parse_compute_apps(out.stdout or "")
+            except (OSError, ValueError, subprocess.SubprocessError) as e:  # no signal, cached for the window
+                logger.debug("GPU compute apps unreadable: %s", e)
+            except Exception as e:  # the registry closed: advisory, answers None and is not cached
+                logger.debug("GPU compute apps reading unavailable: %s", e)
+                return None
+        _gpu_apps_reading.update(at=when, apps=apps)
+        return apps
