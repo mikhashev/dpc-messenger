@@ -1,6 +1,15 @@
 """Shared test constants and fixtures. Override TEST_DOMAIN via DPC_TEST_DOMAIN."""
 import os
 
+# The GPU belongs to the live local engines (Strata, Whisper, ComfyUI). One
+# torch CUDA context from a test process costs ~1.2 GiB and took Strata's decode
+# from ~130 to ~35 tok/s. Tests that need a CUDA answer mock
+# torch.cuda.is_available (see test_the_entity_model_has_a_device_setting.py and
+# test_the_node_embedding_device_decides_over_an_agent_profile.py). This runs at
+# conftest import, before any test module can import torch.
+if os.environ.get("DPC_TESTS_ALLOW_GPU") != "1":
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # not "": Windows drops an empty variable
+
 import pytest
 
 TEST_DOMAIN = os.environ.get("DPC_TEST_DOMAIN", "wikipedia.org")
