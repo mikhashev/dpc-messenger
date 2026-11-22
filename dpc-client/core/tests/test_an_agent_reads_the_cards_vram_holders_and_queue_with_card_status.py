@@ -223,6 +223,43 @@ class TestRegistration:
         assert "card_status" not in DpcAgent.EXTERNAL_SOURCE_ALLOWED_TOOLS
 
 
+def _turn(cls, source, tmp_path):
+    from dpc_client_core.dpc_agent.agent import ALL_MEMORY_LAYERS
+    from dpc_client_core.dpc_agent.tools.registry import ToolContext
+
+    layers = ALL_MEMORY_LAYERS if cls == "owner" else frozenset()
+    return ToolContext(agent_root=tmp_path, message_source=source, turn_class=cls, open_layers=layers)
+
+
+class TestOnlyTheOwnersTurnReadsIt:
+    """ADR-052 L7: the card queue is the owner's. Telegram and a group with another node reach this tool
+    (EXTERNAL_SOURCE_ALLOWED_TOOLS limits Discord alone, agent.py _get_allowed_tools), so the tool gates
+    on the turn's class, as the file tools do (tools/core.py _not_owner)."""
+
+    @pytest.mark.parametrize("cls,source", [("stranger", "telegram"), ("stranger", None),
+                                            ("other_node", "group"), ("stranger", "discord")])
+    def test_a_turn_that_is_not_the_owners_gets_the_refusal_and_no_data(self, tmp_path, monkeypatch, cls, source):
+        from dpc_client_core.dpc_agent.tools import card
+
+        card_reads = []
+        monkeypatch.setattr(cm, "read_vram_mib", lambda: card_reads.append(1) or (1, 2))
+        monkeypatch.setattr(lss, "card_queue", lambda: card_reads.append(1) or [])
+        monkeypatch.setattr(lss, "card_holders", lambda: card_reads.append(1) or [])
+        answer = card._card_status(_turn(cls, source, tmp_path))
+        assert answer.startswith("⚠️") and "owner's own turns" in answer and "\n" not in answer, answer
+        assert "vram_free_mib" not in answer and "queue" not in answer.replace("card queue", "")
+        assert not card_reads, "a refused turn reads nothing"
+
+    @pytest.mark.parametrize("source", ["ui", "external_agent", "telegram_owner"])
+    def test_the_owners_turn_gets_the_data(self, tmp_path, monkeypatch, source):
+        from dpc_client_core.dpc_agent.tools import card
+
+        _Card().install(monkeypatch)
+        out = json.loads(card._card_status(_turn("owner", source, tmp_path)))
+        assert (out["vram_free_mib"], out["vram_total_mib"]) == (9000, 32607)
+        assert "queue" in out and "holders" in out
+
+
 def test_the_answer_says_when_the_readings_were_taken_and_how_old_they_are(monkeypatch):
     _Card().install(monkeypatch)
     clock = {"mono": 1000.0, "wall": 1_800_000_000.0}

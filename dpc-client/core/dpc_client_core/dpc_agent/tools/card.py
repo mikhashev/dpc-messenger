@@ -6,6 +6,10 @@ total VRAM, who holds the card, who waits for it and the processes the driver li
 (ADR-046 point 8, ADR-052). It reads what the UI's `list_processes` and `local_engine_status`
 read, through the same cached readers, and adds no nvidia-smi call beyond them.
 
+The card queue is the owner's alone (ADR-052 L7): a turn that is not the owner's (a Telegram stranger, a
+group with another node) is refused before anything is read, by the gate the file tools use
+(`tools.core._not_owner`). Discord never reaches it: it is not in EXTERNAL_SOURCE_ALLOWED_TOOLS.
+
 Every NVIDIA-dependent value is None without nvidia-smi; the answer still carries the holders and the
 queue. The owner's queue rows name conversations; those never leave through this tool.
 """
@@ -71,8 +75,18 @@ def _queue() -> Optional[List[Dict[str, Any]]]:
     ]
 
 
+_NOT_THE_OWNERS = (
+    "⚠️ The card status is not read on this turn: it is for the owner's own turns "
+    "(it names who holds the card and who waits for it)."
+)
+
+
 def _card_status(ctx: "ToolContext") -> str:
     """The card's VRAM, holders, queue and GPU processes as JSON (read-only, cached 30 s)."""
+    from .core import _not_owner
+
+    if _not_owner(ctx) is not None:
+        return _NOT_THE_OWNERS
     from ...managers.commit_memory import (
         gpu_apps_reading_age, read_gpu_compute_apps, read_vram_mib, vram_reading_age,
     )
