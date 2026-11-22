@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** 2026-11-12 | **Current Version:** 0.30.0 | **Current Phase:** Phase 2 (Track 1 Agent Maturity mostly complete; Track 2 Team Collaboration: see its section and the board — the client targets Windows, Linux and macOS; star topology)
+> **Status:** Alpha | **Last Updated:** 2026-11-22 | **Current Version:** 0.30.0 (tag `v0.30.0`, 2026-09-18; the four manifests still say 0.30.0 and `dev` carries unreleased work since) | **Current Phase:** Phase 2 (Track 1 Agent Maturity mostly complete; Track 2 Team Collaboration: see its section and the board; since 2026-11-12 the work on `dev` is mostly the local engines and the music player, see *Local engines, the card and the music player* below — the client targets Windows, Linux and macOS; star topology)
 
 ---
 
@@ -30,12 +30,12 @@ measured both from git and found the number had no source.
 | **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 accepted · ADR-048 accepted · ADR-050 proposed · ADR-051 accepted | 263 | 90 |
 | **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 accepted · ADR-046 accepted · ADR-048 accepted · ADR-051 accepted | 252 | 50 |
 | **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 accepted · ADR-046 accepted · ADR-047 accepted · ADR-050 proposed · ADR-052 proposed | 398 | 89 |
-| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 359 | 82 |
+| **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 360 | 82 |
 | **reach** | ADR-035 accepted · ADR-043 proposed | 103 | 25 |
 
 **Observation debt: 310 under an axis + 19 in entries that carry none = 329.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
 
-Not yet placed: 130 of 1379 board entries carry no axis, and a guessed one would report coverage this does not have.
+Not yet placed: 130 of 1380 board entries carry no axis, and a guessed one would report coverage this does not have.
 
 Rendered from `docs/decisions/*.md` front matter and `backlog.md`. Nothing here is written by hand; correct it at the source and re-run `uv run python tools/backlog/build.py --roadmap`.
 
@@ -107,7 +107,7 @@ These features were developed organically as the product matured, significantly 
 
 ## Phase 2: Team Collaboration + Agent Maturity
 
-**Status:** Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration): group chat over several nodes with signed authorship and a creator-owned roster (since 8945a14f) exists; the Track 2 section and the board carry the rest — the client targets Windows, Linux and macOS (CI in `.github/workflows/tests.yml` has Ubuntu jobs only, no Windows or macOS job), star topology
+**Status:** Track 1 (Agent Maturity) mostly complete, Track 2 (Team Collaboration): group chat over several nodes with signed authorship and a creator-owned roster (since 8945a14f) exists; the Track 2 section and the board carry the rest; the local-engine and music-player work of November 2026 has its own section after Track 1 — the client targets Windows, Linux and macOS (CI in `.github/workflows/tests.yml` has Ubuntu jobs only, no Windows or macOS job), star topology
 **Timeline:** Q1-Q3 2026
 **Scope:** Small teams (2-20 members + AIs), embedded agent system
 
@@ -159,7 +159,7 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 - **Shell Guardrails (ADR-030)** — `run_shell` tool with 3-tier command classification, Tier-0/2 blocklist (Win/Linux/macOS), Tier-1 approval flow + per-agent whitelist, cwd sandbox enforcement, unit tests in `test_shell_guardrails.py`
 - **Per-Reader Role Derivation (ADR-031)** — per-reader assistant/user role labels in the group LLM payload + single-writer group history + `message_id` dedup
 - **TOOL-DEFAULT-DENY** — deny-by-default for all non-read agent tools; `ToolEntry.default_enabled` as single source of truth + merge-on-startup seeding into the firewall
-- **Agent Transparency** — Drift-style collapsible tool calls (human-readable labels), full per-round reasoning, untruncated tool_calls in history, context-breakdown token tooltip, L1 agent interrupt (Stop button)
+- **Agent Transparency** — Drift-style collapsible tool calls (human-readable labels), full per-round reasoning, untruncated tool_calls in history, context-breakdown token tooltip, L1 agent interrupt (Stop button). Since 2026-11-13 the progress strip says where the context was cut (`b80ce640`) and shows the turn's average cache hit rate (`ff700c77`); since 2026-11-22 a Stop says what happens next: progress lines for Stop, summary and Kill, and a replay that says the user stopped the turn (`1fa73a26`; its follow-up is in progress)
 - **ComfyUI / Forge Spike** — agent-controlled ComfyUI transport tools (submit/wait/convert/queue/progress), UI→API workflow conversion, MP4 + WebSocket progress (Phase 1 video spike)
 - **Incremental Memory Indexing** — per-file hash incremental indexing (no full rebuild), shared content-addressed embedding cache; `HF_HUB_OFFLINE` opt-in offline mode
 - **Agent Skills** — Static SKILL.md files. Reflection removed (S68). Rewrite planned (Track 1)
@@ -167,6 +167,18 @@ North Star: Sleep consolidates session learnings → Memory system enables recal
 
 **Dependencies:** Phases 0-1 DONE → unblocked all. Memory + Skills independent. (Phases 2-3 removed per ADR-015/ADR-014). ADR-024 builds on ADR-010 (memory layers), ADR-018 (retrieval), ADR-019 (scaling). Integrates with ADR-022 (safety provenance).
 **Research basis:** See `ideas/cc-mike-research/README.md`.
+
+### Local engines, the card and the music player (2026-11-12 → 2026-11-22)
+
+What the last ten days put on `dev`, read from the commits and the ADR status lines. What is observed and what is only built is stated in the ADRs and on the board, not here.
+
+- **The music player (ADR-051, accepted 2026-11-19).** A DPC window over one core music service (`core/dpc_client_core/music/`), with one door for the UI and one for agents, and the engines reached directly. **Built on `origin/dev`:** the library (watched folders, track identity by audio hash, playlists), a loopback track stream with `Range`, the window and mini-player, the lyrics chain with Transcribe, audio into a 1:1 agent chat, and the first creative slice: job store, two engine supervisors (YuE2 via yue2.cpp as the default engine, acestep.cpp second), the Create panel with live jobs, the level-matched A/B with Keep / Discard and its reason dictionary, hide / delete, timecoded comments, the waveform, MP3 export, and a provenance record (`mp.provenance/1`) inside every generated file, whose narrow genome is `abcaaa44`. **Not built:** the `music_*` agent tools, QC, region edits and the seam work, cover, the voice clone, streaming sources, the lineage graph. Mike has tried the acestep.cpp run, the YuE2 pairs and the first Create and export in the app; on Linux and macOS only playback has been tried. Status rows: ADR-051 *Implementation Status*.
+- **The card lease (ADR-052, `proposed` 2026-11-21).** One lease registry so that every GPU client (Whisper, the music engines, later the embedder and GLiNER) can hold, wait for and yield the one card beside the llama-server and Strata children. **S1** (registry, lease line, one order across both lines, refusals, wait estimate) is built and pushed (`53a2eaf5`, follow-up `4d0fa885`). **S2** (llama-server and Strata wait for a busy lease and ask an idle one to let go) is committed on `dev` (`1e57932f`) and in review. **S3** (Whisper), **S4** (music) and **S10** (an external lease with a TTL, for ComfyUI) are planned. Whisper on the GPU was measured on speech for it (`ffc81e00`).
+- **Whisper, step 1 of its plan.** A safe unload that counts running transcriptions across a providers reload, an idle self-unload (`[local_transcription] idle_unload_s`, default 300 s), and language and task as per-call arguments of `transcribe` (`b796af4a`, `3b4ae1d3`, `69ae799c`, `20434817`, `b9725990`); the voice panel reacts to `whisper_model_unloaded` (`0cb5e4e0`). Step 2 is ADR-052.
+- **Local engine scheduling (ADR-044, `implemented`).** Since 2026-11-13: Strata holds its guest entry from the moment a peer's call is let park, and a call parks only where the cache has room (`9fde6097`, `a210f3bb`); KV snapshots of a live agent conversation are saved at a stop and at an agent switch and restored into an empty engine (`8fcdbc4b`, `e7201c0d`); a slot queue keeps a local alias's slot for one turn at a time, for a Strata alias too (`27f2a57c`, `e9ffafec`).
+- **Files between nodes (ADR-047, accepted 2026-11-19 as Option B through phase 0).** A node can request the file of a synced record it lacks (`FILE_REQUEST`, `9dbf0866`); a file travels with its author's signed description (`7d3742c4`, DPTP v1.17); chunk size is picked per file and chunks go in windows behind chat (`053157be`); a file over 1000 MB is refused by its sender (`d474666f`); a file and the words written with it are one message (`3f2de3c7`).
+- **Consent before a conversation leaves the node (ADR-050, still `proposed`).** Extract Knowledge asks before the conversation goes to a model this node does not own, and the button cancels an extraction before the vote (`5b17856e`, `e3bf3e72`).
+- **Smaller.** The DPC logo as a vector source and the app icon set (`dddee4cd`, `a6837cc8`); CI installs the CPU build of torch and a hanging test fails in 5 minutes with a stack trace (`6124a0af`, `84425302`); the Ubuntu-only note under *Continuous integration* above still holds.
 
 ### Track 2: Team Collaboration
 
@@ -257,6 +269,6 @@ See `git log` for complete version history.
 
 ---
 
-**Last Updated:** 2026-11-12
+**Last Updated:** 2026-11-22
 **Maintained By:** D-PC Messenger Core Team
 **License:** See [LICENSING.md](./LICENSING.md)
