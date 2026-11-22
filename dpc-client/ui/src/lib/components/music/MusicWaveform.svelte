@@ -68,7 +68,7 @@
     onregion: (start: number, end: number) => void;
   } = $props();
 
-  let status = $state<'loading' | 'ready' | 'failed'>('loading');
+  let status = $state<'empty' | 'loading' | 'ready' | 'failed'>('empty');
   let reason = $state('');
   let data = $state<TrackPeaks | null>(null);
 
@@ -77,7 +77,7 @@
     data = null;
     reason = '';
     if (!id) {
-      status = 'loading';
+      status = 'empty';
       return;
     }
     status = 'loading';
@@ -99,7 +99,8 @@
     };
   });
 
-  let total = $derived(duration > 0 ? duration : (data?.duration ?? 0));
+  // No track: nothing to seek in or select, whatever duration the parent still passes.
+  let total = $derived(status === 'empty' ? 0 : duration > 0 ? duration : (data?.duration ?? 0));
   let showWave = $derived(status !== 'failed');
 
   // -- the range input: the accessible and the fallback control --------------------
@@ -176,8 +177,13 @@
 
   function drawRuler() {
     const c = rulerCanvas;
-    if (!c || width <= 0 || !(total > 0)) return;
+    if (!c || width <= 0) return;
     dpr = Math.max(1, window.devicePixelRatio || 1);
+    if (!(total > 0)) {
+      c.width = Math.round(width * dpr); // resizing also clears a stale ruler
+      c.height = Math.round(RULER_HEIGHT * dpr);
+      return;
+    }
     c.width = Math.round(width * dpr);
     c.height = Math.round(RULER_HEIGHT * dpr);
     const g = c.getContext('2d');
@@ -218,6 +224,14 @@
     dpr = Math.max(1, window.devicePixelRatio || 1);
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.clearRect(0, 0, c.width, c.height);
+    if (status === 'empty') {
+      // A calm, static centre line: nothing is loaded, nothing is animated.
+      g.fillStyle = colors.unplayed;
+      g.globalAlpha = 0.45;
+      g.fillRect(0, Math.round(c.height / 2) - 1, c.width, Math.max(1, Math.round(dpr)));
+      g.globalAlpha = 1;
+      return;
+    }
     if (!layerGrey || !layerPlayed) return;
     g.drawImage(layerGrey, 0, 0);
     const px = timeToX(scrub ?? position, total, width);
@@ -269,6 +283,7 @@
   $effect(() => {
     void width;
     void data;
+    void status;
     void colorsVersion;
     void canvas;
     untrack(() => {
@@ -420,6 +435,7 @@
   function onKeydown(e: KeyboardEvent) {
     if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
     if (e.key.toLowerCase() === 'r') {
+      if (!(total > 0)) return;
       e.preventDefault();
       e.stopPropagation();
       regionMode = !regionMode;
@@ -435,8 +451,9 @@
   {#if showWave}
     <div
       class="stage"
-      class:region-mode={regionMode}
+      class:region-mode={regionMode && status !== 'empty'}
       class:skeleton={status === 'loading'}
+      class:empty={status === 'empty'}
       bind:this={stage}
       role="presentation"
       style="height:{HEIGHT}px"
@@ -448,6 +465,7 @@
     >
       <canvas bind:this={canvas} style="width:{width}px;height:{HEIGHT}px" aria-hidden="true"></canvas>
       {#if status === 'loading'}<span class="skel-note">Drawing the waveform…</span>{/if}
+      {#if status === 'empty'}<span class="skel-note empty-note" role="status">No track selected — pick one from the library to see its waveform.</span>{/if}
       {#if tip && status === 'ready'}<span class="tip" style="left:{tip.x}px" class:flip={tip.x > width - 160}>{tip.text}</span>{/if}
     </div>
     <canvas class="ruler" bind:this={rulerCanvas} style="width:{width}px;height:{RULER_HEIGHT}px" aria-hidden="true"></canvas>
@@ -520,6 +538,7 @@
   .wf:focus-within .stage { outline: 2px solid var(--wf-played); outline-offset: 1px; }
   .stage.region-mode { cursor: crosshair; }
   .stage canvas { display: block; }
+  .stage.empty { cursor: default; }
   .stage.skeleton {
     background: linear-gradient(90deg, var(--bg-primary, #14161a), var(--bg-secondary, #1d2025), var(--bg-primary, #14161a));
     background-size: 200% 100%;
@@ -527,6 +546,7 @@
     cursor: default;
   }
   .skel-note { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--wf-text); }
+  .empty-note { align-items: flex-end; padding: 0 8px 6px; text-align: center; pointer-events: none; }
   .ruler { display: block; }
   .tip {
     position: absolute;
