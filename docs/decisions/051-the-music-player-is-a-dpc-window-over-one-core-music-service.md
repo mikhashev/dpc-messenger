@@ -8,15 +8,19 @@ deciders: [Mike]
 consulted: [CC, Zcode, Forge, Ark, Warren, Johnny]
 informed: []
 depends_on: [ADR-040, ADR-044, ADR-046]
-related: [ADR-032, ADR-041, ADR-047]
+related: [ADR-032, ADR-041, ADR-047, ADR-052]
 supersedes: []
 session: "AI Studio group chat (group-60aff6110f02), 2026-11-19 03:17-05:33 — epic THE-AI-MUSIC-PLAYER-RUNS-ONLY-AS-A-SIMULATED-BROWSER-PROTOTYPE-AND-DPC-HAS-NO-PLACE-TO-HOST-IT; Mike asked for this ADR at 05:31; reviews by Zcode, Forge and Ark at 06:03-06:33"
 ---
 
 # ADR-051 — The music player is a DPC window over one core music service
 
-> **Proposed 2026-11-19, accepted; Phase 0 and the listener part of Phase 1 are built on dev
-> (2026-11-20, see Implementation Status).** Mike asked for this record at
+> **Proposed 2026-11-19, accepted. Built and on `origin/dev` as of 2026-11-22 (checked at
+> `1fa73a26`): Phase 0 and the listener part of Phase 1, and the first creative slice (own text
+> to takes, review, hide/delete, MP3 export, provenance, comments, waveform). Not built: the
+> `music_*` agent tools, QC, region edits, audio into the gateway, SoundCloud/Yandex, the
+> voice clone, and the card lease for the engines (ADR-052 S4). See Implementation Status.**
+> Mike asked for this record at
 > 05:31 in the AI Studio group chat, "following the template". Only the points under
 > **Decided** are Mike's. Everything under **Not decided** and **Open Questions** is open
 > or is a proposal, and needs his yes. This file is self-contained, so it can move to
@@ -28,6 +32,27 @@ session: "AI Studio group chat (group-60aff6110f02), 2026-11-19 03:17-05:33 — 
 > review is attributed to its reviewer. Reviewer positions on Mike's open questions are
 > recorded under Open Questions; none of them is a decision.
 >
+> **Revised 2026-11-22, whole document against the code at `1fa73a26` (`origin/dev`) and the
+> decisions up to then** (Mike's request, 2026-11-22: "bring ADR-051 up to date"). Every
+> status row now says what the code does, with commits, and every commit named there is on
+> `origin/dev`. What changed in substance: the first creative slice is built, so several
+> open items are answered by the code (N7, N11 in part, N12, N13, `Where takes live`); D30-D36
+> are marked built; D37-D39 point at SPEC decisions 32, 33 and 39, which had no entry here;
+> the relations to ADR-052 (the card lease: Transcribe in S3, the music engines in S4, the
+> idle-swap rule of Mike's #70, the "Stop X" button) are written where this record talks
+> about the card; stale text was removed (the axis paragraph, the "not on the board" and "not
+> started" rows, Q8's number). What the code, SPEC, EVOLUTION and this record still disagree
+> on is listed under **Open Questions, Q9**. `accepted` is kept: the record's own lifecycle
+> says `implemented` means the decision is built, and the tools, QC, region edits and the
+> card lease are not.
+>
+> **Words.** `docs/GLOSSARY.md` rows are taken as the meaning. **Engine** here means a *music
+> engine*, the program that makes the audio (acestep.cpp, yue2.cpp); the glossary's
+> **engine** is the program a local LLM provider answers with (`llama-server`, `strata`).
+> The two share the one card (**card hold**, **card lease**, **local engine swap** are the
+> glossary words for how it changes hands). The glossary has no rows yet for **track**,
+> **take**, **version** or **watched folder** (Consequences).
+>
 > **How claims are marked.** `Observed` means read by CC on `dpc-messenger` branch `dev`
 > at `2d333000` (HEAD, 2026-11-19 13:07 local), or in a log or a config file with the
 > place given. `2d333000` sits one commit above `95acf009`, which the reviewers read, and
@@ -35,17 +60,22 @@ session: "AI Studio group chat (group-60aff6110f02), 2026-11-19 03:17-05:33 — 
 > cited at `95acf009` is the same line at `2d333000`. **The working tree is not clean**:
 > on top of `2d333000` there is this ADR (untracked) and a regenerated `ROADMAP.md`
 > (modified, the axis table now lists ADR-051). Every `path:line` in this file is at
-> `2d333000` unless it says otherwise; line numbers will drift. `Inferred` is reasoning
+> `2d333000` unless it says otherwise; line numbers will drift. They have: by `1fa73a26`
+> `service.py` had grown by about 500 lines. The names are the stable reference; the
+> references in **Scope** were re-read at `1fa73a26` and say so, and the `Observed` lines in
+> Context and in the risk section are history of 2026-11-19, kept as written. `Inferred` is reasoning
 > not run. `Reported` is stated by an agent in the thread and not re-checked here.
 >
-> **Axis `knowledge, network`**, the same as the epic. `knowledge` because the player is a
-> place where a person and an agent work on one track: a comment becomes a job, the job
-> returns takes, and the person accepts one. `network` because every engine is local
-> compute on the one 32 GB card that Strata also uses, and the swap is how they share it.
-> Forge suggests `honesty` in place of `network` (Q7); the field is unchanged until Mike
-> decides.
+> **Axis `collective, knowledge`** (Q7: Mike, 2026-11-19 07:39, "more from personal to
+> collective"; the front matter says so). `knowledge` because the player is a place where a
+> person and an agent work on one track: a comment becomes a job, the job returns takes, and
+> the person keeps one. The epic carries `knowledge, network`; `network` is dropped here
+> because the card is shared through ADR-052 (axis `network`), not through this record.
 
 ## Context and Problem Statement
+
+*This section is the situation of 2026-11-19, when the record was written; it is kept as
+written. What was missing then and is built now is in Implementation Status.*
 
 On 2026-11-06 the AI Studio group discussed a music studio: an editor where a person and
 an agent work on the same track (SPEC §1 calls this "the 2026-11-06 vision"). The research
@@ -65,7 +95,8 @@ or edit when I want to" (03:17). He then set the modes, the sources and the engi
 
 What exists today is a spec, `ai-studio/experiments/music-player/SPEC.md`, and a simulated
 browser prototype, `prototype/index.html`, where every engine is a labelled mock. Neither
-is committed in ai-studio: `experiments/music-player/` is untracked at `f341db1`. None of
+is committed in ai-studio: `experiments/music-player/` is untracked at `f341db1` (*it is
+committed since, in ai-studio, which has no remote*). None of
 the runtime pieces exist in DPC (epic THE-AI-MUSIC-PLAYER-RUNS-ONLY-AS-A-SIMULATED-BROWSER-PROTOTYPE-AND-DPC-HAS-NO-PLACE-TO-HOST-IT):
 
 - `Observed`: no agent tool posts a file into its own chat. The agent tool names in
@@ -101,7 +132,9 @@ child cards can be built in order without going back over these questions.
 - **Listening first.** The player has to work as a plain player before anything else.
   Review and generation are opt-in actions on the track that is playing.
 - **One card, two tenants.** Every music engine needs the GPU that Strata holds. The
-  existing swap (ADR-044, amendment of 2026-11-02) is how the card changes hands.
+  existing swap (ADR-044, amendment of 2026-11-02) is how the card changes hands. ADR-052
+  (the card lease, proposed) extends that to the clients that are not supervised
+  `llama-server` children: Whisper and these music engines.
 - **One rule, one place.** The person (in the UI) and an agent (through tools) make the
   same requests. The capability check, the hash check and never-overwrite must not be
   written twice.
@@ -154,7 +187,9 @@ Required by the template (Mike's call, 2026-11-17).
     fetch so a repeat works offline and the rate limit is respected (Zcode).
   - **ACE-Step 1.5 API server and YuE2-Studio** (README copies read for the SPEC on
     2026-11-19, not run). **Take:** the engines' own HTTP interfaces instead of a
-    ComfyUI graph or MCP (Decided D12-D13). `Reported` (Zcode): YuE2-Studio documents a
+    ComfyUI graph or MCP (Decided D12-D13). *2026-11-21: the engines DPC actually runs are the
+    C++ ports, acestep.cpp and yue2.cpp, each with its own server (D30, D35); YuE2-Studio and
+    the Python ACE-Step API server are not used.* `Reported` (Zcode): YuE2-Studio documents a
     `--headless` mode (tray, auto-stop after about 10 minutes idle).
   - **yamusic-rs** (GPL-3.0-only). It was used for visual tone only, and no code was
     taken (SPEC §13).
@@ -213,6 +248,15 @@ timestamps lie outside them and are worth one read by Mike before acceptance.
   *Implementation note (2026-11-20):* the automatic chain reads only the local LRCLIB
   cache; a request to lrclib.net goes out only on the explicit "Find on LRCLIB" lookup
   (review of `cb9af8a1`: no egress on a track change).
+  *Built 2026-11-20 (`cb9af8a1`, `74c2de84`, `a94c7943`, `3672ee23`, `7fd6a407`); the
+  Whisper run releases the model it loaded (`provider.transcribe(..., release_if_loaded_here=True)`,
+  `music/commands.py`, with the idle self-unload of `b796af4a`). Where Transcribe runs is
+  ADR-052's: in S3 it becomes a lease client (rule L12 chooses the GPU, the CPU twin or the
+  line; Mike #62; a person's click waits without a bound), so the player's Transcribe waits
+  and names the holder instead of loading beside a running engine. Not built yet (S3 is
+  pending). ID3 SYLT is not read (backlog card
+  A-SYNCED-ID3-LYRICS-FRAME-IS-NOT-READ-SO-A-FILE-WITH-ONLY-SYLT-LYRICS-SHOWS-NONE); the
+  Transcribe quality card is open.*
 - **D7. "Generate similar" means both** "same style" (a new song) **and** "cover" (the
   same melody and lyrics with a new arrangement), as two separate actions (SPEC §12
   decision 10).
@@ -238,7 +282,9 @@ timestamps lie outside them and are worth one read by Mike before acceptance.
   - the **ACE-Step 1.5 API server**, for text2music, cover, repaint, and lego/complete
     (*2026-11-21: the engine actually chosen is acestep.cpp, run and supervised by DPC; D30*);
   - **YuE2-Studio** over its HTTP API (`/synth`, `/job`, `/health` on yue-server) or its
-    CLI;
+    CLI (*2026-11-21: the engine actually reached is yue2.cpp's own `yue-server`, run and
+    supervised by DPC, the default engine; D35. YuE2-Studio is not used and no MCP is
+    needed*);
   - **Music Flamingo** through DPC's own `llama-server` (ADR-040).
 
   ComfyUI stays an external tool that DPC integrates with separately, through the
@@ -272,6 +318,25 @@ timestamps lie outside them and are worth one read by Mike before acceptance.
   that is the mechanism the GPU card adds (the epic's note of 2026-11-19 on
   EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-SO-AN-IDLE-ENGINE-KEEPS-THE-CARD-THEY-NEED).
   What the registry needs before this can be checked is in N11.
+  *Status 2026-11-22.* **Built:** DPC starts the two music engines itself (D30, D35), the
+  registry knows them (`acestep_server`, `yue2_server` in `SUBSYSTEMS` and `ENGINES`, so each
+  has a VRAM row), only one music engine is on the card at a time, and a job whose card is
+  held by Strata or `llama-server` waits in `queued` with `card_wait` naming the holders, and
+  the job card offers **"Stop X"**, which calls the existing `stop_local_engine` by the
+  person's press; nothing is stopped automatically (SPEC decision 32, D37). **Not built, and
+  now ADR-052's:** the music engines are not card holders, so `llama-server` and Strata do
+  not see them (they do not wait for a running song, which Mike asked for at #20), and a
+  music job does not yet swap an idle server out. ADR-052 S4 makes the music engines lease
+  clients (acquired before the engine's `_the_lock`), S2 makes the supervisors wait for a
+  busy lease and unload an idle one; Mike #70 amends SPEC decision 32: with the queue empty
+  and the server idle, music unloads the server and takes the card by the owner-start rule,
+  gated by `swap_when_idle` (D37). Two smaller items of the same plan touch this record's
+  code: `stop_local_engine` on a lease alias (S2 item 8) is what lets the "Stop X" button stop
+  an idle lease or hear what a busy one is doing, and the `mp.job/1` `card_wait.holders`
+  schema (exactly `{alias, engine}` per holder, `music/job_schemas.py:479-488`, kept by
+  `set_waiting_for_card`) cannot tell a lease apart, so widening it and the "Stop X" label is
+  an S4 item. The job's `card_wait` shows only while the job is `queued`; S4 widens it to
+  `running`.
 - **D19. No new `audio` attachment type** (05:33, decided by Mike's objection). Mike asked
   why a new type was needed when `file` already exists. The existing `file` attachment
   carries `mime_type` (`types.ts:17` union, `mime_type?` at `:23`), so **a `file` whose
@@ -284,6 +349,11 @@ timestamps lie outside them and are worth one read by Mike before acceptance.
   Ark counted five). A rename would edit other entries' links and could break the graph,
   so the correction lives in dated notes in each body. Phase 0 in
   `docs/dpc-integration.html` will be corrected to this decision.
+  *Built 2026-11-20/21: an audio `file` plays in the chat (`ChatMessageList.svelte`, the
+  `knownDurationSeconds` of the attachment, `dd446110`), core reads the duration with ffprobe
+  (N12), and the agent's history names every non-image attachment
+  (`file_attachment_markers`, `dpc_agent/context.py`, `3837b3a5`). The union is unchanged. B1's own part,
+  an agent posting a file into its chat, is not built and no longer a Phase 0 need (Q1).*
 
 ### Decided (Mike's calls, 2026-11-20, AI Studio group chat, on the external review v2 and the review of its written decisions)
 
@@ -351,10 +421,12 @@ consensus 2026-11-20)") and are not decisions.
   shows "not playable yet"). Options (ii) `blob:` and (iii) copy-in are not chosen. The
   CSP `media-src` change and the first-step experiment of N8 belong to the implementation
   (SPEC §12 decision 30).
-  *Implementation note (2026-11-20): built on `dev` in `9bb7599d`, pushed (on `origin/dev`, checked 2026-11-21); checked by
-  tests, not yet in the Linux window.* Asked for after the Linux node measured the `blob:`
-  path as a live stream (`loadedmetadata duration=0.00`, `seekable` only what had played).
-  See the N8 entry for the shape.
+  *Implementation note (2026-11-20): built on `dev` in `9bb7599d`, on `origin/dev` (checked
+  2026-11-22).* Asked for after the Linux node measured the `blob:` path as a live stream
+  (`loadedmetadata duration=0.00`, `seekable` only what had played). The Linux window then
+  needed four follow-ups (`89123e1d`, `05549c35`, `012d8c0b`, `36a4777a`: no-Range
+  whole-file stream, the 9998 headers, preload, wait for a duration above zero before play);
+  see the N8 entry for the shape.
 
 - **D29. Song creation is tracked as evolution; the process shows a lineage graph** (14:34,
   14:52). Mike's direction: creating a song is like evolution; each take records what
@@ -381,6 +453,15 @@ consensus 2026-11-20)") and are not decisions.
   taste) and built at `abcaaa44`. **The public build recipe is answered**, Mike, session B
   #17, 09:31Z. Still open: the style battery, graph per song, agent notes, the `N_delta`
   warning, and hiding a rejected take's library entry (D32).*
+  *Built as of 2026-11-22 (on `origin/dev`):* the provenance record `mp.provenance/1` inside
+  every generated file, with the narrow ids (`06c8b20f`, `ac25991d`, `abcaaa44`; see the
+  status table), the take-level `rejected` record with its reason (D32), the level-matched
+  plain A/B (D33) and timecoded comments. **Not built:** `lineage.json` / `lineage.html`
+  (nothing draws a graph; `register_generated` takes a `lineage` dict and stores it), the
+  `parents` edges and `N_delta`, selection events beyond Keep / Discard, and any reader of
+  `genome_sha256` (EVOLUTION v3 §14, items 10 and 14). EVOLUTION v3 §14 also holds
+  questions that were not put to Mike (items 10-15), among them the genome close-out and
+  whether a timecoded comment is a `note` selection event.*
 
 - **D30. DPC supervises the acestep.cpp server** (2026-11-21, #159 (a), 19:33; SPEC §12
   decision 31). Asked by CC: "does DPC itself manage the acestep.cpp server?" Mike: "да, мы
@@ -391,6 +472,13 @@ consensus 2026-11-20)") and are not decisions.
   "Mike starts ACE-Step himself, DPC only connects" (2026-11-20 09:56). The settings keys,
   port and restart policy are CC's proposal, not Mike's. Backlog:
   DPC-DOES-NOT-START-OR-WATCH-THE-ACESTEP-CPP-SERVER-SO-NO-MUSIC-JOB-CAN-REACH-AN-ENGINE.
+  *Built 2026-11-21 (`6b34b44c`, on `origin/dev`):* `music/acestep.py` over the shared
+  supervisor `music/engine_base.py`; the `[music] acestep_*` keys (binary, models dir, port
+  9995, `acestep_idle_stop_s` 300, device) and the commands `get_music_engine_status`,
+  `start_music_engine`, `stop_music_engine`. The process goes through the registry as the
+  subsystem `acestep_server` (ADR-046 point 5). Windows only so far: Linux and macOS have no
+  build recipe and report `not_installed`. In ADR-052 the engine becomes a lease client in
+  S4 (holder `music:acestep`).
 
 - **D31. Slice 1 engine settings and output format** (SPEC §12 decision 34; defaults accepted
   by Mike 2026-11-20 09:56, engine line rewritten 2026-11-21). acestep.cpp turbo, Q8, 8 steps.
@@ -399,6 +487,8 @@ consensus 2026-11-20)") and are not decisions.
   recorded word of Mike's.** DPC records `synth_batch_size` and the batch index per take: a
   measurement of 2026-11-21 showed the batch size changes the audio for the same seed
   (PROVENANCE section 2). It replaces the earlier "ACE-Step API, `audio_format: flac`".
+  *Built (`6b34b44c`): one `/synth` per job with `synth_batch_size` = the variants, wav24
+  converted to 24-bit FLAC, a sidecar, the library entry; Mike accepted the live run (#191).*
 
 - **D32. Discard requires a reason** (2026-11-21, #159 (b); SPEC §12 decision 35). Asked by
   CC: "is a reason mandatory on Discard?" Mike: "да, как написать текстом так и выбрать из
@@ -411,13 +501,22 @@ consensus 2026-11-20)") and are not decisions.
   case-insensitively and ordered by use. An optional failure class (EVOLUTION section 6) can
   be attached to an entry; a class is never required to save a reason. Whether Discard keeps a `rejected` record
   instead of removing the library entry is **not** decided (EVOLUTION section 14).
-  *Update 2026-11-22: the take-level `rejected` record is built in the job store
-  (`music/jobs.py` `discard_take`: the take becomes `rejected` with its reason and the record
-  stays). Only the hiding of the library entry is open.*
+  *Update 2026-11-22: built (`9ccd950a`, `2208a803`, on `origin/dev`): the take-level
+  `rejected` record is in the job store (`music/jobs.py` `discard_take`: the take becomes
+  `rejected` with its reason and the record stays; `reject_all_takes` for "None of these";
+  `list_music_discard_reasons` / `set_music_discard_reason_class` for the dictionary), and
+  the library entry of a discarded take is **hidden**, not removed (`_music_hide_for_discard`
+  in `music/commands.py`; the file stays in `generated/<job>/`). Whether the entry should
+  instead show as `rejected` is still open (EVOLUTION v3 §14, open item 1).*
 
 - **D33. Blind A/B is not in slice 1** (2026-11-21, #159 (c); SPEC §12 decision 37). CC
   proposed "later; slice 1 gets a plain A/B with level matching". Mike: "ок позже" (ok,
   later). Slice 1 has the plain, level-matched A/B; blind A/B comes in a later slice.
+  *Built (`2208a803`, `0063d4be`, `c146b811`): the review plays every take at the quietest
+  take's integrated loudness (ffmpeg `ebur128`, `music/loudness.py`, display gain only, the
+  files are never changed), A/B/C/D keys keep the position, and a waveform shows in the
+  review. It is one audio element, so a switch has a short gap; SPEC decision 7 (two elements
+  or decoded buffers) stays open. There is no seam A/B yet: region edits are not built.*
 
 - **D34. The library needs hide and delete** (2026-11-21, #159; SPEC §12 decision 38). **The
   requirement is Mike's:** raw engine outputs duplicated tracks in the library; he wrote
@@ -427,8 +526,12 @@ consensus 2026-11-20)") and are not decisions.
   **The specifics are CC's proposal, not decisions:** Hide is reversible and leaves the file
   untouched; Remove from library applies only to entries whose file is missing; Delete file
   applies only to files under `~/.dpc/music/generated/`; the person's own folders are never
-  deleted from, only hidden. Being built; backlog card
+  deleted from, only hidden. Backlog card
   THE-MUSIC-LIBRARY-HAS-NO-WAY-TO-HIDE-OR-DELETE-A-TRACK-SO-RAW-ENGINE-OUTPUTS-AND-DUPLICATES-CLUTTER-IT.
+  *Built 2026-11-21 (`8e134ec6`, `76a081c4`, `8d716430`, on `origin/dev`): the commands
+  `hide_music_track`, `unhide_music_track`, `remove_missing_music_tracks`,
+  `delete_generated_music_file`; ownership is decided by the path under
+  `~/.dpc/music/generated/`, not by the folder id.*
 
 - **D35. YuE2 via yue2.cpp is the default music engine** (2026-11-21, #198; SPEC §12 decision
   40). **The decision is Mike's:** after the first listening pairs ("заметно лучше чем acestep",
@@ -443,8 +546,22 @@ consensus 2026-11-20)") and are not decisions.
   **Backbone default resolved (Mike, 2026-11-21, CC window):** "ну сток по умолчанию это
   правильно" (stock by default is right): `stock` is the default, RS-TW is picked per job in
   the Create form.
+  **Voice adapters in renders: Mike said yes** (#198 (в), 2026-11-21, "да", adding "not
+  everything is listened to yet"); that settles that they may be used in renders. Keeping
+  them to local listening, none by default and nothing published with them, is CC's proposal
+  after the consent question of #195 (each adapter was trained on one real reader's voice,
+  the readers' consent is not stated in the README) and is not Mike's word.
   *Known limit (SPEC decision 40): an instrumental request to YuE2 comes back sung. Mike,
-  session B #6: LoRAs are added as needed, with ideas from Ruach.*
+  session B #6: LoRAs are added as needed, with ideas from Ruach.* Backlog:
+  AN-INSTRUMENTAL-JOB-ON-YUE2-COMES-BACK-SUNG-BECAUSE-THE-MODEL-INVENTS-LYRICS-WHEN-NONE-ARE-GIVEN
+  (open; what exactly to build stays undecided). Own adapters: DPC-CANNOT-TRAIN-ITS-OWN-YUE2-ADAPTERS-SO-VOICES-STYLES-AND-INSTRUMENTS-COME-ONLY-FROM-OTHERS
+  (Mike, 2026-11-21: "later, our own voices, styles and instruments the way Ruach Studio
+  does"; open, LOW).
+  *Built (`ade158b7`, on `origin/dev`): `music/yue2.py` supervises `yue-server` (`[music]
+  yue2_*` keys, port 9994, `--max-batch 1`), `music/engines.py` keeps one music engine on the
+  card, `params.engine` defaults to `yue2`, the Create form has engine, backbone and voice
+  selects and the short-cap warning. The process is the subsystem `yue2_server`. In ADR-052
+  it is the holder `music:yue2` (S4). Linux and macOS have no build recipe.*
 
 - **D36. MP3 export without duplicates or folder chaos** (2026-11-22, #210; SPEC §12 decision
   41). **The ask is Mike's:** "думаю надо сделать, не хватает экспорта или сохранения в mp3 —
@@ -460,15 +577,57 @@ consensus 2026-11-20)") and are not decisions.
   `TXXX:DPC_EXPORT_OF`; presets `mp3-v0` (default) and `mp3-320`; a -1 dBTP limiter on the
   export only, verified on the decoded MP3 (the policy is decided: Mike, session B #15, 2026-11-21 09:29Z, limiter on lossy export only);
   provenance in ID3v2.4 per PROVENANCE §3, with `cmd_as_sent` reduced to file names (rule 3).
+  *Built `98001dc7`, on `origin/dev`: the commands `export_music_track`,
+  `export_music_playlist`, `get_music_export_info`; an "Export MP3" action and an "mp3" chip
+  in the window. Tests and real ffmpeg runs on Windows only; not yet tried in the app, and
+  Linux and macOS not run. A tree of exported copies under the track is a LOW card
+  (A-TRACKS-EXPORTED-COPIES-SHOW-ONLY-AS-A-CHIP-AND-A-ONE-TIME-NOTICE-NOT-AS-A-TREE-OF-VERSIONS).*
 
-  *Numbering: ADR D30-D36 mirror SPEC §12 decisions 31, 34, 35, 37, 38, 40, 41 in that order. SPEC
-  decisions 32 (GPU card), 33 (song from own text) and 39 (stress dictionary) have no ADR entry
-  yet.*
+- **D37. The GPU card in slice 1: the job waits, the person presses "Stop X"; amended by Mike
+  #70** (SPEC §12 decision 32; Mike's call 2026-11-20 09:56, defaults as proposed by CC;
+  amendment: Mike #70, 2026-11-21, ADR-052 "Decided by Mike", decision 4). Before a job
+  starts, the runner reads who holds the card (`card_holders()`); if a DPC engine (Strata or
+  `llama-server`) holds it, the job stays `queued` with `card_wait` ("waiting for the card: X
+  holds it") and the job card offers "Stop X" (the person's action, the existing
+  `stop_local_engine`). Nothing is stopped automatically. **Built** (the wait in `6b34b44c`,
+  `music/runner.py` `_wait_for_card`; the button in `2208a803`; the runner reads the card once per job, not before each
+  variant as the SPEC text says, and it treats a failed read as a free card, which ADR-052's
+  Ruach rule forbids and S4 changes). **Amendment (#70):** with nothing waiting and the
+  server idle, music unloads the server and takes the card, by the owner-start rule and gated
+  by `swap_when_idle`. **Not built** (ADR-052 S2 and S4); SPEC decision 32 still carries the
+  old text (Q9).
+
+- **D38. Song from the person's own text** (SPEC §12 decision 33; Mike's call 2026-11-20
+  09:56, defaults as proposed by CC). A job type `generate_from_text` with `track_id` and
+  `base_version_id` null and no source fields; the lineage relation is "song from own text"
+  with `source_track_id` null (`mp.job/1` gains `params_from_text`). **Built** with the first
+  slice (`f97a454e`, `6b34b44c`, `ade158b7`, `2208a803`): the Create panel proposes it, the
+  runner returns takes, and each take enters the library once (D21, `a4f2c785`). Every other
+  job type (`edit`, `generate_similar`, `generate_from_lyrics`, `cover`, `transcribe`, `qc`,
+  `generate_from_melody`, `voice_clone`) is reported `planned` or `unsupported` by
+  `get_music_capabilities`.
+
+- **D39. A Russian stress dictionary the person downloads** (SPEC §12 decision 39; Mike #182,
+  2026-11-20 20:31Z, 2026-11-21 by the SPEC's Bangkok date). CC asked "Zaliznyak, which the
+  user downloads (CC BY-NC), or a free dictionary?" Mike: "I think take it, and others can be
+  added later? (are the stress dictionaries pluggable?)". So the large source is **Zaliznyak's
+  paradigm, downloaded by the person, never bundled in the repository** (CC BY-NC), like
+  the engine weights. That dictionaries are pluggable, as an ordered list of sources, is CC's
+  answer [P], not Mike's word. **Not built:** nothing in `music/` prepares lyrics (no
+  syllable-meter check, no U+0301 audit, no stress resolver); the only trace is the count of
+  stress marks in the provenance record. The dictionary file sits in
+  `~/.dpc/models/lyrics/stress/ru/forms.sqlite` and nothing reads it. Mike put it after the
+  Whisper card (2026-11-21, CC window). Backlog:
+  A-VOCAL-JOB-SENDS-THE-AUTHORS-LYRICS-TO-THE-ENGINE-UNCHECKED-SO-SYLLABLE-METER-AND-RUSSIAN-STRESS-ARE-LEFT-TO-CHANCE.
+
+  *Numbering: ADR D30-D39 mirror SPEC §12 decisions 31, 34, 35, 37, 38, 40, 41, 32, 33, 39 in
+  that order; every SPEC decision from 30 to 41 now has an entry here (SPEC 36 is D29).*
 
 ### Not decided
 
 Each item needs Mike's yes or a measurement. Where an item is built in practice, a dated
-implementation note under it says so (N1, N6); the rest are not built.
+implementation note under it says so (N1, N6, N7, N8, N11, N12, N13); the rest are not
+built.
 
 - **N1. The phase plan 0 → 1 → 2 → 3** (CC's proposal, `docs/dpc-integration.html`).
   Mike asked what Phase 0 contains. He has **not** said go (Q2).
@@ -489,11 +648,16 @@ implementation note under it says so (N1, N6); the rest are not built.
 
   The epic's older child order ("Order B") is also CC's recommendation, not Mike's.
 
-  *Implementation note (2026-11-20):* the core library, the window and mini-player, the
-  lyrics chain with Transcribe, and audio into a 1:1 agent chat are built on local `dev`
-  (Implementation Status). SoundCloud/Yandex is postponed (Q6). Phase 2 is not started;
-  the GPU card (EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-SO-AN-IDLE-ENGINE-KEEPS-THE-CARD-THEY-NEED,
-  N11) is what unblocks it.
+  *Implementation note (2026-11-22):* Phase 0 (library, byte serving, chat audio, the agent's
+  context markers, a metadata source) and the listener part of Phase 1 (window, mini-player,
+  lyrics chain with Transcribe) are built and on `origin/dev`. SoundCloud/Yandex is postponed
+  (Q6). **Phase 2 has started in a different order from the plan above** (Mike #192, 2026-11-21:
+  engine, then the window): the runner, acestep.cpp and YuE2 as supervised engines, the
+  Create panel, the level-matched A/B and Keep / Discard are built (slice 1, D31-D35, D38).
+  Not built from Phase 2: the tools and the generate dialogs for agents, stage-1 QC and the
+  judge, cover, and the card swaps counted over one full run. Phase 3 is not started. The
+  card is no longer a precondition for the engines; the lease (ADR-052) is what lets the
+  other GPU clients, Whisper first, wait for music and the reverse.
 - **N2. The repaint engine.** The proposal is ACE-Step 1.5 API repaint, with Resonant as
   the fallback (SPEC §12 decision 2). It was to be settled by a one-evening spike; since
   D26 (2026-11-20 05:53) it is checked live in the working player as B4 lands, with no
@@ -514,6 +678,12 @@ implementation note under it says so (N1, N6); the rest are not built.
 - **N7. The tag reader**: which library to use and its licence. `Observed`: there is no
   mutagen, tinytag or eyed3 in `dpc-client/core/pyproject.toml`. It may be the same
   library as N12.
+  *Implementation note (2026-11-22): answered in practice without a library.* Tags are read
+  through `ffprobe` (`music/identity.py`, `lyrics.py`), and the FLAC Vorbis comments and the
+  WAV `LIST/INFO` chunk that carry the provenance record are read and written by a small
+  pure-Python module (`music/audio_tags.py`, audio copied byte for byte). The cost is
+  known: ffprobe does not surface ID3 SYLT, so a file whose only lyrics are the synced frame
+  shows none (the SYLT card). Whether to add a tag library for that is open.
 - **N8. How core serves bytes to the webview.** *Resolved 2026-11-20 by Mike, D28: option
   (i), a local server with `Range`, a token and an `Origin` allowlist, keyed by `track_id`.
   Implementation deferred; checks use files inside `~/.dpc/music`.*
@@ -594,6 +764,13 @@ implementation note under it says so (N1, N6); the rest are not built.
     Linux WebKitGTK. Forge's cost argument against (ii) `blob:`: the whole file sits in
     webview memory for every playing track. None of this was a decision when written; Mike then chose (i), D28,
     built in `9bb7599d` (note above).
+  - *Implementation note (2026-11-22):* the Linux WebKitGTK window needed follow-ups. Linux
+    plays the track without `Range` by default (`stream_ranges_linux`, false), with the
+    headers of the 9998 server (`89123e1d`, `05549c35`), preloads the track (`012d8c0b`) and
+    waits for a duration above zero before play so seeking works (`36a4777a`; the Linux node's
+    log is in the backlog cards, not re-read here). Whether the no-`Range` special case is
+    still needed is a LOW card, on Mike's yes
+    (THE-LINUX-TRACK-STREAM-KEEPS-A-NO-RANGE-SPECIAL-CASE-THAT-THE-DURATION-BEFORE-PLAY-FIX-MAY-HAVE-MADE-UNNECESSARY).
 - **N9. Web delivery**: core proxies (fetches and caches) the stream, or open web
   `https:` is added to `media-src`. `Observed`: `media-src` allows only
   `https://asset.localhost` among https origins (`tauri.conf.json:27`); there is no open
@@ -619,6 +796,17 @@ implementation note under it says so (N1, N6); the rest are not built.
   - `Reported` (Zcode): YuE2-Studio documents `--headless` (tray, auto-stop after about
     10 minutes idle). That makes (a) viable for YuE2: DPC starts it headless through the
     registry (ADR-046) instead of the person starting a desktop app.
+  - *Implementation note (2026-11-22): the half of (a) that names the process is built, and (b)
+    became ADR-052.* The music engines DPC supervises are registered as
+    `launcher_kind="subsystem"` under their own names, `acestep_server` and `yue2_server`,
+    which `SUBSYSTEMS` (`process_registry.py:220`) and `ENGINES` (`:281`) now list, so each has
+    a VRAM row (`6b34b44c`, `ade158b7`; the unknown-subsystem `ValueError` is at `:1148`).
+    `_CARD_CLAIMS` (`llama_server_supervisor.py:664`) is still typed for the supervisor.
+    What the card option still has to do is ADR-052: a **card lease** for the engines (S4)
+    and for Whisper (S3), so that the supervisors see them and wait (S2). ADR-052 depends
+    on this record, is `proposed`, and S1 (the lease registry and the lease line) is built
+    (`53a2eaf5`, follow-up `4d0fa885`). The probe is still `nvidia-smi`; foreign GPU use
+    (ComfyUI, an external music app) is S8 / S10.
 - **N12. A metadata source** (Ark). `Observed`: `VoicePlayer` takes a required `duration:
   number` prop (`VoicePlayer.svelte:41`), and a `file` attachment carries no duration.
   `ffprobe` is called nowhere in `dpc_client_core`; `ffmpeg` is called only by
@@ -628,11 +816,26 @@ implementation note under it says so (N1, N6); the rest are not built.
   `Reported`: ffmpeg 8.1.2 (winget) is on this node (Forge's measurement, relayed by Ark);
   on how many other nodes ffmpeg is present is unknown. The same choice decides what the
   payload hash of Q4 (a) costs.
+  *Implementation note (2026-11-22): resolved by `ffprobe`.* Core reads duration, sample rate
+  and channels with `ffprobe` through `run_probe` and the registry (`music/identity.py`
+  `probe_metadata`; for a chat attachment, `measure_recording_seconds` in `service.py`), and an audio
+  `file` in a chat shows its `duration_seconds` (`knownDurationSeconds`). **Without ffprobe**
+  the title is the file name, a FLAC still gives its duration from STREAMINFO, the audio hash
+  falls back to the whole file (`hash_kind: "file"`, a retag then looks like new audio), and
+  the waveform, loudness and MP3 export, which run through ffmpeg, have nothing to run on
+  (`Inferred`, not run without it). The per-node ffmpeg presence check of Scope stays a real
+  requirement.
 - **N13. Waveform rendering.** (A) `wavesurfer.js` 7.12.12 bundled by Vite (BSD-3-Clause,
   Prior art), with `sampleRate: 22050` for the spectrogram; (B) peaks precomputed by
   ffmpeg into JSON, cached beside the file hash and drawn as a static wave (Forge's
   preference: no DSP library in the webview, cheap on a large library). Recorded so the
   choice is not made silently by installing a package.
+  *Implementation note (2026-11-22): built as (B), with no recorded decision of Mike's.*
+  Core decodes the track with ffmpeg to mono 8 kHz PCM and reduces it to peaks, cached by
+  content hash (`music/peaks.py`, `get_music_track_peaks`, `0063d4be`); the window draws them
+  (`MusicWaveform.svelte`, on the now-playing card and in the A/B review, `c146b811`).
+  `wavesurfer.js` is not a dependency (`ui/package.json`). There is no spectrogram, so the
+  `sampleRate: 22050` setting of the prototype has nothing to carry.
 - **N14. Audio through the gateway (ADR-041).** If Music Flamingo becomes a DPC engine,
   audio either passes the gateway's doors (today a test asserts that `input_audio` is
   refused there, `tests/test_the_gateway_carries_the_effort_and_the_image_through_both_doors.py:599-608`),
@@ -659,6 +862,15 @@ implementation note under it says so (N1, N6); the rest are not built.
   buffers for A/B (7), tags versus sidecar precedence (8, 11), QC thresholds and which
   judge to install first (12; until then ranking is off, D23), a version tree for sibling takes (14), the Listen-view
   defaults (17), and the build order 1 → 2 → 3 of the modes (19).
+  *2026-11-22, as the code answers them (none of these is a decision of Mike's):* (5) takes
+  live in `~/.dpc/music/generated/<job_id>/` (D31, D21), and the library is where the person
+  finds them; (6) `local_api` commands for everything and one loopback listener for bytes
+  (N8), no HTTP service for jobs; (7) one audio element, a short gap on a switch
+  (`MusicReview.svelte`), so still open for seamless A/B; (8, 11) sidecar `.lrc`, then tags
+  (D6 chain), and tags in watched folders are never written (Q4); (12) no judge is
+  installed; (14) a take is registered once and carries `parents: []` only (PROVENANCE §7);
+  (17) not re-checked here; (19) the listener and the first creative slice came
+  first, musician mode is not started.
 
 ### Rationale
 
@@ -671,7 +883,9 @@ implementation note under it says so (N1, N6); the rest are not built.
   never-overwrite are written once. This is how `comfyui_*` already works for images. It
   is also why Ark wants the accept rule enforced in the tool, not only in the UI (Q1).
 - **Engines reached directly.** Each engine already ships its own interface: the ACE-Step
-  API server is asynchronous submit and poll, and YuE2-Studio has `/synth` and `/job`.
+  API server is asynchronous submit and poll, and YuE2-Studio has `/synth` and `/job`
+  (the C++ servers DPC runs, `ace-server` and `yue-server`, are the same shape: a local HTTP
+  server DPC starts, polls and stops).
   Going through ComfyUI would add a second process on the card and tie the player to
   graphs. ComfyUI 0.37 has no repaint node (repaint spike card, `Observed` there on
   2026-11-19).
@@ -714,8 +928,9 @@ implementation note under it says so (N1, N6); the rest are not built.
   - No new protocol client and no ComfyUI dependency in the player's path.
   - Weights live in one store, with no 6-19 GB duplicates.
 - **Negative:**
-  - Every engine is a GPU process beside Strata. Until the card option (N11) is built,
-    Strata is stopped and restarted by hand, and a job waits in `queued` with a reason.
+  - Every engine is a GPU process beside Strata. Until ADR-052 S2 and S4 are built (N11),
+    Strata is stopped and restarted by hand ("Stop X" on the job card), a job waits in
+    `queued` with a reason, and `llama-server` and Strata do not wait for a running song.
   - **The queue clock is long.** `Observed`: `swap_wait_s = 1800` on this node
     (`~/.dpc/config.ini:181`; the default is 300, `settings.py:147`). A queued job can
     legitimately wait up to 30 minutes for the card, so the GPU acceptance runs on a
@@ -730,7 +945,11 @@ implementation note under it says so (N1, N6); the rest are not built.
     question (card THE-WHISPER-ALIAS-IS-THE-BACKENDS-LAST-STANDING-CUDA-RESIDENT,
     `backlog.md:7212`, already linked from the QC card at `backlog.md:313`). How many
     swaps a full run costs decides whether the musician mode is usable; phase 2 counts
-    them (N1).
+    them (N1). *2026-11-22: Whisper now unloads itself after a transcription
+    (`[local_transcription] idle_unload_s`, default 300, `b796af4a`, `69ae799c`), and the
+    player's Transcribe releases a model it loaded; the queue and the GPU/CPU choice are
+    ADR-052 S3. Whisper beside a busy music engine is the one shared cell ADR-052 allows
+    when it provably fits (L11).*
   - Watching and hashing a large library is I/O-heavy (SPEC §13). A payload hash (Q4 a)
     adds one ffmpeg spawn per file.
   - Web streaming and core byte serving add an outbound path and a local serving path
@@ -751,16 +970,25 @@ implementation note under it says so (N1, N6); the rest are not built.
     walk: open.
   - New words need GLOSSARY rows in the same commit as the code: the button label, the
     tool family, **track**, **take**, **version** and **watched folder** (Ark), plus the
-    tool names of Q5.
-  - ROADMAP's axis table is generated (`tools/backlog/build.py --roadmap`). The working
-    tree's `ROADMAP.md` already lists this record under `knowledge` and `network`.
+    tool names of Q5. *2026-11-22: not done.* The library, the jobs and the review shipped
+    without rows (`docs/GLOSSARY.md` has none for these words, **genome** or the `mp.*`
+    records); this is a gap against the commit rule, listed in Q9. The glossary's **engine**
+    already means the local LLM provider's program, so the rows have to say "music engine".
+  - ROADMAP's axis table is generated (`tools/backlog/build.py --roadmap`) from the front
+    matter, so it lists this record under `collective` and `knowledge`.
   - **ADR number.** A parked draft,
     `ideas/parked/adr-051-draft-group-extraction-target-2026-11-15.md` (2026-11-15, older
     than this record), also declares `adr: 051`. `build.py` reads front matter only from
     `docs/decisions/[0-9]*.md` (`tools/backlog/build.py:432-438`), so the collision is
-    invisible to `--check` (Ark). Renumbering is Mike's call (Q8).
+    invisible to `--check` (Ark). Renumbering is Mike's call (Q8); 052, the number
+    recommended there, is now ADR-052.
 
 ### Risk: a file sent to a group of agents is dropped silently
+
+*Status 2026-11-22: fixed on Mike's verb, 2026-11-19 (`3837b3a5`, `3f2de3c7`, `dd446110`);
+the text below is the finding as it stood at `2d333000`, and its line numbers are of that
+commit. The second gate (ADR-032 Part B, Q3) is still as described, and the third gate is
+closed by `file_attachment_markers`.*
 
 This is a precondition for the musician flow in group chats. `Observed` in code at
 `2d333000` and in the log:
@@ -821,6 +1049,18 @@ This is a precondition for the musician flow in group chats. `Observed` in code 
 Taken from the child cards' acceptance lines and the reviews. Each one is checked in the
 real app, not in the prototype.
 
+*Status 2026-11-22.* No box below is ticked: the boxes mean "seen working in the app", and
+most of what is built is covered by tests (23 committed core test files with "music" in the
+name under `dpc-client/core/tests`, more for provenance, export and lyrics, and the UI
+suites) and by Mike's live tries of
+2026-11-21 (the acestep.cpp run, #191; the YuE2 listening set, #197-#198; his first Create
+test and the first MP3 export). Built and waiting for a try in the app on both platforms:
+byte serving, library, watched folder, track identity, chat playback, agent context,
+microphone, lyrics, runner (as `generate_from_text`), the A/B (level-matched, no seam), MP3
+export. **Not built, so not testable:** the tools, QC, the audio input, the region edit,
+cover, and the lease items of the GPU box. The agents-only group precondition was fixed and
+seen working by Mike (2026-11-19, Implementation Status).
+
 - [ ] **Byte serving first step (N8, N9).** A `http://localhost:9998/files/…` audio URL is
   tried in the Tauri window on Windows and on Linux, and the result (plays or not, seeks
   or not) is written down when the N8 endpoint (option (i), D28; deferred) is built. The endpoint serves
@@ -850,7 +1090,8 @@ real app, not in the prototype.
 - [ ] **Agent context.** After an audio `file` lands in an agent chat or a group, the
   agent's next turn names its path (the `context.py` change), and the agent can read it
   only where the firewall grants access (Scope).
-- [ ] **Runner (B2).** One `generate_similar` job with 2 variants returns 2 `new_track`
+- [ ] **Runner (B2).** (Built for `generate_from_text`; `generate_similar` is `planned`.)
+  One `generate_similar` job with 2 variants returns 2 `new_track`
   takes. Each has `mp.take/1` and `mp.qa/1`, and its files are written once and hashed.
   A repeat with the same `idempotency_key` returns the same job.
 - [ ] **Tools.** With the tools enabled, an agent registers a track, proposes a
@@ -882,118 +1123,154 @@ real app, not in the prototype.
   of". Without lyrics it is refused with `missing_lyrics`.
 - [ ] **No ComfyUI, no MCP (D12, D13).** No module under the music service imports the
   ComfyUI client or an MCP package, and `pyproject.toml` gains no `mcp` dependency.
-- [ ] **GPU (D18, N11).** A music engine is registered under a named process category and
-  has a VRAM row in the registry. A music job on a card held by an idle Strata leads to
-  `stopped` / `swap` in the process registry, the job runs, and Strata comes back on the
-  next demand. The run is timed against `swap_wait_s` (1800 s on this node).
+- [ ] **GPU (D18, N11, D37).** A music engine is registered under a named process category
+  and has a VRAM row in the registry (**built**: `acestep_server`, `yue2_server`). A music job
+  on a card held by an idle Strata leads to `stopped` / `swap` in the process registry, the
+  job runs, and Strata comes back on the next demand (**not built**: ADR-052 S2 and S4, Mike
+  #70, gated by `swap_when_idle`; today the job waits and the person presses "Stop X"). The
+  run is timed against `swap_wait_s` (1800 s on this node). A transcription during a running
+  song waits and names the holder (ADR-052's Done-when, S1 + S3 + S4).
 - [ ] **Agents-only group (precondition).** An audio file sent to a group whose only node
   is the sender lands in its history and `files/`, and an agent can read its path. A send
   that reaches nobody does not report bare `success`.
 
 ## Scope
 
-New code and files touched. Paths are relative to `dpc-client/`.
+New code and files touched. Paths are relative to `dpc-client/`. *Re-read at `1fa73a26`
+(2026-11-22); each item says what is built.*
 
-- `core/dpc_client_core/music/` (new; the name is proposed in `docs/dpc-integration.html`):
-  the core service (library, folders and hashing, playlists, jobs, takes, lyrics with a
-  local LRCLIB cache) and the engine adapters. Adapters resolve weights through
-  `get_model_files_dir()` (D14).
-- `core/dpc_client_core/service.py`: `local_api` commands as `async def`s on
-  `CoreService`, dispatched by `getattr` (`local_api.py:689`). Also `send_group_file`
-  (`:7882`) for the group-file card, and `list_model_files` (`:11232`) if N15 excludes
-  `music/`.
-- `core/dpc_client_core/dpc_agent/context.py` (Ark): `history_body` (`:864`) adds markers
-  only from `image_attachment_markers` (`:877`, `:895-913`), which skips every
-  non-image attachment. Every confirmation of the form "the agent names or reads the
-  path" (B1, microphone, agents-only group) needs a marker for audio `file` attachments.
-- **Agent file access to `~/.dpc/music`** (Ark). `Observed`: an agent's paths outside its
-  own sandbox are granted per profile through `sandbox_extensions` `read_only` /
-  `read_write` in the firewall (`firewall.py:1222-1225`; checked by
-  `is_extended_path_allowed`, `:1386`; extended read is gated per agent,
-  `get_extended_read_enabled`, `:1326`). The `context.py` docstring (`:895-913`) notes
-  that no default grants read access to the conversations folder. `Inferred`: the
-  `music_*` tools read through the core service, but an agent that opens a take with
-  `read_file` or `transcribe` needs `~/.dpc/music` (and any watched folder it should
-  read) granted. Which paths are granted, and to which agents, is a security choice to
-  state in the tools card.
-- `core/dpc_client_core/dpc_agent/tools/music.py` (new): the `music_*` `ToolEntry`s,
-  `default_enabled=False`, autoloaded like `comfyui.py`. Each declares a `timeout_sec`
-  and a wait budget consistent with `swap_wait_s`, in the same commit as its name
-  (Consequences).
-- A metadata reader (N12): `ffprobe` or a pure-Python library, its licence, and the
-  ffmpeg presence check per node.
-- `core/dpc_client_core/providers/llamacpp_server_provider.py` (`:1761-1790`,
-  `supports_vision` at `:1198`): audio content parts for Flamingo. **Open:** the gateway
-  (ADR-041) either carries them or the judge bypasses it (N14).
-- `core/dpc_client_core/managers/llama_server_supervisor.py` (`_CARD_CLAIMS` at `:657`,
-  typed for `LlamaServerSupervisor`) and `local_api.py`: the GPU card option (N11).
-- `core/dpc_client_core/process_registry.py` (`SUBSYSTEMS` at `:218`, `ENGINES` at
-  `:277`, the unknown-subsystem `ValueError` at `:1145`) and `dpc_agent/tools/process.py`
+- `core/dpc_client_core/music/` (**built**; the name came from `docs/dpc-integration.html`):
+  the core service (library and identity, folders and polling, playlists, jobs and takes,
+  runner, engine supervisors, lyrics with a local LRCLIB cache, comments, peaks, loudness,
+  export, provenance, the track stream) and the two engine adapters. Adapters resolve
+  weights through `get_model_files_dir()` (D14).
+- `core/dpc_client_core/music/commands.py` (**built**): the `local_api` commands as
+  `async def`s on `CoreService`, dispatched by `getattr` (`local_api.py:711`). Also
+  `send_group_file` (`service.py:8399`, fixed) for the group-file card, and
+  `list_model_files` (`service.py:12032`) if N15 excludes `music/` (**open**).
+- `core/dpc_client_core/dpc_agent/context.py` (**built**, Ark): `history_body` (`:889`)
+  names image attachments through `image_attachment_markers` (`:922`) and every other file
+  or voice attachment through `file_attachment_markers` (`:1007`, `3837b3a5`), so the agent
+  learns where an audio file is kept.
+- **Agent file access to `~/.dpc/music`** (Ark; **open**, belongs to the tools card).
+  `Observed`: an agent's paths outside its own sandbox are granted per profile through
+  `sandbox_extensions` `read_only` / `read_write` in the firewall (`firewall.py:1224-1226`;
+  checked by `is_extended_path_allowed`, `:1387`; extended read is gated per agent,
+  `get_extended_read_enabled`, `:1327`). `Inferred`: the `music_*` tools read through the
+  core service, but an agent that opens a take with `read_file` or `transcribe` needs
+  `~/.dpc/music` (and any watched folder it should read) granted. Which paths are granted,
+  and to which agents, is a security choice to state in the tools card.
+- `core/dpc_client_core/dpc_agent/tools/music.py` (**not built**; no music module exists
+  under `dpc_agent/tools`): the `music_*` `ToolEntry`s, `default_enabled=False`, autoloaded
+  like `comfyui.py`. Each declares a `timeout_sec` and a wait budget consistent with
+  `swap_wait_s`, in the same commit as its name (Consequences). With ADR-052 the wait is a
+  lease wait: a job whose engine waits for the card is `queued` or, after S4, `running`.
+- The metadata reader (N12, **built** as `ffprobe`, `music/identity.py`), and the ffmpeg
+  presence check per node (**open**).
+- `core/dpc_client_core/providers/llamacpp_server_provider.py` (`:1762-1784` build
+  `image_url` parts only, `supports_vision` at `:1198`): audio content parts for Flamingo
+  (**not built**). **Open:** the gateway (ADR-041) either carries them or the judge bypasses
+  it (N14).
+- `core/dpc_client_core/managers/llama_server_supervisor.py` (`_CARD_CLAIMS` at `:664`,
+  typed for `LlamaServerSupervisor`), `managers/card_lease.py` and `local_api.py`: the card
+  option (N11). **ADR-052:** S1 (lease registry, lease line) is built; S2 (supervisors wait
+  for a busy lease, unload an idle one, `stop_local_engine` on a lease alias) and S4 (the
+  music engines hold the lease; `music/engine_base.py`, `runner.py`, `jobs.py`, `commands.py`,
+  `acestep.py`, `yue2.py`, `ui/src/lib/utils/musicCreate.ts`; both gates of a waiting job)
+  are pending.
+- `core/dpc_client_core/process_registry.py` (`SUBSYSTEMS` at `:220`, `ENGINES` at `:281`,
+  the unknown-subsystem `ValueError` at `:1148`) and `dpc_agent/tools/process.py`
   (`run_supervised` at `:983`): any engine DPC starts goes through the registry (ADR-046
-  point 5), under a named category with a VRAM probe (N11).
-- `core/dpc_client_core/file_server.py` (`:22-79`): only if N8 chooses to grow it
-  (`Range`, a token, the folders it may serve). *2026-11-20: not grown; N8 is a separate
-  listener, `core/dpc_client_core/music/stream.py` (`9bb7599d`).*
-- `ui/src/lib/components/MusicPlayer.svelte` (new), `Sidebar.svelte` (the button beside
-  `:992`), `utils/windowGeometry.ts` (reused).
-- `ui/src/lib/components/ChatMessageList.svelte` (`:445`): the `audio/*` file row as a
-  player. `types.ts` is unchanged (D19). `VoicePlayer.svelte` (`duration` at `:41`)
-  receives its duration from N12.
-- `ui/src/lib/panels/ChatPanel.svelte` (`:987-998`): sending a recording as audio, and
-  in groups of one node plus agents only if Q3 says yes (then ADR-032 Part B is amended).
-- `ui/package.json` (`Observed`: no `wavesurfer` today): `wavesurfer.js` 7.12.12 bundled
-  by Vite, never loaded from a CDN, decoding at `sampleRate: 22050`; this is the only new
-  UI dependency. Or no package, if N13 chooses precomputed peaks.
-- `ui/src-tauri/tauri.conf.json` (`:27-33`): only if N8 or N9 chooses a scope or CSP
-  change.
-- `~/.dpc/music/` (library, folders, playlists, recordings, imported files) and
-  `get_model_files_dir() / "music" / <engine>` (D14).
-- `docs/GLOSSARY.md`: track, take, version, watched folder, the button label and the tool
-  names, in the same commit as the code that introduces each.
+  point 5), under a named category with a VRAM probe (**built** for `acestep_server` and
+  `yue2_server`; the library's probes run as `device_probe`).
+- `core/dpc_client_core/file_server.py` (`:22-79`): not grown; N8 is a separate listener,
+  `core/dpc_client_core/music/stream.py` (`9bb7599d`).
+- `ui/src/lib/components/music/` (**built**; the first draft named
+  `components/MusicPlayer.svelte`): `MusicPlayer.svelte`, `MusicCreate.svelte`,
+  `MusicReview.svelte`, `MusicReasonBox.svelte`, `MusicLyrics.svelte`, `MusicComments.svelte`,
+  `CommentMarkers.svelte`, `MusicWaveform.svelte`; `services/music.ts`, `services/musicJobs.ts`,
+  `utils/musicPlayer.ts`, `utils/musicCreate.ts`. `Sidebar.svelte` (the button, label
+  "MUSIC PLAYER" at `:1002`, beside AGENTS MAP at `:995`) and `utils/windowGeometry.ts`
+  (reused).
+- `ui/src/lib/components/ChatMessageList.svelte` (`:517`): the `audio/*` file row as a
+  player (**built**, `dd446110`). `types.ts` is unchanged (D19; the union is at `:19`,
+  `mime_type?` at `:25`). `VoicePlayer.svelte` (`duration` at `:46`, `:63`) receives its
+  duration from N12.
+- `ui/src/lib/panels/ChatPanel.svelte` (`:1201-1204`): sending a recording as audio
+  (**built** for 1:1 agent chats); groups of one node plus agents only if Q3 says yes (then
+  ADR-032 Part B is amended; **open**).
+- `ui/package.json`: **no new UI dependency** (`Observed`: no `wavesurfer`; N13 went to
+  precomputed peaks).
+- `ui/src-tauri/tauri.conf.json` (`:27`): `media-src` gained `http://127.0.0.1:9996` for the
+  stream; no scope change.
+- `~/.dpc/music/` (library, folders, playlists, comments, peaks, jobs, `generated/<job_id>/`)
+  and `get_model_files_dir() / "music" / <engine>` (D14); `<DPC home>/exports/music` for MP3
+  exports (D36).
+- `docs/GLOSSARY.md` (**not done**): track, take, version, watched folder, the button label,
+  the tool names and the music words of ADR-052's holders (`music:yue2`, `music:acestep`),
+  in the same commit as the code that introduces each.
 
 ## Implementation Status
 
-Accepted by Mike on 2026-11-19 (08:21). **Status as of 2026-11-20**, read from the code on
-branch `dev` at `4c58a1d4`. Built: the group-file fix (pushed), and on local `dev`, **not
-pushed yet** (`git log origin/dev..dev`), the core music library, the window and
-mini-player, the lyrics chain with Transcribe, and audio into a 1:1 agent chat. Phase 2
-is not started; the GPU card unblocks it. The cards are in `dpc-messenger/backlog.md`
-(gitignored); a card's heading there can still say open after part of it is built, so the
-Status column describes the code. Cards were filed 2026-11-19 unless a date is given.
-Card names are kept as filed (D19).
+Accepted by Mike on 2026-11-19 (08:21). **Status as of 2026-11-22**, read from the code on
+`origin/dev` at `1fa73a26` (every commit named below is an ancestor of it). Built: the group-file
+fix, the core music library and its stream, the window and mini-player, the lyrics chain with
+Transcribe, audio into a 1:1 agent chat and into the chat player, and the first creative slice:
+the job store, the two engine supervisors (YuE2 default, acestep.cpp second), the Create panel,
+live jobs, the level-matched A/B with Keep / Discard and its reason dictionary, hide / remove /
+delete, timecoded comments, the waveform, MP3 export, and the provenance record inside every
+generated file. **Not built:** the `music_*` agent tools, QC, region edits and the seam work,
+cover, `generate_similar`, audio into the gateway, SoundCloud/Yandex, the voice clone, stress
+and meter preparation of lyrics, the lineage graph, and the card lease for the engines
+(ADR-052 S4). The cards are in `dpc-messenger/backlog.md` (gitignored); a card's heading there
+can still say open after part of it is built, so the Status column describes the code. Cards
+were filed 2026-11-19 unless a date is given. Card names are kept as filed (D19). **Tried in the
+app by Mike:** the acestep.cpp run (#191), the YuE2 pairs and voices (#197-#198), the first Create
+and the first export. **Not yet tried in the app:** anything marked "not tried" below, and
+everything on Linux and macOS except playback.
 
 | Task (card id) | Status | Commit |
 |---|---|---|
-| Epic: THE-AI-MUSIC-PLAYER-RUNS-ONLY-AS-A-SIMULATED-BROWSER-PROTOTYPE-AND-DPC-HAS-NO-PLACE-TO-HOST-IT | Open | — |
-| B1: AN-AGENT-CANNOT-POST-A-FILE-INTO-ITS-OWN-CHAT-AND-THE-CHAT-HAS-NO-AUDIO-ATTACHMENT-TYPE (title kept; dated correction per D19 in the body) | Pending | — |
-| B2: NO-MUSIC-JOB-RUNNER-EXISTS-SO-A-COMMENT-OR-A-GENERATE-REQUEST-CANNOT-BECOME-A-TAKE | In progress (2026-11-21), on local `dev`, not pushed. Step 1 built: the music job store and capabilities report (SPEC §5 states, payloads written before send, takes with seed, `synth_batch_size` and index, a Discard that needs a reason), job and take commands on `local_api`. Step 2 built: see Engine supervision. Reason dictionary (D32): `9ccd950a`. Step 4 (window UI: Generate from own text, A/B at matched level, Keep / Discard with a reason) not started; Mike: after the YuE2 listening set (#192). Left: QA stage-1 gates | `f97a454e`, `8d716430`, `6b34b44c`, `9ccd950a` |
-| Engine supervision (2026-11-21): DPC-DOES-NOT-START-OR-WATCH-THE-ACESTEP-CPP-SERVER-SO-NO-MUSIC-JOB-CAN-REACH-AN-ENGINE | Built on local `dev`, not pushed (2026-11-21, slice 1 step 2): `core/dpc_client_core/music/acestep.py` supervises `ace-server` on 127.0.0.1 (`[music] acestep_*` settings, `get_music_engine_status` / `start_music_engine` / `stop_music_engine`), and `music/runner.py` runs `generate_from_text` to review: one `/synth` per job with `synth_batch_size` = variants, wav24 to 24-bit FLAC, sidecar, library entry. One live run on the Windows card (2 x 30 s). Open: Linux and macOS have no build recipe (the engine reports `not_installed`); llama-server and Strata do not see acestep.cpp as a card holder  Live smoke test: 2 takes of 30 s in 16.9 s, peak 9344 MiB, FLAC 24-bit/48k in the library, **accepted by Mike (#191)**. Known differences from SPEC (open for Mike, not decided): `ACESTEP_OFFLOAD_TO_CPU` and `thinking off` have no acestep.cpp equivalent; the card is checked once per job, not per variant; `variant` is 1-based in names, the batch index is recorded separately (0-based) | `6b34b44c` |
-| YuE2 default engine (2026-11-21, D35, Mike #198): no card yet | Built on local `dev`, not pushed: `core/dpc_client_core/music/yue2.py` supervises `yue-server` on 127.0.0.1:9994 (`[music] yue2_*` settings; `--max-batch 1`; backbone `stock` / `rs-tw`), `music/engine_base.py` is the supervisor both engines share, `music/engines.py` keeps one music engine on the card (idle one stopped as `swap`, busy one waited for or `engine_busy`), `music/runner.py` runs yue2 jobs one `/synth` per variant at batch 1 (seed and lm_seed `seed + i`, payload per variant before send, replay JSON kept as a payload, sidecar with commit, backbone sha256, adapters with source and split sha256s). Voice adapters are split by key prefix into music (AR) and sound (NAR) files under `<models>/yue2/loras/.split/`, tensor bytes unchanged (byte-identical to the trial's split). `params.engine` defaults to `yue2`; `ace-step-1.5:text2music` and engine-less records still load as acestep. Engine commands take an optional `engine`. Create panel: engine, backbone and voice selects, short-cap warning. Live smoke (2026-11-21, scratch DPC home, real `yue-server`, card free): 2 variants at a 120 s cap in 39.7 s wall from proposal to review, peak 5258 MiB, takes of 74.0 and 74.4 s (the model ended the song), seeds 42/43 with lm_seed 42/43, 24-bit/48k FLAC in that home's library; awaiting Mike's listen. Open: Linux/macOS build recipe; the voice adapters are not yet heard through DPC | `ade158b7` |
-| Library hide/delete (2026-11-21): THE-MUSIC-LIBRARY-HAS-NO-WAY-TO-HIDE-OR-DELETE-A-TRACK-SO-RAW-ENGINE-OUTPUTS-AND-DUPLICATES-CLUTTER-IT | Built on local `dev`, not pushed (D34): hide, remove missing, delete a generated file; ownership is decided by path under `~/.dpc/music/generated/`, and the person's own folders are only hidden. Awaiting Mike's try in the app | `8e134ec6`, `76a081c4`, `2ae20b01`, `8d716430` |
-| MP3 export (2026-11-22, D36, Mike #210): A-TRACK-CAN-ONLY-BE-KEPT-AS-WAV-OR-FLAC-SO-THERE-IS-NO-MP3-TO-SHARE-OR-PLAY-ELSEWHERE | Built on local `dev`, not pushed (design [P]): `music/export.py` (one root, identity index, portable names, playlists as one level of hard links, -1 dBTP limiter checked on the decoded MP3, ID3v2.4 with `DPC_PROVENANCE`); the library scan skips exports; `export_music_track` / `export_music_playlist` / `get_music_export_info`; Export MP3 in the window with an "mp3" chip. Tests and real ffmpeg runs on this machine only: not tried in the app, Linux and macOS not run | `98001dc7` |
-| Provenance inside the file (2026-11-21, Mike "да сделай"): A-GENERATED-FILE-CARRIES-NO-PROVENANCE-RECORD-SO-A-TRACK-CANNOT-BE-REPRODUCED-FROM-THE-FILE-ALONE | Built on local `dev`, not pushed: `music/provenance.py` builds `mp.provenance/1` per engine (genotype with the `audio_codes` or the YuE2 score and semantic tokens, substrate with weights and binaries by sha256 and the hidden genes batch size and index, phenotype, `genome_sha256` / `intent_sha256` / `genome_basis` / `render_sha256`, output chain, privacy guard, 64 KB cap with hash-reference fallback); `music/audio_tags.py` writes it once into the FLAC (`DPC_PROVENANCE`, `LYRICS`, `UNSYNCEDLYRICS`) or the WAV (`LIST/INFO` item `DPCP`, [P]) with the audio copied byte for byte and the PCM md5 checked; the runner embeds it at creation and the sidecar is the same record; the library reads it back on a scan (size cap, strict check, summary `provenance` on the entry); MP3 export fills `source_record` and writes `USLT` from it; `tools/retag_music_provenance.py` re-tagged the 55 trial and smoke files on this machine (`not_stored` where nothing was kept, library identity unchanged). Not tried in the app; Linux and macOS not run; GPU probe is `nvidia-smi` only. 2026-11-22: ids are narrow (`genome_sha256` = the engine's inheritable unit with the engine id inside, `genome_basis` names it; `intent_sha256` = the text bucket; `render_sha256` = genome + substrate), built at `abcaaa44`, not pushed; records without `genome_basis` are legacy wide and summarised as `legacy_*` | `06c8b20f`, `abcaaa44` |
-| Library: THE-MUSIC-PLAYER-HAS-NO-LIBRARY-OR-PLAYLIST-SO-PLAIN-LISTENING-IS-NOT-ITS-DEFAULT-MODE | Core built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): `core/dpc_client_core/music/` (watched folders indexed in place and polled, N6; track identity by `track_id` plus an audio-payload hash, Q4 layers 1-3 and 5; playlists; `local_api` commands; `[music] poll_interval_s` in a fresh `config.ini`). Queue, shuffle and repeat live in the window (B3 row) | `1cdce551`, `aa61925b`, `6f797e02`, `22d73fd0`, `b712712a` |
-| B3: THE-MUSIC-PLAYER-HAS-NO-DPC-COMPONENT-SO-COMMENTS-LYRICS-TAKES-AND-AB-REVIEW-EXIST-ONLY-IN-THE-PROTOTYPE | Window part built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): the Music Player button beside AGENTS MAP, a floating window that minimises to a mini-player, the mini-player with its own width and its own place (`ui/src/lib/components/music/MusicPlayer.svelte`). Since `9bb7599d` any library track plays through the N8 stream (next row). Comments, waveform, takes and A/B are not started | `32900e82`, `8bebfb6a`, `ec79687d`, `2457aa7c` |
-| Byte serving (N8, D28; 2026-11-20, no card) | Built, on `dev`, pushed (`9bb7599d` is on `origin/dev`, checked 2026-11-21): a loopback track stream with `Range`, a per-process token and an `Origin` allowlist, keyed by `track_id` (`core/dpc_client_core/music/stream.py`, `get_music_stream_info`, CSP `media-src http://127.0.0.1:9996`); Linux plays every track from it, Windows and macOS the files outside `~/.dpc`. Tests only; the Linux window check is open (Confirmation) | `9bb7599d` |
-| Lyrics: A-TRACK-HAS-NO-LYRICS-CHAIN-SO-TAGS-LRC-LRCLIB-AND-TRANSCRIBE-ARE-NOT-TRIED-IN-ORDER | Built, on `dev`, pushed (`20dcc3f1`, 2026-11-20): sidecar `.lrc`, then tags, then the local LRCLIB cache, with lrclib.net only on an explicit lookup (D6 note); manual lyrics; Transcribe only when the person asks, which unloads the Whisper model it loaded and records provider and model (`music/lyrics.py`, `MusicLyrics.svelte`) | `cb9af8a1`, `74c2de84`, `a94c7943` (chain); `3672ee23`, `7fd6a407` (Transcribe) |
-| Transcribe quality (2026-11-20): TRANSCRIBED-LYRICS-CARRY-WHISPER-HALLUCINATIONS-AND-MERGE-LONG-SEGMENTS-INTO-ONE-LINE | Open | — |
+| Epic: THE-AI-MUSIC-PLAYER-RUNS-ONLY-AS-A-SIMULATED-BROWSER-PROTOTYPE-AND-DPC-HAS-NO-PLACE-TO-HOST-IT | In progress (the card heading says in-progress) | — |
+| B1: AN-AGENT-CANNOT-POST-A-FILE-INTO-ITS-OWN-CHAT-AND-THE-CHAT-HAS-NO-AUDIO-ATTACHMENT-TYPE (title kept; dated correction per D19 in the body) | Half built: an audio `file` plays in the chat and the agent's context names it (D19 note). Not built: an agent posting a file into its own chat (`chat_post_file`); Mike's 2026-11-19 07:59 call (Q1) makes it unneeded for the music flows | `dd446110`, `3837b3a5` |
+| B2: NO-MUSIC-JOB-RUNNER-EXISTS-SO-A-COMMENT-OR-A-GENERATE-REQUEST-CANNOT-BECOME-A-TAKE | Slice 1 built, on `origin/dev`: the job store and capabilities report (SPEC §5 states, payloads written before send, takes with seed, `synth_batch_size` and index), job and take commands on `local_api`, the runner for `generate_from_text` (D38), the Create panel with live jobs and "Waiting for the GPU: X holds it" with "Stop X" (D37), the level-matched A/B with Keep / Discard / None of these and the reason dictionary (D32, D33), loudness by ffmpeg `ebur128`, the runner refusing instead of hanging (`f1d85057`). Left: stage-1 QA gates (`mp.qa/1` fields other than loudness are `planned`), the other job types, a seam A/B. Open review card (Zcode, #206): THE-MUSIC-JOB-PATH-TURNS-SEVERAL-RECOVERABLE-EDGE-CASES-INTO-AN-INTERNAL-ERROR | `f97a454e`, `8d716430`, `6b34b44c`, `9ccd950a`, `2208a803`, `f1d85057`, `1eca804e` |
+| Engine supervision (2026-11-21): DPC-DOES-NOT-START-OR-WATCH-THE-ACESTEP-CPP-SERVER-SO-NO-MUSIC-JOB-CAN-REACH-AN-ENGINE | Built, on `origin/dev` (slice 1 step 2): `core/dpc_client_core/music/acestep.py` supervises `ace-server` on 127.0.0.1 (`[music] acestep_*` settings, `get_music_engine_status` / `start_music_engine` / `stop_music_engine`), `music/runner.py` runs `generate_from_text` to review: one `/synth` per job with `synth_batch_size` = variants, wav24 to 24-bit FLAC, sidecar, library entry. Live run on the Windows card (2 x 30 s in 16.9 s, peak 9344 MiB), **accepted by Mike (#191)**. Open: Linux and macOS have no build recipe (the engine reports `not_installed`); llama-server and Strata do not see the engine as a card holder (ADR-052 S2 and S4). Known differences from SPEC (open for Mike, not decided): `ACESTEP_OFFLOAD_TO_CPU` and `thinking off` have no acestep.cpp equivalent; the card is checked once per job, not per variant; `variant` is 1-based in names, the batch index is recorded separately (0-based) | `6b34b44c` |
+| YuE2 default engine (2026-11-21, D35, Mike #198): no card yet | Built, on `origin/dev`: `music/yue2.py` supervises `yue-server` on 127.0.0.1:9994 (`[music] yue2_*` settings; `--max-batch 1`; backbone `stock` / `rs-tw`), `music/engine_base.py` is the supervisor both engines share, `music/engines.py` keeps one music engine on the card (idle one stopped as `swap`, busy one waited for or `engine_busy`), `music/runner.py` runs yue2 jobs one `/synth` per variant at batch 1 (seed and lm_seed `seed + i`, payload per variant before send, replay JSON kept as a payload, sidecar with commit, backbone sha256, adapters with source and split sha256s). Voice adapters are split by key prefix into music (AR) and sound (NAR) files under `<models>/yue2/loras/.split/`. `params.engine` defaults to `yue2`; `ace-step-1.5:text2music` and engine-less records still load as acestep. Create panel: engine, backbone and voice selects, short-cap warning. Live smoke (scratch DPC home, real `yue-server`, card free): 2 variants at a 120 s cap in 39.7 s wall, peak 5258 MiB. Mike listened to the pairs and the voices (#197-#198, 2026-11-21); the adapters are heard through the trial, not yet through the DPC window. Open: an instrumental job comes back sung (card AN-INSTRUMENTAL-JOB-ON-YUE2-COMES-BACK-SUNG-...); Linux/macOS build recipe | `ade158b7`, `ac25991d` |
+| Library hide/delete (2026-11-21): THE-MUSIC-LIBRARY-HAS-NO-WAY-TO-HIDE-OR-DELETE-A-TRACK-SO-RAW-ENGINE-OUTPUTS-AND-DUPLICATES-CLUTTER-IT | Built, on `origin/dev` (D34): hide, unhide, remove missing, delete a generated file; ownership is decided by path under `~/.dpc/music/generated/`, and the person's own folders are only hidden. A Discard hides the take's library entry (D32). Awaiting Mike's try in the app | `8e134ec6`, `76a081c4`, `2ae20b01`, `8d716430` |
+| MP3 export (2026-11-21, D36, Mike #210): A-TRACK-CAN-ONLY-BE-KEPT-AS-WAV-OR-FLAC-SO-THERE-IS-NO-MP3-TO-SHARE-OR-PLAY-ELSEWHERE | Built, on `origin/dev` (design [P]): `music/export.py` (one root, identity index, portable names, playlists as one level of hard links, -1 dBTP limiter checked on the decoded MP3, ID3v2.4 with `DPC_PROVENANCE`); the library scan skips exports; `export_music_track` / `export_music_playlist` / `get_music_export_info`; Export MP3 in the window with an "mp3" chip. Seen on one track by Mike (card note); tests and real ffmpeg runs on Windows only; Linux and macOS not run. Open: a tree of exported copies (LOW card) | `98001dc7` |
+| Provenance inside the file (2026-11-21, Mike "да сделай"): A-GENERATED-FILE-CARRIES-NO-PROVENANCE-RECORD-SO-A-TRACK-CANNOT-BE-REPRODUCED-FROM-THE-FILE-ALONE | Built, on `origin/dev`: `music/provenance.py` builds `mp.provenance/1` per engine (genotype with the `audio_codes` or the YuE2 score and semantic tokens, substrate with weights and binaries by sha256 and the hidden genes batch size and index, phenotype, `genome_sha256` / `intent_sha256` / `genome_basis` / `render_sha256`, output chain, privacy guard, 64 KB cap with hash-reference fallback); `music/audio_tags.py` writes it once into the FLAC (`DPC_PROVENANCE`, `LYRICS`, `UNSYNCEDLYRICS`) or the WAV (`LIST/INFO` item `DPCP`, [P]) with the audio copied byte for byte and the PCM md5 checked; the runner embeds it at creation and the sidecar is the same record; the library reads it back on a scan; MP3 export carries it on; `tools/retag_music_provenance.py` re-tagged the 55 trial and smoke files on this machine. Ids are narrow (`genome_sha256` = the engine's inheritable unit with the engine id inside, `genome_basis` names it; `intent_sha256` = the text bucket; `render_sha256` = genome + substrate); records without `genome_basis` are legacy wide and summarised as `legacy_*`. Not tried in the app; Linux and macOS not run; the GPU probe is `nvidia-smi` only. Open: EVOLUTION v3 §14 items 10 and 14 (close-out of the genome, a first reader of the ids) | `06c8b20f`, `ac25991d`, `abcaaa44` |
+| Comments (2026-11-21, no card of its own; SPEC §4 `mp.comment/1`): the timecoded notes of the review | Built, on `origin/dev`: four commands (`list_music_comments`, `add_music_comment`, `update_music_comment`, `delete_music_comment`), a file per track, markers on the slider, a `C` shortcut and a review list (`music/comments.py`, `MusicComments.svelte`, `CommentMarkers.svelte`). The action is `note` only; `version_id` is the constant original, as the core has no versions. The command is reachable by agents and has no cap on comments per track (Zcode, #206). A comment does not yet become a job (region edits are not built); the capabilities report still says comments are `planned` (Q9) | `f62f998b`, `f587ec06` |
+| Waveform (2026-11-21, N13): peaks computed by ffmpeg | Built, on `origin/dev`: `get_music_track_peaks`, a cache by content hash, a waveform on the now-playing card and in the A/B review, an empty placeholder when no track is selected. No spectrogram | `0063d4be`, `c146b811`, `1eca804e`, `e2fbee26` |
+| Library: THE-MUSIC-PLAYER-HAS-NO-LIBRARY-OR-PLAYLIST-SO-PLAIN-LISTENING-IS-NOT-ITS-DEFAULT-MODE | Core built, on `origin/dev` (`20dcc3f1`, 2026-11-20): `core/dpc_client_core/music/` (watched folders indexed in place and polled, N6; track identity by `track_id` plus an audio-payload hash, Q4 layers 1-3 and 5; playlists; `local_api` commands; `[music] poll_interval_s` in a fresh `config.ini`). Queue, shuffle and repeat live in the window (B3 row). Open card: the window re-reads the whole library every 10 s (THE-MUSIC-WINDOW-RE-READS-THE-WHOLE-LIBRARY-EVERY-TEN-SECONDS-AND-AUDIO-STUTTERS-ON-LINUX-DURING-PLAYBACK) | `1cdce551`, `aa61925b`, `6f797e02`, `22d73fd0`, `b712712a` |
+| B3: THE-MUSIC-PLAYER-HAS-NO-DPC-COMPONENT-SO-COMMENTS-LYRICS-TAKES-AND-AB-REVIEW-EXIST-ONLY-IN-THE-PROTOTYPE | Mostly built, on `origin/dev`: the Music Player button beside AGENTS MAP, a floating window that minimises to a mini-player with its own width and place (`ui/src/lib/components/music/MusicPlayer.svelte`), comments, waveform, takes and the plain A/B (rows above), lyrics. Since `9bb7599d` any library track plays through the N8 stream. **Not built:** a region comment that becomes an edit job, a seam A/B, accepting a take as a new version `v2` (a take is Kept as a new track, not a version of the source), the version tree | `32900e82`, `8bebfb6a`, `ec79687d`, `2457aa7c`, `2208a803` |
+| Byte serving (N8, D28; 2026-11-20, no card) | Built, on `origin/dev`: a loopback track stream with `Range`, a per-process token and an `Origin` allowlist, keyed by `track_id` (`core/dpc_client_core/music/stream.py`, `get_music_stream_info`, CSP `media-src http://127.0.0.1:9996`); Linux plays every track from it (no-`Range` whole-file by default, preload, wait for a duration before play), Windows and macOS the files outside `~/.dpc`. Tests plus the Linux node's log; the Linux special case is a LOW card | `9bb7599d`, `ff48a730`, `89123e1d`, `05549c35`, `012d8c0b`, `36a4777a` |
+| Lyrics: A-TRACK-HAS-NO-LYRICS-CHAIN-SO-TAGS-LRC-LRCLIB-AND-TRANSCRIBE-ARE-NOT-TRIED-IN-ORDER | Built, on `origin/dev`: sidecar `.lrc`, then tags (through ffprobe: USLT yes, SYLT no), then the local LRCLIB cache, with lrclib.net only on an explicit lookup (D6 note); manual lyrics; Transcribe only when the person asks, with `provider.transcribe(..., release_if_loaded_here=True)` and provider and model recorded (`music/lyrics.py`, `MusicLyrics.svelte`). Transcribe is a card-lease client in ADR-052 S3 (pending) | `cb9af8a1`, `74c2de84`, `a94c7943` (chain); `3672ee23`, `7fd6a407` (Transcribe) |
+| Transcribe quality (2026-11-20): TRANSCRIBED-LYRICS-CARRY-WHISPER-HALLUCINATIONS-AND-MERGE-LONG-SEGMENTS-INTO-ONE-LINE | Open (MEDIUM) | — |
+| Stress and meter (2026-11-21, D39): A-VOCAL-JOB-SENDS-THE-AUTHORS-LYRICS-TO-THE-ENGINE-UNCHECKED-SO-SYLLABLE-METER-AND-RUSSIAN-STRESS-ARE-LEFT-TO-CHANCE | Not built (MEDIUM); Mike put it after the Whisper card | — |
+| Own adapters (2026-11-21): DPC-CANNOT-TRAIN-ITS-OWN-YUE2-ADAPTERS-SO-VOICES-STYLES-AND-INSTRUMENTS-COME-ONLY-FROM-OTHERS | Not built (LOW) | — |
+| Lineage graph (2026-11-21, D29): NO-LINEAGE-GRAPH-EXISTS-SO-HOW-A-SONG-EVOLVED-FROM-ITS-TAKES-AND-REJECTIONS-CANNOT-BE-SEEN | Not built (LOW); depends on the provenance row | — |
 | Button title (2026-11-20): THE-MUSIC-PLAYER-BUTTON-CUTS-A-LONG-TRACK-TITLE-INSTEAD-OF-SCROLLING-IT | Open | — |
 | Mini-player place (2026-11-20): THE-MINI-PLAYER-FIT-TO-A-SMALLER-SCREEN-MOVES-ITS-SAVED-PLACE-FOR-GOOD | Open | — |
-| Whisper switch (2026-11-20): THE-VOICE-WHISPER-SWITCH-CAN-UNLOAD-THE-MODEL-UNDER-A-RUNNING-TRANSCRIPTION | Open | — |
-| Tools: DPC-AGENTS-HAVE-NO-MUSIC-TOOLS-SO-THEY-CANNOT-DRIVE-THE-PLAYER-THE-WAY-THEY-DRIVE-COMFYUI | Pending | — |
-| Microphone: IN-AN-AGENT-CHAT-THE-MICROPHONE-ONLY-DICTATES-SO-A-HUMMED-MELODY-NEVER-REACHES-THE-AGENT-AS-AUDIO | Built for 1:1 agent chats, on `dev`, pushed (`20dcc3f1`, 2026-11-20): a recording (Dictate or Send as audio) or a paperclip file reaches the agent as an audio `file` attachment with its path in context; length measured, picked file capped, a refusal or an unconfirmed send (180 s) gives the draft back. Groups keep ADR-032 Part B dictation (Q3) | `b5c31fcd`, `3f2c6600`, `cc1c1e87`, `d218c432` |
-| Audio input: THE-LLAMA-SERVER-PROVIDER-SENDS-ONLY-IMAGES-SO-AN-AUDIO-MODEL-LIKE-MUSIC-FLAMINGO-CANNOT-BE-A-DPC-ENGINE | Pending | — |
-| QC: A-TAKE-ARRIVES-WITH-NO-QUALITY-CHECK-SO-TAKES-CANNOT-BE-RANKED-BEFORE-THE-PERSONS-AB | Pending | — |
-| Spike: NOBODY-HAS-RUN-ACE-STEP-REPAINT-ON-AN-OWN-TRACK-SO-THE-REGION-EDIT-ENGINE-IS-UNCHOSEN | Pending (needs weights and the card, on Mike's go) | — |
-| B4: REGION-EDIT-JOBS-HAVE-NO-ENGINE-SO-REGENERATE-REGION-AND-FIX-SEAM-ANSWER-UNSUPPORTED | Blocked by the repaint engine (checked live since D26, no separate spike) | — |
-| YuE2: DPC-CANNOT-CALL-AN-MCP-SERVER-SO-YUE2-STUDIO-COVER-AND-LYRICS-TO-SONG-HAVE-NO-WAY-IN (scope now HTTP/CLI, D13) | Pending | — |
+| Whisper switch (2026-11-20): THE-VOICE-WHISPER-SWITCH-CAN-UNLOAD-THE-MODEL-UNDER-A-RUNNING-TRANSCRIPTION | Closed 2026-11-21 (`backlog_closed.md`): the unload is counter-aware and a providers reload hands the count over | `b796af4a`, `3b4ae1d3` |
+| Whisper on the card queue (2026-11-21): WHISPER-RUNS-OUTSIDE-THE-CARD-QUEUE-STAYS-RESIDENT-AND-USES-ONE-MODEL-FOR-DICTATION-AND-SUNG-LYRICS | Step 1 built (safe unload, idle self-unload after `[local_transcription] idle_unload_s`, default 300; per-call language and task). Open: the queue and the GPU/CPU choice (ADR-052 S3), a model per use. The player's Transcribe depends on it | `b796af4a`, `69ae799c`, `b9725990` |
+| Tools: DPC-AGENTS-HAVE-NO-MUSIC-TOOLS-SO-THEY-CANNOT-DRIVE-THE-PLAYER-THE-WAY-THEY-DRIVE-COMFYUI | Not built (no `dpc_agent/tools/music.py`); the service layer the tools would wrap is the `music/` package | — |
+| Microphone: IN-AN-AGENT-CHAT-THE-MICROPHONE-ONLY-DICTATES-SO-A-HUMMED-MELODY-NEVER-REACHES-THE-AGENT-AS-AUDIO | Built for 1:1 agent chats, on `origin/dev` (`20dcc3f1`, 2026-11-20): a recording (Dictate or Send as audio) or a paperclip file reaches the agent as an audio `file` attachment with its path in context; length measured, picked file capped, a refusal or an unconfirmed send (180 s) gives the draft back. Groups keep ADR-032 Part B dictation (Q3) | `b5c31fcd`, `3f2c6600`, `cc1c1e87`, `d218c432` |
+| Audio input: THE-LLAMA-SERVER-PROVIDER-SENDS-ONLY-IMAGES-SO-AN-AUDIO-MODEL-LIKE-MUSIC-FLAMINGO-CANNOT-BE-A-DPC-ENGINE | Not built | — |
+| QC: A-TAKE-ARRIVES-WITH-NO-QUALITY-CHECK-SO-TAKES-CANNOT-BE-RANKED-BEFORE-THE-PERSONS-AB | Not built; only loudness and true peak are measured (advisory, D27, D23) | — |
+| Spike: NOBODY-HAS-RUN-ACE-STEP-REPAINT-ON-AN-OWN-TRACK-SO-THE-REGION-EDIT-ENGINE-IS-UNCHOSEN | Superseded by D26 (checked live while B4 is built) | — |
+| B4: REGION-EDIT-JOBS-HAVE-NO-ENGINE-SO-REGENERATE-REGION-AND-FIX-SEAM-ANSWER-UNSUPPORTED | Not built; `regenerate_region`, `fix_seam`, `remove_region`, `extend_ending` are `planned` in the capabilities report | — |
+| YuE2 cover: DPC-CANNOT-CALL-AN-MCP-SERVER-SO-YUE2-STUDIO-COVER-AND-LYRICS-TO-SONG-HAVE-NO-WAY-IN (scope now HTTP/CLI, D13; the engine is yue2.cpp, not YuE2-Studio, so no MCP) | Not built: `cover` is `planned`; DPC does not run the yue2.cpp score step (SheetSage2) | — |
 | Clone: NO-SINGING-VOICE-CLONE-IS-CHOSEN-SO-A-SONG-CANNOT-BE-SUNG-IN-THE-MUSICIANS-OWN-VOICE | Research | — |
-| Streaming: THE-MUSIC-PLAYER-CANNOT-PLAY-OR-SAVE-SOUNDCLOUD-AND-YANDEX-MUSIC-TRACKS-SO-LISTENER-MODE-IS-LOCAL-ONLY (`backlog.md:132`) | Postponed (Mike, 2026-11-20: later, no rush); the `yt-dlp` path is not started. On the board (the first draft's "not on the board yet" was stale, Zcode and Ark) | — |
-| Group file, agents-only (bug, MEDIUM): A-FILE-SENT-TO-A-GROUP-WITH-ONLY-AGENTS-VANISHES-AND-THE-UI-IS-TOLD-SUCCESS (`backlog.md:121`, filed by CC on Mike's request) | Fixed on Mike's verb (07:58), observed live by Mike after a restart and closed 2026-11-19; follow-up: one message for a file and its text, audio plays inline | `3837b3a5`, `3f2de3c7`, `dd446110` |
-| Group file (dependency, 2026-08-11): GROUP-IMAGE-AND-FILE-ECHO-STILL-WAITS-ON-THE-TRANSFER (ADR-032 phase 3, `backlog.md:8393`) | Files half fixed by `3837b3a5` | `3837b3a5` |
-| GPU (dependency, 2026-11-06): EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-SO-AN-IDLE-ENGINE-KEEPS-THE-CARD-THEY-NEED | Waiting on Mike's option (N11); it is what unblocks Phase 2, which is not started | — |
-| Whisper residency (related, 2026-08-20): THE-WHISPER-ALIAS-IS-THE-BACKENDS-LAST-STANDING-CUDA-RESIDENT (`backlog.md:7212`) | Open; bears on swaps per run | — |
-| Prototype and spec (ai-studio `experiments/music-player/`) | Exists, simulated, untracked | — |
+| Streaming: THE-MUSIC-PLAYER-CANNOT-PLAY-OR-SAVE-SOUNDCLOUD-AND-YANDEX-MUSIC-TRACKS-SO-LISTENER-MODE-IS-LOCAL-ONLY | Postponed (Mike, 2026-11-20: later, no rush); the `yt-dlp` path is not started | — |
+| Group file, agents-only (bug, MEDIUM): A-FILE-SENT-TO-A-GROUP-WITH-ONLY-AGENTS-VANISHES-AND-THE-UI-IS-TOLD-SUCCESS | Fixed on Mike's verb (07:58), observed live by Mike after a restart and closed 2026-11-19; follow-up: one message for a file and its text, audio plays inline | `3837b3a5`, `3f2de3c7`, `dd446110` |
+| Group file (dependency, 2026-08-11): GROUP-IMAGE-AND-FILE-ECHO-STILL-WAITS-ON-THE-TRANSFER (ADR-032 phase 3) | Files half fixed by `3837b3a5` | `3837b3a5` |
+| GPU (dependency, 2026-11-06): EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-SO-AN-IDLE-ENGINE-KEEPS-THE-CARD-THEY-NEED | Answered by ADR-052 (the card lease, `proposed`): S1 built; S2, S3, S4 pending. Mike's #20 and #70 are the decisions it rests on; the engines no longer wait for a decision on the option (N11) | `53a2eaf5`, `4d0fa885` (S1) |
+| Whisper residency (related, 2026-08-20): THE-WHISPER-ALIAS-IS-THE-BACKENDS-LAST-STANDING-CUDA-RESIDENT | Open (HIGH); the idle self-unload of `b796af4a` is the first half, the lease is S3. Bears on swaps per run | — |
+| Prototype and spec (ai-studio `experiments/music-player/`) | Exists; the prototype is simulated; the SPEC, EVOLUTION v3 and PROVENANCE are the product record. ai-studio has no remote | — |
+| Linux track stream (2026-11-21): THE-LINUX-TRACK-STREAM-KEEPS-A-NO-RANGE-SPECIAL-CASE-THAT-THE-DURATION-BEFORE-PLAY-FIX-MAY-HAVE-MADE-UNNECESSARY | Open (LOW); a revert is proposed, not approved | — |
+| Linux track switch (2026-11-21): SWITCHING-TRACKS-QUICKLY-ON-LINUX-GIVES-MEDIA-ERROR-4-BECAUSE-THE-PLAYER-REUSES-THE-AUDIO-ELEMENT-WITHOUT-A-RESET | Open | — |
+| Synced lyrics (2026-11-21): A-SYNCED-ID3-LYRICS-FRAME-IS-NOT-READ-SO-A-FILE-WITH-ONLY-SYLT-LYRICS-SHOWS-NONE | Open (LOW) | — |
+| Exports tree (2026-11-21): A-TRACKS-EXPORTED-COPIES-SHOW-ONLY-AS-A-CHIP-AND-A-ONE-TIME-NOTICE-NOT-AS-A-TREE-OF-VERSIONS | Open (LOW), Mike's wish | — |
 
 ## Open Questions
 
@@ -1030,6 +1307,11 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
   - Forge: include it; without it the musician mode does not work in this chat at all.
   - Ark: did not vote on Q2; lists it among Mike's verbs.
   - CC recommends: include the fix. — @Mike
+  - *2026-11-22: settled in practice, no single recorded "go".* The group-file fix went in on
+    Mike's verb (2026-11-19 07:58, `3837b3a5`); Phase 0 and the listener part of Phase 1 were
+    built after the acceptance (08:21); the creative slice was ordered step by step by Mike
+    (engine first, #192: YuE2, then the window). What was never put to him is the phase plan
+    as such (N1).
 - **Q3. "In the chat" (D9).** Does it include group chats with one node plus agents, like
   AI Studio? If yes, ADR-032 Part B needs an amendment: the dictation branch for groups
   with one node or fewer (`ChatPanel.svelte:987-993`) gets a "send as audio" choice, and
@@ -1039,6 +1321,9 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
     agent chat. Forge: otherwise D9 is false in the one group "we live in".
   - CC recommends: yes, with the ADR-032 amendment written as its own record or
     amendment. — @Mike
+  - *2026-11-22: unchanged and still open.* A group of one node plus agents still routes the
+    microphone to dictation (`ChatPanel.svelte:1201-1204`); the file half works (the
+    agents-only group fix), the microphone half does not.
 - **Q4. Track identity.** SHA-256 over the whole file changes when a tag is edited.
   `Reported` (Forge, measured on the "Куртка" file, 4 321 302 bytes): a `-c copy` retag
   of title and artist changed the whole-file hash (`1B2DBB4C` → `DC4D3B6F`), while the
@@ -1079,6 +1364,12 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
        metadata alone asks the person before relinking.
     Tags in watched folders outside `~/.dpc/music` are never rewritten; lyrics go to a
     sidecar `.lrc`. Still to test before code: an APE-tagged file and a remux.
+    *Built 2026-11-19/20 (`1cdce551`, `6f797e02`; `music/identity.py`, `music/library.py`):
+    layers 1, 2, 3 and 5; layer 4 (Chromaprint) is not built. A generated take is written once
+    and its tags are DPC's own (`DPC_PROVENANCE`), outside the "never rewritten" rule, which
+    covers the person's folders; re-tagging a generated file leaves its track identity
+    unchanged (checked on the 55 re-tagged files, PROVENANCE §7). Without ffmpeg the hash
+    falls back to the whole file (N12). The APE and remux cases were not tested.*
 - **Q5. Names.** Under the vocabulary rule, before code, with GLOSSARY rows in the same
   commit:
   - the button label (Mike said "Music Player");
@@ -1090,6 +1381,10 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
   - each `music_*` tool's timeout and wait budget, declared with its name (Ark;
     Consequences).
   — @Mike
+  *2026-11-22: the button label is "MUSIC PLAYER" (`Sidebar.svelte:1002`), the folder
+  `music/` and the package `music/` are in use; no tool exists, so no tool name was chosen
+  beyond `chat_post_file` (not needed by the music flows, Q1); the domain words have no
+  GLOSSARY rows (Q9).*
 - **Q6. Streaming card.** Filed (`backlog.md:132`); Forge votes to keep it. Still open:
   the outbound path (N9) and account handling, stated as security choices in that card.
   — CC, on Mike's verb
@@ -1112,11 +1407,59 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
   the parked draft, if Mike agrees; this file is not touched. **Mike (2026-11-19 07:40):
   the parked draft will be renumbered later**; nothing is changed now, and whoever revives
   it gives it a free number (052 recommended).
+  *2026-11-22: 052 is taken (the card lease), so that recommendation is void. `docs/decisions`
+  holds 048, 050, 051 and 052; 049 is cited as a planned record (above) and 053 is free. The
+  parked file still says `adr: 051`.*
+
+- **Q9. Where the code, SPEC, EVOLUTION, GLOSSARY and this record disagree** (found in the
+  2026-11-22 revision; CC did not guess, each needs Mike or the owner of the file). None is a
+  decision of Mike's.
+  - **SPEC decision 32 is not amended for Mike #70.** ADR-052 says the SPEC file needs the
+    amendment (music swaps an idle server when its queue is empty); SPEC §12 decision 32 still
+    says "Nothing is stopped automatically". D37 here holds the amendment. SPEC 32 also says
+    the card is read before each variant; the runner reads it once per job and treats a failed
+    read as a free card (`runner.py` `_wait_for_card`), which ADR-052 S4 changes.
+  - **SPEC decision 30 still says N8 is deferred** ("until the endpoint is built, only files
+    under `~/.dpc` play"); it is built (`9bb7599d`, D28).
+  - **The capabilities report contradicts the comment commands.** `music/capabilities.py`
+    `_EDIT_ACTIONS["note"]` reads "comments are not built in DPC" (and `comments.py` says the
+    report's "planned"), while `add_music_comment` and its three siblings are built
+    (`f62f998b`). Probably the edit-job action `note` is meant, but the report's wording is
+    what the UI and an agent read.
+  - **"Not pushed" is stale in the ai-studio docs.** PROVENANCE §7 and EVOLUTION v3 §14 item 10
+    say `abcaaa44` is not pushed; it is on `origin/dev` (checked at `1fa73a26`). Those files
+    are not edited here.
+  - **D36's date.** This record and SPEC decision 41 date Mike's MP3 ask 2026-11-22 and cite
+    #210; in session A #210 is 2026-11-21 06:49Z, and the backlog card dates the first ask
+    2026-11-22. The other entries here use the SPEC's Bangkok date. One of the dates is a day
+    off; not resolved.
+  - **Mike's yes to voice adapters in renders is not in SPEC decision 40** (#198 (в), 2026-11-21
+    "да"). D35 records it; SPEC 40 keeps only CC's "local listening only, none by default".
+  - **GLOSSARY.** No rows for **track**, **take**, **version**, **watched folder**, **genome**
+    or the `mp.*` records, though Consequences promised them in the same commit as the code
+    (Ark). The glossary's **engine** means the program a local LLM provider answers with; the
+    music engines need their own row or a qualifier (this record now says "music engine").
+    GLOSSARY is not edited here.
+  - **Status.** `accepted` stays. The lifecycle makes `implemented` a claim that the decision
+    is built; the tools, QC, region edits, the audio input, the voice clone, SoundCloud/Yandex
+    and the card lease are not. Mike decides when this record is `implemented`, or whether the
+    unbuilt parts move to their own records.
+  - **ADR-052 is `proposed` and `depends_on` this record.** The card part of D18 and N11 now
+    leans on it, so this record lists it as `related`, not `depends_on`, to avoid a cycle.
+    If Mike rejects or reshapes ADR-052, D18, D37 and N11 return to being this record's.
+  - **EVOLUTION v3 §14 items 10-15** (genome close-out, the reason dictionary against
+    measurement rule 2, failure-class meanings, YuE2 edge rules, the first reader of the ids,
+    comments against selection events) were found in the fold-in and not put to Mike; D29
+    still lists the style battery, graph per song, agent notes and the `N_delta` warning as
+    open.
 
 ## Authors
 
-- **Mike**: Decision (D1-D28)
-- **CC**: Spec, prototype, cards, this draft and its revision after review
+- **Mike**: Decision (D1-D39; the specifics CC proposed inside D29-D39 are marked [P] and are
+  not his)
+- **CC**: Spec, prototype, cards, this draft, its revision after review, the status
+  rewrites of 2026-11-20 to 2026-11-22 and the whole-document revision of 2026-11-22
+  (against the code at `1fa73a26`, the SPEC, EVOLUTION v3, PROVENANCE and ADR-052)
 - **Zcode, Forge, Ark** (reviews, 2026-11-19 06:03, 06:04 and 06:33, AI Studio group
   chat): Zcode re-checked the code references by subagent at `95acf009`, found the D5
   over-promise, the number collision and the stale streaming row, and proposed option (c)
@@ -1151,6 +1494,17 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
   goes through the registry, which covers any engine the service launches.
 - [ADR-047](047-multi-source-file-transfer-and-peer-file-search.md): content-addressed
   file transfer, relevant if a library or its takes are ever shared between nodes.
+- [ADR-052](052-the-card-lease-lets-every-gpu-client-in-dpc-hold-wait-for-and-yield-the-one-card.md):
+  the card lease. The music engines are lease clients in S4, the player's Transcribe in S3,
+  music swaps an idle server by Mike's #70 (amending SPEC decision 32), and `stop_local_engine`
+  on a lease alias and the `card_wait.holders` schema are S2 / S4 items (D18, D37, N11).
+- `docs/GLOSSARY.md`: **engine**, **card hold**, **card lease**, **local engine swap**,
+  **decision status**.
+- `ai-studio/experiments/music-player/docs/EVOLUTION.md` (v3, 2026-11-22),
+  `docs/PROVENANCE.md` (§7, built at `abcaaa44`), `docs/RUACH-BORROW.md` and
+  `engine/yue2-cpp/trial.md` (the YuE2 trial of 2026-11-21): the single home of the
+  evolution model, the record inside the file, what is borrowed from Ruach Studio, and the
+  measurements behind D35.
 - `~/.dpc/logs/dpc-client.log.1:75624-75625`: the silent group-file send of 2026-11-19.
 - `~/.dpc/config.ini:181`: `swap_wait_s = 1800` on this node.
 - AI Studio group chat, 2026-11-19 06:03-06:33: the three reviews of this record.
