@@ -12,7 +12,7 @@
     import { cutFromSpeed, cutLabel, cutTitle } from '$lib/utils/contextCut';
     import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
     import { firstRound, roundJumpLabel, roundJumpTitle } from '$lib/utils/roundJump';
-    import { sendCommand } from '$lib/coreService';
+    import { sendCommand, agentStopNotes } from '$lib/coreService';
     import {
         pressAction, stopButtonLabel, stopButtonTitle, stopButtonDisabled, type StopState,
     } from '$lib/utils/stopButton';
@@ -83,6 +83,10 @@
     // until the reader returns to the bottom.
     let rootEl = $state<HTMLElement | null>(null);
     let first = $derived(firstRound(toolCalls));
+    // What happens after Stop was pressed, as lines of their own under the rounds: who
+    // pressed it, the summary being written with tools off, a Kill (utils/stopNotes.ts).
+    // Only the live block has them.
+    let stopNotes = $derived(isLive && conversationId ? ($agentStopNotes[conversationId] ?? []) : []);
     function jumpToRunStart(e: Event) {
         e.stopPropagation();
         rootEl?.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -328,6 +332,13 @@
                 {/if}
             </div>
         {/if}
+        {#if stopNotes.length > 0}
+            <div class="stop-notes" role="status">
+                {#each stopNotes as note (note.kind)}
+                    <div class="stop-note-line {note.kind}">{note.text}</div>
+                {/each}
+            </div>
+        {/if}
         <!-- During live with per-round structure, narration lives inside each round —
              suppress the bottom block to avoid duplicating it (and the old raw leak).
              The final answer appears as msg.text when the message finalizes. -->
@@ -381,6 +392,25 @@
     .round-jump:hover {
         color: var(--text-primary, #e5e7eb);
         border-color: #60a5fa;
+    }
+    .stop-notes {
+        margin: 6px 0 2px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+    }
+    .stop-note-line {
+        padding: 3px 8px;
+        font-size: 0.85em;
+        border-left: 2px solid var(--warning, #f59e0b);
+        color: var(--warning, #f59e0b);
+        background: rgba(245, 158, 11, 0.08);
+        border-radius: 0 3px 3px 0;
+    }
+    .stop-note-line.kill {
+        border-left-color: var(--danger, #ef4444);
+        color: var(--danger, #ef4444);
+        background: rgba(239, 68, 68, 0.08);
     }
     .stop-note.error {
         color: #f87171;

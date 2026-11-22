@@ -1854,6 +1854,39 @@ USER_STOP_SUMMARY_REQUEST = (
     "found so far, where exactly you stopped, and what is left to do."
 )
 
+# The status lines a Stop puts in the live progress panel, so that the person (and anyone
+# reading the panel) sees what happens after the press and that the user pressed it. They
+# ride the `agent_progress` event with `stop_note` set to the kind. The "pressed" and "kill"
+# lines are said where the press lands (`AgentManager._interrupt_loop`, which knows who
+# pressed); the loop says the other two where it acts.
+STOP_NOTE_KINDS = ("pressed", "summary", "kill", "before_round_1")
+
+
+def stop_note_text(kind: str, who: str = "") -> str:
+    """The panel line for one kind of Stop note; `who` is the person who pressed."""
+    who = (who or "").strip() or "the user"
+    if kind == "pressed":
+        return f"Stop pressed by {who} — waiting for the current step to finish"
+    if kind == "summary":
+        return "Writing a summary of where it stopped — tools are off (the user pressed Stop)"
+    if kind == "kill":
+        return f"Kill pressed by {who} — ending now, no summary"
+    if kind == "before_round_1":
+        return "Stopped before the first step — nothing was done, so there is nothing to summarise"
+    raise ValueError(f"unknown stop note kind {kind!r}")
+
+
+def _say_stop_note(emit_progress: Optional[Callable[..., None]], kind: str,
+                   round_idx: Optional[int] = None) -> None:
+    """Put a Stop note in the panel. A failing emitter never touches the stop."""
+    if emit_progress is None:
+        return
+    try:
+        emit_progress(stop_note_text(kind), None, round_idx, None, None, stop_note=kind)
+    except Exception:
+        log.debug("The %s stop note could not be emitted", kind, exc_info=True)
+
+
 # The result a call gets when the Stop came before it ran, so that every tool
 # call in the history has its result and the summary call is a valid request.
 NOT_RUN_AFTER_STOP = "Not run: the user pressed Stop before this call."
@@ -1996,6 +2029,8 @@ async def _finalize_after_user_stop(
     keep_unexecuted: Optional[Callable[[str], Optional[str]]] = None,
     kill_event: Optional[asyncio.Event] = None,
     window: Optional[int] = None,
+    emit_progress: Optional[Callable[..., None]] = None,
+    round_idx: Optional[int] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """The user's Stop: the work ends, and one more call writes where it stopped.
 
@@ -2017,6 +2052,7 @@ async def _finalize_after_user_stop(
         llm_trace["turn_end"] = "stopped"
         return stopped_text, accumulated_usage, llm_trace
     messages.append({"role": "user", "content": USER_STOP_SUMMARY_REQUEST})
+    _say_stop_note(emit_progress, "summary", round_idx)
     try:
         final_msg = await _one_finalising_call(
             llm, messages, tools or None, accumulated_usage,
@@ -2656,6 +2692,7 @@ async def run_llm_loop(
                 stopped_text = f"⚠️ Stopped by user after {round_idx - 1} rounds."
                 if round_idx == 1:
                     # Nothing was done yet, so there is nothing to summarise.
+                    _say_stop_note(emit_progress, "before_round_1", round_idx)
                     llm_trace["turn_end"] = _user_stop_end(kill_event)
                     return stopped_text, accumulated_usage, llm_trace
                 return _with_the_words(await _finalize_after_user_stop(
@@ -2667,6 +2704,7 @@ async def run_llm_loop(
                     keep_unexecuted=_keep_unexecuted,
                     kill_event=kill_event,
                     window=ctx.state.context_window,
+                    emit_progress=emit_progress, round_idx=round_idx,
                 ))
 
             # A local engine's window, read after its first answer; the alias numbers otherwise.
@@ -3245,6 +3283,7 @@ async def run_llm_loop(
                     keep_unexecuted=_keep_unexecuted,
                     kill_event=kill_event,
                     window=ctx.state.context_window,
+                    emit_progress=emit_progress, round_idx=round_idx,
                 )
 
             _told: List[str] = []

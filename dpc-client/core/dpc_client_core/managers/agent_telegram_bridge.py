@@ -677,6 +677,13 @@ Send a voice message and it will be transcribed and processed\\.
             await update.message.reply_text(
                 f"❌ Error: {escape_markdown(str(e)[:200])}{dropped_line}", parse_mode="MarkdownV2")
 
+    @staticmethod
+    def _stop_presser_name(update) -> str:
+        """Who sent /stop, for the line the desktop panel shows ("Stop pressed by Mike (Telegram)")."""
+        user = getattr(update, "effective_user", None)
+        name = (getattr(user, "full_name", None) or getattr(user, "username", None) or "").strip()
+        return f"{name} (Telegram)" if name else "a Telegram user"
+
     async def _handle_stop_command(self, update, context):
         """Handle /stop: the desktop Stop for the turn that answers this chat.
 
@@ -703,7 +710,7 @@ Send a voice message and it will be transcribed and processed\\.
         interrupt_loop = getattr(manager, "_interrupt_loop", None) if manager else None
         has_loop = getattr(manager, "has_active_loop", None) if manager else None
         if callable(has_loop) and callable(interrupt_loop) and has_loop(conversation_id):
-            if interrupt_loop(conversation_id):
+            if interrupt_loop(conversation_id, who=self._stop_presser_name(update)):
                 stopped = "running"
         if stopped is None:
             from ..dpc_agent.run_gate import stop_waiting

@@ -21,7 +21,7 @@ import pathlib
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..dpc_agent.agent import DpcAgent, AgentConfig
-from ..dpc_agent.loop import without_tag_calls
+from ..dpc_agent.loop import stop_note_text, without_tag_calls
 from ..dpc_agent.run_gate import RunGate, StoppedWhileWaiting, _RUN_GATES, get_run_gate, hold, turn_title  # noqa: F401
 from ..providers.base import ModelNotCachedError
 from .llama_server_supervisor import leave_card_queue, runs_on_a_local_engine
@@ -977,15 +977,16 @@ class DpcAgentManager:
         """True while this agent runs a loop in that conversation."""
         return conversation_id in self._interrupt_events
 
-    def interrupt(self, conversation_id: str, kill: bool = False) -> bool:
-        """A person's Stop on this agent (with `kill`, the Kill).
+    def interrupt(self, conversation_id: str, kill: bool = False, who: str = "") -> bool:
+        """A person's Stop on this agent (with `kill`, the Kill); `who` names the
+        person who pressed it, for the line the panel shows.
 
         It also drops what the agent's Telegram bot has gathered and not yet
         handed over, in every chat, so the burst does not start a run the
         moment the stopped one ends (Mike's call, 2026-10-30).
         """
         self.drop_telegram_bursts()
-        return self._interrupt_loop(conversation_id, kill)
+        return self._interrupt_loop(conversation_id, kill, who)
 
     def drop_telegram_bursts(self) -> int:
         """Drop the Telegram bursts not yet handed to this agent; how many messages."""
@@ -998,21 +999,33 @@ class DpcAgentManager:
             log.warning("Stop could not drop the gathered Telegram messages: %s", e)
             return 0
 
-    def _interrupt_loop(self, conversation_id: str, kill: bool = False) -> bool:
+    def _interrupt_loop(self, conversation_id: str, kill: bool = False, who: str = "") -> bool:
         """Signal the active agent loop to stop after the current LLM call/tool finishes.
 
-        With `kill` the model call in flight is cancelled at once instead.
+        With `kill` the model call in flight is cancelled at once instead. The press is
+        put in the panel here, the moment it lands, and not when the loop next notices it
+        (a local model can spend minutes in one call): "Stop pressed by <who>", or on a
+        Kill "Kill pressed by <who>". A repeated press says nothing new.
         """
         ev = self._interrupt_events.get(conversation_id)
         if ev:
+            first_press = not ev.is_set()
             ev.set()
             # A turn in the queue for the card makes no model call to finish: it leaves now.
             leave_card_queue(conversation_id)
+            killed_now = False
             if kill:
                 kev = self._kill_events.get(conversation_id)
                 if kev:
+                    killed_now = not kev.is_set()
                     kev.set()
                     log.info("Kill signal sent for conversation %s", conversation_id)
+            if killed_now:
+                self._emit_progress(stop_note_text("kill", who), conversation_id,
+                                    stop_note="kill")
+            elif first_press and not kill:
+                self._emit_progress(stop_note_text("pressed", who), conversation_id,
+                                    stop_note="pressed")
             log.info("Interrupt signal sent for conversation %s", conversation_id)
             return True
         log.warning("No active agent loop for conversation %s", conversation_id)
@@ -1233,8 +1246,9 @@ class DpcAgentManager:
 
         try:
             # Process through agent with progress callback that includes conversation_id
-            def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None, speed=None):
-                self._emit_progress(msg, conversation_id, tool, round, tool_calls, speed)
+            def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None, speed=None,
+                                           stop_note: str = None):
+                self._emit_progress(msg, conversation_id, tool, round, tool_calls, speed, stop_note)
 
             # Accumulate streaming chunks for persistence to history.json
             _stream_chunks: list = []
@@ -1558,8 +1572,9 @@ class DpcAgentManager:
                 monitor = None
             await self._broadcast_history_to_ui(conversation_id)
 
-        def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None, speed=None):
-            self._emit_progress(msg, conversation_id, tool, round, tool_calls, speed)
+        def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None, speed=None,
+                                       stop_note: str = None):
+            self._emit_progress(msg, conversation_id, tool, round, tool_calls, speed, stop_note)
 
         streamed: List[str] = []
 
@@ -2002,8 +2017,12 @@ class DpcAgentManager:
         round: int = None,
         tool_calls=None,
         speed=None,
+        stop_note: str = None,
     ) -> None:
-        """Emit progress message to DPC UI (if available)."""
+        """Emit progress message to DPC UI (if available).
+
+        `stop_note` (one of `loop.STOP_NOTE_KINDS`) marks a status line about a Stop: the
+        panel shows it as a line of its own and not as thinking or a tool."""
         try:
             # Try to broadcast via local_api if available
             local_api = getattr(self.service, "local_api", None)
@@ -2026,6 +2045,7 @@ class DpcAgentManager:
                     "agent_name": getattr(self, '_current_agent_display_name', ''),
                     "agent_id": self.agent_id or '',
                     "ts": utc_now_iso(),
+                    **({"stop_note": stop_note} if stop_note else {}),
                 }))
         except Exception as e:
             log.debug(f"Failed to emit progress: {e}")

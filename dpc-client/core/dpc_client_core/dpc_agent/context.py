@@ -861,6 +861,27 @@ FAILED_TURN_REPLAY_CHARS = 200
 FAILED_TURN_NOTICE = "⚠️ No answer this time: the run failed. Its owner was shown the error."
 
 
+# What a turn the user stopped says of itself on the turns after it. The summary the
+# loop asks for after a Stop is written as an ordinary answer, so the record alone would
+# not tell the agent that its user ended the turn. Rendered from `turn_end` and the
+# text, nothing else, so the same record renders the same bytes every time.
+USER_STOPPED_MARK = "[The user pressed Stop and ended this turn early.]"
+USER_KILLED_MARK = "[The user pressed Stop, then Kill: this turn was ended at once, with no summary.]"
+_STOPPED_TEXT_OPENING = "⚠️ Stopped by user"
+
+
+def _with_the_stop_mark(record: Dict[str, Any], body: str) -> str:
+    """`body` with the one-line mark of a user's Stop above it, when the record is
+    that of a stopped or killed turn. A stopped turn whose text already opens with
+    the loop's own "Stopped by user" notice says so itself and gets no second line."""
+    turn_end = record.get("turn_end")
+    if turn_end == "killed":
+        return f"{USER_KILLED_MARK}\n{body}" if body else USER_KILLED_MARK
+    if turn_end == "stopped" and not body.lstrip().startswith(_STOPPED_TEXT_OPENING):
+        return f"{USER_STOPPED_MARK}\n{body}" if body else USER_STOPPED_MARK
+    return body
+
+
 def history_body(record: Dict[str, Any]) -> str:
     """The text a history record is replayed with — a function of the record
     alone, so the same record renders the same bytes on every later turn.
@@ -869,15 +890,17 @@ def history_body(record: Dict[str, Any]) -> str:
     loop's error, whose body can be a page of HTML or a traceback: only its
     first line goes back, capped. Every other record is replayed whole, the
     notice of a stopped, killed, refused or guard-ended turn included — it is
-    the assistant turn that keeps two user turns from standing in a row."""
+    the assistant turn that keeps two user turns from standing in a row. A
+    stopped or killed turn carries one line that says the user pressed Stop
+    (`_with_the_stop_mark`)."""
     content = record.get("content", "") or ""
     if record.get("turn_end") == "failed":
         lines = content.strip().splitlines()
         return lines[0][:FAILED_TURN_REPLAY_CHARS] if lines else ""
     markers = image_attachment_markers(record) + file_attachment_markers(record)
     if markers:
-        return (content + "\n\n" if content else "") + "\n".join(markers)
-    return content
+        content = (content + "\n\n" if content else "") + "\n".join(markers)
+    return _with_the_stop_mark(record, content)
 
 
 _MARKER_NAME_CHARS = 80

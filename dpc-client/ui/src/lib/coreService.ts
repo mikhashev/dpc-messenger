@@ -141,7 +141,8 @@ import { applyRequestStatus } from './utils/attachmentRequest';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded } from './services/voice';
 import { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed, modelDownloadProgress } from './services/modelDownload';
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
-import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates, agentTurns, onAgentTurnUpdated, onAgentActivity, forgetAgentTurns } from './services/agents';
+import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentStopNotes, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates, agentTurns, onAgentTurnUpdated, onAgentActivity, forgetAgentTurns } from './services/agents';
+import { addStopNote, clearStopNotes, isStopNote } from './utils/stopNotes';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionCancelled, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
@@ -161,7 +162,7 @@ export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTran
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded };
 export { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed, modelDownloadProgress };
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated };
-export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates, agentTurns };
+export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentStopNotes, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates, agentTurns };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
 export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionCancelled, extractionFallback, tokenWarning, integrityWarnings, votingConversationId };
 export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
@@ -1053,6 +1054,13 @@ export async function connectToCoreService() {
                     agentHistoryUpdated.set(message.payload);
                 }
                 // DPC Agent progress events (v0.15.0+ - real-time agent progress in chat)
+                else if (message.event === "agent_progress" && isStopNote(message.payload)) {
+                    // A status line about a Stop (payload.stop_note): drawn as a line of its
+                    // own. It must not reach agentProgress, whose last event names the tool
+                    // that is still running.
+                    agentStopNotes.update((m) => addStopNote(m, message.payload));
+                    onAgentActivity(message.payload?.agent_id || undefined, message.payload?.conversation_id || undefined);
+                }
                 else if (message.event === "agent_progress") {
                     // Progress update from agent during tool execution
                     // payload: {conversation_id, message, round, tool_name, ts}
@@ -1082,6 +1090,7 @@ export async function connectToCoreService() {
                     agentProgressClear.set(message.payload);
                     const _cid = message.payload?.conversation_id;
                     if (_cid) {
+                        agentStopNotes.update((m) => clearStopNotes(m, _cid));
                         agentLiveTools.update((m) => { const n = { ...m }; delete n[_cid]; return n; });
                         agentLiveAgentIds.update((m) => { const n = { ...m }; delete n[_cid]; return n; });
                         if (_cid !== activeChat && !_cid.startsWith('group-')) {

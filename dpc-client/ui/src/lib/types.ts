@@ -311,6 +311,9 @@ export interface VoiceTranscription {
 export interface AgentProgressEvent {
     conversation_id: string;
     message?: string;
+    // Set on a status line about a Stop ('pressed' | 'summary' | 'kill' | 'before_round_1');
+    // the line is in `message`. See utils/stopNotes.ts.
+    stop_note?: string;
     round?: number;
     tool_name?: string;
     agent_name?: string;

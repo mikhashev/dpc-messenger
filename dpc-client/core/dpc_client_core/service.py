@@ -11879,7 +11879,14 @@ class CoreService(MusicCommandsMixin):
             else:
                 targets = [aid for aid, m in managers.items()
                            if m.has_active_loop(conversation_id)]
-            stopped = [aid for aid in targets if managers[aid].interrupt(conversation_id, kill=bool(force))]
+            # The person who pressed it, as the panel's line names them ("Stop pressed by Mike").
+            who = ""
+            try:
+                who = (self.p2p_manager.get_display_name() if self.p2p_manager else "") or ""
+            except Exception:
+                who = ""
+            stopped = [aid for aid in targets
+                       if managers[aid].interrupt(conversation_id, kill=bool(force), who=who)]
             if stopped and agent_id not in stopped:
                 logger.warning(
                     "interrupt_agent: request named %r, which runs no loop in %s; stopped %s instead",

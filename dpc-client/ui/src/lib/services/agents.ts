@@ -16,6 +16,7 @@ import {
     type AgentTurnSnapshot,
     type AgentTurnStates,
 } from '$lib/utils/agentTurnNotice';
+import type { StopNotes } from '$lib/utils/stopNotes';
 
 // Agent state
 export const agentsList = writable<AgentInfo[]>([]);
@@ -36,6 +37,10 @@ export const agentLiveTools = writable<Record<string, any[]>>({});
 // running agent even after a chat switch cleared the page-level id.
 export const agentLiveAgentIds = writable<Record<string, string>>({});
 export const agentTextChunk = writable<AgentTextChunkEvent | null>(null);
+// The Stop status lines of the live run (conversation_id -> lines): who pressed Stop,
+// the summary being written, a Kill. Kept apart from agentProgress so a Stop line never
+// replaces the tool that is still running (utils/stopNotes.ts).
+export const agentStopNotes = writable<StopNotes>({});
 
 // Each agent's turn and the chats waiting for it (ADR-046 point 8): seeded from
 // the `turn`/`waiting` of the list_agents rows, then replaced whole by every

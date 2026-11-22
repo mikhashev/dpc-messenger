@@ -8,7 +8,7 @@
   import ThinkingBlock from './ThinkingBlock.svelte';
   import { showsThinkingBlock } from '$lib/utils/thinkingVisibility';
   import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
-  import { agentLiveTools, agentLiveAgentIds, blockedNodeIds, attachmentRequests, activeFileTransfers, sendCommand } from '$lib/coreService';
+  import { agentLiveTools, agentLiveAgentIds, agentStopNotes, blockedNodeIds, attachmentRequests, activeFileTransfers, sendCommand } from '$lib/coreService';
   import {
     isMissingHere, showsRequestButton, requestKey, requestStatusText, requestFromAnswer,
   } from '$lib/utils/attachmentRequest';
@@ -170,6 +170,8 @@
   // dropped results, survives chat switches. The currently-executing tool shows via the
   // live spinner (currentTool); completed tools come from the snapshot with their results.
   let liveToolCalls = $derived($agentLiveTools[conversationId] ?? []);
+  // A Stop's status lines keep the live block on screen even before any tool ran.
+  let liveStopNotes = $derived($agentStopNotes[conversationId] ?? []);
 
   // Who runs here, as far as the client knows. Never the first agent in the
   // list: in a group that named an idle agent and Stop missed. Empty lets
@@ -302,9 +304,9 @@
   // Instant, not the window's smooth scroll: a smooth jump fires scroll events
   // short of the bottom, which read as the reader leaving it and ended the follow.
   $effect(() => {
-    void liveToolCalls; void agentProgressRound; void agentProgressTool; void agentProgressMessage;
+    void liveToolCalls; void agentProgressRound; void agentProgressTool; void agentProgressMessage; void liveStopNotes;
     const el = chatWindowElement;
-    const live = agentStreamingText || liveToolCalls.length > 0 || agentProgressTool || agentProgressMessage;
+    const live = agentStreamingText || liveToolCalls.length > 0 || agentProgressTool || agentProgressMessage || liveStopNotes.length > 0;
     // A reader's own scroll in progress (a smooth jump to round 1) is not overridden.
     if (!live || !el || !atBottom || performance.now() - readerMovedAt < 1000) return;
     const behavior = el.style.scrollBehavior;
@@ -579,7 +581,7 @@
   <!-- Unified agent collapsible: tool calls + streaming text in one block (S187).
        liveToolCalls.length keeps it visible when switching INTO a chat with an active
        run (snapshot present) before the next progress event arrives. -->
-  {#if agentProgressTool || agentProgressMessage || filteredStreamingText || liveToolCalls.length > 0}
+  {#if agentProgressTool || agentProgressMessage || filteredStreamingText || liveToolCalls.length > 0 || liveStopNotes.length > 0}
     <AgentProgressCollapsible
       toolCalls={liveToolCalls}
       agentName={agentProgressName}
