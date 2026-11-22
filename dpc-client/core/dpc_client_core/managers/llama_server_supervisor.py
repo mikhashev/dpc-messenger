@@ -509,7 +509,7 @@ _still_configured: Callable[["LlamaServerSupervisor"], bool] = lambda _superviso
 _MAX_SWAP_ROUNDS = 4
 # How soon a start asks a card lease again after it answered `refused` or `could_not_let_go`
 # (ADR-052 L6); at most `_MAX_SWAP_ROUNDS` asks per lease and start, then the lease is waited for
-# like a busy holder until the start's deadline. The lease line's own `_YIELD_RETRY_S` is the same.
+# like a busy holder until the start's deadline. The lease line reads this same constant.
 _LEASE_ASK_AGAIN_S = 1.0
 # How long a person's Stop engine on a card lease waits for it to let go when no timeout is given
 # (`stop_local_engine`): an unload takes about a second and an engine's stop seconds.
@@ -690,10 +690,12 @@ def _live_claims() -> List[Tuple["LlamaServerSupervisor", str]]:
 # a cycle. Until it is, no lease exists and every reader below sees the supervisors alone.
 # `_LEASE_HOLDERS`: (lease, state) of each granted lease. `_LEASE_WAITERS`: (arrival, lease,
 # for_a_peer) of each lease waiter in line order, on `_CARD_ARRIVAL`'s clock (L5a). `_LEASE_QUEUE_ROWS`: the waiters as
-# `card_queue` rows. `_live_claims` and every `_CARD_CLAIMS` access stay supervisor-only.
+# `card_queue` rows. `_LEASE_CHAT_LEAVES`: a person's Stop takes a chat's lease waiters out, and
+# answers how many. `_live_claims` and every `_CARD_CLAIMS` access stay supervisor-only.
 _LEASE_HOLDERS: Callable[[], List[Tuple[Any, str]]] = lambda: []
 _LEASE_WAITERS: Callable[[], List[Tuple[int, Any, bool]]] = lambda: []
 _LEASE_QUEUE_ROWS: Callable[[], List[Dict[str, Any]]] = lambda: []
+_LEASE_CHAT_LEAVES: Callable[[str], int] = lambda _conversation_id: 0
 
 
 def _live_holders() -> List[Tuple[Any, str]]:
@@ -1288,14 +1290,15 @@ def _chat_leaves_the_line(conversation_id: str) -> None:
             )
             request.leaves()
             taken += 1
+    taken += _LEASE_CHAT_LEAVES(conversation_id) if conversation_id else 0
     if taken:
         logger.info("Stop took %d request(s) out of the queue for the card in %s", taken, conversation_id)
 
 
 def leave_card_queue(conversation_id: str) -> None:
-    """A person's Stop in this chat: its requests leave the line, and each meets
-    `TakenOutOfTheCardQueue`. Beside `_CARD_QUEUE` and not in `run_gate.stop_waiting`, which only
-    takes a chat out of the agent's own line (rule 12). `_interrupt_loop` is synchronous, and the
+    """A person's Stop in this chat: its requests leave the line, its lease waiters the lease line,
+    and each meets `TakenOutOfTheCardQueue`. Beside `_CARD_QUEUE` and not in
+    `run_gate.stop_waiting`, which only takes a chat out of the agent's own line (rule 12). `_interrupt_loop` is synchronous, and the
     Telegram `/stop` that reaches it runs on the loop its bridge was started on, so the line is
     changed on the owner loop, which is also why this answers nothing."""
     _now_on_the_owner_loop(_chat_leaves_the_line, conversation_id)

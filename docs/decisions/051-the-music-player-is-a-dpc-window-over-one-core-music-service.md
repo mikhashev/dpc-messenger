@@ -328,7 +328,7 @@ timestamps lie outside them and are worth one read by Mike before acceptance.
   not see them (they do not wait for a running song, which Mike asked for at #20), and a
   music job does not yet swap an idle server out. ADR-052 S4 makes the music engines lease
   clients (acquired before the engine's `_the_lock`), S2 makes the supervisors wait for a
-  busy lease and unload an idle one; Mike #70 amends SPEC decision 32: with the queue empty
+  busy lease and unload an idle one (built at `1e57932f`); Mike #70 amends SPEC decision 32: with the queue empty
   and the server idle, music unloads the server and takes the card by the owner-start rule,
   gated by `swap_when_idle` (D37). Two smaller items of the same plan touch this record's
   code: `stop_local_engine` on a lease alias (S2 item 8) is what lets the "Stop X" button stop
@@ -594,7 +594,11 @@ consensus 2026-11-20)") and are not decisions.
   variant as the SPEC text says, and it treats a failed read as a free card, which ADR-052's
   Ruach rule forbids and S4 changes). **Amendment (#70):** with nothing waiting and the
   server idle, music unloads the server and takes the card, by the owner-start rule and gated
-  by `swap_when_idle`. **Not built** (ADR-052 S2 and S4); SPEC decision 32 carries the amendment since 2026-11-22
+  by `swap_when_idle`. **Half built:** the lease side is ADR-052 S2 (`1e57932f`, a lease with
+  `waits_for_engines` swaps an idle supervisor out; follow-up in the commit after `373d7b7e`), and
+  the music engines become lease clients only in S4, so no job reaches it yet. It acts only with
+  `[local_engines] swap_when_idle = true`; the default is `false` (`settings.py`), and with it off
+  the job waits and the person presses "Stop X". SPEC decision 32 carries the amendment since 2026-11-22
   (Q9).
 
 - **D38. Song from the person's own text** (SPEC §12 decision 33; Mike's call 2026-11-20
@@ -806,7 +810,8 @@ built.
     and for Whisper (S3), so that the supervisors see them and wait (S2). ADR-052 depends
     on this record, is `proposed`, and S1 (the lease registry and the lease line) is built
     (`53a2eaf5`, follow-up `4d0fa885`). The probe is still `nvidia-smi`; foreign GPU use
-    (ComfyUI, an external music app) is S8 / S10.
+    (ComfyUI, an external music app) is S8 / S10. S2 (the supervisors wait for a busy lease and
+    unload an idle one) is built at `1e57932f`; S3 and S4 are pending.
 - **N12. A metadata source** (Ark). `Observed`: `VoicePlayer` takes a required `duration:
   number` prop (`VoicePlayer.svelte:41`), and a `file` attachment carries no duration.
   `ffprobe` is called nowhere in `dpc_client_core`; `ffmpeg` is called only by
@@ -928,7 +933,7 @@ built.
   - No new protocol client and no ComfyUI dependency in the player's path.
   - Weights live in one store, with no 6-19 GB duplicates.
 - **Negative:**
-  - Every engine is a GPU process beside Strata. Until ADR-052 S2 and S4 are built (N11),
+  - Every engine is a GPU process beside Strata. Until ADR-052 S4 is built (N11; S2, the supervisors' side, is built at `1e57932f`),
     Strata is stopped and restarted by hand ("Stop X" on the job card), a job waits in
     `queued` with a reason, and `llama-server` and Strata do not wait for a running song.
   - **The queue clock is long.** `Observed`: `swap_wait_s = 1800` on this node
@@ -1126,8 +1131,9 @@ seen working by Mike (2026-11-19, Implementation Status).
 - [ ] **GPU (D18, N11, D37).** A music engine is registered under a named process category
   and has a VRAM row in the registry (**built**: `acestep_server`, `yue2_server`). A music job
   on a card held by an idle Strata leads to `stopped` / `swap` in the process registry, the
-  job runs, and Strata comes back on the next demand (**not built**: ADR-052 S2 and S4, Mike
-  #70, gated by `swap_when_idle`; today the job waits and the person presses "Stop X"). The
+  job runs, and Strata comes back on the next demand (**not built**: ADR-052 S4, Mike #70, on
+  S2's lease side built at `1e57932f`; gated by `swap_when_idle`, default `false`, which a live
+  check needs `true`; today the job waits and the person presses "Stop X"). The
   run is timed against `swap_wait_s` (1800 s on this node). A transcription during a running
   song waits and names the holder (ADR-052's Done-when, S1 + S3 + S4).
 - [ ] **Agents-only group (precondition).** An audio file sent to a group whose only node
@@ -1174,10 +1180,11 @@ New code and files touched. Paths are relative to `dpc-client/`. *Re-read at `1f
 - `core/dpc_client_core/managers/llama_server_supervisor.py` (`_CARD_CLAIMS` at `:664`,
   typed for `LlamaServerSupervisor`), `managers/card_lease.py` and `local_api.py`: the card
   option (N11). **ADR-052:** S1 (lease registry, lease line) is built; S2 (supervisors wait
-  for a busy lease, unload an idle one, `stop_local_engine` on a lease alias) and S4 (the
+  for a busy lease, unload an idle one, `stop_local_engine` on a lease alias) is built at
+  `1e57932f`, with a follow-up in the commit after `373d7b7e`; S4 (the
   music engines hold the lease; `music/engine_base.py`, `runner.py`, `jobs.py`, `commands.py`,
   `acestep.py`, `yue2.py`, `ui/src/lib/utils/musicCreate.ts`; both gates of a waiting job)
-  are pending.
+  is pending.
 - `core/dpc_client_core/process_registry.py` (`SUBSYSTEMS` at `:220`, `ENGINES` at `:281`,
   the unknown-subsystem `ValueError` at `:1148`) and `dpc_agent/tools/process.py`
   (`run_supervised` at `:983`): any engine DPC starts goes through the registry (ADR-046
@@ -1264,7 +1271,7 @@ everything on Linux and macOS except playback.
 | Streaming: THE-MUSIC-PLAYER-CANNOT-PLAY-OR-SAVE-SOUNDCLOUD-AND-YANDEX-MUSIC-TRACKS-SO-LISTENER-MODE-IS-LOCAL-ONLY | Postponed (Mike, 2026-11-20: later, no rush); the `yt-dlp` path is not started | — |
 | Group file, agents-only (bug, MEDIUM): A-FILE-SENT-TO-A-GROUP-WITH-ONLY-AGENTS-VANISHES-AND-THE-UI-IS-TOLD-SUCCESS | Fixed on Mike's verb (07:58), observed live by Mike after a restart and closed 2026-11-19; follow-up: one message for a file and its text, audio plays inline | `3837b3a5`, `3f2de3c7`, `dd446110` |
 | Group file (dependency, 2026-08-11): GROUP-IMAGE-AND-FILE-ECHO-STILL-WAITS-ON-THE-TRANSFER (ADR-032 phase 3) | Files half fixed by `3837b3a5` | `3837b3a5` |
-| GPU (dependency, 2026-11-06): EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-SO-AN-IDLE-ENGINE-KEEPS-THE-CARD-THEY-NEED | Answered by ADR-052 (the card lease, `proposed`): S1 built; S2, S3, S4 pending. Mike's #20 and #70 are the decisions it rests on; the engines no longer wait for a decision on the option (N11) | `53a2eaf5`, `4d0fa885` (S1) |
+| GPU (dependency, 2026-11-06): EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-SO-AN-IDLE-ENGINE-KEEPS-THE-CARD-THEY-NEED | Answered by ADR-052 (the card lease, `proposed`): S1 built; S2 built at `1e57932f`; S3, S4 pending. Mike's #20 and #70 are the decisions it rests on; the engines no longer wait for a decision on the option (N11) | `53a2eaf5`, `4d0fa885` (S1); `1e57932f` (S2) |
 | Whisper residency (related, 2026-08-20): THE-WHISPER-ALIAS-IS-THE-BACKENDS-LAST-STANDING-CUDA-RESIDENT | Open (HIGH); the idle self-unload of `b796af4a` is the first half, the lease is S3. Bears on swaps per run | — |
 | Prototype and spec (ai-studio `experiments/music-player/`) | Exists; the prototype is simulated; the SPEC, EVOLUTION v3 and PROVENANCE are the product record. ai-studio has no remote | — |
 | Linux track stream (2026-11-21): THE-LINUX-TRACK-STREAM-KEEPS-A-NO-RANGE-SPECIAL-CASE-THAT-THE-DURATION-BEFORE-PLAY-FIX-MAY-HAVE-MADE-UNNECESSARY | Open (LOW); a revert is proposed, not approved | — |

@@ -1,13 +1,15 @@
 """ADR-052, Confirmation test 8 (slice S1): a peer's lease waits only when its estimate fits its deadline.
 
 L13 (Mike #70, #85, #11), on ADR-044's amendment of 2026-11-18: a request served to a peer
-(`serving_a_peer`) is granted at once when it can be; otherwise it takes a place only when the wait
-estimate (L10) is known and fits the deadline its door gave, and is refused at once when the
-estimate is over it or unknown. A waiting peer stands behind every owner's waiter, and an owner's
+(`serving_a_peer`) is granted at once when it can be; otherwise it takes a place only when its whole
+trip is known and fits: the wait estimate (L10) plus its own `expected_s` within the guest's 120 s
+(`PEER_TRIP_S`, L13 point 2) and within the bound its door gave, and is refused at once when the trip
+is over it or any part of it is unknown (its own work too). A supervisor holding the card, idle or
+busy, and any owner's place in the card queue leave the estimate unknown: refused at once. A waiting peer stands behind every owner's waiter, and an owner's
 request that arrives later goes ahead of it. It asks an idle holder to let go only on the owner's
 terms: the swap on, nobody of the owner's waiting. Every refusal to a peer says "right now", gives
 the estimate when known, and names no alias, agent or conversation. Fake clients; the door (S3)
-that computes the deadline from the guest's 120 s is not here.
+that computes a peer's own `expected_s` is not here.
 """
 
 import asyncio
@@ -15,8 +17,9 @@ import time
 
 import pytest
 
+from dpc_client_core.managers import card_lease
 from dpc_client_core.managers import llama_server_supervisor as base_mod
-from dpc_client_core.managers.card_lease import LeaseRefusedForPeer
+from dpc_client_core.managers.card_lease import PEER_TRIP_S, LeaseRefusedForPeer
 from dpc_client_core.managers.llama_server_supervisor import card_held_for, serving_a_peer
 
 from tests._card_lease_helpers import (  # noqa: F401
@@ -47,10 +50,11 @@ async def _as_peer(coro_fn):
         return await coro_fn()
 
 
-async def _refused_at_once(lease, wait_s):
+async def _refused_at_once(lease, wait_s, expected_s=1):
     started = time.monotonic()
     with pytest.raises(LeaseRefusedForPeer) as refused:
-        await asyncio.wait_for(_as_peer(lambda: lease.acquire("peer node-guest", wait_s=wait_s)), BOUND)
+        await asyncio.wait_for(
+            _as_peer(lambda: lease.acquire("peer node-guest", wait_s=wait_s, expected_s=expected_s)), BOUND)
     assert time.monotonic() - started < 0.5, "refused at once, not at a deadline"
     assert lease.alias not in waiting(), "a refused peer takes no place"
     return refused.value
@@ -68,7 +72,7 @@ class TestGrantedAtOnce:
     @pytest.mark.asyncio
     async def test_on_a_free_card_a_peer_is_served_at_once(self):
         p = _peer_whisper()
-        await asyncio.wait_for(_as_peer(lambda: p.lease.acquire("peer node-guest", wait_s=60)), BOUND)
+        await asyncio.wait_for(_as_peer(lambda: p.lease.acquire("peer node-guest", expected_s=1, wait_s=60)), BOUND)
         assert holding() == ["whisper:small"]
 
 
@@ -80,7 +84,7 @@ class TestAnEstimateThatFitsWaits:
         dictation = asyncio.create_task(hold_open(w.lease, "dictation", release))
         await until(lambda: w.lease._uses)
 
-        peer = asyncio.create_task(_as_peer(lambda: p.lease.acquire("peer node-guest", wait_s=60)))
+        peer = asyncio.create_task(_as_peer(lambda: p.lease.acquire("peer node-guest", expected_s=1, wait_s=60)))
         await until(lambda: waiting() == ["whisper:small"])
         row = base_mod.card_queue()[0]
         assert row["wait"]["wait_s"] == 10 and row["until_cancelled"] is False
@@ -101,7 +105,7 @@ class TestAnEstimateThatFitsWaits:
         granted = []
 
         async def peer():
-            await _as_peer(lambda: p.lease.acquire("peer node-guest", wait_s=0.6))
+            await _as_peer(lambda: p.lease.acquire("peer node-guest", expected_s=1, wait_s=0.6))
             granted.append("peer")
 
         async def owner():
@@ -129,7 +133,7 @@ class TestAnEstimateThatFitsWaits:
         first = asyncio.Event()
         dictation = asyncio.create_task(hold_open(w.lease, "dictation", first))
         await until(lambda: w.lease._uses)
-        peer = asyncio.create_task(_as_peer(lambda: p.lease.acquire("peer node-guest", wait_s=30)))
+        peer = asyncio.create_task(_as_peer(lambda: p.lease.acquire("peer node-guest", expected_s=1, wait_s=30)))
         await until(lambda: waiting() == ["whisper:small"])
 
         second = asyncio.Event()
@@ -153,7 +157,7 @@ class TestAnEstimateThatFitsWaits:
         await until(lambda: waiting() == ["music:yue2"])
 
         assert (await _refused_at_once(p.lease, 25)).wait["wait_s"] == 30
-        peer = asyncio.create_task(_as_peer(lambda: p.lease.acquire("peer node-guest", wait_s=35)))
+        peer = asyncio.create_task(_as_peer(lambda: p.lease.acquire("peer node-guest", expected_s=1, wait_s=35)))
         await until(lambda: waiting() == ["music:yue2", "whisper:small"])
         peer.cancel()
         await asyncio.gather(peer, return_exceptions=True)
@@ -162,23 +166,85 @@ class TestAnEstimateThatFitsWaits:
         await nothing_left()
 
     @pytest.mark.asyncio
-    async def test_with_no_bound_from_its_door_a_peer_takes_the_peer_bound(self):
+    @pytest.mark.parametrize("door_bound", [None, 300], ids=["no bound from its door", "a door bound over 120 s"])
+    async def test_a_peer_waits_no_longer_than_its_whole_trip_less_its_own_work(self, door_bound):
+        # The inference peers' bound (`_a_peers_slot_wait_s`, 300 s here) plays no part.
         swap(True, wait_s=300, remote_timeout=1200)
         w, p = whisper(eta=10), _peer_whisper()
         release = asyncio.Event()
         dictation = asyncio.create_task(hold_open(w.lease, "dictation", release))
         await until(lambda: w.lease._uses)
-        peer = asyncio.create_task(_as_peer(lambda: p.lease.acquire("peer node-guest", wait_s=None)))
+        peer = asyncio.create_task(
+            _as_peer(lambda: p.lease.acquire("peer node-guest", expected_s=19, wait_s=door_bound)))
         await until(lambda: waiting() == ["whisper:small"])
         [row] = base_mod.card_queue()
         assert row["until_cancelled"] is False
-        assert row["give_up_at"] - row["queued_at"] == pytest.approx(300, abs=5)
+        assert row["give_up_at"] - row["queued_at"] <= PEER_TRIP_S
+        [waiter] = card_lease._LEASE_LINE
+        assert waiter.wait_s == PEER_TRIP_S - 19, "give_up_at - arrival = 120 - expected_s"
+        assert row["give_up_at"] - row["queued_at"] == pytest.approx(PEER_TRIP_S - 19, abs=1)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(dictation, peer), BOUND)
+        await nothing_left()
+
+    @pytest.mark.asyncio
+    async def test_a_shorter_door_bound_stays_the_bound(self):
+        w, p = whisper(eta=10), _peer_whisper()
+        release = asyncio.Event()
+        dictation = asyncio.create_task(hold_open(w.lease, "dictation", release))
+        await until(lambda: w.lease._uses)
+        peer = asyncio.create_task(_as_peer(lambda: p.lease.acquire("peer node-guest", expected_s=19, wait_s=30)))
+        await until(lambda: waiting() == ["whisper:small"])
+        assert card_lease._LEASE_LINE[0].wait_s == 30
+        release.set()
+        await asyncio.wait_for(asyncio.gather(dictation, peer), BOUND)
+        await nothing_left()
+
+    @pytest.mark.asyncio
+    async def test_a_wait_and_its_own_work_that_together_fit_in_120_s_wait(self):
+        # 100 s of others' work and 19 s of its own: 119 s.
+        w, p = whisper(eta=100), _peer_whisper()
+        release = asyncio.Event()
+        dictation = asyncio.create_task(hold_open(w.lease, "dictation", release))
+        await until(lambda: w.lease._uses)
+        peer = asyncio.create_task(_as_peer(lambda: p.lease.acquire("peer node-guest", expected_s=19, wait_s=None)))
+        await until(lambda: waiting() == ["whisper:small"])
         release.set()
         await asyncio.wait_for(asyncio.gather(dictation, peer), BOUND)
         await nothing_left()
 
 
 class TestAnEstimateOverItOrUnknownIsRefusedAtOnce:
+    @pytest.mark.asyncio
+    async def test_a_wait_that_fits_alone_but_not_with_its_own_work_is_refused(self):
+        # 110 s of others' work and 19 s of its own: 129 s, over the guest's 120 s.
+        swap(True, wait_s=300, remote_timeout=1200)
+        w, p = whisper(eta=110), _peer_whisper()
+        release = asyncio.Event()
+        dictation = asyncio.create_task(hold_open(w.lease, "dictation", release))
+        await until(lambda: w.lease._uses)
+
+        refusal = await _refused_at_once(p.lease, None, expected_s=19)
+
+        _names_nothing(refusal)
+        assert refusal.wait["known"] is True and refusal.wait["wait_s"] == 110
+        release.set()
+        await asyncio.wait_for(dictation, BOUND)
+
+    @pytest.mark.asyncio
+    async def test_its_own_work_unknown_is_refused_even_when_the_wait_fits(self):
+        w, p = whisper(eta=5), _peer_whisper()
+        release = asyncio.Event()
+        dictation = asyncio.create_task(hold_open(w.lease, "dictation", release))
+        await until(lambda: w.lease._uses)
+
+        refusal = await _refused_at_once(p.lease, 60, expected_s=None)
+
+        _names_nothing(refusal)
+        assert refusal.wait["known"] is True and refusal.wait["wait_s"] == 5
+        release.set()
+        await asyncio.wait_for(dictation, BOUND)
+
     @pytest.mark.asyncio
     async def test_over_the_deadline(self):
         w, p = whisper(eta=200), _peer_whisper()
@@ -219,6 +285,27 @@ class TestAnEstimateOverItOrUnknownIsRefusedAtOnce:
         _names_nothing(await _refused_at_once(_peer_whisper().lease, 60))
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
+    @pytest.mark.parametrize("swap_on", [True, False], ids=["swap on", "swap off"])
+    async def test_a_running_supervisor_idle_or_busy_refuses_a_peer_at_once(self, busy, swap_on):
+        # A supervisor's claim: a peer gets the card only when no claim stands on it (L13).
+        swap(swap_on)
+
+        class Supervisor:
+            alias, ENGINE, port = "flash", "strata", None
+            _proc, props, _draining = type("Proc", (), {"returncode": None})(), {"total_slots": 1}, False
+
+            def _busy_for_the_card(self, state, but_for=None, before=None):
+                return busy
+
+        held = Supervisor()
+        base_mod._CARD_CLAIMS[held] = "claimed"
+        assert base_mod._live_claims() == [(held, "running")]
+        refusal = await _refused_at_once(_peer_whisper().lease, 60, expected_s=1)
+        _names_nothing(refusal)
+        assert refusal.wait["known"] is False
+
+    @pytest.mark.asyncio
     async def test_any_owners_place_in_the_card_queue_is_ahead_of_a_peer(self):
         p = _peer_whisper()
         base_mod._CARD_QUEUE.append(base_mod._CardPlace("flash"))
@@ -239,7 +326,7 @@ class TestAnEstimateOverItOrUnknownIsRefusedAtOnce:
     async def test_with_the_swap_on_an_idle_cheap_holder_lets_go_for_a_peer(self):
         w, p = whisper(), _peer_whisper()
         await w.lease.acquire("preload", wait_s=BOUND)
-        await asyncio.wait_for(_as_peer(lambda: p.lease.acquire("peer node-guest", wait_s=60)), BOUND)
+        await asyncio.wait_for(_as_peer(lambda: p.lease.acquire("peer node-guest", expected_s=1, wait_s=60)), BOUND)
         assert holding() == ["whisper:small"] and len(w.yields) == 1
         await nothing_left()
 
@@ -251,7 +338,7 @@ class TestAnEstimateOverItOrUnknownIsRefusedAtOnce:
         await until(lambda: w.lease._uses)
 
         with pytest.raises(LeaseRefusedForPeer) as refused:
-            await asyncio.wait_for(_as_peer(lambda: p.lease.acquire("peer node-guest", wait_s=0.3)), BOUND)
+            await asyncio.wait_for(_as_peer(lambda: p.lease.acquire("peer node-guest", expected_s=1, wait_s=0.3)), BOUND)
 
         _names_nothing(refused.value)
         assert waiting() == []

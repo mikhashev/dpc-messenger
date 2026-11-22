@@ -58,7 +58,6 @@ PEER = "dpc-node-" + "b" * 32
 @pytest.fixture
 def quick(monkeypatch):
     monkeypatch.setattr(base_mod, "_SWAP_POLL_S", 0.005)
-    monkeypatch.setattr(base_mod, "_LEASE_ASK_AGAIN_S", 0.02)
     monkeypatch.setattr(base_mod, "_LAST_SWAP", None)
     yield
     base_mod.bind_model_download_service(None)

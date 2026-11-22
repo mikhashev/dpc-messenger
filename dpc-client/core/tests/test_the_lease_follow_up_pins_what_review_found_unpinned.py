@@ -65,7 +65,7 @@ class TestTheWaiterHookCarriesForAPeer:
 
         async def as_peer():
             with serving_a_peer("node-guest"):
-                await peer.lease.acquire("peer node-guest", wait_s=60)
+                await peer.lease.acquire("peer node-guest", wait_s=60, expected_s=2)
 
         guest = asyncio.create_task(as_peer())
         await until(lambda: waiting() == ["whisper:small"])

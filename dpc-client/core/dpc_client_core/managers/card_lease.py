@@ -14,9 +14,10 @@ Pure Python and in-process, the same on Windows, Linux and macOS: no lease is gr
 vendor tool, only this registry. Every write happens on the owner loop (`bind_owner_loop`), where
 `acquire` is run from any loop, and `release` from any thread.
 
-The supervisor module never imports this one; importing this one installs the three hooks it reads
-(`_LEASE_HOLDERS`, `_LEASE_WAITERS`, `_LEASE_QUEUE_ROWS`), as the provider module sets
-`_still_configured`. Until it is imported no lease exists and the card behaves exactly as before.
+The supervisor module never imports this one; importing this one installs the four hooks it reads
+(`_LEASE_HOLDERS`, `_LEASE_WAITERS`, `_LEASE_QUEUE_ROWS`, `_LEASE_CHAT_LEAVES`), as the provider
+module sets `_still_configured`. Until it is imported no lease exists and the card behaves exactly as
+before.
 
 Slice S1: the registry, the line, the order across both lines as seen from a lease, the yield of an
 idle lease to a lease, the refusals and the wait estimate. Slice S2: the supervisors honour leases
@@ -52,12 +53,14 @@ _YIELD_COSTS = ("cheap", "engine")
 # How often a waiter looks again without being woken: a supervisor that stops, or a use that
 # closes, does not wake the line. Tests set it lower.
 _LEASE_POLL_S = 0.1
-# How soon a waiter asks a holder again after it answered `refused` or `could_not_let_go`; at most
-# `_MAX_SWAP_ROUNDS` asks per holder and waiter, the supervisors' safety net against a ping-pong.
-_YIELD_RETRY_S = 1.0
+# How soon a waiter asks a holder again after `refused` or `could_not_let_go` is the supervisors'
+# `_LEASE_ASK_AGAIN_S`, read where used; at most `_MAX_SWAP_ROUNDS` asks per holder and waiter.
 # The wait estimate's figure for a cheap holder letting go (Whisper unloads in 0.35-0.61 s, ADR-052
 # "GPU figures on speech"). An engine's stop has no figure: unknown.
 _CHEAP_YIELD_S = 1.0
+# A peer's whole trip (ADR-052 L13, point 2): its wait and its own `expected_s` fit in this, or it is
+# refused at once, whatever bound its door passes.
+PEER_TRIP_S = 120.0
 
 # Every lease, by holder name, granted or not. Registered when built.
 _CARD_LEASES: Dict[str, "CardLease"] = {}
@@ -95,8 +98,15 @@ class LeaseWouldWaitOnItself(LeaseRefusal):
 
 
 class LeaseSkipped(LeaseRefusal):
-    """A background call (the glossary's word) and the card is not free right now: nothing waited, nothing yielded.
-    The client falls back to the CPU."""
+    """`background=True` (the glossary's **background call**, its lease carrier) and the card is not
+    free right now: nothing waited, nothing yielded. What follows is the client's (ADR-052 L4): the
+    Whisper preload stays lazy, a background transcription takes the CPU twin when L12 passes it, the
+    embedder's steady-state query its CPU model. Music engines have no CPU twin and never ask with
+    `background`: a job waits in the line."""
+
+
+class LeaseTakenOut(LeaseRefusal, _sup.TakenOutOfTheCardQueue):
+    """A person's Stop took this waiter out of the lease line (`leave_card_queue`, rule 12)."""
 
 
 class LeaseRefusedForPeer(LeaseRefusal):
@@ -500,8 +510,9 @@ class CardLease:
         """Hold the card: at once when nothing excludes this lease and nobody earlier waits (L1,
         L5a), else in `_LEASE_LINE` up to `wait_s` seconds from now (None: until `check` raises or
         the caller is cancelled). A granted lease is granted again at once. `background` never
-        waits or yields (`LeaseSkipped`); a peer's request (`serving_a_peer`) waits only when the
-        estimate fits `wait_s` (L13). `on_wait` is told the wait estimate (L10) whenever who it
+        waits or yields (`LeaseSkipped`); a peer's request (`serving_a_peer`) waits only when its
+        whole trip is known and fits: the estimate plus its own `expected_s` within `PEER_TRIP_S`
+        and `wait_s` (L13). `on_wait` is told the wait estimate (L10) whenever who it
         waits for changes; `expected_s` is how long this request will hold the card once granted,
         which the estimate of a later waiter counts."""
         await _enter(self, what, wait_s=wait_s, background=background, check=check, on_wait=on_wait,
@@ -614,14 +625,15 @@ class _LeaseWaiter:
         self.arrival = next(_sup._CARD_ARRIVAL)
         self.queued_at = time.time()
         self.for_a_peer = _sup.peer_being_served() is not None
-        if wait_s is None and self.for_a_peer:
-            # A peer always has a bound; the inference peers' one when its door gave none (L13).
-            wait_s = _sup._a_peers_slot_wait_s()
+        self.expected_s = _positive(expected_s)
+        if self.for_a_peer:
+            # What is left of the trip once its own work is counted, or its door's bound when shorter.
+            trip_left = max(0.0, PEER_TRIP_S - (self.expected_s or 0.0))
+            wait_s = trip_left if wait_s is None else min(max(0.0, float(wait_s)), trip_left)
         self.wait_s = wait_s
         self.give_up_at = math.inf if wait_s is None else _clock() + max(0.0, float(wait_s))
         self.hold = _sup.current_card_hold()
         self.opens_a_use = opens_a_use
-        self.expected_s = _positive(expected_s)
         self.event: Optional[asyncio.Event] = None
         self.granted = False
         self.use: Optional[_Use] = None
@@ -926,7 +938,7 @@ def _ask_idle_holders(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optio
         asks, next_at = waiter.asks.get(holder, (0, 0.0))
         if asks >= _sup._MAX_SWAP_ROUNDS or now < next_at:
             continue
-        waiter.asks[holder] = (asks + 1, now + _YIELD_RETRY_S)
+        waiter.asks[holder] = (asks + 1, now + _sup._LEASE_ASK_AGAIN_S)
         holder._ask_to_let_go(waiter.lease.alias)
 
 
@@ -942,7 +954,7 @@ def _swap_idle_engines(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Opti
     """Mike #70: when only supervisors stand in its way, and nobody earlier waits in either line
     (L5a: those would be blockers too), the waiter swaps each idle one out, as an owner's start
     does; a busy one is waited for and named. At most `_MAX_SWAP_ROUNDS` marks per supervisor and
-    waiter, `_YIELD_RETRY_S` apart (a stop that failed leaves the holder serving)."""
+    waiter, `_LEASE_ASK_AGAIN_S` apart (a stop that failed leaves the holder serving)."""
     if not blockers or not _swaps_engines(waiter):
         return
     if any(kind != "holder" or _a_lease(what) for kind, what, _state in blockers):
@@ -954,7 +966,7 @@ def _swap_idle_engines(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Opti
         if asks >= _sup._MAX_SWAP_ROUNDS or now < next_at:
             continue
         if _sup.swap_out_for_a_lease(holder, waiter.lease, stop_bound) is not None:
-            waiter.asks[holder] = (asks + 1, now + _YIELD_RETRY_S)
+            waiter.asks[holder] = (asks + 1, now + _sup._LEASE_ASK_AGAIN_S)
 
 
 def _tell(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optional[str]]],
@@ -1003,8 +1015,10 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
             alias, engine, wait=_estimate(waiter, blockers),
         ))
     if waiter.for_a_peer:
+        # Its own work unknown leaves the whole trip unknown (L10): refused like an unknown wait.
         estimate = _estimate(waiter, blockers)
-        if not estimate["known"] or estimate["wait_s"] > waiter.give_up_at - _clock():
+        if (not estimate["known"] or waiter.expected_s is None
+                or estimate["wait_s"] > waiter.give_up_at - _clock()):
             raise _refuse(waiter, LeaseRefusedForPeer(
                 f"this node's GPU is busy with another job right now, {_peer_wait_words(estimate['wait_s'])}",
                 wait=estimate,
@@ -1044,6 +1058,37 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
     except BaseException:
         _leaves(waiter)
         raise
+
+
+def _chat_leaves_the_lease_line(conversation_id: str) -> int:
+    """A person's Stop in this chat: each lease waiter asked under a hold of that chat leaves the
+    line now and meets `LeaseTakenOut` (rule 12). Returns how many.
+
+    A mark it made is not cleared here: a holder it asked keeps `draining` until its yield ends, and
+    `_run_yield` ends the mark whatever the outcome. Clearing it mid-yield would admit a use onto a
+    model being unloaded (L5, L6). The Stop only ends the asking: nothing asks again for this waiter."""
+    if not conversation_id:
+        return 0
+    taken = 0
+    for waiter in list(_LEASE_LINE):
+        hold = waiter.hold
+        if (waiter.granted or waiter.out is not None or hold is None
+                or getattr(hold, "conversation_id", None) != conversation_id):
+            continue
+        hold.taken_out = True
+        waiter.out = LeaseTakenOut(
+            f"{waiter.lease.display}: a person's Stop took this request ({waiter.what}) out of the line "
+            "for the card",
+            waiter.lease.alias, waiter.lease.ENGINE,
+        )
+        _LEASE_LINE.remove(waiter)
+        if waiter.event is not None:
+            waiter.event.set()
+        taken += 1
+    if taken:
+        _settle()
+        _wake()
+    return taken
 
 
 def close_the_line(why: str) -> None:
@@ -1102,6 +1147,7 @@ def _install_hooks() -> None:
     _sup._LEASE_HOLDERS = _lease_holders
     _sup._LEASE_WAITERS = _lease_waiters
     _sup._LEASE_QUEUE_ROWS = _lease_queue_rows
+    _sup._LEASE_CHAT_LEAVES = _chat_leaves_the_lease_line
 
 
 _install_hooks()

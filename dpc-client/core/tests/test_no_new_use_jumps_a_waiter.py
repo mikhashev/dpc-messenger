@@ -45,7 +45,6 @@ pytestmark = pytest.mark.usefixtures("fast", "quick")
 @pytest.fixture
 def quick(monkeypatch):
     monkeypatch.setattr(base_mod, "_SWAP_POLL_S", 0.005)
-    monkeypatch.setattr(base_mod, "_LEASE_ASK_AGAIN_S", 0.02)
 
 
 def queued_starts():

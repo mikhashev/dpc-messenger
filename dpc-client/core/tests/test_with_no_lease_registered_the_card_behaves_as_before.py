@@ -30,7 +30,17 @@ from dpc_client_core.managers.llama_server_supervisor import (
 )
 from dpc_client_core.providers.llamacpp_server_provider import card_holder, stop_local_engine
 
-from tests._card_lease_helpers import BOUND, fast, hold_open, music, nothing_left, swap, until, whisper  # noqa: F401
+from tests._card_lease_helpers import (  # noqa: F401
+    BOUND,
+    fast,
+    freeze_clocks,
+    hold_open,
+    music,
+    nothing_left,
+    swap,
+    until,
+    whisper,
+)
 from tests.test_one_local_engine_holds_the_card import _llama, _strata, card  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("fast")
@@ -47,8 +57,8 @@ def _old_card_holders():
 
 
 def _old_card_queue():
-    """`card_queue()` as it was before ADR-052."""
-    now, clock = time.time(), base_mod._swap_clock()
+    """`card_queue()` as it was before ADR-052, read through the supervisor's own clocks."""
+    now, clock = base_mod.time.time(), base_mod._swap_clock()
     return [
         {
             "alias": place.alias,
@@ -86,7 +96,9 @@ class TestNothingChangesWithoutALease:
         assert base_mod._LEASE_WAITERS() == [] and base_mod._LEASE_QUEUE_ROWS() == []
 
     @pytest.mark.asyncio
-    async def test_the_card_queue_rows_keep_their_keys(self):
+    async def test_the_card_queue_rows_keep_their_keys(self, monkeypatch):
+        # Both sides compute `give_up_at` from two clock reads; frozen, they agree to the bit.
+        freeze_clocks(monkeypatch)
         place = base_mod._CardPlace("flash")
         place.requests.append(base_mod._QueuedRequest(place))
         base_mod._CARD_QUEUE.append(place)

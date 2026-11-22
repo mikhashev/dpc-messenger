@@ -7,6 +7,7 @@ chose ("let_go" frees its "model"). `swap` binds a fake settings object, so the 
 """
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -73,13 +74,37 @@ def swap(on: bool = True, wait_s: int = 300, remote_timeout: int = 1200) -> None
 
 @pytest.fixture
 def fast(monkeypatch):
-    """The line polls every 5 ms and asks a holder again after 20 ms; nothing is left behind."""
+    """The line polls every 5 ms and asks a holder again after 20 ms (the one constant both lines
+    read); nothing is left behind."""
     monkeypatch.setattr(card_lease, "_LEASE_POLL_S", 0.005)
-    monkeypatch.setattr(card_lease, "_YIELD_RETRY_S", 0.02)
+    monkeypatch.setattr(base_mod, "_LEASE_ASK_AGAIN_S", 0.02)
     swap(True)
     yield
     base_mod.bind_local_engine_settings(None)
     base_mod.bind_owner_loop(None)
+
+
+class _FrozenWallClock:
+    """The `time` module with `time()` stopped at one reading."""
+
+    def __init__(self, at: float):
+        self._at = at
+
+    def time(self) -> float:
+        return self._at
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
+def freeze_clocks(monkeypatch, wall: float = 1_800_000_000.0, card: float = 5_000.0) -> None:
+    """Both clocks a queue row is computed from, stopped, in both modules that read them: the wall
+    clock (`time.time()`, read by each module's own `time`) and the card's clock (`_swap_clock`,
+    which `card_lease._clock` reads through the supervisor). Two reads ms apart then agree exactly."""
+    frozen = _FrozenWallClock(wall)
+    monkeypatch.setattr(base_mod, "time", frozen)
+    monkeypatch.setattr(card_lease, "time", frozen)
+    monkeypatch.setattr(base_mod, "_swap_clock", lambda: card)
 
 
 async def until(condition: Callable[[], Any], bound: float = BOUND) -> None:
