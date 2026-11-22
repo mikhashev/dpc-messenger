@@ -91,7 +91,7 @@ class LeaseWouldWaitOnItself(LeaseRefusal):
 
 
 class LeaseSkipped(LeaseRefusal):
-    """A background request and the card is not free right now: nothing waited, nothing yielded.
+    """A background call (the glossary's word) and the card is not free right now: nothing waited, nothing yielded.
     The client falls back to the CPU."""
 
 
