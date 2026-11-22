@@ -291,9 +291,12 @@ async def test_stop_stops_the_running_turn_of_the_chat_and_drops_what_came_after
     await asyncio.sleep(0.01)
 
     cmd = _update(text="/stop")
+    cmd.effective_user.full_name = "Mike"
     await bridge._handle_stop_command(cmd, _ctx())
+    # The reply says the press itself (the line the turn's chat is told on a press, once).
     assert _replies(cmd) == [
-        "⏹ Stopped the agent's running turn; dropped 1 message not yet sent to the agent."]
+        "⏹ Stop pressed by Mike (Telegram) — writing a summary of where it stopped; "
+        "dropped 1 message not yet sent to the agent."]
 
     await _finish([first, second])
     await asyncio.sleep(0.1)

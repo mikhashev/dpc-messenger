@@ -867,17 +867,21 @@ FAILED_TURN_NOTICE = "⚠️ No answer this time: the run failed. Its owner was 
 # text, nothing else, so the same record renders the same bytes every time.
 USER_STOPPED_MARK = "[The user pressed Stop and ended this turn early.]"
 USER_KILLED_MARK = "[The user pressed Stop, then Kill: this turn was ended at once, with no summary.]"
-_STOPPED_TEXT_OPENING = "⚠️ Stopped by user"
+# How every notice of a stopped turn opens: the loop's own "⚠️ Stopped by user after N
+# rounds." and the group post's "⚠️ Stopped by <who> — summary of where it stopped:"
+# (loop.py `group_stop_post_text`). Text that opens so says the Stop itself.
+STOPPED_TEXT_OPENING = "⚠️ Stopped by"
 
 
 def _with_the_stop_mark(record: Dict[str, Any], body: str) -> str:
     """`body` with the one-line mark of a user's Stop above it, when the record is
     that of a stopped or killed turn. A stopped turn whose text already opens with
-    the loop's own "Stopped by user" notice says so itself and gets no second line."""
+    a "Stopped by" notice (the loop's own, or the group post's first line) says so
+    itself and gets no second line."""
     turn_end = record.get("turn_end")
     if turn_end == "killed":
         return f"{USER_KILLED_MARK}\n{body}" if body else USER_KILLED_MARK
-    if turn_end == "stopped" and not body.lstrip().startswith(_STOPPED_TEXT_OPENING):
+    if turn_end == "stopped" and not body.lstrip().startswith(STOPPED_TEXT_OPENING):
         return f"{USER_STOPPED_MARK}\n{body}" if body else USER_STOPPED_MARK
     return body
 

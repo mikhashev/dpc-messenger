@@ -690,6 +690,9 @@ class Message:
     # Outside every hash and never from the wire: this node's own agent turn's
     # finished strip (add_message `speed_summary`).
     speed_summary: Optional[Dict[str, Any]] = None
+    # Outside every hash and never from the wire, like `speed_summary`: the Stop lines of
+    # this node's own agent turn (add_message `stop_notes`).
+    stop_notes: Optional[List[Dict[str, Any]]] = None
 
 
 class ConversationMonitor:
@@ -892,7 +895,8 @@ class ConversationMonitor:
                         tool_calls=getattr(message, "tool_calls", None),
                         signature_fields=getattr(message, "signature_fields", None),
                         mention_depth=getattr(message, "mention_depth", None),
-                        speed_summary=getattr(message, "speed_summary", None))
+                        speed_summary=getattr(message, "speed_summary", None),
+                        stop_notes=getattr(message, "stop_notes", None))
         logger.debug(f"Added message to history: role={role}, text_len={len(message.text)}")
 
         # Only run automatic detection if enabled
@@ -2348,7 +2352,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     task_type: Optional[str] = None,
                     message_source: Optional[str] = None,
                     telegram_chat_id: Optional[str] = None,
-                    speed_summary: Optional[Dict[str, Any]] = None):
+                    speed_summary: Optional[Dict[str, Any]] = None,
+                    stop_notes: Optional[List[Dict[str, Any]]] = None):
         """Add a message to the conversation history
 
         Args:
@@ -2374,6 +2379,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             speed_summary: The finished turn's strip of an agent answer
                 (`loop.speed_summary_of`), shown again after a reload. Local:
                 set after the hashes and the signature, and never exported
+            stop_notes: The Stop lines of a turn the user stopped, `[{kind, who, ts,
+                text}]` (loop.py STOP_NOTE_KINDS), shown again in the finished
+                message's progress block. Local like `speed_summary`: set after the
+                hashes and the signature, never exported, never kept from a peer
 
         Note: This also adds to message_buffer and full_conversation for knowledge extraction.
         thinking and streaming_raw are stored in history.json but excluded from knowledge extraction.
@@ -2485,6 +2494,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         if speed_summary:
             message_dict["speed_summary"] = dict(speed_summary)
+        if stop_notes:
+            message_dict["stop_notes"] = [dict(n) for n in stop_notes if isinstance(n, dict)]
 
         self.message_history.append(message_dict)
 
@@ -4492,6 +4503,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 continue
             # The strip is the storing node's own and unsigned: a peer's is not kept.
             checked.pop("speed_summary", None)
+            checked.pop("stop_notes", None)
             # So is a `file_verdict`, and it goes before anything reads it: the
             # merge into our own note below (`_drop_local_file_note`) took a
             # planted `verified` for a checked one and kept the peer's junk

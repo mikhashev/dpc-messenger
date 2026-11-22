@@ -454,11 +454,12 @@
         {/if}
 
         <!-- Tool calls collapsible (ADR-030 v3 / UI-AGENT-ACTIONS-COLLAPSIBLE) -->
-        {#if isAiSender(msg.sender, msg) && msg.tool_calls && msg.tool_calls.length > 0 && ownsToolCalls(msg)}
+        {#if isAiSender(msg.sender, msg) && ((msg.tool_calls && msg.tool_calls.length > 0) || (msg.stop_notes && msg.stop_notes.length > 0)) && ownsToolCalls(msg)}
           <AgentProgressCollapsible
-            toolCalls={msg.tool_calls}
+            toolCalls={msg.tool_calls ?? []}
             agentName={msg.senderName || ''}
             speed={msg.speed_summary || null}
+            savedStopNotes={msg.stop_notes ?? []}
           />
         {/if}
 

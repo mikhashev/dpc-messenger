@@ -74,6 +74,7 @@ from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import TURN_END_VALUES, ConversationMonitor, Message as ConvMessage
 from .dpc_agent.context import FAILED_TURN_NOTICE
+from .dpc_agent.loop import group_stop_post_text
 from .conversation_monitor import history_status_for as conversation_monitor_history_status_for
 from .conversation_monitor import live_history_boundary_in
 from .conversation_monitor import note_attachment_hash
@@ -7654,10 +7655,17 @@ class CoreService(MusicCommandsMixin):
                 agent = manager._last_used_agent
                 trace = (getattr(agent, '_last_trace', None) or {}) if agent else {}
                 tool_calls = trace.get("accumulated_tool_calls")
+                # The Stop lines of a stopped turn: the record keeps them for the panel, and the
+                # person who pressed Stop is named in the post's first line.
+                take = getattr(manager, "take_stop_notes", None)
+                stop_notes = take(group_id) if callable(take) else []
                 await self.send_group_agent_message(group_id, agent_name, response, tool_calls=tool_calls,
                                                     mention_depth=mention_depth,
                                                     turn_end=trace.get("turn_end"),
-                                                    speed_summary=trace.get("speed_summary"))
+                                                    speed_summary=trace.get("speed_summary"),
+                                                    stop_notes=stop_notes or None,
+                                                    stopped_by=next((n.get("who") for n in stop_notes
+                                                                     if n.get("who")), None))
         except Exception as e:
             logger.error("Agent group response failed: %s", e, exc_info=True)
 
@@ -7872,6 +7880,8 @@ class CoreService(MusicCommandsMixin):
         mention_depth: int = 0,
         turn_end: Optional[str] = None,
         speed_summary: Optional[Dict[str, Any]] = None,
+        stop_notes: Optional[List[Dict[str, Any]]] = None,
+        stopped_by: Optional[str] = None,
     ) -> Optional[str]:
         """Send a group message attributed to an agent.
 
@@ -7893,6 +7903,13 @@ class CoreService(MusicCommandsMixin):
             speed_summary: The run's finished strip (`loop.speed_summary_of`):
                 stored with the record and sent to this node's UI, like
                 `tool_calls`; unsigned, and never sent to a peer.
+            stop_notes: The Stop lines of a stopped turn (`DpcAgentManager.take_stop_notes`):
+                stored with the record and sent to this node's UI, like `speed_summary`;
+                unsigned, and never sent to a peer.
+            stopped_by: The person who pressed Stop on a `stopped` or `killed` turn, named
+                in the first line of the post (`loop.group_stop_post_text`); None reads
+                "the user". That line is the room's only sign of a stop: the signed
+                record has no `turn_end`, and a peer routes the post's mentions by depth.
 
         Returns:
             The generated message_id (16-char hex), or None if the group was not found.
@@ -7952,6 +7969,10 @@ class CoreService(MusicCommandsMixin):
                 "duration": 5000,
             })
             text = FAILED_TURN_NOTICE
+        elif turn_end in ("stopped", "killed"):
+            # Part of the signed text, as the room's own sign that this is a stop and not an
+            # answer. The signed format and DPTP are untouched: it is only text.
+            text = group_stop_post_text(text, turn_end, stopped_by or "")
 
         import uuid
         message_id = uuid.uuid4().hex[:16]
@@ -7974,6 +7995,7 @@ class CoreService(MusicCommandsMixin):
             tool_calls=tool_calls or None,
             mention_depth=mention_depth or None,
             speed_summary=speed_summary or None,
+            stop_notes=stop_notes or None,
         ))
         monitor.save_history()
 
@@ -8006,6 +8028,8 @@ class CoreService(MusicCommandsMixin):
         }
         if speed_summary:
             payload["speed_summary"] = speed_summary
+        if stop_notes:
+            payload["stop_notes"] = stop_notes
         if mention_depth:
             # Inside the v3 preimage; absent means 0.
             payload["mention_depth"] = mention_depth
@@ -8018,7 +8042,8 @@ class CoreService(MusicCommandsMixin):
         self._processed_message_ids.add(dedup_key)  # bounds itself, oldest out first
 
         # Relay to P2P peers so remote members see the agent response
-        for_peers = {k: v for k, v in payload.items() if k not in ("tool_calls", "speed_summary")}
+        for_peers = {k: v for k, v in payload.items()
+                     if k not in ("tool_calls", "speed_summary", "stop_notes")}
         await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": for_peers})
 
         # Update token count — use agent's tokens_after_last_response if available
@@ -10445,11 +10470,13 @@ class CoreService(MusicCommandsMixin):
             # what a reload will say.
             turn_end = None
             speed_summary = None
+            stop_notes = None
             if monitor and monitor.message_history:
                 if monitor.message_history[-1].get("role") == "assistant":
                     assistant_msg_index = monitor.message_history[-1].get("msg_index", 0)
                     turn_end = monitor.message_history[-1].get("turn_end")
                     speed_summary = monitor.message_history[-1].get("speed_summary")
+                    stop_notes = monitor.message_history[-1].get("stop_notes")
                 if len(monitor.message_history) >= 2 and monitor.message_history[-2].get("role") == "user":
                     user_msg_index = monitor.message_history[-2].get("msg_index", 0)
 
@@ -10476,6 +10503,7 @@ class CoreService(MusicCommandsMixin):
                     "context_breakdown": session_state.get("context_breakdown"),
                     **({"turn_end": turn_end} if turn_end else {}),
                     **({"speed_summary": speed_summary} if speed_summary else {}),
+                    **({"stop_notes": stop_notes} if stop_notes else {}),
                 }
             )
 

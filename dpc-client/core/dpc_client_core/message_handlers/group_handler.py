@@ -644,9 +644,15 @@ class GroupTextHandler(MessageHandler):
                 agent_display = self.service._get_agent_display_name(agent_id)
                 agent = getattr(manager, "_last_used_agent", None)
                 trace = getattr(agent, "_last_trace", None) or {}
+                # The Stop lines of a stopped turn, and who pressed Stop (service._invoke_agent_in_group).
+                take = getattr(manager, "take_stop_notes", None)
+                stop_notes = take(group_id) if callable(take) else []
                 await self.service.send_group_agent_message(group_id, agent_display, response,
                                                             mention_depth=mention_depth,
-                                                            turn_end=trace.get("turn_end"))
+                                                            turn_end=trace.get("turn_end"),
+                                                            stop_notes=stop_notes or None,
+                                                            stopped_by=next((n.get("who") for n in stop_notes
+                                                                             if n.get("who")), None))
         except Exception as e:
             self.logger.error("Agent group response failed: %s", e, exc_info=True)
 

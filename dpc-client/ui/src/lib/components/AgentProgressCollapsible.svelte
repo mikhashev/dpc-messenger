@@ -13,6 +13,7 @@
     import { clampDetail, formatToolInput } from '$lib/utils/toolDetail';
     import { firstRound, roundJumpLabel, roundJumpTitle } from '$lib/utils/roundJump';
     import { sendCommand, agentStopNotes } from '$lib/coreService';
+    import type { StopNote } from '$lib/utils/stopNotes';
     import {
         pressAction, stopButtonLabel, stopButtonTitle, stopButtonDisabled, type StopState,
     } from '$lib/utils/stopButton';
@@ -38,6 +39,7 @@
         conversationId = '',
         agentId = '',
         speed = null,
+        savedStopNotes = [],
     }: {
         toolCalls: ToolCall[];
         agentName?: string;
@@ -49,6 +51,7 @@
         conversationId?: string;
         agentId?: string;
         speed?: Record<string, any> | null;
+        savedStopNotes?: StopNote[];
     } = $props();
 
     // Open while the run is live, and the reader owns it from then on — the run
@@ -85,8 +88,11 @@
     let first = $derived(firstRound(toolCalls));
     // What happens after Stop was pressed, as lines of their own under the rounds: who
     // pressed it, the summary being written with tools off, a Kill (utils/stopNotes.ts).
-    // Only the live block has them.
-    let stopNotes = $derived(isLive && conversationId ? ($agentStopNotes[conversationId] ?? []) : []);
+    // The live block has them from the store; a finished message's block draws the ones
+    // its record kept (`savedStopNotes`, history `stop_notes`), so they stay with the turn.
+    let stopNotes = $derived<StopNote[]>(
+        isLive ? (conversationId ? ($agentStopNotes[conversationId] ?? []) : []) : savedStopNotes,
+    );
     function jumpToRunStart(e: Event) {
         e.stopPropagation();
         rootEl?.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -185,7 +191,7 @@
     }
 </script>
 
-{#if toolCalls.length > 0 || isLive}
+{#if toolCalls.length > 0 || isLive || stopNotes.length > 0}
     <div class="tool-calls-collapsible" class:live={isLive} bind:this={rootEl}>
         <button
             class="tool-calls-header"
@@ -199,7 +205,11 @@
                 <span class="agent-label">{agentName}</span>
             {/if}
             <span class="action-count">
-                {roundCount} {roundCount === 1 ? 'round' : 'rounds'} · {toolCalls.length} {toolCalls.length === 1 ? 'action' : 'actions'}{isLive ? '...' : ''}
+                {#if toolCalls.length === 0 && !isLive}
+                    no actions
+                {:else}
+                    {roundCount} {roundCount === 1 ? 'round' : 'rounds'} · {toolCalls.length} {toolCalls.length === 1 ? 'action' : 'actions'}{isLive ? '...' : ''}
+                {/if}
             </span>
             {#if speed && (isLive || speed.median)}
                 <span class="speed-counter" title={speed.elapsed_s ? `model ${speed.model || speed.alias || ''}, round ${speed.round ?? '?'}, ${speed.prompt_tokens ?? 0} in / ${speed.completion_tokens ?? 0} out, ${speed.elapsed_s}s` : ''}>

@@ -26,6 +26,22 @@ export function isStopNote(payload: { stop_note?: unknown } | null | undefined):
     return !!payload && typeof payload.stop_note === 'string' && KINDS.has(payload.stop_note);
 }
 
+/** A record's saved Stop lines (history `stop_notes`, written by the backend beside
+ *  `tool_calls`: `{kind, who, ts, text}` in the order they were said) as the panel draws
+ *  them. Lines of an unknown kind or with no text are left out; an old record has none
+ *  and renders as before. Shared by the live response and the reload. */
+export function stopNotesOf(value: unknown): StopNote[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const notes: StopNote[] = [];
+    for (const n of value) {
+        if (!n || typeof n !== 'object') continue;
+        const { kind, text, ts } = n as { kind?: unknown; text?: unknown; ts?: unknown };
+        if (typeof kind !== 'string' || !KINDS.has(kind) || typeof text !== 'string' || !text) continue;
+        notes.push({ kind: kind as StopNoteKind, text, ts: typeof ts === 'string' ? ts : undefined });
+    }
+    return notes.length > 0 ? notes : undefined;
+}
+
 /** The notes with this payload's line added at the end. A line of a kind already
  *  shown is not drawn twice (a repeated press says nothing new). */
 export function addStopNote(

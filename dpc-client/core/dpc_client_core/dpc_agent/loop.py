@@ -32,8 +32,8 @@ from .utils import (
     load_agent_config,
 )
 from .context import (
-    CompactionState, apply_compaction, context_reserve_of, estimate_messages_tokens,
-    text_of_messages,
+    STOPPED_TEXT_OPENING, CompactionState, apply_compaction, context_reserve_of,
+    estimate_messages_tokens, text_of_messages,
 )
 from . import prompt_divergence
 from .tool_ledger import record_attempt, sweep_unfinished
@@ -1874,6 +1874,39 @@ def stop_note_text(kind: str, who: str = "") -> str:
     if kind == "before_round_1":
         return "Stopped before the first step — nothing was done, so there is nothing to summarise"
     raise ValueError(f"unknown stop note kind {kind!r}")
+
+
+# The words the loop opens the text of a turn the user stopped without a summary with,
+# and the one place a name is put in them for a group's post.
+_STOPPED_BY_USER_OPENING = "⚠️ Stopped by user"
+
+
+def group_stop_post_text(text: str, turn_end: Optional[str], who: str = "") -> str:
+    """The text a group post of a stopped or killed turn carries, so that the room can
+    tell a stop from an answer (the signed record has no `turn_end`, and a peer reads
+    only this text).
+
+    * stopped, with a summary: a first line `⚠️ Stopped by <who> — summary of where it
+      stopped:` and the summary under it;
+    * stopped or killed, without one: the loop's own "⚠️ Stopped by user ..." notice, with
+      `<who>` in place of "user";
+    * text that already opens with a "Stopped by" notice, any other turn end, an empty
+      text: unchanged. `who` empty reads "the user".
+    """
+    if turn_end not in ("stopped", "killed") or not (text or "").strip():
+        return text
+    who = (who or "").strip() or "the user"
+    if text.lstrip().startswith(_STOPPED_BY_USER_OPENING):
+        if who == "the user":
+            return text
+        lead = text[:len(text) - len(text.lstrip())]
+        rest = text.lstrip()[len(_STOPPED_BY_USER_OPENING):]
+        return f"{lead}{STOPPED_TEXT_OPENING} {who}{rest}"
+    if text.lstrip().startswith(STOPPED_TEXT_OPENING):
+        return text
+    if turn_end == "killed":
+        return text
+    return f"{STOPPED_TEXT_OPENING} {who} — summary of where it stopped:\n\n{text}"
 
 
 def _say_stop_note(emit_progress: Optional[Callable[..., None]], kind: str,

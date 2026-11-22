@@ -87,6 +87,10 @@ class DpcAgentManager:
         self._interrupt_events: Dict[str, asyncio.Event] = {}
         # Second press: abandon the model call in flight (loop.py _chat_unless_killed).
         self._kill_events: Dict[str, asyncio.Event] = {}
+        # The Stop lines of the turn running in each conversation, `{kind, who, ts, text}`, kept
+        # for the record of the turn (`take_stop_notes`), and who pressed the Stop that began them.
+        self._stop_notes: Dict[str, List[Dict[str, str]]] = {}
+        self._stop_who: Dict[str, str] = {}
 
         # Get firewall reference from CoreService
         self.firewall = getattr(service, "firewall", None)
@@ -1010,6 +1014,8 @@ class DpcAgentManager:
         ev = self._interrupt_events.get(conversation_id)
         if ev:
             first_press = not ev.is_set()
+            if first_press:
+                self.__dict__.setdefault("_stop_who", {})[conversation_id] = (who or "").strip()
             ev.set()
             # A turn in the queue for the card makes no model call to finish: it leaves now.
             leave_card_queue(conversation_id)
@@ -1022,10 +1028,10 @@ class DpcAgentManager:
                     log.info("Kill signal sent for conversation %s", conversation_id)
             if killed_now:
                 self._emit_progress(stop_note_text("kill", who), conversation_id,
-                                    stop_note="kill")
+                                    stop_note="kill", stop_who=who)
             elif first_press and not kill:
                 self._emit_progress(stop_note_text("pressed", who), conversation_id,
-                                    stop_note="pressed")
+                                    stop_note="pressed", stop_who=who)
             log.info("Interrupt signal sent for conversation %s", conversation_id)
             return True
         log.warning("No active agent loop for conversation %s", conversation_id)
@@ -1306,6 +1312,7 @@ class DpcAgentManager:
                 self._interrupt_events[conversation_id] = interrupt_ev
                 kill_ev = asyncio.Event()
                 self._kill_events[conversation_id] = kill_ev
+                self._open_stop_notes(conversation_id)
                 # The `finally` below and the record after it read these from the
                 # agent. process() clears them as it starts; this covers a turn
                 # that never reaches that line, so the previous turn's tokens are
@@ -1500,6 +1507,8 @@ class DpcAgentManager:
         (`turn_end`, named by the loop's exit branch, never read from the
         text), or the prompt stood alone and the next one held two user turns.
         """
+        # Taken first: a run kept no record of leaves none behind for the next turn.
+        stop_notes = self.take_stop_notes(conversation_id)
         thinking, streaming_raw = self._answer_extras(agent, response, stream_chunks)
         has_content = response and response.strip() != _THINKING_FALLBACK
         if not (has_content or thinking or streaming_raw):
@@ -1522,6 +1531,7 @@ class DpcAgentManager:
             turn_end=turn_end,
             message_source=message_source,
             speed_summary=trace.get("speed_summary"),
+            stop_notes=stop_notes or None,
         )
         monitor.save_history()
 
@@ -1586,6 +1596,7 @@ class DpcAgentManager:
         kill_ev = asyncio.Event()
         self._interrupt_events[conversation_id] = interrupt_ev
         self._kill_events[conversation_id] = kill_ev
+        self._open_stop_notes(conversation_id)
         try:
             yield {
                 "emit_progress": emit_progress_with_context,
@@ -2018,11 +2029,17 @@ class DpcAgentManager:
         tool_calls=None,
         speed=None,
         stop_note: str = None,
+        stop_who: str = None,
     ) -> None:
         """Emit progress message to DPC UI (if available).
 
         `stop_note` (one of `loop.STOP_NOTE_KINDS`) marks a status line about a Stop: the
-        panel shows it as a line of its own and not as thinking or a tool."""
+        panel shows it as a line of its own and not as thinking or a tool. It is also kept
+        for the turn's record (`take_stop_notes`) and told to the Telegram chat the turn
+        serves (`AgentTelegramBridge.notice_for_stop`); `stop_who` names the person who
+        pressed it, the Stop's presser when not given."""
+        if stop_note:
+            self._remember_stop_note(conversation_id, stop_note, message, stop_who)
         try:
             # Try to broadcast via local_api if available
             local_api = getattr(self.service, "local_api", None)
@@ -2049,6 +2066,35 @@ class DpcAgentManager:
                 }))
         except Exception as e:
             log.debug(f"Failed to emit progress: {e}")
+
+    def _open_stop_notes(self, conversation_id: str) -> None:
+        """A turn starts: its Stop lines start empty (lines a turn that never reached its
+        record left behind are not the next turn's)."""
+        self.__dict__.setdefault("_stop_notes", {}).pop(conversation_id, None)
+        self.__dict__.setdefault("_stop_who", {}).pop(conversation_id, None)
+
+    def _remember_stop_note(self, conversation_id: str, kind: str, text: str,
+                            who: Optional[str] = None) -> None:
+        """Keep one Stop line for the record of the turn, and tell Telegram.
+
+        `who` is the person who pressed this line's button; the loop's lines (the summary,
+        a stop before the first step) name the person whose Stop began them."""
+        presser = (who if who is not None
+                   else self.__dict__.setdefault("_stop_who", {}).get(conversation_id, ""))
+        presser = (presser or "").strip() or "the user"
+        self.__dict__.setdefault("_stop_notes", {}).setdefault(conversation_id, []).append(
+            {"kind": kind, "who": presser, "ts": utc_now_iso(), "text": text})
+        bridge = getattr(self, "_telegram_bridge", None)
+        if bridge is not None:
+            try:
+                bridge.notice_for_stop(conversation_id, kind, presser)
+            except Exception as e:  # a Stop must still reach the loop
+                log.debug("Telegram was not told of the %s stop note: %s", kind, e)
+
+    def take_stop_notes(self, conversation_id: str) -> List[Dict[str, str]]:
+        """The Stop lines of the turn that just ended in this conversation, in order, taken
+        out (a second call gets none). Empty for a turn nobody stopped."""
+        return self.__dict__.setdefault("_stop_notes", {}).pop(conversation_id, None) or []
 
     def _emit_progress_clear(self, conversation_id: str) -> None:
         """Emit progress clear event to DPC UI (when task completes/fails)."""

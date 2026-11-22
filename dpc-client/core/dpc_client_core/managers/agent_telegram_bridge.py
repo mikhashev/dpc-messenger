@@ -284,6 +284,12 @@ class AgentTelegramBridge:
         # A desktop Stop's one line to each chat it dropped a burst in; held so
         # the send is not collected half-way.
         self._burst_notice_tasks: Set[asyncio.Task] = set()
+        # The chat a run of this bridge answers, by conversation: the Stop lines of that turn
+        # go to it (`notice_for_stop`). Set around the agent call of one burst batch.
+        self._serving: Dict[str, str] = {}
+        # A /stop in flight, by conversation: its own reply says the press, so the line that
+        # would say it again is handed to the reply instead of being sent.
+        self._stop_replies: Dict[str, List[str]] = {}
 
         log.info(f"AgentTelegramBridge initialized for {len(allowed_chat_ids)} chat(s), "
                 f"filter={len(self.event_filter)} event types, transcription={transcription_enabled}")
@@ -684,6 +690,47 @@ Send a voice message and it will be transcribed and processed\\.
         name = (getattr(user, "full_name", None) or getattr(user, "username", None) or "").strip()
         return f"{name} (Telegram)" if name else "a Telegram user"
 
+    @staticmethod
+    def stop_notice_text(kind: str, who: str = "") -> Optional[str]:
+        """What the Telegram user is told when Stop or Kill lands on the turn that answers
+        them; None for the kinds the panel alone says (the summary starts after "Stop pressed")."""
+        who = (who or "").strip() or "the user"
+        if kind == "pressed":
+            return f"⏹ Stop pressed by {who} — writing a summary of where it stopped"
+        if kind == "kill":
+            return f"⏹ Kill pressed by {who} — ended at once, no summary"
+        if kind == "before_round_1":
+            return "⏹ Stopped before the first step — nothing was done"
+        return None
+
+    def notice_for_stop(self, conversation_id: str, kind: str, who: str = "") -> bool:
+        """A Stop line of the turn running in `conversation_id` (`DpcAgentManager._emit_progress`
+        calls this for every one): one short message to the chat that turn answers.
+
+        The manager emits each kind once per turn (a repeated press is silent there), and a
+        kind is told once per turn here too. Nothing is sent for a turn this bridge is not
+        serving (a desktop turn in a shared conversation, a scheduled run), under the
+        events' rate limit, through the bridge's own send path. Returns True when a message
+        was sent or handed to a /stop reply."""
+        text = self.stop_notice_text(kind, who)
+        chat_id = self._serving.get(conversation_id)
+        if not text or not chat_id:
+            return False
+        held = self._stop_replies.get(conversation_id)
+        if held is not None and kind == "pressed":
+            held.append(text)  # the /stop reply says it, in the chat that sent /stop
+            return True
+        if not self._check_rate_limit(f"stop_{kind}"):
+            log.info("Stop notice %s for chat %s not sent: rate limited", kind, chat_id)
+            return False
+        try:
+            task = asyncio.get_running_loop().create_task(self._send_burst_notice(chat_id, md_literal(text)))
+        except RuntimeError:  # no loop: nothing to send with
+            return False
+        self._burst_notice_tasks.add(task)
+        task.add_done_callback(self._burst_notice_tasks.discard)
+        return True
+
     async def _handle_stop_command(self, update, context):
         """Handle /stop: the desktop Stop for the turn that answers this chat.
 
@@ -709,9 +756,18 @@ Send a voice message and it will be transcribed and processed\\.
         manager = self._agent_manager
         interrupt_loop = getattr(manager, "_interrupt_loop", None) if manager else None
         has_loop = getattr(manager, "has_active_loop", None) if manager else None
+        pressed_line = None
         if callable(has_loop) and callable(interrupt_loop) and has_loop(conversation_id):
-            if interrupt_loop(conversation_id, who=self._stop_presser_name(update)):
-                stopped = "running"
+            held: List[str] = []
+            self._stop_replies[conversation_id] = held
+            try:
+                if interrupt_loop(conversation_id, who=self._stop_presser_name(update)):
+                    stopped = "running"
+            finally:
+                self._stop_replies.pop(conversation_id, None)
+            # A first press: the line the turn's chat is told, said here, once. A repeated
+            # press has none, and the reply is the plain one.
+            pressed_line = held[0] if held else None
         if stopped is None:
             from ..dpc_agent.run_gate import stop_waiting
             if stop_waiting(conversation_id):
@@ -719,7 +775,7 @@ Send a voice message and it will be transcribed and processed\\.
         log.info("Telegram /stop in %s: stopped=%s, dropped %d gathered message(s)",
                  conversation_id, stopped, dropped)
 
-        head = {
+        head = pressed_line or {
             "running": "⏹ Stopped the agent's running turn",
             "waiting": "⏹ Stopped the turn waiting for the agent",
         }.get(stopped, "⏹ Nothing was running")
@@ -2006,6 +2062,7 @@ Send a voice message and it will be transcribed and processed\\.
         # Set before the first await: the batch is out of the burst already, so
         # a drop from here on must leave this run alone (`_drop_chat_burst`).
         burst.running = True
+        self._serving[conversation_id] = chat_id
         try:
             await self._show_chat_action(last.context, chat_id, "typing")
             self._start_new_cc_chain(conversation_id)
@@ -2058,6 +2115,8 @@ Send a voice message and it will be transcribed and processed\\.
             return batch, None, e
         finally:
             burst.running = False
+            if self._serving.get(conversation_id) == chat_id:
+                del self._serving[conversation_id]
 
     async def _answer_burst(self, conversation_id: str, batch: List[_BurstItem],
                             response: Optional[str], error: Optional[Exception]) -> None:

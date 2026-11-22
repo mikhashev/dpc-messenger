@@ -7,6 +7,7 @@
 <script lang="ts">
   import type { Writable } from 'svelte/store';
   import { mapBackendMessage, speedSummaryOf, turnEndOf } from '$lib/utils/messageMapper';
+  import { stopNotesOf } from '$lib/utils/stopNotes';
   import { imageAnswerBubble } from '$lib/utils/imageAnswerBubble';
   import { liveBubbleId } from '$lib/utils/liveMessageIdentity';
   import {
@@ -370,6 +371,7 @@
         // The record's own mark, read the way a reload reads it (mapBackendMessage).
         const turnEnd = message.status === 'OK' ? turnEndOf(message.payload.turn_end) : undefined;
         const speedSummary = message.status === 'OK' ? speedSummaryOf(message.payload.speed_summary) : undefined;
+        const stopNotes = message.status === 'OK' ? stopNotesOf(message.payload.stop_notes) : undefined;
 
         // Show toast notification for errors (helps remote users see host failures)
         if (message.status !== 'OK') {
@@ -436,6 +438,7 @@
                   streamingRaw: capturedStreamingText || undefined,
                   turnEnd,
                   speed_summary: speedSummary ?? m.speed_summary,
+                  stop_notes: stopNotes ?? m.stop_notes,
                   commandId: undefined,
                 };
               }

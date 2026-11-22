@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { addStopNote, clearStopNotes, isStopNote } from './stopNotes';
+import { addStopNote, clearStopNotes, isStopNote, stopNotesOf } from './stopNotes';
+import { mapBackendMessage } from './messageMapper';
 import panel from '../components/AgentProgressCollapsible.svelte?raw';
 import list from '../components/ChatMessageList.svelte?raw';
 import core from '../coreService.ts?raw';
+import router from '../panels/MessageRouterPanel.svelte?raw';
+import page from '../../routes/+page.svelte?raw';
 
 const pressed = {
     conversation_id: 'agent_001',
@@ -70,8 +73,8 @@ describe('the lines are wired into the live panel', () => {
         expect(panel.slice(rounds, lines)).toContain('{/if}');
     });
 
-    it('only the live block has them (it is the one given a conversation)', () => {
-        expect(panel).toMatch(/isLive && conversationId \? \(\$agentStopNotes\[conversationId\]/);
+    it('the live block has them from the store (it is the one given a conversation)', () => {
+        expect(panel).toMatch(/isLive \? \(conversationId \? \(\$agentStopNotes\[conversationId\]/);
     });
 
     it('colours come from the existing tokens', () => {
@@ -90,5 +93,55 @@ describe('the lines are wired into the live panel', () => {
         expect(own).toContain('agentStopNotes.update');
         expect(own).not.toContain('agentProgress.set');
         expect(core).toContain('agentStopNotes.update((m) => clearStopNotes(m, _cid))');
+    });
+});
+
+// What the turn kept: the finished message's block draws the lines of its record.
+const saved = [
+    { kind: 'pressed', who: 'Mike', ts: '2026-11-22T10:00:00Z', text: 'Stop pressed by Mike — waiting for the current step to finish' },
+    { kind: 'summary', who: 'Mike', ts: '2026-11-22T10:00:09Z', text: 'Writing a summary of where it stopped — tools are off (the user pressed Stop)' },
+];
+
+describe('the lines a record keeps', () => {
+    it('are read back in order, without the fields the panel does not draw', () => {
+        const notes = stopNotesOf(saved);
+        expect(notes?.map((n) => n.kind)).toEqual(['pressed', 'summary']);
+        expect(notes?.[0].text).toContain('Stop pressed by Mike');
+        expect(notes?.[1].ts).toBe('2026-11-22T10:00:09Z');
+    });
+
+    it('an old record, a non-list, and lines of an unknown kind or with no text give nothing to draw', () => {
+        expect(stopNotesOf(undefined)).toBeUndefined();
+        expect(stopNotesOf('x')).toBeUndefined();
+        expect(stopNotesOf([])).toBeUndefined();
+        expect(stopNotesOf([{ kind: 'zzz', text: 'x' }, { kind: 'pressed' }, null, 4])).toBeUndefined();
+        expect(stopNotesOf([{ kind: 'zzz', text: 'x' }, saved[0]])?.map((n) => n.kind)).toEqual(['pressed']);
+    });
+
+    it('the mapper puts them on the row, an old record has none, the open chat copy fills a gap', () => {
+        const row = mapBackendMessage({ id: 'a1', role: 'assistant', content: 'summary', turn_end: 'stopped', stop_notes: saved });
+        expect(row.stop_notes?.map((n) => n.kind)).toEqual(['pressed', 'summary']);
+        expect(mapBackendMessage({ id: 'a1', role: 'assistant', content: 'done' }).stop_notes).toBeUndefined();
+        const local = stopNotesOf(saved);
+        expect(mapBackendMessage({ id: 'a1', content: 'x' }, { local: { stop_notes: local } }).stop_notes).toEqual(local);
+    });
+});
+
+describe('the finished message draws them', () => {
+    it('the list gives the block the lines of its record and shows it for a turn with no tools', () => {
+        expect(list).toContain('savedStopNotes={msg.stop_notes ?? []}');
+        expect(list).toMatch(/msg\.stop_notes && msg\.stop_notes\.length > 0\)\) && ownsToolCalls\(msg\)/);
+    });
+
+    it('the block draws the saved lines with the same markup as the live ones, and is shown for them alone', () => {
+        expect(panel).toContain('savedStopNotes = []');
+        expect(panel).toContain('{#if toolCalls.length > 0 || isLive || stopNotes.length > 0}');
+        expect(panel.match(/class="stop-notes"/g)?.length).toBe(1);
+    });
+
+    it('the 1:1 live answer and the reload both carry them onto the row', () => {
+        expect(router).toContain('stopNotesOf(message.payload.stop_notes)');
+        expect(router).toContain('stop_notes: stopNotes ?? m.stop_notes');
+        expect(page).toContain('stop_notes: local.stop_notes');
     });
 });

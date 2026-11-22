@@ -6,6 +6,8 @@
 // Canonical definitions used across +page.svelte, ChatPanel, AgentPanel, ChatMessageList.
 // Single source of truth — do not redefine locally in components.
 
+import type { StopNote } from './utils/stopNotes';
+
 export type Mention = {
   node_id: string;
   name: string;
@@ -84,6 +86,7 @@ export type Message = {
     round: number;
   }>;
   speed_summary?: SpeedSummary; // The finished turn's strip (history `speed_summary`, beside tool_calls)
+  stop_notes?: StopNote[];      // The Stop lines of a stopped turn (history `stop_notes`, beside tool_calls)
 };
 
 /** The finished agent turn's strip, made by the backend (loop.py speed_summary_of)

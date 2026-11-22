@@ -8,6 +8,7 @@
 
 import { normalizeAttachments } from './telegramLiveMessage';
 import type { SpeedSummary, TurnEnd } from '$lib/types';
+import { stopNotesOf, type StopNote } from './stopNotes';
 
 export interface MappedMessage {
     id: string;
@@ -25,6 +26,7 @@ export interface MappedMessage {
     agentOwner?: string | null;
     turnEnd?: TurnEnd;
     speed_summary?: SpeedSummary;
+    stop_notes?: StopNote[];
 }
 
 export interface SenderIdentityOptions {
@@ -39,6 +41,7 @@ interface LocalCachedFields {
     streamingRaw?: string;
     tool_calls?: any[];
     speed_summary?: SpeedSummary;
+    stop_notes?: StopNote[];
 }
 
 interface MapOptions {
@@ -185,6 +188,7 @@ export function mapBackendMessage(msg: any, opts: MapOptions = {}): MappedMessag
         agentOwner: msg.agent_owner || null,
         turnEnd: turnEndOf(msg.turn_end),
         speed_summary: speedSummaryOf(msg.speed_summary) ?? opts.local?.speed_summary,
+        stop_notes: stopNotesOf(msg.stop_notes) ?? opts.local?.stop_notes,
     };
 }
 
