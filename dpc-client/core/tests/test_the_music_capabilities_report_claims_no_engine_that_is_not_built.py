@@ -36,6 +36,15 @@ def test_every_job_type_and_edit_action_is_listed_with_a_status_and_a_reason():
     assert report["job_types"]["voice_clone"]["status"] == "unsupported"
 
 
+def test_the_report_says_comments_are_built_and_the_region_edits_are_not():
+    from dpc_client_core.music.comments import SUPPORTED_ACTIONS
+    actions = MusicCapabilities(installed_probe).report()["actions"]
+    assert set(SUPPORTED_ACTIONS) == {"note"}
+    assert actions["note"]["status"] == "supported" and "not built" not in actions["note"]["reason"]
+    for planned in set(js.EDIT_ACTIONS) - set(SUPPORTED_ACTIONS):
+        assert actions[planned]["status"] == "planned", planned
+
+
 def test_the_limits_are_the_slice_one_decisions_per_engine():
     report = MusicCapabilities().report()
     limits = report["limits"]

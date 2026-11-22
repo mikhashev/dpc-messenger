@@ -72,7 +72,7 @@ _NOT_BUILT_JOB_TYPES: Dict[str, Dict[str, str]] = {
 }
 
 _EDIT_ACTIONS: Dict[str, Dict[str, str]] = {
-    "note": {"status": PLANNED, "reason": "comments are not built in DPC"},
+    "note": {"status": SUPPORTED, "reason": "timecoded comments, mp.comment/1 (music/comments.py); the other four actions are planned"},
     "regenerate_region": {"status": PLANNED, "reason": "repaint is not built in DPC"},
     "extend_ending": {"status": PLANNED, "reason": "continuation is not built in DPC"},
     "fix_seam": {"status": PLANNED, "reason": "repaint around the seam is not built in DPC"},

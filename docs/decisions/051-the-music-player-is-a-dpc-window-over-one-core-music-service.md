@@ -594,8 +594,8 @@ consensus 2026-11-20)") and are not decisions.
   variant as the SPEC text says, and it treats a failed read as a free card, which ADR-052's
   Ruach rule forbids and S4 changes). **Amendment (#70):** with nothing waiting and the
   server idle, music unloads the server and takes the card, by the owner-start rule and gated
-  by `swap_when_idle`. **Not built** (ADR-052 S2 and S4); SPEC decision 32 still carries the
-  old text (Q9).
+  by `swap_when_idle`. **Not built** (ADR-052 S2 and S4); SPEC decision 32 carries the amendment since 2026-11-22
+  (Q9).
 
 - **D38. Song from the person's own text** (SPEC §12 decision 33; Mike's call 2026-11-20
   09:56, defaults as proposed by CC). A job type `generate_from_text` with `track_id` and
@@ -1414,27 +1414,23 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
 - **Q9. Where the code, SPEC, EVOLUTION, GLOSSARY and this record disagree** (found in the
   2026-11-22 revision; CC did not guess, each needs Mike or the owner of the file). None is a
   decision of Mike's.
-  - **SPEC decision 32 is not amended for Mike #70.** ADR-052 says the SPEC file needs the
-    amendment (music swaps an idle server when its queue is empty); SPEC §12 decision 32 still
-    says "Nothing is stopped automatically". D37 here holds the amendment. SPEC 32 also says
-    the card is read before each variant; the runner reads it once per job and treats a failed
-    read as a free card (`runner.py` `_wait_for_card`), which ADR-052 S4 changes.
-  - **SPEC decision 30 still says N8 is deferred** ("until the endpoint is built, only files
-    under `~/.dpc` play"); it is built (`9bb7599d`, D28).
-  - **The capabilities report contradicts the comment commands.** `music/capabilities.py`
-    `_EDIT_ACTIONS["note"]` reads "comments are not built in DPC" (and `comments.py` says the
-    report's "planned"), while `add_music_comment` and its three siblings are built
-    (`f62f998b`). Probably the edit-job action `note` is meant, but the report's wording is
-    what the UI and an agent read.
-  - **"Not pushed" is stale in the ai-studio docs.** PROVENANCE §7 and EVOLUTION v3 §14 item 10
-    say `abcaaa44` is not pushed; it is on `origin/dev` (checked at `1fa73a26`). Those files
-    are not edited here.
+  - **Closed 2026-11-22** (ai-studio `067523f`, dpc-messenger fix commit of the same day): SPEC
+    decision 32 now carries Mike #70's amendment (music swaps an idle server when its queue is
+    empty; ADR-052) and says what the code does: one card read per job, and a failed read
+    treated as free, which is not intended and S4 replaces. **Still open inside it:** once per
+    job versus before each variant; neither this record nor ADR-052 decides it, and SPEC §5 and §6
+    still say "before each variant". SPEC decision 30 now says N8 is built (`9bb7599d`).
+    The capabilities report no longer says comments are not built:
+    `_EDIT_ACTIONS["note"]` is `supported` (the comment action of `mp.comment/1`; the other four
+    edit actions stay `planned`), pinned by
+    `test_the_music_capabilities_report_claims_no_engine_that_is_not_built.py`. PROVENANCE §7
+    and EVOLUTION v3 §14 item 10 say `abcaaa44` is on `origin/dev`. SPEC decision 40 records
+    Mike #198 (в), "да" to voice adapters in renders (2026-11-21 04:03 UTC); "none by default"
+    stays CC's [P].
   - **D36's date.** This record and SPEC decision 41 date Mike's MP3 ask 2026-11-22 and cite
     #210; in session A #210 is 2026-11-21 06:49Z, and the backlog card dates the first ask
     2026-11-22. The other entries here use the SPEC's Bangkok date. One of the dates is a day
     off; not resolved.
-  - **Mike's yes to voice adapters in renders is not in SPEC decision 40** (#198 (в), 2026-11-21
-    "да"). D35 records it; SPEC 40 keeps only CC's "local listening only, none by default".
   - **GLOSSARY.** No rows for **track**, **take**, **version**, **watched folder**, **genome**
     or the `mp.*` records, though Consequences promised them in the same commit as the code
     (Ark). The glossary's **engine** means the program a local LLM provider answers with; the
