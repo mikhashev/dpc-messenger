@@ -458,7 +458,13 @@ class AgentTelegramBridge:
 
             # Start polling
             await self._application.start()
-            await self._application.updater.start_polling(drop_pending_updates=True)
+            from ._telegram_conflict import make_polling_error_callback
+            await self._application.updater.start_polling(
+                drop_pending_updates=True,
+                error_callback=make_polling_error_callback(
+                    lambda: self._bot_username, f"agent bridge for {self._agent_id or '?'}"
+                ),
+            )
 
             self._enabled = True
             _ACTIVE_BOT_TOKENS.add(self.bot_token)

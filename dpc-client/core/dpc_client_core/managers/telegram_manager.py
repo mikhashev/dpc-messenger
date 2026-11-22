@@ -359,7 +359,13 @@ class TelegramBotManager:
                         _lg.addFilter(self._network_filter)
 
                     self._running = True
-                    await self.application.updater.start_polling(drop_pending_updates=drop_updates)
+                    from ._telegram_conflict import make_polling_error_callback
+                    await self.application.updater.start_polling(
+                        drop_pending_updates=drop_updates,
+                        error_callback=make_polling_error_callback(
+                            lambda: self.application.bot.username, "owner bot"
+                        ),
+                    )
                     logger.info(f"Telegram bot started (polling mode, drop_updates={drop_updates})")
 
                 # Start outgoing message sender task
