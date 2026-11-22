@@ -20,11 +20,18 @@ import pytest
 
 from dpc_client_core.managers import card_lease
 from dpc_client_core.managers import llama_server_supervisor as base_mod
-from dpc_client_core.managers.llama_server_supervisor import card_holders, card_queue
-from dpc_client_core.providers.llamacpp_server_provider import card_holder
+from dpc_client_core.managers.llama_server_supervisor import (
+    CardHeldError,
+    _QueuedRequest,
+    card_held_for,
+    card_holders,
+    card_queue,
+    serving_a_peer,
+)
+from dpc_client_core.providers.llamacpp_server_provider import card_holder, stop_local_engine
 
-from tests._card_lease_helpers import BOUND, fast, hold_open, music, nothing_left, until, whisper  # noqa: F401
-from tests.test_one_local_engine_holds_the_card import _llama, card  # noqa: F401
+from tests._card_lease_helpers import BOUND, fast, hold_open, music, nothing_left, swap, until, whisper  # noqa: F401
+from tests.test_one_local_engine_holds_the_card import _llama, _strata, card  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("fast")
 
@@ -119,15 +126,16 @@ class TestLeaseRowsComeAfterTheSupervisors:
         assert [u["what"] for u in row["uses"]] == ["dictation"] and row["beside"] is None
         assert row["yield_cost"] == "cheap" and row["vram_mib"] is None
 
-        # A supervisor claims beside it: in S1 supervisors do not see leases yet (S2), which is how
-        # both rows can be shown here.
+        # A claim beside it, put there by hand: since S2 a supervisor's start waits for a lease and
+        # the two are never on the card together (test 5), so only a direct claim shows both rows.
         llama = _llama()
-        await llama.ensure_running()
+        base_mod._CARD_CLAIMS[llama] = "claimed"
         assert [(r["alias"], r["kind"]) for r in card_holders()] == [("qwen27", "inference"),
                                                                      ("whisper:turbo", "transcription")]
-        assert card_holder()["alias"] == "qwen27"
+        assert card_holder()["alias"] == "qwen27", "card_holder stays supervisor-only after S2 too"
         assert [h for h, _state in base_mod._live_claims()] == [llama], "_live_claims stays supervisor-only"
         assert llama in base_mod._CARD_CLAIMS and len(base_mod._CARD_CLAIMS) == 1
+        base_mod._CARD_CLAIMS.pop(llama)
         release.set()
         await asyncio.wait_for(dictation, BOUND)
 
@@ -169,3 +177,63 @@ class TestLeaseRowsComeAfterTheSupervisors:
         release.set()
         await asyncio.wait_for(asyncio.gather(dictation, job), BOUND)
         await nothing_left()
+
+
+class TestTheS2PathsWithNoLeaseRegistered:
+    """S2's supervisor paths (ADR-052 section 2.2 items 3-13) read the lease hooks only; with no lease
+    registered the hooks are empty and every path is the one before ADR-052. The running app
+    registers no lease until S3/S4, so this is what it runs."""
+
+    @pytest.fixture(autouse=True)
+    def no_lease(self, monkeypatch):
+        monkeypatch.setattr(base_mod, "_LEASE_HOLDERS", lambda: [])
+        monkeypatch.setattr(base_mod, "_LEASE_WAITERS", lambda: [])
+        monkeypatch.setattr(base_mod, "_LEASE_QUEUE_ROWS", lambda: [])
+
+    @pytest.mark.asyncio
+    async def test_the_holder_readers_are_the_supervisors_alone(self, tmp_path):
+        strata = _strata(tmp_path)
+        await strata.ensure_running()
+        llama = _llama()
+        assert llama._blocking_holders() == [(strata, "running")] == base_mod._live_claims()
+        assert llama._blocking_holder() == (strata, "running")
+        assert llama._only_leases_block() is False and llama._a_supervisor_blocks() is True
+        assert base_mod._lease_holding("flash") is None and base_mod._owner_lease_waiting() is False
+        place = base_mod._CardPlace("qwen27")
+        assert llama._earlier_lease_waiter(_QueuedRequest(place)) is None
+
+    @pytest.mark.asyncio
+    async def test_with_the_swap_off_the_refusal_is_todays_and_no_place_is_taken(self, tmp_path):
+        swap(False, 30)
+        strata = _strata(tmp_path)
+        await strata.ensure_running()
+        with pytest.raises(CardHeldError, match="strata alias 'flash'") as refused:
+            await asyncio.wait_for(_llama().ensure_running(), BOUND)
+        assert "Stop 'flash' from the providers settings" in str(refused.value)
+        assert base_mod._CARD_QUEUE == []
+
+    @pytest.mark.asyncio
+    async def test_a_hold_stands_before_the_line_by_the_card_queue_alone(self):
+        async with card_held_for("qwen27", "accepted_request", agent_id="a", conversation_id="c"):
+            hold = base_mod.current_card_hold()
+            assert base_mod._stands_before_the_line(hold) is True
+            later = base_mod._CardPlace("flash")
+            base_mod._CARD_QUEUE.append(later)
+            assert base_mod._stands_before_the_line(hold) is True
+            base_mod._CARD_QUEUE.clear()
+
+    @pytest.mark.asyncio
+    async def test_a_peers_start_meets_the_same_rule_7_check(self):
+        place = base_mod._CardPlace("flash")
+        place.requests.append(_QueuedRequest(place))
+        base_mod._CARD_QUEUE.append(place)
+        llama = _llama()
+        with serving_a_peer("dpc-node-" + "c" * 32):
+            refusal = llama._card_held_error()
+        assert refusal is not None and "a request on this node is waiting for the card" in str(refusal)
+        base_mod._CARD_QUEUE.clear()
+        assert llama._card_held_error() is None
+
+    @pytest.mark.asyncio
+    async def test_stop_engine_on_an_alias_with_no_child_answers_false_as_before(self):
+        assert await stop_local_engine("whisper:turbo") is False

@@ -507,6 +507,13 @@ _SWAP_POLL_S = 0.1
 # supervisors) every supervisor counts as configured.
 _still_configured: Callable[["LlamaServerSupervisor"], bool] = lambda _supervisor: True
 _MAX_SWAP_ROUNDS = 4
+# How soon a start asks a card lease again after it answered `refused` or `could_not_let_go`
+# (ADR-052 L6); at most `_MAX_SWAP_ROUNDS` asks per lease and start, then the lease is waited for
+# like a busy holder until the start's deadline. The lease line's own `_YIELD_RETRY_S` is the same.
+_LEASE_ASK_AGAIN_S = 1.0
+# How long a person's Stop engine on a card lease waits for it to let go when no timeout is given
+# (`stop_local_engine`): an unload takes about a second and an engine's stop seconds.
+LEASE_STOP_BY_HAND_S = 120.0
 _swap_clock = time.monotonic
 # The toasts of swaps, held until sent: a task nobody references can be collected.
 _SWAP_TOASTS: "set[asyncio.Future]" = set()
@@ -693,6 +700,26 @@ def _live_holders() -> List[Tuple[Any, str]]:
     """(holder, state) of everything on the card: the supervisors first, then the granted leases.
     With no lease granted it is `_live_claims()`."""
     return _live_claims() + list(_LEASE_HOLDERS())
+
+
+def _a_lease(holder: Any) -> bool:
+    """Whether a holder is a card lease (ADR-052) and not a supervisor. Read by attribute, so this
+    module never imports the lease module."""
+    return bool(getattr(holder, "IS_CARD_LEASE", False))
+
+
+def _lease_holding(alias: str) -> Optional[Any]:
+    """The granted lease whose holder name is `alias`, or None (always None with no lease)."""
+    for holder, _state in _LEASE_HOLDERS():
+        if holder.alias == alias:
+            return holder
+    return None
+
+
+def _owner_lease_waiting() -> bool:
+    """Whether an owner's request waits in the lease line: a peer goes ahead of none (ADR-044 point
+    3, rule 7; ADR-052 L5a and L13). Always False with no lease."""
+    return any(not for_a_peer for _arrival, _lease, for_a_peer in _LEASE_WAITERS())
 
 
 def card_holders() -> List[Dict[str, Any]]:
@@ -1011,6 +1038,13 @@ def _who_stands_on(alias: str, but_for: Optional["_CardHold"] = None) -> str:
     named. Never for a peer: these are ids of the owner's agents and chats. No refusal a peer
     meets calls this, because a peer never waits in the card queue (rule 7). `but_for` is the
     card-borrow's request itself."""
+    lease = _lease_holding(alias)
+    if lease is not None:
+        # A card lease (ADR-052 section 2.2 item 6): what its open uses are for, in its own words.
+        uses = lease.who_uses()
+        if uses == "nothing":
+            return ""
+        return " It is loading." if uses == "loading" else f" In use by {uses}."
     names = []
     for hold in _CARD_HOLDS.get(alias, []):
         if hold is but_for or not _stands_before_the_line(hold):
@@ -1092,11 +1126,14 @@ class _QueuedRequest:
     deadline until it starts (`starts_the_way_back`), and `card_queue` reports no time till then."""
 
     __slots__ = ("place", "hold", "accepted_at", "queued_at", "wait_s", "wait_why", "give_up_at", "came_late",
-                 "stop_bound", "out", "_turn_mark", "borrows_from", "way_back", "for_a_peer")
+                 "stop_bound", "out", "_turn_mark", "borrows_from", "way_back", "for_a_peer", "for_leases")
 
     def __init__(self, place: _CardPlace, borrows_from: Optional[str] = None, way_back: bool = False):
         self.place = place
         self.for_a_peer = False
+        # Taken with the swap off because only card leases stood in its way (ADR-052 section 2.2
+        # item 3): it waits for them and asks an idle one to let go, and stops no supervisor.
+        self.for_leases = False
         self.hold: Optional[_CardHold] = _CARD_HOLD.get()
         self.borrows_from = borrows_from
         self.way_back = way_back
@@ -1224,8 +1261,17 @@ def _a_peers_request(alias: str) -> _QueuedRequest:
 
 def _stands_before_the_line(hold: _CardHold) -> bool:
     """Whether a hold counts for the place that acts: it was there first, or it has been let
-    through. A waiting start waits for what stood there when it queued, no more (rule 4)."""
-    return hold.admitted or not _CARD_QUEUE or hold.arrival < _CARD_QUEUE[0].arrival
+    through. A waiting start waits for what stood there when it queued, no more (rule 4). The line
+    is both lines (ADR-052 L5a point 5): the first place and every owner's lease waiter, so a stream
+    of turns accepted after a waiting dictation or music job does not keep the holder busy for it. A
+    peer's lease waiter makes no holder busy (ADR-044 point 3) and is not counted."""
+    if hold.admitted:
+        return True
+    first = _CARD_QUEUE[0].arrival if _CARD_QUEUE else None
+    for arrival, _lease, for_a_peer in _LEASE_WAITERS():
+        if not for_a_peer and (first is None or arrival < first):
+            first = arrival
+    return first is None or hold.arrival < first
 
 
 def _chat_leaves_the_line(conversation_id: str) -> None:
@@ -1660,6 +1706,98 @@ async def stop_by_hand(supervisor: "LlamaServerSupervisor", timeout: Optional[fl
             if reopen and _still_configured(supervisor):
                 supervisor.reopen()
     return outcome
+
+
+async def _stop_holder_for_a_swap(holder: "LlamaServerSupervisor", stop_bound: Optional[float]
+                                  ) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+    """The one stop a swap makes of a supervisor holder, whoever the contender is: another engine's
+    start, or a card lease (ADR-052 section 2.2 item 12). The parked count is read before the stop
+    (section 2.4), and the contender's stop bound reaches the KV snapshot save in `drain` through
+    `_SAVE_BY` (None: the save's own ceiling). The mark goes however a failure ended it, and the
+    holder serves again. Returns (parked, live_saved): `live_saved` is the save's outcome or None."""
+    try:
+        parked = await holder._parked_conversations()
+        token = _SAVE_BY.set(stop_bound)
+        try:
+            live_saved = await stop_by_hand(holder, why="swap")
+        finally:
+            with contextlib.suppress(ValueError):  # a dying task closed from another context
+                _SAVE_BY.reset(token)
+    except BaseException:
+        holder._end_swap_drain()
+        raise
+    holder._swap_for = None
+    return parked, live_saved if isinstance(live_saved, dict) else None
+
+
+def _say_swap(holder: Any, to_alias: str, to_engine: str, *, gave_up: bool = False,
+              parked: Optional[int] = None, live_saved: Optional[Dict[str, Any]] = None) -> None:
+    """Say a swap happened: the INFO line, `last_swap`, one toast. Nothing awaits here, so the card
+    is claimed in the stretch that follows. `gave_up`: the request it was for left during the stop,
+    which ran to its end, and a stopped Strata's parked conversations are gone all the same, so it
+    is said in those words. `parked` is what the engine reported just before its stop: none means
+    none went, and not knowing is said as if some did. `live_saved` is the KV snapshot save's
+    outcome: None says nothing (nothing live, or saving off); otherwise the live conversation is said
+    saved, or lost. A card lease that let go (ADR-052 section 2.2 item 5) parks nothing, and its
+    toast says the card was handed over: no engine was stopped."""
+    global _LAST_SWAP
+    dropped = holder.DROPS_PARKED_ON_STOP and parked != 0
+    tail = "; its parked conversations are dropped" if dropped else ""
+    live = _live_saved_words(holder.alias, live_saved)
+    message = (f"stopped '{holder.alias}' to free the card for '{to_alias}', which stopped waiting"
+               f"{live}{tail}" if gave_up else f"swapped '{holder.alias}' out for '{to_alias}'{live}{tail}")
+    logger.info("%s", message)
+    _LAST_SWAP = {
+        "from": holder.alias, "to": to_alias,
+        "from_engine": holder.ENGINE, "to_engine": to_engine,
+        "at": time.time(), "parked_dropped": dropped,
+        "live_saved": dict(live_saved) if live_saved else None,
+    }
+    title = "Card handed over" if _a_lease(holder) else "Local engine swapped"
+    try:
+        task = asyncio.get_running_loop().create_task(_toast(title, message, event="notice_toast"))
+    except RuntimeError:
+        return
+    _SWAP_TOASTS.add(task)
+    task.add_done_callback(_SWAP_TOASTS.discard)
+
+
+def swap_out_for_a_lease(holder: "LlamaServerSupervisor", lease: Any,
+                         stop_bound: Optional[float]) -> Optional[asyncio.Task]:
+    """A card lease swaps an idle supervisor out by the owner-start rule (ADR-052 section 2.2 item
+    12; Mike #70 for music: "if the queue is empty and the server just idles, unload it and take the
+    card"). The conditions are `_free_the_card`'s: the swap on, the holder idle by rule 1 and not
+    already stopping, no description-borrow refusal; the lease line has found the lease first in
+    both lines (L5a) in the same stretch, before calling this. The busy test and the mark are one
+    synchronous stretch. The stop runs as its own task, held in `_SWAP_STOPS`, so the lease's
+    deadline or cancel never cuts it in half; the owner's live conversation is saved before it,
+    Strata's parked count is read first and said (section 2.4). The lease is granted on its line's
+    next round, when the claim is gone. Returns the stop's task, or None when nothing was marked."""
+    if _a_lease(holder) or not swap_policy()[0]:
+        return None
+    state = next((found for sup, found in _live_claims() if sup is holder), None)
+    if state != "running" or holder._draining:  # starting is busy by rule 1; stopping is waited for
+        return None
+    if holder._busy_for_the_card(state):
+        return None
+    if _CARD_BORROW.get() and holder.DROPS_PARKED_ON_STOP:
+        return None
+    holder._begin_swap_drain(lease)  # no await since the busy test above
+    logger.info("%s[%s]: idle; stopping it to free the card for %s ('%s')",
+                holder.ENGINE, holder.alias, getattr(lease, "display", lease.alias), lease.alias)
+    # A fresh context: the stop is the holder's, not the request the lease waits for.
+    task = asyncio.get_running_loop().create_task(_stop_for_a_lease(holder, lease, stop_bound),
+                                                  context=contextvars.Context())
+    _SWAP_STOPS.add(task)
+    task.add_done_callback(_SWAP_STOPS.discard)
+    task.add_done_callback(lambda ended: ended.cancelled() or ended.exception())
+    return task
+
+
+async def _stop_for_a_lease(holder: "LlamaServerSupervisor", lease: Any, stop_bound: Optional[float]) -> None:
+    parked, live_saved = await _stop_holder_for_a_swap(holder, stop_bound)
+    _say_swap(holder, lease.alias, lease.ENGINE, gave_up=lease.state == "free", parked=parked,
+              live_saved=live_saved)
 
 
 def _positive_int(name: str, value: Any) -> int:
@@ -2520,21 +2658,47 @@ class LlamaServerSupervisor:
             raise held
         _CARD_CLAIMS[self] = "claimed"
 
-    def _blocking_holders(self) -> List[Tuple["LlamaServerSupervisor", str]]:
-        """(supervisor, state) of every live claim that excludes this one. Two llama-server
-        children can hold the card together."""
+    def _blocking_holders(self) -> List[Tuple[Any, str]]:
+        """(holder, state) of everything on the card that excludes this one: the live claims and
+        the granted card leases (ADR-052 section 2.2 item 1; every lease excludes every
+        supervisor). Two llama-server children can hold the card together."""
         if not self.on_the_card():
             return []
-        return [(other, state) for other, state in _live_claims()
+        return [(other, state) for other, state in _live_holders()
                 if other is not self and other.alias != self.alias and self._excludes(other)]
 
-    def _blocking_holder(self) -> Optional[Tuple["LlamaServerSupervisor", str]]:
-        """(supervisor, state) of the live claim that excludes this one, or None: the one this very
-        request stands on if there is one, else the first. Rule 9 is settled before any other
-        holder is stopped for a request that would then be refused anyway."""
+    def _blocking_holder(self) -> Optional[Tuple[Any, str]]:
+        """(holder, state) of what excludes this one, or None: the one this very request stands on
+        if there is one, else an idle cheap lease (it lets go in about a second, ADR-052 section
+        2.2 item 11), else the first. Rule 9 is settled before any other holder is stopped for a
+        request that would then be refused anyway."""
         holders = self._blocking_holders()
         own = [found for found in holders if _this_request_holds(found[0].alias)]
-        return (own or holders or [None])[0]
+        cheap = [(holder, state) for holder, state in holders
+                 if _a_lease(holder) and holder.yield_cost == "cheap" and not holder._draining
+                 and not holder._busy_for_the_card(state)]
+        return (own or cheap or holders or [None])[0]
+
+    def _a_supervisor_blocks(self) -> bool:
+        return any(not _a_lease(holder) for holder, _state in self._blocking_holders())
+
+    def _only_leases_block(self) -> bool:
+        """Something is in the way, and every one of them is a card lease."""
+        holders = self._blocking_holders()
+        return bool(holders) and all(_a_lease(holder) for holder, _state in holders)
+
+    def _earlier_lease_waiter(self, request: _QueuedRequest) -> Optional[Any]:
+        """The lease of a waiter in the lease line that this request does not overtake (ADR-052
+        L5a point 2), or None: an owner's waiter that came before its place, and for a peer's
+        request every owner's waiter. An owner's place never waits behind a peer's waiter (rule 7).
+        Every lease excludes every supervisor, so each waiter found is in the way. None with no
+        lease."""
+        for arrival, lease, for_a_peer in _LEASE_WAITERS():
+            if for_a_peer and not request.for_a_peer:
+                continue
+            if (request.for_a_peer and not for_a_peer) or arrival < request.place.arrival:
+                return lease
+        return None
 
     def _card_held_error(self) -> Optional[CardHeldError]:
         """The refusal `_claim_card` would raise now, or None. Claims nothing,
@@ -2557,6 +2721,22 @@ class LlamaServerSupervisor:
                 why = _A_DESCRIPTION_WOULD_LOSE_PARKED
             else:
                 why = f"swapping is off, the start serves a peer, or '{other.alias}' is already stopping"
+            if _a_lease(other) and self._start_is_for_a_peer():
+                # A peer reads this: no holder name (ADR-052 L3, L13; ADR-044 point 7).
+                return CardHeldError(
+                    f"{self.ENGINE}[{self.alias}] cannot load for a peer: this node's GPU is busy with "
+                    "another job right now",
+                    "", "",
+                )
+            if _a_lease(other):
+                # A card lease (ADR-052 section 2.2 item 7): its own words for how it lets go, and no
+                # switch to tick, since yielding a lease is not gated by it.
+                letting_go = other.stop_hint or "It lets go of the card when it is idle."
+                return CardHeldError(
+                    f"{self.ENGINE}[{self.alias}] cannot load: the card is held by {other.display} "
+                    f"('{other.alias}', {state}), and DPC did not hand it over here ({why}). {letting_go}",
+                    other.alias, other.ENGINE,
+                )
             return CardHeldError(
                 f"{self.ENGINE}[{self.alias}] cannot load: the card is held by "
                 f"{other.ENGINE} alias '{other.alias}' ({state}). "
@@ -2572,6 +2752,10 @@ class LlamaServerSupervisor:
             # to claim.
             if _CARD_QUEUE and _CARD_QUEUE[0].alias != self.alias:
                 return self._a_place_waits_refusal()
+        if self.on_the_card() and self not in _CARD_CLAIMS and self._start_is_for_a_peer() and _owner_lease_waiting():
+            # The same in the lease line (ADR-052 L5a, L13): a peer's start does not take a card an
+            # owner's waiter is about to be granted.
+            return self._a_place_waits_refusal()
         return None
 
     def _description_may_not_stop(self, holder: "LlamaServerSupervisor") -> bool:
@@ -2662,7 +2846,7 @@ class LlamaServerSupervisor:
         holders = self._blocking_holders()
         if holders and not swap_policy()[0]:
             return "this node's owner has not turned on swapping local models for an idle holder"
-        if _CARD_QUEUE:
+        if _CARD_QUEUE or _owner_lease_waiting():
             return "a request on this node is waiting for the card, and a peer's request does not go ahead of it"
         for holder, state in holders:
             if state in ("stopping", "draining") or holder._draining:
@@ -2671,7 +2855,14 @@ class LlamaServerSupervisor:
                 return "it is busy, and a peer's request does not wait for a busy holder"
         return None
 
-    def _a_peer_cannot_swap_refusal(self, holder: "LlamaServerSupervisor", why: str) -> CardQueueRefusal:
+    def _a_peer_cannot_swap_refusal(self, holder: Any, why: str) -> CardQueueRefusal:
+        if _a_lease(holder):
+            # A peer reads this: a card lease is named by no holder name (ADR-052 L3, L13).
+            return CardQueueRefusal(
+                f"{self.ENGINE}[{self.alias}] cannot load for a peer: this node's GPU is busy with "
+                f"another job right now; {why}",
+                "", "",
+            )
         return CardQueueRefusal(
             f"{self.ENGINE}[{self.alias}] cannot load for a peer: the card is held by "
             f"{holder.ENGINE} alias '{holder.alias}'; {why}",
@@ -2739,9 +2930,13 @@ class LlamaServerSupervisor:
             holder.alias, holder.ENGINE,
         )
 
-    def _behind_a_place_refusal(self, request: _QueuedRequest) -> CardQueueRefusal:
-        """The deadline passed before this request was first in line."""
-        ahead = _CARD_QUEUE[0].alias if _CARD_QUEUE else "nobody"
+    def _behind_a_place_refusal(self, request: _QueuedRequest, ahead_lease: Any = None) -> CardQueueRefusal:
+        """The deadline passed before this request was first in line: behind the first place, or
+        behind `ahead_lease`, a waiter in the lease line that came before it (ADR-052 L5a)."""
+        if ahead_lease is not None:
+            ahead = ahead_lease.alias
+        else:
+            ahead = _CARD_QUEUE[0].alias if _CARD_QUEUE else "nobody"
         found = self._blocking_holder()
         holder = (f" The card is held by {found[0].ENGINE} alias '{found[0].alias}'."
                   f"{_who_stands_on(found[0].alias)}" if found is not None else "")
@@ -2823,8 +3018,18 @@ class LlamaServerSupervisor:
                 return await self._take_the_way_back(way_back)
             _hold_borrow_ends(hold)  # left by a person's word, or by an earlier try that failed
             way_back.check_still_in_line()
-        if not swap_policy()[0] or not self.on_the_card():
+        if not self.on_the_card():
             return None
+        for_leases = False
+        if not swap_policy()[0]:
+            # With the swap off a start still waits for a busy card lease and asks an idle one to
+            # let go, since yielding a lease is not gated by the switch (ADR-052 section 2.2 item 3,
+            # Mike #77 B): it takes a place when every holder in its way is a lease. Nothing in the
+            # way, or a supervisor in it, or a peer's call: today's path (a peer keeps today's
+            # refusal, L13).
+            if not self._only_leases_block() or peer_being_served() is not None or self._start_is_for_a_peer():
+                return None
+            for_leases = True
         if _CARD_BORROW.get() and hold is not None and not hold.live:
             raise self._ended_request_refusal()
         what = _BACKGROUND_CALL.get()
@@ -2832,8 +3037,10 @@ class LlamaServerSupervisor:
             raise self._background_call_skipped(what)
         peer = peer_being_served()
         if peer is not None:
-            # A peer never takes a place, and a new one does not go ahead of one (rule 7).
-            if _CARD_QUEUE and not (self._child_is_up() and peer in _callers_in_their_window(self.alias)):
+            # A peer never takes a place, and a new one does not go ahead of one, in either line
+            # (rule 7; ADR-052 L5a).
+            if ((_CARD_QUEUE or _owner_lease_waiting())
+                    and not (self._child_is_up() and peer in _callers_in_their_window(self.alias))):
                 raise self._a_place_waits_refusal()
             return self._a_peers_request_that_may_swap()
         if self._start_is_for_a_peer():
@@ -2861,6 +3068,7 @@ class LlamaServerSupervisor:
             place = _CardPlace(self.alias)
             _CARD_QUEUE.append(place)
         request = _QueuedRequest(place, borrows_from=borrows_from)
+        request.for_leases = for_leases
         place.requests.append(request)
         try:
             await self._wait_to_be_first(request)
@@ -2878,7 +3086,7 @@ class LlamaServerSupervisor:
         found = None if self._child_is_up() else self._blocking_holder()
         if found is None:
             return None
-        if _CARD_QUEUE:
+        if _CARD_QUEUE or _owner_lease_waiting():
             raise self._a_peer_cannot_swap_refusal(found[0], self._why_a_peer_may_not_swap())
         return _a_peers_request(self.alias)
 
@@ -2894,24 +3102,32 @@ class LlamaServerSupervisor:
         return request if request.in_line() else None
 
     async def _wait_to_be_first(self, request: _QueuedRequest) -> None:
-        """Wait until this request is first in line, or leave. Only the first place acts."""
-        told = False
+        """Wait until this request is first in line, or leave. Only the first place acts. First
+        means first in both lines: a waiter in the lease line that came before this place goes
+        first (ADR-052 L5a point 2), and this one waits behind it as behind a place."""
+        told = None
         while True:
             self._check_a_wait_can_end(request)
-            if not swap_policy()[0] and not request.way_back:
-                # The switch was thrown during the wait: the claim says today's refusal.
+            if not swap_policy()[0] and not request.way_back and (not request.for_leases
+                                                                  or self._a_supervisor_blocks()):
+                # The switch was thrown during the wait, or a place taken for card leases alone
+                # finds an engine in its way: the claim says today's refusal.
                 request.leaves()
                 return
+            ahead_lease = None
             if request.is_first():
-                return
+                ahead_lease = self._earlier_lease_waiter(request)
+                if ahead_lease is None:
+                    return
             now = _swap_clock()
             if now >= request.give_up_at:
-                raise self._behind_a_place_refusal(request)
-            if not told:
-                told = True
+                raise self._behind_a_place_refusal(request, ahead_lease)
+            ahead = ahead_lease.alias if ahead_lease is not None else _CARD_QUEUE[0].alias
+            if told != ahead:
+                told = ahead
                 logger.info(
                     "%s[%s]: waiting behind '%s' in the queue for the card, %s",
-                    self.ENGINE, self.alias, _CARD_QUEUE[0].alias, request.how_long_it_waits(),
+                    self.ENGINE, self.alias, ahead, request.how_long_it_waits(),
                 )
                 request.says_it_waits()
             await asyncio.sleep(min(_SWAP_POLL_S, request.give_up_at - now))
@@ -3043,42 +3259,80 @@ class LlamaServerSupervisor:
         ahead of this request in line in that stretch, because places only join at the back."""
         if request is None:
             return
-        for _ in range(_MAX_SWAP_ROUNDS):
+        rounds = 0
+        # A card lease asked to let go answers; one that refused or could not is asked again after
+        # `_LEASE_ASK_AGAIN_S`, at most `_MAX_SWAP_ROUNDS` times, and is then waited for like a busy
+        # holder (ADR-052 L6). Such an ask is not one of the rounds: nothing was swapped out.
+        asks: Dict[Any, Tuple[int, float]] = {}
+        while rounds < _MAX_SWAP_ROUNDS:
             told_about = None
             while True:
                 request.check_still_in_line()
                 if self._draining:
                     raise self._draining_error()  # retired while it waited: no child nobody holds
-                if not swap_policy()[0] and not request.way_back:
+                if not swap_policy()[0] and not request.way_back and not request.for_leases:
                     return  # the switch was thrown during the wait: the claim says today's refusal
                 if request.borrows_from is not None and not request.hold.live:
                     raise self._ended_request_refusal()
+                ahead_lease = None if request.for_a_peer else self._earlier_lease_waiter(request)
+                if ahead_lease is not None:
+                    # An earlier waiter in the lease line goes first, and only the earliest waiter
+                    # acts on a holder (ADR-052 L5a points 2 and 3): this waits behind it as behind
+                    # a place, within its one deadline.
+                    now = _swap_clock()
+                    if now >= request.give_up_at:
+                        raise self._behind_a_place_refusal(request, ahead_lease)
+                    if ahead_lease is not told_about:
+                        told_about = ahead_lease
+                        logger.info("%s[%s]: waiting behind '%s' in the lease line for the card, %s",
+                                    self.ENGINE, self.alias, ahead_lease.alias, request.how_long_it_waits())
+                    request.says_it_waits()
+                    await asyncio.sleep(min(_SWAP_POLL_S, request.give_up_at - now))
+                    continue
                 found = self._blocking_holder()
                 if found is None:
                     return  # freed, by us or by someone else's stop: not this swap's doing
                 holder, state = found
+                lease = _a_lease(holder)
+                if not swap_policy()[0] and not request.way_back and not lease:
+                    return  # with the swap off no engine is stopped: the claim says today's refusal
+                now = _swap_clock()
+                ask_count, ask_again_at = asks.get(holder, (0, 0.0))
+                askable = not lease or (ask_count < _MAX_SWAP_ROUNDS and now >= ask_again_at)
                 if request.for_a_peer:
                     # A start for a peer (amendment 2026-11-06): the owner's own conditions, with
                     # no wait. Asked here, in the stretch of the mark below, so nothing that came
                     # into the line or onto the holder since the policy looked is passed over.
                     why = self._why_a_peer_may_not_swap()
+                    if why is None and not askable:
+                        why = "it did not let go when asked"
                     if why is not None:
                         raise self._a_peer_cannot_swap_refusal(holder, why)
                     stands_there = False
-                    logger.info("%s[%s]: stopping '%s' (%s) to free the card for a peer's start",
-                                self.ENGINE, self.alias, holder.alias, holder.ENGINE)
+                    logger.info("%s[%s]: %s '%s' (%s) to free the card for a peer's start",
+                                self.ENGINE, self.alias, "asking" if lease else "stopping",
+                                holder.alias, holder.ENGINE)
                     break
-                stands_there = _this_request_holds(holder.alias)
-                if stands_there and not request.may_stop_its_own_stand_on(holder.alias):
-                    return  # rule 9: it would wait on itself
-                if not stands_there and self._description_may_not_stop(holder):
-                    return  # it took the card while this waited: the claim refuses
-                now = _swap_clock()
+                if lease:
+                    # A card lease (ADR-052 section 2.2 item 4): this request standing on it through
+                    # one of its open uses would wait on itself, refused at once; a use that came
+                    # after this place waits behind it and keeps nothing busy (L5a point 4).
+                    refusal = holder._would_wait_on_itself(request.hold, f"{self.ENGINE}[{self.alias}]")
+                    if refusal is not None:
+                        raise refusal
+                    stands_there = False
+                    busy = holder._busy_for_the_card(state, before=request.place.arrival) or not askable
+                else:
+                    stands_there = _this_request_holds(holder.alias)
+                    if stands_there and not request.may_stop_its_own_stand_on(holder.alias):
+                        return  # rule 9: it would wait on itself
+                    if not stands_there and self._description_may_not_stop(holder):
+                        return  # it took the card while this waited: the claim refuses
+                    busy = (holder._busy_for_the_card(state, but_for=request.hold) if stands_there
+                            else holder._busy_for_the_card(state))
                 # A holder stopping for another reason is waited for like a busy one (decision 1).
                 stopping = state == "stopping" or holder._draining
                 in_time = now < request.give_up_at or request.came_late
-                busy = (holder._busy_for_the_card(state, but_for=request.hold) if stands_there
-                        else holder._busy_for_the_card(state))
                 if not stopping and in_time and not busy:
                     break
                 if now >= request.give_up_at:
@@ -3087,12 +3341,17 @@ class LlamaServerSupervisor:
                     told_about = holder
                     logger.info(
                         "%s[%s]: '%s' (%s) is %s; waiting %s before "
-                        "stopping it to free the card", self.ENGINE, self.alias, holder.alias,
+                        "%s to free the card", self.ENGINE, self.alias, holder.alias,
                         holder.ENGINE, state if stopping else "busy", request.how_long_it_waits(),
+                        "asking it to let go" if lease else "stopping it",
                     )
                 request.says_it_waits()
                 await asyncio.sleep(min(_SWAP_POLL_S, request.give_up_at - now))
             holder._begin_swap_drain(self)  # no await since the last check above
+            if lease:
+                asks[holder] = (ask_count + 1, now + _LEASE_ASK_AGAIN_S)
+                logger.info("%s[%s]: asked %s ('%s') to let go of the card", self.ENGINE, self.alias,
+                            holder.display, holder.alias)
             if stands_there:
                 request.gives_up_its_stand()
             if request.for_a_peer:
@@ -3101,7 +3360,9 @@ class LlamaServerSupervisor:
                 request.stop_bound = _swap_clock() + _STOP_WITH_NO_WAIT_LEFT_S
             else:
                 request.says_it_waits()
-            await self._wait_for_the_stop(holder, request)
+            outcome = await self._wait_for_the_stop(holder, request)
+            if not lease or outcome in ("let_go", "nothing_to_give"):
+                rounds += 1
         if self._blocking_holder() is not None:
             # Out of rounds: `_claim_card` names whoever holds the card now. FIFO is what closes
             # the ping-pong, so reaching this means a holder keeps coming back past the line.
@@ -3111,85 +3372,66 @@ class LlamaServerSupervisor:
                 self._blocking_holder()[0].alias,
             )
 
-    async def _wait_for_the_stop(self, holder: "LlamaServerSupervisor", request: _QueuedRequest) -> None:
+    async def _wait_for_the_stop(self, holder: Any, request: _QueuedRequest) -> Optional[str]:
         """The stop of a marked holder, as its own task, and this request's wait for it, bounded
         by what is left of its deadline (decisions 2 and 3). The remainder is not `drain`'s
         timeout, which reads a timeout as how long to wait before it stops the child anyway; by
         rule 2 nothing is in flight here, and a stop is never hurried. So a request that runs out
         of time, is cancelled or is taken out leaves the stop running to its end, and that stop
-        clears the mark."""
+        clears the mark. Returns a card lease's yield outcome (None for a supervisor's stop)."""
         stop = asyncio.ensure_future(self._stop_for_the_swap(holder, request))
         _SWAP_STOPS.add(stop)
         stop.add_done_callback(_SWAP_STOPS.discard)
         # Retrieved here too, for the request that left before it ended.
         stop.add_done_callback(lambda task: task.cancelled() or task.exception())
+        lease = _a_lease(holder)
         while not stop.done():
             request.check_still_in_line()
             if _swap_clock() >= request.stop_bound:
                 ran_out = (request.stop_limit() if request.came_late
                            else f"the wait of {request.wait_limit()}")
                 raise CardQueueRefusal(
-                    f"{self.ENGINE}[{self.alias}] cannot load: '{holder.alias}' is already stopping to "
-                    f"free the card for it, and {ran_out} ran out. The stop goes on, and the card goes "
-                    "to the next in line.",
+                    f"{self.ENGINE}[{self.alias}] cannot load: '{holder.alias}' is already "
+                    f"{'letting go' if lease else 'stopping'} to free the card for it, and {ran_out} "
+                    f"ran out. The {'yield' if lease else 'stop'} goes on, and the card goes to the next "
+                    "in line.",
                     holder.alias, holder.ENGINE,
                 )
             await asyncio.wait({stop}, timeout=_SWAP_POLL_S)
-        stop.result()
+        return stop.result()
 
-    async def _stop_for_the_swap(self, holder: "LlamaServerSupervisor", request: _QueuedRequest) -> None:
+    async def _stop_for_the_swap(self, holder: Any, request: _QueuedRequest) -> Optional[str]:
         """`stop_by_hand`, and the mark gone however it ended: a stop that failed leaves the holder
         serving, and a retired one closed but marked for nobody. The swap is said here, as it is
         done whoever is still waiting for it. The waiting request's stop bound reaches the KV
-        snapshot save in `drain` through `_SAVE_BY`, and the save's outcome comes back here."""
-        try:
-            parked = await holder._parked_conversations()
-            token = _SAVE_BY.set(request.stop_bound)
+        snapshot save in `drain` through `_SAVE_BY`, and the save's outcome comes back here.
+
+        A card lease is not stopped but asked (ADR-052 section 2.2 item 5): its `give_up_for` runs
+        the client's yield, parks nothing, and is said only when it let go. Its yield is its own
+        task and is not bounded here: `_wait_for_the_stop` bounds this request's wait, and the yield
+        keeps its mark until it ends, as a supervisor's stop does. Returns the lease's outcome."""
+        if _a_lease(holder):
             try:
-                live_saved = await stop_by_hand(holder, why="swap")
-            finally:
-                with contextlib.suppress(ValueError):  # a dying task closed from another context
-                    _SAVE_BY.reset(token)
-        except BaseException:
-            holder._end_swap_drain()
-            raise
-        holder._swap_for = None
-        self._note_swap(holder, gave_up=not request.in_line(), parked=parked,
-                        live_saved=live_saved if isinstance(live_saved, dict) else None)
+                outcome = await holder.give_up_for(self.alias)
+            except BaseException:
+                if holder._yield_task is None:  # the yield never began: nothing else ends the mark
+                    holder._end_swap_drain()
+                raise
+            if outcome == "let_go":
+                self._note_swap(holder, gave_up=not request.in_line(), parked=0, live_saved=None)
+            return outcome
+        parked, live_saved = await _stop_holder_for_a_swap(holder, request.stop_bound)
+        self._note_swap(holder, gave_up=not request.in_line(), parked=parked, live_saved=live_saved)
+        return None
 
     async def _parked_conversations(self) -> Optional[int]:
         """How many conversations this engine has parked; None when it cannot be read."""
         return 0
 
-    def _note_swap(self, holder: "LlamaServerSupervisor", gave_up: bool = False,
+    def _note_swap(self, holder: Any, gave_up: bool = False,
                    parked: Optional[int] = None, live_saved: Optional[Dict[str, Any]] = None) -> None:
-        """Say a swap happened: the INFO line, `last_swap`, one toast. Nothing awaits
-        here, so the card is claimed in the stretch that follows. `gave_up`: the request it was
-        for left during the stop, which ran to its end, and a stopped Strata's parked
-        conversations are gone all the same, so it is said in those words. `parked` is what the
-        engine reported just before its stop: none means none went, and not knowing is said as
-        if some did. `live_saved` is the KV snapshot save's outcome: None says nothing (nothing
-        live, or saving off); otherwise the live conversation is said saved, or lost."""
-        global _LAST_SWAP
-        dropped = holder.DROPS_PARKED_ON_STOP and parked != 0
-        tail = "; its parked conversations are dropped" if dropped else ""
-        live = _live_saved_words(holder.alias, live_saved)
-        message = (f"stopped '{holder.alias}' to free the card for '{self.alias}', which stopped waiting"
-                   f"{live}{tail}" if gave_up else f"swapped '{holder.alias}' out for '{self.alias}'{live}{tail}")
-        logger.info("%s", message)
-        _LAST_SWAP = {
-            "from": holder.alias, "to": self.alias,
-            "from_engine": holder.ENGINE, "to_engine": self.ENGINE,
-            "at": time.time(), "parked_dropped": dropped,
-            "live_saved": dict(live_saved) if live_saved else None,
-        }
-        try:
-            task = asyncio.get_running_loop().create_task(
-                _toast("Local engine swapped", message, event="notice_toast"))
-        except RuntimeError:
-            return
-        _SWAP_TOASTS.add(task)
-        task.add_done_callback(_SWAP_TOASTS.discard)
+        """Say a swap made for this start (`_say_swap`)."""
+        _say_swap(holder, self.alias, self.ENGINE, gave_up=gave_up, parked=parked, live_saved=live_saved)
 
     def _release_card_unless_live(self) -> None:
         """A start that failed before leaving a live child holds nothing. A child

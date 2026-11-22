@@ -1993,8 +1993,10 @@ def card_holder() -> Optional[Dict[str, Any]]:
 
     Read-only, for the providers UI. Several are listed by `card_holders` only
     when llama-server aliases share the card; across engines there is one.
-    Supervisor rows only (ADR-052 L7): the panel's Stop engine button must not
-    point at a card lease until `stop_local_engine` can let one go (S2)."""
+    Supervisor rows only (ADR-052 L7), on purpose after S2 too: `stop_local_engine`
+    lets a card lease go since S2 item 8, but the panel names a lease in its "Also on
+    the card" lines (`cardQueue.ts`), which carry no Stop button, and its Card holder
+    line, the one with Stop engine, stays the supervisor's until S5 shows lease rows."""
     holders = [row for row in card_holders() if row.get("kind") == "inference"]
     return holders[0] if holders else None
 
@@ -2009,7 +2011,13 @@ async def stop_local_engine(alias: str, timeout: Optional[float] = None) -> bool
     configured: its next call starts the child again, so a switch reassigns the
     agent before stopping. A place the alias has in the queue for the card goes first
     (ADR-044, the card queue, rule 12): a first place holds the start lock while it
-    waits for the holder. False when the alias has no supervisor."""
+    waits for the holder. False when the alias has no supervisor.
+
+    `alias` may also be a card lease's holder name, "whisper:turbo" or "music:yue2" (ADR-052
+    section 2.2 item 8): an idle lease lets go now (True); a busy one raises `LeaseBusy`, naming
+    what it is busy with; one that refuses, cannot let go, or has not let go within `timeout`
+    (or `LEASE_STOP_BY_HAND_S` when None) raises `CardHeldError` naming it. The music card's
+    "Stop X" reaches a lease this way."""
     stopped, _live_saved = await _stop_local_engine(alias, timeout)
     return stopped
 
@@ -2025,6 +2033,10 @@ async def stop_local_engine_with_live_saved(
 
 
 async def _stop_local_engine(alias: str, timeout: Optional[float]) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    lease = None if alias in _ACTIVE_SUPERVISORS or alias in _RETIRING else (
+        _llama_server_supervisor_module._lease_holding(alias))
+    if lease is not None:
+        return await _let_a_lease_go_by_hand(lease, timeout), None
     take_card_queue_place(alias)
     supervisor = _ACTIVE_SUPERVISORS.get(alias)
     retired = supervisor is None
@@ -2036,3 +2048,20 @@ async def _stop_local_engine(alias: str, timeout: Optional[float]) -> Tuple[bool
     live_saved = await stop_by_hand(supervisor, timeout=timeout, reopen=not retired)
     logger.info("local engine '%s' (%s) stopped by hand", alias, supervisor.ENGINE)
     return True, live_saved if isinstance(live_saved, dict) else None
+
+
+async def _let_a_lease_go_by_hand(lease: Any, timeout: Optional[float]) -> bool:
+    """A person's Stop on a card lease (ADR-052 section 2.2 item 8): `let_go_by_hand`. A busy lease
+    raises `LeaseBusy` from there; a lease that did not let go raises here, so the command answers
+    why instead of "no local engine child"."""
+    bound = timeout if timeout is not None else _llama_server_supervisor_module.LEASE_STOP_BY_HAND_S
+    if await lease.let_go_by_hand("Stop by hand", bound) or not lease.granted:
+        # Not granted any more is what the person asked for too (it let go on its own meanwhile).
+        logger.info("card lease '%s' (%s) let go by hand", lease.alias, lease.ENGINE)
+        return True
+    if lease.state == "draining":
+        why = f"it is still letting go after {bound:g} s; the card goes to the next in line when it has"
+    else:
+        why = "it answered that it could not let go now (in use, or its memory is still held); try again"
+    raise CardHeldError(f"{lease.display} ('{lease.alias}') did not let go of the card: {why}",
+                        lease.alias, lease.ENGINE)

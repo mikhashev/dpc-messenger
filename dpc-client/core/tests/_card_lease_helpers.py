@@ -27,7 +27,7 @@ class FakeClient:
     def __init__(self, holder: str, *, kind: str = "transcription", engine: str = "whisper",
                  display: Optional[str] = None, yield_cost: str = "cheap", outcome: Any = "let_go",
                  gate: Optional[asyncio.Event] = None, eta: Optional[float] = None,
-                 vram_mib: Optional[int] = None, stop_hint: str = ""):
+                 vram_mib: Optional[int] = None, stop_hint: str = "", waits_for_engines: bool = False):
         self.outcome = outcome
         self.gate = gate
         self.eta = eta
@@ -36,6 +36,7 @@ class FakeClient:
         self.lease = CardLease(
             holder, kind=kind, engine=engine, display=display or holder, vram_mib=vram_mib,
             yield_cost=yield_cost, on_yield=self.on_yield, eta_s=lambda: self.eta, stop_hint=stop_hint,
+            waits_for_engines=waits_for_engines,
         )
 
     async def on_yield(self, why: str) -> str:

@@ -2,8 +2,9 @@
 
 Seen in the log 2026-11-04: `process ended: pid N launcher strata reason stopped stop_kind ui_stop`
 for a swap nobody pressed. The stop was real and `DEFAULT_STOP` named who asked, wrongly. Every
-swap (the idle swap, the card queue, a borrow and its way back) stops the holder in one place,
-`_stop_for_the_swap`, so the word is put down there; a person's Stop engine, a settings save and
+swap (the idle swap, the card queue, a borrow and its way back, and since ADR-052 S2 a card lease
+swapping an idle engine out) stops the holder in one place, `_stop_holder_for_a_swap`, so the word
+is put down there; a person's Stop engine, a settings save and
 the rest stay `ui_stop`. Real supervisors on the fakes of the swap tests; the registry's
 `note_stop_sent` is the seam, and the fake children are given a pid so the announcement is made.
 """
@@ -127,8 +128,8 @@ def test_the_word_is_one_the_registry_accepts_and_a_person_s_default_is_still_ui
 
 
 def test_every_stop_the_supervisor_makes_for_a_swap_names_the_swap():
-    """The idle swap, the card queue's request, a borrow and its way back all stop the holder in
-    `_stop_for_the_swap`: a second call to `stop_by_hand` in the supervisor that names no word
+    """The idle swap, the card queue's request, a borrow and its way back, and a card lease's swap
+    (ADR-052 S2) all stop the holder in `_stop_holder_for_a_swap`: a second call to `stop_by_hand` in the supervisor that names no word
     would read `ui_stop` again."""
     tree = ast.parse(inspect.getsource(base_mod))
     calls = [
@@ -137,6 +138,6 @@ def test_every_stop_the_supervisor_makes_for_a_swap_names_the_swap():
         for node in ast.walk(scope)
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "stop_by_hand"
     ]
-    assert {name for _, name in calls} == {"_stop_for_the_swap"}
+    assert {name for _, name in calls} == {"_stop_holder_for_a_swap"}
     for node, _name in calls:
         assert [k.value.value for k in node.keywords if k.arg == "why"] == ["swap"]

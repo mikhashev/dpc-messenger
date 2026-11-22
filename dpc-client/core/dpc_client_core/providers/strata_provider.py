@@ -437,6 +437,9 @@ class StrataProvider(LlamaServerProvider):
                 return None
             if isinstance(held, _base.CardQueueRefusal):
                 return f"{not_started}: {why or 'a request on this node is waiting for the card'}"
+            if not held.holder_alias:
+                # A card lease holds the card: a peer is told no holder name (ADR-052 L3, L13).
+                return f"{not_started}: this node's GPU is busy with another job right now; {why}"
             return f"{not_started}: the card is held by {held.holder_engine} alias '{held.holder_alias}'; {why}"
 
         refusal = card_refusal()

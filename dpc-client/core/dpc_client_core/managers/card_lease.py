@@ -19,10 +19,14 @@ The supervisor module never imports this one; importing this one installs the th
 `_still_configured`. Until it is imported no lease exists and the card behaves exactly as before.
 
 Slice S1: the registry, the line, the order across both lines as seen from a lease, the yield of an
-idle lease to a lease, the refusals and the wait estimate. Not here yet: supervisors honouring leases
-(S2: `_free_the_card`, `_blocking_holders`, `swap_out_for_a_lease`), Whisper and the music engines as
-clients (S3, S4), L11's one shared cell (S3: `shares_with` is stored and not consulted), the probe of
-foreign GPU use (S8). In S1 a lease waits for a supervisor holder until that holder goes by itself.
+idle lease to a lease, the refusals and the wait estimate. Slice S2: the supervisors honour leases
+(their side is in `llama_server_supervisor`: `_free_the_card`, `_blocking_holders`,
+`swap_out_for_a_lease`); here, a new use of a granted lease waits behind an earlier card-queue place
+too (L5), and a lease that `waits_for_engines` (music, Mike #70), first in both lines, swaps an idle
+supervisor out by the owner-start rule with the swap on. Any other lease waits for a supervisor
+holder until it goes by itself. Not here yet: Whisper and the music engines as clients (S3, S4),
+L11's one shared cell (S3: `shares_with` is stored and not consulted), the probe of foreign GPU use
+(S8).
 """
 
 import asyncio
@@ -259,8 +263,10 @@ class CardLease:
         self.vram_mib = vram_mib
         self.yield_cost = yield_cost
         self._on_yield = on_yield
-        # Stored for S2 (whether a waiting lease swaps an idle supervisor out, section 2.2 item 12);
-        # in S1 every lease waits for a supervisor holder (Mike #68, #70: no lease loads beside one).
+        # Whether this lease waits for a busy supervisor and swaps an idle one out by the owner-start
+        # rule, with the swap on (section 2.2 item 12; ADR-052 section 3.2 builds music engines with
+        # True, Mike #70). False: it waits for a supervisor holder until that holder goes by itself
+        # (Whisper's item 1a is open). No lease ever loads beside a supervisor (Mike #68).
         self.waits_for_engines = waits_for_engines
         # L11's one shared cell, consulted from S3 on.
         self.shares_with = shares_with
@@ -369,6 +375,19 @@ class CardLease:
         self._draining = False
         _settle()
         _wake()
+
+    def _would_wait_on_itself(self, hold: Any, contender: str) -> Optional["LeaseWouldWaitOnItself"]:
+        """The refusal of a supervisor's start that would wait for this lease while its own request
+        (`hold`, its `_CARD_HOLD`) stands on it through an open use (section 2.2 item 4), or None."""
+        if hold is None or not any(use.hold is hold for use in self._uses):
+            return None
+        refusal = LeaseWouldWaitOnItself(
+            f"{contender} would wait for {self.display} ('{self.alias}'), which this very request uses "
+            f"({self.who_uses()}); refused at once instead of waiting on itself",
+            self.alias, self.ENGINE,
+        )
+        logger.info("card: %s refused: %s", contender, refusal)
+        return refusal
 
     async def _parked_conversations(self) -> int:
         """A lease parks nothing: a yield drops no conversation."""
@@ -650,11 +669,13 @@ def _blockers(waiter: _LeaseWaiter) -> List[Tuple[str, Any, Optional[str]]]:
             found.append(("draining", lease, "draining"))
         if not waiter.opens_a_use:
             return found
-        # S2 adds a supervisor's place whose blocking holder is this lease; in S1 supervisors do not
-        # wait for leases yet, so only lease waiters stand here.
         found.extend(("waiter", other, None) for other in _LEASE_LINE
                      if other is not waiter and not other.granted and other.lease is not lease
                      and _goes_before(other, waiter))
+        # A supervisor's place that came earlier waits for this lease (every lease excludes every
+        # supervisor), so a new use does not jump it either (L5, S2).
+        found.extend(("place", place, None) for place in _sup._CARD_QUEUE
+                     if waiter.for_a_peer or place.arrival < waiter.arrival)
         return found
     found.extend(("holder", sup, state) for sup, state in _sup._live_claims())
     found.extend(("holder", other, other.state) for other in _granted_leases() if other is not lease)
@@ -768,8 +789,10 @@ def _estimate(waiter: _LeaseWaiter, blockers: Optional[List[Tuple[str, Any, Opti
             if seconds is not None:
                 holders_s = max(holders_s, seconds)
         elif kind == "holder":
-            # A supervisor: no ETA (L10), and in S1 a lease does not ask one to stop.
-            seconds, where = None, "busy_holder"
+            # A supervisor: no ETA (L10), and its stop has no figure either.
+            swapping = what._draining or state == "stopping" or (
+                _swaps_engines(waiter) and state == "running" and not what._busy_for_the_card(state))
+            seconds, where = None, "yielding" if swapping else "busy_holder"
             behind.append(f"{what.ENGINE} '{what.alias}'")
         elif kind == "draining":
             seconds, where = None, "yielding"
@@ -808,6 +831,10 @@ def _why_it_waits(waiter: _LeaseWaiter, kind: str, what: Any, state: Optional[st
             return what.display, "idle, asking it to let go"
         return what.display, "idle; a peer does not ask it to let go"
     if kind == "holder":
+        if state == "running" and _swaps_engines(waiter) and not what._draining:
+            busy = what._busy_for_the_card(state)
+            return f"{what.ENGINE} '{what.alias}'", ("a local engine on the card, busy" if busy else
+                                                    "a local engine on the card, idle; swapping it out")
         return f"{what.ENGINE} '{what.alias}'", f"a local engine on the card, {state}"
     if kind == "draining":
         return what.display, f"letting go for {what._swap_for}"
@@ -903,6 +930,33 @@ def _ask_idle_holders(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optio
         holder._ask_to_let_go(waiter.lease.alias)
 
 
+def _swaps_engines(waiter: _LeaseWaiter) -> bool:
+    """Whether `waiter` swaps an idle supervisor out (section 2.2 item 12): an owner's request for a
+    lease that `waits_for_engines`, with the swap on (the owner-start rule, gated by the switch,
+    Mike #70). A peer never does (L13: a supervisor's stop has no figure), nor does any other lease."""
+    return (waiter.lease.waits_for_engines and not waiter.for_a_peer and not waiter.lease._granted
+            and _sup.swap_policy()[0])
+
+
+def _swap_idle_engines(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optional[str]]]) -> None:
+    """Mike #70: when only supervisors stand in its way, and nobody earlier waits in either line
+    (L5a: those would be blockers too), the waiter swaps each idle one out, as an owner's start
+    does; a busy one is waited for and named. At most `_MAX_SWAP_ROUNDS` marks per supervisor and
+    waiter, `_YIELD_RETRY_S` apart (a stop that failed leaves the holder serving)."""
+    if not blockers or not _swaps_engines(waiter):
+        return
+    if any(kind != "holder" or _a_lease(what) for kind, what, _state in blockers):
+        return
+    now = _clock()
+    stop_bound = None if math.isinf(waiter.give_up_at) else waiter.give_up_at
+    for _kind, holder, _state in blockers:
+        asks, next_at = waiter.asks.get(holder, (0, 0.0))
+        if asks >= _sup._MAX_SWAP_ROUNDS or now < next_at:
+            continue
+        if _sup.swap_out_for_a_lease(holder, waiter.lease, stop_bound) is not None:
+            waiter.asks[holder] = (asks + 1, now + _YIELD_RETRY_S)
+
+
 def _tell(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optional[str]]],
           on_wait: Optional[Callable[[Dict[str, Any]], None]]) -> None:
     """One INFO line and one `on_wait` per change of who it waits for, none while it polls."""
@@ -983,6 +1037,7 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
             if now >= waiter.give_up_at:
                 raise _refusal_at_the_deadline(waiter, blockers)
             _ask_idle_holders(waiter, blockers)
+            _swap_idle_engines(waiter, blockers)
             _tell(waiter, blockers, on_wait)
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(waiter.event.wait(), min(_LEASE_POLL_S, waiter.give_up_at - now))
