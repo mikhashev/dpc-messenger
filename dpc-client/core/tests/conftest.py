@@ -71,6 +71,38 @@ def _embedding_cache_in_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _settings_never_open_the_real_home(tmp_path, monkeypatch):
+    """A Settings built on this machine's own ~/.dpc reads and may write its config.ini: a fresh
+    config when there is none, the seeded keys a config written before them lacks
+    (`_seed_missing_keys`, ADR-052 item 7's carrier), every setter. Code builds one there by
+    itself (`DPC_HOME_DIR` in service.py, webrtc_peer, `_dpc_home_for` for a graph root outside
+    `agents/`): test_conversation_monitoring's `CoreService()` and the `kg` fixtures of
+    test_knowledge_graph, test_graph_snapshot and test_legacy_forms all did, and a run of one of
+    them wrote `[local_transcription] idle_unload_s` into the developer's real config.ini
+    (2026-11-23). Every Settings asked for the real home is built on
+    the test's tmp_path instead: a test sees what a CI runner sees (no config, the defaults) and
+    the real file is never opened. Guarded by
+    test_a_test_run_never_writes_the_real_config_ini."""
+    from pathlib import Path
+    from dpc_client_core import settings as settings_module
+
+    real_home = (Path.home() / ".dpc").resolve()
+    stand_in = tmp_path / "home-stand-in" / ".dpc"
+    original_init = settings_module.Settings.__init__
+
+    def init(self, dpc_home_dir, *args, **kwargs):
+        try:
+            asked_for_the_real_home = Path(dpc_home_dir).expanduser().resolve() == real_home
+        except (OSError, TypeError, ValueError):
+            asked_for_the_real_home = False
+        if asked_for_the_real_home:
+            dpc_home_dir = stand_in
+        original_init(self, dpc_home_dir, *args, **kwargs)
+
+    monkeypatch.setattr(settings_module.Settings, "__init__", init)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_process_registry():
     """The process registry is module state (ADR-046). A test that begins the
     backend's stop would make every later spawn refuse, and open entries of one

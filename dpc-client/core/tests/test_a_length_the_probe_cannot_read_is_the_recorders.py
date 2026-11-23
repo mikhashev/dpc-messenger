@@ -8,8 +8,8 @@ dictation door takes it from the UI's `transcribe_audio` command, the received-v
 message's `voice_metadata`.
 
 Also pinned here (L13 point 2): a peer whose own `expected_s` is unknown is refused at once on a
-blocked card, also with no door bound, and is served on a free card; the lease line never reads an
-unknown as "no work".
+blocked card, also with no door bound, and since S3 follow-up 3 (Johnny #30-4, Mike #17) on a free
+card too; the lease line never reads an unknown as "no work".
 """
 
 import asyncio
@@ -144,11 +144,13 @@ class TestAPeerWhoseOwnTimeIsUnknown:
         await asyncio.wait_for(dictation, BOUND)
 
     @pytest.mark.asyncio
-    async def test_is_served_on_a_free_card(self):
+    async def test_is_refused_on_a_free_card_too(self):
+        # S3 follow-up 3, Johnny #30-4: a trip that cannot be shown to fit 120 s is refused (Mike #17).
         p = whisper("small")
-        with serving_a_peer("node-guest"):
-            await asyncio.wait_for(p.lease.acquire("peer node-guest", wait_s=None, expected_s=None), BOUND)
-        assert holding() == ["whisper:small"]
+        with pytest.raises(LeaseRefusedForPeer):
+            with serving_a_peer("node-guest"):
+                await asyncio.wait_for(p.lease.acquire("peer node-guest", wait_s=None, expected_s=None), BOUND)
+        assert holding() == [] and waiting() == []
 
     def test_its_bound_is_the_whole_trip_never_the_trip_less_nothing(self):
         p = whisper("small")

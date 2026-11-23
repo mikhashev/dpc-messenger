@@ -2,8 +2,9 @@
 
 A peer's transcription whose whole trip (its own `expected_s`) does not fit the guest's 120 s
 (`PEER_TRIP_S`) is refused at once, also when the card is free: the guest has gone before the work
-could end. One that fits is served at once; one whose `expected_s` is unknown is served on a free card
-(L10, as before). Fake clients.
+could end. One that fits is served at once. One whose `expected_s` is unknown cannot be shown to fit,
+so since S3 follow-up 3 (Johnny #30-4) it is refused on a free card too, in the same class and words
+as behind a blocked card, and also as a new use of a warm grant. Fake clients.
 """
 
 import asyncio
@@ -57,7 +58,24 @@ async def test_the_limit_itself_fits_and_a_second_over_does_not():
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_own_time_is_still_served_on_a_free_card():
+async def test_an_unknown_own_time_is_refused_on_a_free_card_in_the_blocked_cards_words():
     p = whisper("small")
-    await _peer_acquire(p.lease, None)
+    with pytest.raises(LeaseRefusedForPeer) as refused:
+        await _peer_acquire(p.lease, None)
+    assert str(refused.value) == "this node's GPU is busy with another job right now, and how long is not known"
+    assert holding() == [], "nothing was granted"
+    await nothing_left()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_own_time_is_refused_as_a_new_use_of_a_warm_grant_and_a_known_one_is_served():
+    p = whisper("small")
+    await asyncio.wait_for(p.lease.acquire("preload", wait_s=BOUND), BOUND)  # warm, idle, nothing open
+    with pytest.raises(LeaseRefusedForPeer):
+        with serving_a_peer("node-guest"):
+            async with p.lease.use("peer node-guest", wait_s=None, expected_s=None):
+                pass
+    with serving_a_peer("node-guest"):
+        async with p.lease.use("peer node-guest", wait_s=None, expected_s=30):
+            assert p.lease._uses
     assert holding() == ["whisper:small"]

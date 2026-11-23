@@ -135,7 +135,12 @@ def card_ask(provider: Any, purpose: str, audio_path: str, *, bound_s: Optional[
     The length is `audio_s` when the door has it, else the probe's (`audio_seconds`); when the probe
     reads none (no ffprobe, and soundfile does not read WebM, the recorder's default) it is
     `declared_s`, the recorder's own `duration_seconds` (ADR-052 L10: "ffprobe's, else the
-    recorder's declared one"; Johnny #24-3). The probe wins; the declared length is the fallback."""
+    recorder's declared one"; Johnny #24-3). The probe wins; the declared length is the fallback.
+
+    One length by value (Johnny #30-6): when the estimate was made from a known length, the ask
+    carries it as `audio_s`, and the call's batch descent and its recorded run read that same number
+    instead of the decoded samples' (which may differ by a fraction of a second across a band
+    boundary), so the band the estimate read is the band the call runs and records in."""
     if audio_s is None:
         audio_s = audio_seconds(audio_path)
     if _a_positive(audio_s) is None:
@@ -147,15 +152,22 @@ def card_ask(provider: Any, purpose: str, audio_path: str, *, bound_s: Optional[
         margin = max(MIN_MARGIN_S, expected_s or 0.0)
         left = max(0.0, float(caller_left_s) - margin)
         wait_s = left if wait_s is None else min(wait_s, left)
-    return {"purpose": purpose, "wait_s": wait_s, "expected_s": expected_s}
+    ask: Dict[str, Any] = {"purpose": purpose, "wait_s": wait_s, "expected_s": expected_s}
+    if callable(estimate) and _a_positive(audio_s) is not None:
+        ask["audio_s"] = float(audio_s)
+    return ask
 
 
 def asks_for_the_card(provider: Any) -> bool:
     """Whether a transcription on `provider` would ask this node's card lease (ADR-052 3.1, queueing
     condition 2, slice S3c): a local Whisper whose route is not the CPU. A cloud provider, a
-    `device: cpu` alias and a model that fell back to the CPU do not. Never imports torch: an `auto`
-    device not detected yet counts as a card's, the side a cascade the card has just refused must err
-    on (that refusal already says this machine has one)."""
+    `device: cpu` alias and a model that fell back to the CPU do not.
+
+    An `auto` device not detected yet is detected here, as the call itself would route it
+    (`_route_device`: torch's CUDA check, no model load; Johnny #30-7), so an unloaded `auto` alias
+    on a machine with no GPU is not skipped after a refusal. Only a detection that fails counts as a
+    card's, the side a cascade the card has just refused must err on. It may import torch: blocking,
+    call it in a thread."""
     if (getattr(provider, "config", None) or {}).get("type") != "local_whisper":
         return False
     current = provider._current_owner() if hasattr(provider, "_current_owner") else provider
@@ -166,6 +178,16 @@ def asks_for_the_card(provider: Any) -> bool:
     device = getattr(current, "device", "auto")
     if device == "auto":
         device = getattr(current, "_estimate_device", None) or getattr(current, "_detected_device", None)
+    if device is None:
+        route = getattr(current, "_route_device", None)
+        try:
+            device = route() if callable(route) else None
+        except Exception:
+            logger.debug("Whisper: the device of %s could not be detected; counted as the card's",
+                         getattr(current, "alias", current), exc_info=True)
+            device = None
+        if device is None:
+            return True
     return device != "cpu"
 
 
@@ -1322,7 +1344,8 @@ class LocalWhisperProvider(AIProvider):
                          purpose: Optional[str] = None, wait_s: Optional[float] = None,
                          expected_s: Optional[float] = None,
                          on_wait: Optional[Callable[[Dict[str, Any]], None]] = None,
-                         check: Optional[Callable[[], Awaitable[None]]] = None) -> Dict[str, Any]:
+                         check: Optional[Callable[[], Awaitable[None]]] = None,
+                         audio_s: Optional[float] = None) -> Dict[str, Any]:
         """Transcribe `audio_path`. With `release_if_loaded_here`, a model this very call
         had to load is unloaded as the call ends, unless another transcription is using
         it (the decision is made under the load lock, so it cannot race).
@@ -1336,7 +1359,10 @@ class LocalWhisperProvider(AIProvider):
         most `wait_s` (None: until cancelled or `check` raises), and `on_wait` is told the
         wait estimate (L10) whenever who it waits for changes. `check` runs on every round of
         the wait and once more at the grant, before anything loads (a peer that left, L13
-        point 3). A refusal is a `CardQueueRefusal` (L3). On the CPU none of this applies."""
+        point 3). A refusal is a `CardQueueRefusal` (L3). On the CPU none of this applies.
+
+        `audio_s` is the length the door's estimate was made from (`card_ask`); when given, the
+        batch descent and the recorded run read it rather than the decoded samples' (Johnny #30-6)."""
         # A stale reference to a replaced object forwards to the object that replaced it,
         # so a use is counted and ended on one object.
         current = self._current_owner()
@@ -1344,11 +1370,12 @@ class LocalWhisperProvider(AIProvider):
             return await current.transcribe(audio_path, release_if_loaded_here,
                                             language=language, task=task, purpose=purpose,
                                             wait_s=wait_s, expected_s=expected_s,
-                                            on_wait=on_wait, check=check)
+                                            on_wait=on_wait, check=check, audio_s=audio_s)
         self._refuse_if_retired()
         lease = await self._lease_for_the_card()
         if lease is None:
-            return await self._transcribe_holding(audio_path, release_if_loaded_here, language, task, None)
+            return await self._transcribe_holding(audio_path, release_if_loaded_here, language, task, None,
+                                                  audio_s=audio_s)
         # S3d seam (ADR-052 L12, item 1a): the GPU/CPU choice goes HERE, before the lease is
         # asked; a call L12 sends to the CPU twin asks no lease and swaps nothing out. Until
         # then every GPU call asks the lease.
@@ -1366,7 +1393,7 @@ class LocalWhisperProvider(AIProvider):
                 runs[id(token)] = (time.monotonic(), _a_positive(expected_s))
                 try:
                     return await self._transcribe_holding(audio_path, release_if_loaded_here,
-                                                          language, task, lease)
+                                                          language, task, lease, audio_s=audio_s)
                 finally:
                     runs.pop(id(token), None)
         finally:
@@ -1374,7 +1401,7 @@ class LocalWhisperProvider(AIProvider):
 
     async def _transcribe_holding(self, audio_path: str, release_if_loaded_here: bool,
                                   language: Optional[str], task: Optional[str],
-                                  lease: Optional[Any]) -> Dict[str, Any]:
+                                  lease: Optional[Any], audio_s: Optional[float] = None) -> Dict[str, Any]:
         """The body of `transcribe` once the card is held (`lease`) or not needed (None)."""
         # The lock is taken even when the model is loaded, so the use is counted
         # atomically with the load and an unload in progress is waited for.
@@ -1402,6 +1429,8 @@ class LocalWhisperProvider(AIProvider):
                 overrides["language"] = language
             if task is not None:
                 overrides["task"] = task
+            if _a_positive(audio_s) is not None:
+                overrides["audio_s"] = audio_s
             return await self._transcribe_loaded(audio_path, **overrides)
         finally:
             owner = counted._current_owner()
@@ -1430,7 +1459,7 @@ class LocalWhisperProvider(AIProvider):
         owner._calls_since_load += 1
 
     async def _transcribe_loaded(self, audio_path: str, language: Optional[str] = None,
-                                 task: Optional[str] = None) -> Dict[str, Any]:
+                                 task: Optional[str] = None, audio_s: Optional[float] = None) -> Dict[str, Any]:
         # Per-call values, resolved once: the MLX thread and the HF generate call both use
         # these locals, never `self.language` / `self.task`, which another call may change.
         call_language = self.language if language is None else language
@@ -1477,7 +1506,8 @@ class LocalWhisperProvider(AIProvider):
                 result = await asyncio.to_thread(mlx_transcribe)
 
                 elapsed = asyncio.get_event_loop().time() - start_time
-                self._record_run(duration_seconds, elapsed)
+                # The estimate's length when the door had one (Johnny #30-6), else the decoded one.
+                self._record_run(_a_positive(audio_s) or duration_seconds, elapsed)
                 text = result.get("text", "").strip()
                 detected_language = result.get("language", "unknown")
 
@@ -1515,14 +1545,18 @@ class LocalWhisperProvider(AIProvider):
                 logger.info(f"Transcribing audio with local Whisper: {duration_seconds:.1f}s, model={self.model_name}")
                 start_time = asyncio.get_event_loop().time()
 
+                # One length by value (Johnny #30-6): the band the door's estimate read, when it read
+                # one, is the band this call runs (batch size) and records in; else the decoded length.
+                run_s = _a_positive(audio_s) or duration_seconds
+
                 # Adaptive batch_size for long audio
                 # (`_BATCH_DESCENT`, whose thresholds are also the warm figures' length bands)
                 adaptive_batch_size = self.batch_size
                 for over, divisor in _BATCH_DESCENT:
-                    if duration_seconds > over:
+                    if run_s > over:
                         adaptive_batch_size = max(1, self.batch_size // divisor)
                         size = "Long" if over > 60 else "Medium"
-                        logger.info(f"{size} audio ({duration_seconds:.0f}s), reducing batch_size: "
+                        logger.info(f"{size} audio ({run_s:.0f}s), reducing batch_size: "
                                     f"{self.batch_size} → {adaptive_batch_size}")
                         break
 
@@ -1538,7 +1572,7 @@ class LocalWhisperProvider(AIProvider):
                 )
 
                 elapsed = asyncio.get_event_loop().time() - start_time
-                self._record_run(duration_seconds, elapsed)
+                self._record_run(run_s, elapsed)
                 text = result.get("text", "").strip()
 
                 detected_language = "unknown"

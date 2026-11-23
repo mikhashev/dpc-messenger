@@ -654,8 +654,8 @@ class _LeaseWaiter:
             # What is left of the trip once its own work is counted, or its door's bound when shorter.
             if self.expected_s is None:
                 # Its own work unknown: the trip is unknown, never "no work" (L10). `_enter` refuses
-                # such a peer at once on a blocked card (L13 point 2) and serves it only on a free
-                # one, where nothing waits; the whole 120 s is the bound only that grant reads.
+                # such a peer at once, on a free card as on a blocked one (L13 point 2, Johnny #30-4);
+                # the whole 120 s is only the bound it would have had.
                 trip_left = PEER_TRIP_S
             else:
                 trip_left = max(0.0, PEER_TRIP_S - self.expected_s)
@@ -1050,11 +1050,19 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
     blockers = _blockers(waiter)
     if waiter.for_a_peer and waiter.expected_s is not None and waiter.expected_s > PEER_TRIP_S:
         # Mike #17 (L13, point 2), Ark #20-1: the 120 s rule holds at the grant too. Its own work alone
-        # outlasts the guest, so the card being free does not make the trip fit. An unknown
-        # `expected_s` is not this case: a free card still serves it (L10).
+        # outlasts the guest, so the card being free does not make the trip fit.
         estimate = _estimate(waiter, blockers)
         raise _refuse(waiter, LeaseRefusedForPeer(
             "this node cannot finish this transcription within the time the request is given, right now",
+            wait=estimate,
+        ))
+    if waiter.for_a_peer and waiter.expected_s is None:
+        # Mike #17 (L13, point 2), Johnny #30-4: a trip whose own work is unknown cannot be shown to fit
+        # the guest's 120 s, so it is refused at the grant too, free card or not, in the same class and
+        # words as behind a blocked card (L10: an unknown part leaves the trip unknown).
+        estimate = _estimate(waiter, blockers)
+        raise _refuse(waiter, LeaseRefusedForPeer(
+            f"this node's GPU is busy with another job right now, {_peer_wait_words(estimate['wait_s'])}",
             wait=estimate,
         ))
     if not blockers:

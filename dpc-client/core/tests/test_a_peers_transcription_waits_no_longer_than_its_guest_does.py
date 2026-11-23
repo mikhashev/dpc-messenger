@@ -110,6 +110,8 @@ _AUDIO = base64.b64encode(b"RIFF....WAVEfmt fake").decode()
 
 @pytest.mark.asyncio
 async def test_a_guest_that_left_before_the_grant_is_dropped_and_nothing_loads(monkeypatch, caplog):
+    # A known length: an unknown one is refused before the grant (S3 follow-up 3, Johnny #30-4).
+    monkeypatch.setattr(whisper_provider, "audio_seconds", lambda path: 10.0)
     p = gpu_whisper(monkeypatch)
     coordinator, service = _coordinator(p, peers={})
     with caplog.at_level("INFO"):
@@ -145,6 +147,7 @@ async def test_a_guest_that_leaves_during_the_wait_leaves_the_line(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_guest_still_there_is_answered(monkeypatch):
+    monkeypatch.setattr(whisper_provider, "audio_seconds", lambda path: 10.0)
     p = gpu_whisper(monkeypatch)
     coordinator, service = _coordinator(p, peers={"node-guest": object()})
     await asyncio.wait_for(

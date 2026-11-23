@@ -4693,6 +4693,11 @@ class CoreService(MusicCommandsMixin):
         # received-voice cascade then skips its further GPU aliases, which would only stand in the
         # same line, and still tries a cloud or CPU one. The chain below runs as for a failure.
         _card_refusal_name: str | None = None
+        # What that chain already asked for this audio, the cloud provider's alias and the peers'
+        # node ids, carried on a card refusal's answer so the received-voice cascade does not ask
+        # them a second time (Zcode #29-3, Ark F4).
+        _fallback_providers_asked: list = []
+        _fallback_peers_asked: list = []
 
         # 0. Check if this is a remote transcription request
         if provider_alias and provider_alias.startswith("remote:"):
@@ -4842,9 +4847,13 @@ class CoreService(MusicCommandsMixin):
                     bound_s=self.settings.get_local_transcription_queue_wait_s(),
                     declared_s=duration_seconds)
                 ask["on_wait"] = lambda estimate: self._tell_the_card_wait("dictation", estimate)
+                # The received-voice check is the card's (queueing condition 3): it is handed only to
+                # a call that asks the card, never to a CPU alias, which holds none (Ark (6)).
                 voice_message_check = _VOICE_MESSAGE_CARD_CHECK.get()
                 if voice_message_check is not None:
-                    ask["check"] = voice_message_check
+                    from .providers.whisper_provider import asks_for_the_card
+                    if await asyncio.to_thread(asks_for_the_card, provider_obj):
+                        ask["check"] = voice_message_check
                 try:
                     # Use local Whisper provider
                     result = await provider_obj.transcribe(temp_path, **ask)
@@ -4880,7 +4889,12 @@ class CoreService(MusicCommandsMixin):
                             f"Confirm the download in the D-PC Messenger app to proceed."
                         ) from local_error
 
-                    logger.warning(f"Local transcription failed: {local_error}")
+                    if _card_refusal_name is not None:
+                        # A refusal is not a failure of the model (Zcode #29-4, Ark (4)).
+                        logger.warning("Local transcription was refused the card (%s): %s",
+                                       _card_refusal_name, local_error)
+                    else:
+                        logger.warning(f"Local transcription failed: {local_error}")
 
                     # Check if fallback is enabled
                     fallback_enabled = self.settings.get_local_transcription_fallback_to_openai()
@@ -4897,6 +4911,7 @@ class CoreService(MusicCommandsMixin):
 
                         cloud_error = None
                         if fallback_provider:
+                            _fallback_providers_asked.append(getattr(fallback_provider, "alias", None))
                             try:
                                 # Use OpenAI API
                                 result = await self._transcribe_with_openai(temp_path, fallback_provider.config)
@@ -4917,7 +4932,8 @@ class CoreService(MusicCommandsMixin):
                             # provider, or when it failed too — both of which
                             # ended here in a dead end before (Mike's call,
                             # 2026-09-07).
-                            result = await self._transcribe_with_peer(temp_path, mime_type)
+                            result = await self._transcribe_with_peer(
+                                temp_path, mime_type, asked=_fallback_peers_asked)
                             if result is None:
                                 cloud = (
                                     f"the OpenAI fallback failed ({cloud_error})"
@@ -4953,7 +4969,10 @@ class CoreService(MusicCommandsMixin):
         except _TheSendersTranscriptArrived:
             raise
         except Exception as e:
-            logger.error(f"Audio transcription failed: {e}", exc_info=True)
+            if _card_refusal_name is not None:
+                logger.warning("Audio transcription ended on a card refusal (%s): %s", _card_refusal_name, e)
+            else:
+                logger.error(f"Audio transcription failed: {e}", exc_info=True)
 
             # Broadcast error toast to UI for OOM errors (v0.14.1+)
             error_msg = str(e)
@@ -4972,6 +4991,10 @@ class CoreService(MusicCommandsMixin):
                 result_dict["model_not_cached"] = _model_not_cached_name
             if _card_refusal_name is not None:
                 result_dict["card_refusal"] = _card_refusal_name
+                result_dict["already_asked"] = {
+                    "providers": [alias for alias in _fallback_providers_asked if alias],
+                    "peers": list(_fallback_peers_asked),
+                }
             return result_dict
         finally:
             # Only delete the temp file if we created it (not if the caller passed file_path)
@@ -5105,6 +5128,20 @@ class CoreService(MusicCommandsMixin):
         first_local = next((p for p in providers.values()
                             if (getattr(p, "config", None) or {}).get("type") == "local_whisper"), None)
         return first_local is not None and asks_for_the_card(first_local)
+
+    @staticmethod
+    def _voice_alias_was_asked(provider_alias: str, providers: set, peers: set) -> bool:
+        """Whether the fallback chain of a refused call already asked what `provider_alias` names
+        (Zcode #29-3, Ark F4): a configured cloud alias by its name, a `remote:<node>:<alias>` by its
+        node, which the peer step asked whatever alias it chose."""
+        if not provider_alias:
+            return False
+        if provider_alias.startswith("remote:"):
+            parts = provider_alias.split(":", 2)
+            return len(parts) == 3 and parts[1] in peers
+        if provider_alias.startswith("local:"):
+            provider_alias = provider_alias[6:]
+        return provider_alias in providers
 
     async def _maybe_transcribe_voice_message(
         self,
@@ -5246,6 +5283,9 @@ class CoreService(MusicCommandsMixin):
                         raise _TheSendersTranscriptArrived(transfer_id)
 
                 refused_by_the_card: Optional[str] = None
+                # What the refused call's own fallback chain already asked (Zcode #29-3, Ark F4).
+                asked_providers: set = set()
+                asked_peers: set = set()
                 check_token = _VOICE_MESSAGE_CARD_CHECK.set(the_senders_transcript_is_in)
                 try:
                     for provider_alias in provider_priority:
@@ -5253,10 +5293,16 @@ class CoreService(MusicCommandsMixin):
                             logger.info(f"Transcription received from peer during the cascade, "
                                         f"cancelling local attempt for {transfer_id}")
                             return
-                        if refused_by_the_card is not None and self._voice_alias_asks_for_the_card(provider_alias):
+                        # In a thread: an `auto` alias not detected yet is detected here (Johnny #30-7).
+                        if refused_by_the_card is not None and await asyncio.to_thread(
+                                self._voice_alias_asks_for_the_card, provider_alias):
                             logger.info(f"Skipping {provider_alias} for {transfer_id}: the card refused "
                                         f"this message ({refused_by_the_card}), and this alias would stand "
                                         f"in the same line")
+                            continue
+                        if self._voice_alias_was_asked(provider_alias, asked_providers, asked_peers):
+                            logger.info(f"Skipping {provider_alias} for {transfer_id}: the fallback after "
+                                        f"the card refusal already asked it for this message")
                             continue
                         try:
                             logger.info(f"Attempting transcription with provider: {provider_alias}")
@@ -5274,6 +5320,9 @@ class CoreService(MusicCommandsMixin):
                             refused_by_the_card = result["card_refusal"]
                             logger.warning(f"Transcription with {provider_alias} was refused the card: "
                                            f"{result.get('error')}")
+                            asked = result.get("already_asked") or {}
+                            asked_providers.update(asked.get("providers") or [])
+                            asked_peers.update(asked.get("peers") or [])
                             result = None
                             continue
                         break  # A result: stop trying providers
@@ -5281,7 +5330,14 @@ class CoreService(MusicCommandsMixin):
                     _VOICE_MESSAGE_CARD_CHECK.reset(check_token)
 
                 if result is None:
-                    logger.error(f"All transcription providers failed for transfer {transfer_id}")
+                    if refused_by_the_card is not None:
+                        # Not a failure of every provider: the card refused, and every alias after it
+                        # was skipped or gave nothing (Zcode #29-4, Ark (4)).
+                        logger.warning(f"No transcription for transfer {transfer_id}: the card refused it "
+                                       f"({refused_by_the_card}) and no alias that does not use the card "
+                                       f"gave one")
+                    else:
+                        logger.error(f"All transcription providers failed for transfer {transfer_id}")
                     return
 
                 # 9. Validate transcription result (ensure not empty)
@@ -10281,11 +10337,13 @@ class CoreService(MusicCommandsMixin):
             f"transcription provider in their last PROVIDERS_RESPONSE"
         )
 
-    async def _transcribe_with_peer(self, audio_path, mime_type: str) -> Optional[Dict[str, Any]]:
+    async def _transcribe_with_peer(self, audio_path, mime_type: str,
+                                    asked: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         """Ask a permitted peer to transcribe, or return None having said why.
 
         Returns None rather than raising: this is the last step of a fallback
         chain, and the caller still owes the user the original local failure.
+        `asked`, when given, gets the node id of every peer this call asks.
         """
         import base64
         from pathlib import Path as _Path
@@ -10302,6 +10360,8 @@ class CoreService(MusicCommandsMixin):
                 "Falling back to peer transcription: %s via '%s' (audio leaves this node)",
                 peer_id[:20], alias,
             )
+            if asked is not None:
+                asked.append(peer_id)
             try:
                 result = await self._request_transcription_from_peer(
                     peer_id=peer_id,
