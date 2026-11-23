@@ -5,8 +5,9 @@ passes "dictation" and the dictation bound `[local_transcription] queue_wait_s`;
 passes "music Transcribe" and no bound (it waits until cancelled); the agent tool passes "agent
 tool" and the tool's timeout less the margin, capped by the turn hold's deadline; a peer's request
 passes "peer <node>", no bound (the lease line gives it what is left of the guest's 120 s, L13) and
-runs inside `serving_a_peer`. Each passes the provider's own estimate for the file. Whisper holds no
-lease until S3b, so here the provider only receives them.
+runs inside `serving_a_peer`. Each passes the provider's own estimate for the file. Since S3b the
+provider also receives each door's `on_wait` (and the peer's `check`): see
+`test_whisper_holds_the_card_lease_and_the_doors_wait_through_it.py`.
 
 Fake providers; no model, no GPU.
 """
@@ -36,6 +37,7 @@ class RecordingWhisper:
         self.asks = []
         self.peer_seen = []
         self.estimated = []
+        self.extras = []
 
     def expected_seconds(self, audio_s):
         self.estimated.append(audio_s)
@@ -45,8 +47,9 @@ class RecordingWhisper:
         return True
 
     async def transcribe(self, path, release_if_loaded_here=False, language=None, task=None, *,
-                         purpose=None, wait_s=None, expected_s=None):
+                         purpose=None, wait_s=None, expected_s=None, on_wait=None, check=None):
         self.asks.append({"purpose": purpose, "wait_s": wait_s, "expected_s": expected_s})
+        self.extras.append({"on_wait": on_wait, "check": check})
         self.peer_seen.append(base_mod.peer_being_served())
         return {"text": "hello", "language": "en", "duration": 3.0, "provider": "local_whisper",
                 "segments": []}

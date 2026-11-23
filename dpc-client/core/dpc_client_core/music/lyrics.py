@@ -79,6 +79,7 @@ machine's IP) to lrclib.net; no audio, no path, no hash.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import email.utils
 import json
@@ -135,6 +136,17 @@ TRANSCRIBE_SOURCE = "transcribe"
 # `LocalWhisperProvider.transcribe`'s: `text`, `language`, `duration`, `provider`,
 # optionally `model` and `segments: [{start, end, text}]`. It raises on failure.
 Transcriber = Callable[[Path], Awaitable[Dict[str, Any]]]
+
+# The Transcribe run a transcriber is working for, as a setter of its `card_wait` (ADR-052 S3b).
+_RUN_CARD_WAIT: contextvars.ContextVar = contextvars.ContextVar("dpc_music_run_card_wait", default=None)
+
+
+def show_card_wait(wait: Dict[str, Any]) -> None:
+    """A transcriber's `on_wait` for the card (ADR-052 3.3, step 6): the wait goes into the
+    running Transcribe run's record as `card_wait` (`transcribe_run`). Outside a run, nothing."""
+    note = _RUN_CARD_WAIT.get()
+    if note is not None:
+        note(wait)
 
 # Tag names that hold lyrics, compared case-folded; `lyrics-*` is matched by prefix.
 _LYRICS_TAG_NAMES = ("lyrics", "syncedlyrics", "unsyncedlyrics", "unsynced lyrics")
@@ -1100,6 +1112,12 @@ class MusicLyrics:
                 raise MusicLibraryError("transcribe_running", "this track is already being transcribed")
             self._transcribe_runs[track_id] = {"state": "running", "started_at": _now_iso()}
 
+        def note_card_wait(wait: Dict[str, Any]) -> None:
+            run = self._transcribe_runs.get(track_id)
+            if run is not None and run.get("state") == "running":
+                run["card_wait"] = dict(wait)
+
+        token = _RUN_CARD_WAIT.set(note_card_wait)
         try:
             try:
                 result = await self.transcriber(Path(path))
@@ -1137,6 +1155,8 @@ class MusicLyrics:
                                                "message": str(exc) or type(exc).__name__,
                                                "finished_at": _now_iso()}
             raise
+        finally:
+            _RUN_CARD_WAIT.reset(token)
         self._transcribe_runs[track_id] = {"state": "done", "applied": answer["applied"],
                                            "transcription": copy.deepcopy(info), "finished_at": _now_iso()}
         return answer

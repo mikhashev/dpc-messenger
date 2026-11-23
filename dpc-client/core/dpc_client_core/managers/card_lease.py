@@ -25,9 +25,10 @@ idle lease to a lease, the refusals and the wait estimate. Slice S2: the supervi
 `swap_out_for_a_lease`); here, a new use of a granted lease waits behind an earlier card-queue place
 too (L5), and a lease that `waits_for_engines` (music, Mike #70), first in both lines, swaps an idle
 supervisor out by the owner-start rule with the swap on. Any other lease waits for a supervisor
-holder until it goes by itself. Not here yet: Whisper and the music engines as clients (S3, S4),
-L11's one shared cell (S3: `shares_with` is stored and not consulted), the probe of foreign GPU use
-(S8).
+holder until it goes by itself. Slice S3b: the local Whisper provider is a client (a lease per GPU
+alias, `waits_for_engines`, item 1a; `release_when_empty` for a grant with nothing loaded). Not here
+yet: the music engines as clients (S4), L11's one shared cell (S3e: `shares_with` is stored and not
+consulted), the probe of foreign GPU use (S8).
 """
 
 import asyncio
@@ -277,8 +278,9 @@ class CardLease:
         self._on_yield = on_yield
         # Whether this lease waits for a busy supervisor and swaps an idle one out by the owner-start
         # rule, with the swap on (section 2.2 item 12; ADR-052 section 3.2 builds music engines with
-        # True, Mike #70). False: it waits for a supervisor holder until that holder goes by itself
-        # (Whisper's item 1a is open). No lease ever loads beside a supervisor (Mike #68).
+        # True, Mike #70; Whisper too since S3b, item 1a decided 2026-11-23). False: it waits for a
+        # supervisor holder until that holder goes by itself. No lease ever loads beside a
+        # supervisor (Mike #68).
         self.waits_for_engines = waits_for_engines
         # L11's one shared cell, consulted from S3 on.
         self.shares_with = shares_with
@@ -549,6 +551,26 @@ class CardLease:
         stay open (an engine whose child exited under a job's use): their next start acquires
         again."""
         _on_the_owner_loop_now(self._release_now, why)
+
+    def release_when_empty(self, why: str, holds: Optional[Callable[[], bool]] = None) -> None:
+        """Let go of a grant nobody uses and nothing fills (ADR-052 3.1, "warm means granted with 0
+        uses"; S3b): from any thread, decided on the owner loop, after any use closed before this
+        call. Released only when granted, no use is open, the client is not loading (`starting`),
+        no yield runs (`draining`: the yield releases by its own outcome), and `holds()` says the
+        client keeps nothing on the card. An open use keeps the grant: it is about to load, or runs."""
+        _on_the_owner_loop_now(self._release_if_empty_now, why, holds)
+
+    def _release_if_empty_now(self, why: str, holds: Optional[Callable[[], bool]]) -> None:
+        if not self._granted or self._uses or self._starting or self._draining:
+            return
+        try:
+            kept = bool(holds()) if holds is not None else False
+        except Exception:
+            # What the client holds is not known: keeping the grant cannot let a load go over it.
+            logger.warning("card: %s could not say what it holds; the grant is kept", self.display, exc_info=True)
+            return
+        if not kept:
+            self._release_now(why)
 
     def acquire_blocking(self, what: str, **acquire_kw: Any) -> None:
         """`acquire` for a thread client (L9): waits on the owner loop. On the owner loop's own

@@ -4612,6 +4612,24 @@ class CoreService(MusicCommandsMixin):
             "mime_type": mime_type
         }
 
+    def _tell_the_card_wait(self, purpose: str, estimate: dict) -> None:
+        """A transcription's `on_wait` (ADR-052 section 4): the wait for the card goes to the UI as
+        `transcription_waiting_for_card`, with the person's line and the estimate (L10)."""
+        from .providers.whisper_provider import card_wait_words
+
+        local_api = getattr(self, "local_api", None)
+        if local_api is None:
+            return
+        payload = {"purpose": purpose, "text": card_wait_words(estimate), "wait": dict(estimate or {})}
+        try:
+            task = asyncio.get_running_loop().create_task(
+                local_api.broadcast_event("transcription_waiting_for_card", payload))
+        except RuntimeError:
+            return
+        tasks = self.__dict__.setdefault("_card_wait_events", set())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
     @slow_command
     async def transcribe_audio(
         self,
@@ -4799,6 +4817,7 @@ class CoreService(MusicCommandsMixin):
                 ask = await asyncio.to_thread(
                     card_ask, provider_obj, "dictation", temp_path,
                     bound_s=self.settings.get_local_transcription_queue_wait_s())
+                ask["on_wait"] = lambda estimate: self._tell_the_card_wait("dictation", estimate)
                 try:
                     # Use local Whisper provider
                     result = await provider_obj.transcribe(temp_path, **ask)

@@ -21,8 +21,9 @@ job store, which keeps the state machine; every store call goes through
 2. **The card** (decision 32). `card_holders()` names the DPC engines (Strata,
    llama-server) holding the GPU card. While one does, the job stays `queued` with "waiting
    for the card: X holds it" (`set_waiting_for_card`), re-checked every `card_poll_s` and on
-   every `wake()`. Nothing is stopped here: the job card's "Stop X" is the person's press,
-   through the existing `stop_local_engine` command with the holder's alias.
+   every `wake()`. No engine is stopped here: the job card's "Stop X" is the person's press,
+   through the existing `stop_local_engine` command with the holder's alias. An idle lease
+   with a cheap yield (a warm Whisper, ADR-052 S3b) is asked to let go, until S4.
 3. `queued -> running`; the server is started when it is not running (`AceStepServer.start`,
    one try; a failure fails the job with the engine's reason and log tail).
 4. **`POST /lm`**, polled through `/job` until done. The answer (the JSON with
@@ -151,6 +152,10 @@ class _JobFailure(Exception):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+# How long the old card wait waits for an idle lease to let go (a Whisper unload takes about 1 s).
+_LEASE_YIELD_BOUND_S = 30.0
 
 
 def default_card_holders() -> List[Dict[str, Any]]:
@@ -665,6 +670,12 @@ class MusicJobRunner:
             except Exception:
                 logger.exception("music: reading the card holders failed; treating the card as free")
                 holders = []
+            if holders and await self._ask_idle_leases_to_let_go(job_id, holders):
+                try:
+                    holders = list(self._card_holders() or [])
+                except Exception:
+                    logger.exception("music: reading the card holders failed; treating the card as free")
+                    holders = []
             if not holders:
                 if job.get("card_wait"):
                     await self._change(self.store.clear_waiting_for_card, job_id)
@@ -681,6 +692,28 @@ class MusicJobRunner:
                 logger.info("music: job %s waits for the card (%s)", job_id,
                             ", ".join(str(a) for a, _ in names))
             await self._sleep_or_wake(self.card_poll_s)
+
+    async def _ask_idle_leases_to_let_go(self, job_id: str, holders: List[Dict[str, Any]]) -> bool:
+        """Until S4 moves the runner onto the card lease (ADR-052 3.3): a holder row that names an
+        idle lease with a cheap yield (a warm Whisper, S3b) is asked to let go, as a music start does
+        by the matrix (2.1: "yields while idle"); a busy one is waited for and named, as before.
+        True when one let go."""
+        from ..managers import card_lease
+        let_go = False
+        for row in holders:
+            lease = card_lease.lease_named(str(row.get("alias") or ""))
+            if (lease is None or lease.yield_cost != "cheap" or not lease.granted or lease._draining
+                    or lease._busy_for_the_card(lease.state)):
+                continue
+            try:
+                outcome = await lease.give_up_for(f"music job {job_id}",
+                                                  card_lease._clock() + _LEASE_YIELD_BOUND_S)
+            except asyncio.TimeoutError:
+                logger.warning("music: job %s: %s did not let go within %g s", job_id, lease.display,
+                               _LEASE_YIELD_BOUND_S)
+                continue
+            let_go = let_go or outcome in ("let_go", "nothing_to_give")
+        return let_go
 
     async def _sleep_or_wake(self, seconds: float) -> None:
         if self._wake is None:

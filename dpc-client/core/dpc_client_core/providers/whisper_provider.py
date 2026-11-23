@@ -6,7 +6,8 @@ import math
 import os
 import logging
 import threading
-from typing import Callable, Dict, Any, Optional, List
+import time
+from typing import Awaitable, Callable, Dict, Any, Optional, List
 
 from .base import AIProvider, ModelNotCachedError
 from .model_sizes import model_size_bytes
@@ -40,6 +41,11 @@ _START_FIGURES: Dict[str, Dict[str, float]] = {
 _FIGURE_KEYS = ("warm", "cold", "load_s")
 # ADR-052 L4: the margin a person's door keeps for the transcription itself, `max(10 s, estimate)`.
 MIN_MARGIN_S = 10.0
+# ADR-052 L11: what a loaded Whisper holds on the card beyond its weights, MiB (torch reserved peak at
+# batch 8 plus the CUDA context, less the weights; "GPU figures on speech"). A start value.
+_WHISPER_OVERHEAD_MIB = 2900
+# The words a Stop or a refusal adds about a Whisper holder (ADR-052 2.2 item 7).
+_STOP_HINT = "It lets go when idle; Stop unloads it now."
 
 
 def _a_positive(value: Any) -> Optional[float]:
@@ -87,8 +93,9 @@ def card_ask(provider: Any, purpose: str, audio_path: str, *, bound_s: Optional[
     deadline (`wait_s=None`, until cancelled). A peer's door passes neither: the lease line gives a
     peer what is left of its 120 s trip (`card_lease.PEER_TRIP_S`, L13).
 
-    Slice S3a builds the ask and the doors pass it; the provider holds no lease until S3b, which
-    hands these three to `CardLease.use`."""
+    Slice S3a builds the ask and the doors pass it; since S3b `transcribe` hands these three to
+    `CardLease.use` (`purpose` names the use, `wait_s` bounds the wait in the lease line, `expected_s`
+    is what a later waiter's estimate counts for this call)."""
     if audio_s is None:
         audio_s = audio_seconds(audio_path)
     estimate = getattr(provider, "expected_seconds", None)
@@ -99,6 +106,32 @@ def card_ask(provider: Any, purpose: str, audio_path: str, *, bound_s: Optional[
         left = max(0.0, float(caller_left_s) - margin)
         wait_s = left if wait_s is None else min(wait_s, left)
     return {"purpose": purpose, "wait_s": wait_s, "expected_s": expected_s}
+
+
+def card_wait_words(estimate: Optional[Dict[str, Any]]) -> str:
+    """A person's line for a transcription waiting for the card (ADR-052 section 4): "transcription
+    queued behind yue2.cpp (music job J), about 6 min" or "..., time unknown". From the lease's wait
+    estimate (L10), which the doors' `on_wait` receives."""
+    estimate = estimate or {}
+    behind = ", ".join(str(name) for name in estimate.get("behind") or []) or "another job on the card"
+    wait_s = _a_positive(estimate.get("wait_s")) if estimate.get("known") else None
+    if wait_s is None:
+        when = "time unknown"
+    elif wait_s < 90:
+        when = f"about {max(1, round(wait_s))} s"
+    else:
+        when = f"about {round(wait_s / 60)} min"
+    return f"transcription queued behind {behind}, {when}"
+
+
+def whisper_vram_mib(model_name: str) -> Optional[int]:
+    """The declared peak of a loaded Whisper model in MiB (ADR-052 3.1 and L11): the weights from
+    the measured size table plus `_WHISPER_OVERHEAD_MIB`, else None (unknown, never 0). Never asks
+    the network (`model_sizes.measured_size_bytes`)."""
+    from .model_sizes import measured_size_bytes
+
+    size = measured_size_bytes(model_name)
+    return None if not size else size // 2**20 + _WHISPER_OVERHEAD_MIB
 
 _idle_unload_source: Optional[Callable[[], float]] = None
 
@@ -198,6 +231,11 @@ class LocalWhisperProvider(AIProvider):
         self._loaded_device: Optional[str] = None
         self._calls_since_load = 0
         self._estimate_device: Optional[str] = None
+        # ADR-052 S3b: this alias's standing on the card, built on the first call that runs on a GPU
+        # device (never for the CPU) and handed over in a providers reload; and the calls holding it
+        # now, {token: (monotonic start, expected_s)}, shared with a successor, for its `eta_s`.
+        self._card_lease: Optional[Any] = None
+        self._card_runs: Dict[int, Any] = {}
 
         logger.info(f"LocalWhisperProvider '{alias}' initialized (model={self.model_name}, device={self.device})")
 
@@ -491,18 +529,152 @@ class LocalWhisperProvider(AIProvider):
         load = figures["load_s"]
         return None if load is None else load + work
 
+    # -- the card lease (ADR-052 S3b) --
+
+    async def _lease_for_the_card(self) -> Optional[Any]:
+        """The lease a call holds the card under, or None when it runs on the CPU (ADR-052 3.1: a CPU
+        device builds no lease; a model that fell back to the CPU routes there). The route's device
+        is `_route_device`: an explicit device is used as is (no torch import), `auto` is detected
+        once, in a thread."""
+        if (self.device == "auto" and not self.model_loaded and self._estimate_device is None
+                and self._detected_device is None):
+            device = await asyncio.to_thread(self._route_device)
+        else:
+            device = self._route_device()
+        if device == "cpu":
+            return None
+        return self._the_card_lease()
+
+    def _the_card_lease(self) -> Any:
+        """This alias's lease, built once: holder `whisper:<alias>`, a cheap yield (an unload), and
+        `waits_for_engines` (item 1a, decided 2026-11-23: with the swap on and nothing waiting, an
+        idle local engine is swapped out by the owner-start rule, as for music)."""
+        if self._card_lease is not None:
+            return self._card_lease
+        from ..managers.card_lease import CardLease, lease_named
+
+        holder = f"whisper:{self.alias}"
+        known = lease_named(holder)
+        if known is not None and (known.granted or known._uses or known._waiters()):
+            # A retired object of this alias left it standing (no hand-over): one lease per alias.
+            known.rebind(self._yield_for_the_card)
+            self._card_lease = known
+            return known
+        self._card_lease = CardLease(
+            holder, kind="transcription", engine="whisper",
+            display=f"Whisper ({self.model_name.rsplit('/', 1)[-1]})",
+            vram_mib=whisper_vram_mib(self.model_name), yield_cost="cheap",
+            on_yield=self._yield_for_the_card, waits_for_engines=True,
+            eta_s=self._card_eta, stop_hint=_STOP_HINT,
+        )
+        return self._card_lease
+
+    async def _yield_for_the_card(self, why: str) -> str:
+        """The lease's `on_yield`: the object that owns the model now lets go."""
+        return await self._current_owner().yield_card(why)
+
+    def _card_eta(self) -> Optional[float]:
+        """The lease's `eta_s`: the longest remaining expected time of the calls holding the card now,
+        None when any is unknown or none runs (L10). An overrun reads as unknown (`_positive`)."""
+        runs = list(self._current_owner()._card_runs.values())
+        if not runs:
+            return None
+        now = time.monotonic()
+        left = []
+        for started, expected in runs:
+            if expected is None:
+                return None
+            left.append(expected - (now - started))
+        return max(left)
+
+    def _holds_the_card(self) -> bool:
+        """Whether a model sits on a GPU device now (a model that fell back to the CPU does not)."""
+        owner = self._current_owner()
+        return owner.model_loaded and owner._device_in_use() != "cpu"
+
+    def _let_go_of_an_empty_grant(self, why: str) -> None:
+        """A grant with no use open and no model on the card is released (ADR-052 3.1, "warm means
+        granted with 0 uses"): a failed load, a call that ended before loading, an unload that ran
+        while no use was open. Decided on the owner loop after the uses closed before it."""
+        lease = self._current_owner()._card_lease or self._card_lease
+        if lease is not None:
+            lease.release_when_empty(why, self._holds_the_card)
+
+    def _off_the_card_after_a_load(self, lease: Optional[Any]) -> None:
+        """A load that fell back to the CPU releases the lease (ADR-052 3.1, Ark #13 new #3): the
+        model lives in host RAM and the call runs without a card hold. L12's RAM check for this route
+        is S3d's."""
+        if lease is not None and self.model_loaded and self._loaded_device == "cpu":
+            logger.warning("Whisper '%s': the load fell back to the CPU; the card is let go", self.alias)
+            lease.release("the load fell back to the CPU")
+
+    async def _load_under_the_lease(self, lease: Optional[Any]):
+        """`_load_model` in its thread, the lease marked `starting` meanwhile. The caller holds
+        `_load_lock`. Returns `_finish_thread`'s triple."""
+        if lease is not None:
+            lease.mark_starting()
+        try:
+            outcome = await self._finish_thread(self._load_model)
+        finally:
+            if lease is not None:
+                lease.mark_running()
+        self._off_the_card_after_a_load(lease)
+        return outcome
+
+    async def yield_card(self, why: str) -> str:
+        """Let go of the card for a contender (ADR-052 L6, 3.1), under `_load_lock`: nothing loaded
+        is `nothing_to_give`; a transcription running is `refused`; else the model is unloaded, and
+        the answer is `let_go` when it is gone, `could_not_let_go` when it is still loaded (the
+        unload's thread never ran). Not gated by `swap_when_idle` (item 2)."""
+        owner = self._current_owner()
+        if owner is not self:
+            return await owner.yield_card(why)
+        async with self._load_lock:
+            if not self.model_loaded:
+                return "nothing_to_give"
+            if self._active_transcriptions > 0:
+                return "refused"
+            self._cancel_idle_task()
+            try:
+                await self._unload_locked("card_yield", why)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Whisper '%s': the unload for the card did not run (%s); the model "
+                               "and the card are kept", self.alias, exc)
+            return "could_not_let_go" if self.model_loaded else "let_go"
+
     async def ensure_model_loaded(self) -> None:
+        """The preload. On a GPU device it asks for the card as a background call (ADR-052 3.1,
+        rule 10): it never waits or swaps anything out; when the card is not free it raises
+        `LeaseSkipped` and the model stays lazy."""
         owner = self._current_owner()
         if owner is not self:
             return await owner.ensure_model_loaded()
         self._refuse_if_retired()
         if self.model_loaded:
             return
+        lease = await self._lease_for_the_card()
+        if lease is None:
+            return await self._preload(None)
+        from ..managers.card_lease import LeaseSkipped
+        try:
+            # A use, not a bare grant: busy while it loads, so no contender asks it to let go before
+            # the load starts (a grant with no use is idle, L6).
+            async with lease.use("preload", wait_s=0, background=True):
+                await self._preload(lease)
+        except LeaseSkipped as skipped:
+            logger.info("Whisper preload skipped: %s", skipped)
+            raise
+        finally:
+            self._let_go_of_an_empty_grant("the preload loaded nothing")
+
+    async def _preload(self, lease: Optional[Any]) -> None:
         async with self._load_lock:
             if self.model_loaded:
                 return
             self._refuse_if_retired()
-            _, error, cancelled = await self._finish_thread(self._load_model)
+            _, error, cancelled = await self._load_under_the_lease(lease)
             if error is not None:
                 raise error
             self._settle_finished_load()
@@ -606,6 +778,10 @@ class LocalWhisperProvider(AIProvider):
             released, error, cancelled = await self._finish_thread(self._unload_model)
         finally:
             self._unloading = False
+            # ADR-052 3.1: the card is let go on every unload that ran, read from state, not from the
+            # path: a model still loaded (the thread never started) keeps it. A use still open keeps
+            # it too (it is about to load); a yield releases by its own outcome.
+            self._let_go_of_an_empty_grant(f"unloaded: {reason}")
         if error is not None:
             raise error
         if not was_loaded:
@@ -749,6 +925,7 @@ class LocalWhisperProvider(AIProvider):
             return
         if self.model_loaded:
             logger.error("Whisper '%s': the model is still loaded at exit", self.alias)
+        self._let_go_of_an_empty_grant("shutdown")
 
     # -- idle self-unload ------------------------------------------------------------------
 
@@ -868,6 +1045,15 @@ class LocalWhisperProvider(AIProvider):
         if self._unload_when_idle:
             new._unload_when_idle = True
             new._unload_reason = self._unload_reason
+        # ADR-052 3.1: one lease follows the model and is never released by a hand-over.
+        lease = self._card_lease
+        if lease is not None:
+            new._card_lease = lease
+            lease.rebind(new._yield_for_the_card)
+            from ..managers import card_lease as _card_lease
+            _card_lease._CARD_LEASES[lease.holder] = lease
+        self._card_runs.update(new._card_runs)
+        new._card_runs = self._card_runs
         if new.model_name == self.model_name:
             # The speed measured here is the same model's: `new` keeps what it measured itself.
             for device, figures in self._measured.items():
@@ -1039,33 +1225,69 @@ class LocalWhisperProvider(AIProvider):
     async def transcribe(self, audio_path: str, release_if_loaded_here: bool = False,
                          language: Optional[str] = None, task: Optional[str] = None, *,
                          purpose: Optional[str] = None, wait_s: Optional[float] = None,
-                         expected_s: Optional[float] = None) -> Dict[str, Any]:
+                         expected_s: Optional[float] = None,
+                         on_wait: Optional[Callable[[Dict[str, Any]], None]] = None,
+                         check: Optional[Callable[[], Awaitable[None]]] = None) -> Dict[str, Any]:
         """Transcribe `audio_path`. With `release_if_loaded_here`, a model this very call
         had to load is unloaded as the call ends, unless another transcription is using
         it (the decision is made under the load lock, so it cannot race).
 
         `language` ("auto" = detect) and `task` apply to this call only; None keeps the
         provider's configured value. Nothing here mutates the shared provider. So do
-        `purpose`, `wait_s` and `expected_s`, the door's ask for the card (`card_ask`)."""
+        `purpose`, `wait_s` and `expected_s`, the door's ask for the card (`card_ask`).
+
+        On a GPU device the call holds the card lease (ADR-052 S3b, section 3.1): its use is
+        taken before `_load_lock` (the lease, then the lock), waiting in the lease line at
+        most `wait_s` (None: until cancelled or `check` raises), and `on_wait` is told the
+        wait estimate (L10) whenever who it waits for changes. `check` runs on every round of
+        the wait and once more at the grant, before anything loads (a peer that left, L13
+        point 3). A refusal is a `CardQueueRefusal` (L3). On the CPU none of this applies."""
         # A stale reference to a replaced object forwards to the object that replaced it,
         # so a use is counted and ended on one object.
         current = self._current_owner()
         if current is not self:
             return await current.transcribe(audio_path, release_if_loaded_here,
                                             language=language, task=task, purpose=purpose,
-                                            wait_s=wait_s, expected_s=expected_s)
-        if purpose is not None:  # the lease that takes the ask is S3b's (ADR-052)
-            logger.debug("Whisper '%s': %s asks for the card, bound %s, expected %s", self.alias,
-                         purpose, "none" if wait_s is None else f"{wait_s:g} s",
-                         "unknown" if expected_s is None else f"{expected_s:.1f} s")
+                                            wait_s=wait_s, expected_s=expected_s,
+                                            on_wait=on_wait, check=check)
         self._refuse_if_retired()
+        lease = await self._lease_for_the_card()
+        if lease is None:
+            return await self._transcribe_holding(audio_path, release_if_loaded_here, language, task, None)
+        # S3d seam (ADR-052 L12, item 1a): the GPU/CPU choice goes HERE, before the lease is
+        # asked; a call L12 sends to the CPU twin asks no lease and swaps nothing out. Until
+        # then every GPU call asks the lease.
+        what = purpose or "transcription"
+        logger.debug("Whisper '%s': %s asks for the card, bound %s, expected %s", self.alias, what,
+                     "none" if wait_s is None else f"{wait_s:g} s",
+                     "unknown" if expected_s is None else f"{expected_s:.1f} s")
+        token = object()
+        try:
+            async with lease.use(what, wait_s=wait_s, expected_s=expected_s, on_wait=on_wait,
+                                 check=check):
+                if check is not None:
+                    await check()
+                runs = self._current_owner()._card_runs
+                runs[id(token)] = (time.monotonic(), _a_positive(expected_s))
+                try:
+                    return await self._transcribe_holding(audio_path, release_if_loaded_here,
+                                                          language, task, lease)
+                finally:
+                    runs.pop(id(token), None)
+        finally:
+            self._let_go_of_an_empty_grant(f"{what} ended with nothing loaded")
+
+    async def _transcribe_holding(self, audio_path: str, release_if_loaded_here: bool,
+                                  language: Optional[str], task: Optional[str],
+                                  lease: Optional[Any]) -> Dict[str, Any]:
+        """The body of `transcribe` once the card is held (`lease`) or not needed (None)."""
         # The lock is taken even when the model is loaded, so the use is counted
         # atomically with the load and an unload in progress is waited for.
         async with self._load_lock:
             self._refuse_if_retired()
             loaded_here = not self.model_loaded
             if loaded_here:
-                _, error, cancelled = await self._finish_thread(self._load_model)
+                _, error, cancelled = await self._load_under_the_lease(lease)
                 if error is not None:
                     raise error
                 if cancelled:

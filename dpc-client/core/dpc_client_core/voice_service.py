@@ -249,7 +249,12 @@ class VoiceService:
             }
 
         except Exception as e:
-            logger.error(f"Failed to pre-load Whisper model: {e}", exc_info=True)
+            from .managers.card_lease import LeaseSkipped
+            if isinstance(e, LeaseSkipped):
+                # ADR-052 3.1: the preload never waits for the card; the model stays lazy.
+                logger.info("Whisper preload skipped for '%s': %s", provider_alias, e)
+            else:
+                logger.error(f"Failed to pre-load Whisper model: {e}", exc_info=True)
 
             # Broadcast loading failed event
             await self.local_api.broadcast_event("whisper_model_loading_failed", {

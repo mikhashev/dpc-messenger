@@ -318,9 +318,13 @@ class MusicCommandsMixin:
                 "too_large",
                 f"the file is {size_mb:.1f} MB, over the local transcription limit of {limit:g} MB "
                 f"([local_transcription] max_file_size_mb)")
-        from ..providers.whisper_provider import card_ask
+        from ..providers.whisper_provider import card_ask, card_wait_words
+        from .lyrics import show_card_wait
         # ADR-052 L4: a person's click with no bound of its own; it waits until cancelled.
         ask = await asyncio.to_thread(card_ask, provider, "music Transcribe", str(path))
+        ask["on_wait"] = lambda estimate: show_card_wait({
+            "text": card_wait_words(estimate), "behind": list(estimate.get("behind") or []),
+            "wait_s": estimate.get("wait_s"), "known": bool(estimate.get("known"))})
         try:
             # A model this run loads is released when the run ends (decided under the
             # provider's lock); a warm one stays, and the idle timer frees it in time.

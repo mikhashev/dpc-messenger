@@ -6,8 +6,9 @@ out by the owner-start rule (`swap_out_for_a_lease`, section 2.2 item 12): the s
 idle by rule 1, nothing earlier waiting in either line. The owner's live conversation is saved
 before the stop, the swap note says the parked conversations are dropped, and the job is granted
 the card. A busy holder is waited for and never marked; another waiter ahead means no swap; with
-the swap off the job waits and nothing is stopped. A lease that does not wait for engines (Whisper's
-item 1a is open) never swaps a supervisor out.
+the swap off the job waits and nothing is stopped. A lease that does not wait for engines (a fake
+client built without it; the real Whisper lease waits for engines since S3b, item 1a) never swaps a
+supervisor out.
 
 Real supervisors faked at their seams (`test_one_local_engine_holds_the_card.py`); fake lease clients.
 """

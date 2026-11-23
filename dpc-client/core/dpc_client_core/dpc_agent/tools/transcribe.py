@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from ...managers import llama_server_supervisor as _sup
-from ...providers.whisper_provider import card_ask
+from ...providers.whisper_provider import card_ask, card_wait_words
 from .core import _resolve_file_path
 from .registry import ToolEntry, ToolContext
 
@@ -187,6 +187,8 @@ async def transcribe_audio_file(
 
     ask = await asyncio.to_thread(card_ask, provider, "agent tool", str(source),
                                   bound_s=_turn_holds_wait_left(), caller_left_s=_TOOL_TIMEOUT_S)
+    # ADR-052 3.1: a wait for the card is told through the tool's progress.
+    ask["on_wait"] = lambda estimate: ctx.emit_progress(f"Waiting for the card: {card_wait_words(estimate)}")
     try:
         result = await provider.transcribe(str(source), **({"language": language} if language else {}), **ask)
     except Exception as e:

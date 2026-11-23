@@ -88,8 +88,16 @@ def _engine_unavailable_cause(error: BaseException, strata: bool) -> bool:
     return False
 
 
+class _PeerLeft(Exception):
+    """A peer's transcription whose guest disconnected before the card was its (ADR-052 L13
+    point 3): nothing is loaded and no answer is sent."""
+
+
 class P2PCoordinator:
     """Coordinates P2P connection lifecycle, messaging, and request handling."""
+
+    # Peer transcriptions dropped because the guest had gone by the grant (ADR-052 L13 point 3).
+    transcription_answers_dropped = 0
 
     def __init__(self, service, ledger: Optional[NodeLedger] = None):
         """
@@ -1400,6 +1408,13 @@ class P2PCoordinator:
             from .managers.llama_server_supervisor import serving_a_peer
             from .providers.whisper_provider import card_ask
             ask = await asyncio.to_thread(card_ask, provider_instance, f"peer {peer_id}", temp_audio_path)
+
+            async def the_peer_is_still_there() -> None:
+                # L13 point 3, the one cheap guard: in the wait and at the grant.
+                if peer_id not in self.p2p_manager.peers:
+                    raise _PeerLeft(peer_id)
+
+            ask["check"] = the_peer_is_still_there
             with serving_a_peer(peer_id):
                 result = await provider_instance.transcribe(temp_audio_path, **overrides, **ask)
             logger.info("Transcription completed successfully for %s", peer_id)
@@ -1413,6 +1428,10 @@ class P2PCoordinator:
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
 
+        except _PeerLeft:
+            self.transcription_answers_dropped += 1
+            logger.info("Transcription answer dropped, request gone: %s left before the card was its "
+                        "(%d dropped so far)", peer_id, self.transcription_answers_dropped)
         except Exception as e:
             logger.error("Transcription failed for %s: %s", peer_id, e, exc_info=True)
             error_response = create_remote_transcription_response(request_id=request_id, error=str(e))

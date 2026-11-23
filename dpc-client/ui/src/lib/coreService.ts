@@ -151,6 +151,13 @@ import { callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type
 import type { DiscardReason, MusicCapabilities, MusicEngine, MusicJob, MusicTake } from './utils/musicCreate';
 import type { MusicExportInfo, PlaylistExportAnswer, TrackExportAnswer } from './utils/musicExport';
 
+// ADR-052 L4: a dictation may wait in line for the GPU up to the dictation bound
+// (`[local_transcription] queue_wait_s`, 600 s by default) and then transcribe; the margin is
+// the transcription's own allowance (the former 240 s timeout). A shorter timeout would cut a
+// wait the backend still runs. A `queue_wait_s` raised above 600 in config.ini is not seen here.
+const TRANSCRIBE_QUEUE_WAIT_MS = 600_000;
+const TRANSCRIBE_WORK_MARGIN_MS = 240_000;
+
 // Re-export all service stores for backward compatibility.
 // NOTE: When adding new UI-reactive fields from privacy_rules.json, add the store in
 // services/providers.ts and re-export it here. See docs/CONFIGURATION.md "UI integration pattern".
@@ -1498,10 +1505,7 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     // (Mike's call, 2026-11-15; was 180s)
                     timeout = 300000;
                 } else if (command === 'transcribe_audio') {
-                    // Voice transcription timeout: 240s (v0.13.1+)
-                    // First use: model download (~3GB, 1-2min) + load (~20s) + compile (~30s) + transcribe (~5s)
-                    // Subsequent uses: ~5-10s
-                    timeout = 240000;
+                    timeout = TRANSCRIBE_QUEUE_WAIT_MS + TRANSCRIBE_WORK_MARGIN_MS;
                 } else if (command === 'start_music_engine' || command === 'stop_music_engine'
                     || command === 'measure_music_take_loudness' || command === 'stop_local_engine') {
                     // 180s: an engine start waits up to 60 s for /health (yue2.cpp may first split

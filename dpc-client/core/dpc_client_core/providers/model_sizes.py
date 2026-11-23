@@ -103,6 +103,16 @@ def model_size_bytes(
     return None, None
 
 
+def measured_size_bytes(model_name: str, revision: Optional[str] = None) -> Optional[int]:
+    """The table row's size for `model_name` (by exact revision, or by name when none is given),
+    or None. Never asks the network: for a caller on a request's path (the card lease's
+    `vram_mib`, ADR-052 S3b), where `model_size_bytes`'s HfApi fallback could take 20 s."""
+    row = _MEASURED_SIZES.get((model_name, revision))
+    if row is None and revision is None:
+        row = next((r for (name, _rev), r in _MEASURED_SIZES.items() if name == model_name), None)
+    return row.size_bytes if row is not None else None
+
+
 def model_size_measured_on(
     model_name: str, revision: Optional[str] = None
 ) -> Optional[str]:
