@@ -83,7 +83,7 @@ class TestIdleUnloadSIsWrittenForTheOwner:
         assert s.get_local_transcription_idle_unload_s() == 45.0
 
     def test_a_file_that_has_the_key_is_not_rewritten(self, tmp_path):
-        _old_config(tmp_path, {"idle_unload_s": "300"})
+        _old_config(tmp_path, {"idle_unload_s": "300", "queue_wait_s": "600"})
         before = (tmp_path / "config.ini").read_bytes()
         Settings(tmp_path)
         assert (tmp_path / "config.ini").read_bytes() == before
@@ -126,3 +126,54 @@ class TestIdleUnloadSIsWrittenForTheOwner:
         monkeypatch.setattr("builtins.open", refusing_open)
         s = Settings(tmp_path)
         assert s.get_local_transcription_idle_unload_s() == 300.0
+
+
+class TestQueueWaitSIsWrittenForTheOwnerToo:
+    """Ark #20-3 (Mike #9/#15): the same carrier as `idle_unload_s`, code default and key in the file."""
+
+    def test_an_old_config_without_the_section_gets_it_at_start(self, tmp_path):
+        _old_config(tmp_path)
+        s = Settings(tmp_path)
+        parser = _read(tmp_path)
+        assert parser["local_transcription"]["queue_wait_s"] == "600"
+        assert parser["hub"]["url"] == "http://localhost:8000"
+        assert s.get_local_transcription_queue_wait_s() == 600
+
+    def test_an_old_config_with_the_section_but_not_the_key_gets_it(self, tmp_path):
+        _old_config(tmp_path, {"device": "cpu"})
+        Settings(tmp_path)
+        section = _read(tmp_path)["local_transcription"]
+        assert section["queue_wait_s"] == "600" and section["device"] == "cpu"
+        assert section["idle_unload_s"] == "300"
+
+    def test_the_owners_value_is_never_touched_and_wins(self, tmp_path):
+        _old_config(tmp_path, {"queue_wait_s": "45", "idle_unload_s": "30"})
+        before = (tmp_path / "config.ini").read_bytes()
+        s = Settings(tmp_path)
+        assert (tmp_path / "config.ini").read_bytes() == before
+        assert s.get_local_transcription_queue_wait_s() == 45
+
+    def test_one_source_for_the_default(self, tmp_path):
+        from dpc_client_core.settings import _SEEDED_KEYS
+
+        assert _SEEDED_KEYS[("local_transcription", "queue_wait_s")][0] == "600"
+        Settings(tmp_path)  # a fresh config writes the same value the seed table holds
+        for (section, key), (value, _comment) in _SEEDED_KEYS.items():
+            assert _read(tmp_path)[section][key] == value
+
+    def test_a_changed_seed_moves_the_fresh_file_and_the_getters(self, tmp_path, monkeypatch):
+        from dpc_client_core import settings as settings_mod
+
+        patched = dict(settings_mod._SEEDED_KEYS)
+        patched[("local_transcription", "queue_wait_s")] = ("77", "x")
+        patched[("local_transcription", "idle_unload_s")] = ("88", "x")
+        monkeypatch.setattr(settings_mod, "_SEEDED_KEYS", patched)
+        _old_config(tmp_path)
+        # An unwritable file: the getters still read the seed table, not a literal of their own.
+        monkeypatch.setattr(Settings, "_seed_missing_keys", lambda self: None)
+        s = Settings(tmp_path)
+        assert s.get_local_transcription_queue_wait_s() == 77
+        assert s.get_local_transcription_idle_unload_s() == 88.0
+        (tmp_path / "fresh").mkdir()
+        Settings(tmp_path / "fresh")
+        assert _read(tmp_path / "fresh")["local_transcription"]["queue_wait_s"] == "77"

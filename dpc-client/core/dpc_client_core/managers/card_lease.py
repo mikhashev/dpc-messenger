@@ -1042,6 +1042,15 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
                           wait=None)
     waiter = _LeaseWaiter(lease, what, wait_s, opens_a_use, expected_s, ticket)
     blockers = _blockers(waiter)
+    if waiter.for_a_peer and waiter.expected_s is not None and waiter.expected_s > PEER_TRIP_S:
+        # Mike #17 (L13, point 2), Ark #20-1: the 120 s rule holds at the grant too. Its own work alone
+        # outlasts the guest, so the card being free does not make the trip fit. An unknown
+        # `expected_s` is not this case: a free card still serves it (L10).
+        estimate = _estimate(waiter, blockers)
+        raise _refuse(waiter, LeaseRefusedForPeer(
+            "this node cannot finish this transcription within the time the request is given, right now",
+            wait=estimate,
+        ))
     if not blockers:
         _proceed(waiter)
         return waiter.use

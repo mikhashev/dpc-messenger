@@ -70,6 +70,8 @@ def _check_model_files_dir(raw: str) -> Path:
 _SEEDED_KEYS: Dict[tuple, tuple] = {
     ('local_transcription', 'idle_unload_s'): (
         '300', 'Unload the model (frees VRAM) after this many idle seconds; 0 = never'),
+    ('local_transcription', 'queue_wait_s'): (
+        '600', "How long a person's transcription may wait in line for the GPU; 0 = do not wait"),
 }
 
 
@@ -429,7 +431,7 @@ class Settings:
             'max_file_size_mb': '25',  # Max audio file size for local transcription (VRAM limit)
             'lazy_loading': 'true',  # Load model on first use (faster startup)
             'idle_unload_s': _SEEDED_KEYS[('local_transcription', 'idle_unload_s')][0],  # Unload the model (frees VRAM) after this many idle seconds; 0 = never
-            'queue_wait_s': '600'  # How long a person's transcription may wait in line for the GPU; 0 = do not wait
+            'queue_wait_s': _SEEDED_KEYS[('local_transcription', 'queue_wait_s')][0]  # How long a person's transcription may wait in line for the GPU; 0 = do not wait
         }
 
         self._config['vision'] = {
@@ -1347,31 +1349,35 @@ class Settings:
 
     def get_local_transcription_idle_unload_s(self) -> float:
         """`[local_transcription] idle_unload_s`: seconds after the last transcription
-        before the loaded model is unloaded to free the card. 0 = never. Default 300."""
-        raw = self.get('local_transcription', 'idle_unload_s', '300')
+        before the loaded model is unloaded to free the card. 0 = never. The default is the
+        seed table's (`_SEEDED_KEYS`, 300)."""
+        default = _SEEDED_KEYS[('local_transcription', 'idle_unload_s')][0]
+        raw = self.get('local_transcription', 'idle_unload_s', default)
         try:
             value = float(str(raw).strip())
         except (TypeError, ValueError):
-            logger.warning("[local_transcription] idle_unload_s is unreadable (%r); using 300", raw)
-            return 300.0
+            logger.warning("[local_transcription] idle_unload_s is unreadable (%r); using %s", raw, default)
+            return float(default)
         return value if value > 0 else 0.0
 
     def get_local_transcription_queue_wait_s(self) -> int:
         """`[local_transcription] queue_wait_s`: the dictation bound, seconds a person's
-        transcription waits in line for the card (0 = do not wait). Default 600 (ADR-052 L4,
-        item 6A, Mike 2026-11-23); a value that is not a whole number >= 0 reads as the default."""
+        transcription waits in line for the card (0 = do not wait). The default is the seed
+        table's (`_SEEDED_KEYS`, 600; ADR-052 L4, item 6A, Mike 2026-11-23); a value that is not a
+        whole number >= 0 reads as the default."""
+        default = _SEEDED_KEYS[('local_transcription', 'queue_wait_s')][0]
         try:
-            raw = self.get('local_transcription', 'queue_wait_s', '600').strip()
+            raw = self.get('local_transcription', 'queue_wait_s', default).strip()
         except configparser.Error as e:
             logger.warning("[local_transcription] queue_wait_s is unreadable (%s); using the default", e)
-            return 600
+            return int(default)
         try:
             value = int(raw)
         except ValueError:
             value = -1
         if value < 0:
             logger.warning("[local_transcription] queue_wait_s %r is not a whole number >= 0; using the default", raw)
-            return 600
+            return int(default)
         return value
 
     # Telegram Bot Integration Settings (v0.14.0+)
