@@ -46,7 +46,7 @@
     engineAdmissionLine, ENGINE_BACKEND_HELP, ENGINE_BACKEND_OWN_FOLDER, engineBackendOptions,
     strataWindowHint, draftingSelectValue, draftingFromSelect, draftingHelp, DRAFTING_AUTO_LABEL,
     STRATA_DRAFTING_CHOICES, pictureReaderSelectValue, PICTURE_READER_OPTIONS, pictureReaderHelp,
-    engineDraftingLine,
+    engineDraftingLine, SSD_TIER_LABEL, SSD_TIER_HINT, ssdTierExtraArgsNote,
   } from '$lib/utils/strataFields';
 
   export let open: boolean = false;
@@ -170,6 +170,7 @@
     conversation_cache_min_free_mib?: number; // --conversation-cache-min-free-mib, physical RAM floor
     conversation_cache_min_tokens?: number;   // --conversation-cache-min-tokens
     conversation_cache_park_gain?: number;    // --conversation-cache-park-gain
+    conversation_spill_mib?: number;          // the SSD tier's cap, MiB; unset or 0 = off
     max_context?: number;        // the SERVER window, not context_window
     resident_budget_gib?: number; // --resident-budget-gib, host RAM pinned for experts
     vram_reserve_mib?: number;   // --vram-reserve-mib, VRAM left for other programs
@@ -3761,6 +3762,23 @@
                             the next start sends.
                           </p>
                         </div>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="strata-spill-mib-{i}">{SSD_TIER_LABEL}</label>
+                        <input
+                          id="strata-spill-mib-{i}"
+                          type="number"
+                          min="0"
+                          step="1024"
+                          value={sp.conversation_spill_mib ?? ''}
+                          on:input={(e) => setNum(i, 'conversation_spill_mib', e.currentTarget.value)}
+                          placeholder="0 = off"
+                        />
+                        {#if ssdTierExtraArgsNote(sp.extra_args)}
+                          <p class="help-text warn">{ssdTierExtraArgsNote(sp.extra_args)}</p>
+                        {/if}
+                        <p class="help-text">{SSD_TIER_HINT}</p>
                       </div>
 
                       <div class="form-group">

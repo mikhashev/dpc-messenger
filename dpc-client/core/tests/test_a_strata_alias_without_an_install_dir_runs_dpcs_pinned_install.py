@@ -289,7 +289,7 @@ def _checkout_golden(t: Path) -> dict:
             "--control-vector-scaled", f"{t / 'cv.gguf'}:1.0",
             "--conversation-cache-mib", "10240", "--conversation-cache-slots", "2",
             "--conversation-cache-min-free-mib", "2560", "--conversation-cache-min-tokens", "0",
-            "--conversation-cache-park-gain", "0", "--foo", "1",
+            "--conversation-cache-park-gain", "0", "--conversation-spill-mib", "0", "--foo", "1",
         ],
         "cwd": str(root),
         "tokenizer": str(data / "packs" / "iq3" / "tokenizer"),

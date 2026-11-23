@@ -91,6 +91,32 @@ export const STRATA_CACHE_ADMISSION: StrataCacheAdmissionSpec[] = [
       + 'resume from the older copy then re-reads up to that many tokens (0 = park every turn).' },
 ];
 
+/**
+ * The conversation cache's SSD tier (Strata v0.2.16+; Mike's call, 2026-11-23: opt-in). One alias field,
+ * `conversation_spill_mib`: 0 or empty = off, N = on and capped at N MiB inside the KV snapshots
+ * folder. The backend's STRATA_DEFAULTS and `conversation_spill_mib_error` own the rule.
+ */
+export const SSD_TIER_LABEL = 'SSD tier for parked conversations (conversation_spill_mib)';
+export const SSD_TIER_SUGGESTED_MIB = 32768;
+export const SSD_TIER_HINT =
+  '0 = off. Writes inside the KV snapshots folder and is off while that folder is not set. '
+  + 'The engine skips conversations with pictures and short ones it finds cheaper to re-read. '
+  + 'The files live only while the engine runs (a KV snapshot survives a stop). '
+  + `Suggested size ${SSD_TIER_SUGGESTED_MIB.toLocaleString('en-US')}.`;
+
+const SPILL_FLAGS = ['--conversation-spill-mib', '--conversation-spill-dir'];
+
+/**
+ * The note under the SSD tier field when `extra_args` names one of its flags: those come last and
+ * win, so the field is not what the engine gets. Empty when no such flag is there.
+ */
+export function ssdTierExtraArgsNote(extraArgs: unknown): string {
+  const named = SPILL_FLAGS.filter((f) => Array.isArray(extraArgs) && extraArgs.some((t) => String(t).trim() === f));
+  if (named.length === 0) return '';
+  return `Extra flags carry ${named.join(' and ')}: they come after this field and override it. `
+    + 'Remove them there and set the value here.';
+}
+
 /** The placeholder of an admission field: the default DPC writes, and a base value it overrides. */
 export function admissionPlaceholder(spec: StrataCacheAdmissionSpec, baseValue: unknown): string {
   const written = `Strata default ${spec.strataDefault}, written`;

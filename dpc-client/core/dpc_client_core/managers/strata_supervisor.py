@@ -282,6 +282,9 @@ STRATA_DEFAULTS: Dict[str, Any] = {
     # engine), written as `elastic` inside the start config's "vision" block; None or
     # "auto" writes nothing and Strata decides.
     "vision_elastic": None,
+    # The conversation cache's SSD tier (Strata v0.2.16+): MiB it may take inside the KV
+    # snapshots folder; 0 = off. Opt-in (Mike's call, 2026-11-23); needs `slot_save_path`.
+    "conversation_spill_mib": 0,
     # Strata `/config` keys written into the start config the way Strata's own
     # serve/runconfig.py stores them: `sampling.<k>` in the "sampling" block,
     # `vram_reserve_mib` as its engine flag, everything else top level.
@@ -428,6 +431,19 @@ def vision_elastic_error(value: Any) -> Optional[str]:
     if value is None or value == "" or value == AUTO or isinstance(value, bool):
         return None
     return f"vision_elastic: expected auto, true or false, not {value!r}"
+
+
+def conversation_spill_mib_error(value: Any) -> Optional[str]:
+    """Why `value` cannot be the alias's `conversation_spill_mib`, or None (None is 0, off)."""
+    if value is None or (isinstance(value, int) and not isinstance(value, bool) and value >= 0):
+        return None
+    return f"conversation_spill_mib: expected a whole number, at least 0 (0 is off), not {value!r}"
+
+
+def conversation_spill_mib_of(config: Dict[str, Any]) -> int:
+    """The SSD tier's cap the alias asks for, MiB; 0 = off. Call only on a value
+    `conversation_spill_mib_error` accepted."""
+    return int(config.get("conversation_spill_mib") or 0)
 
 
 def _base_config_path_of(config: Dict[str, Any]) -> Path:
@@ -590,7 +606,8 @@ def strata_config_errors(config: Dict[str, Any], check_paths: bool = False) -> L
     guest_error = guest_conversation_cache_error(config.get("guest_conversation_cache"))
     if guest_error:
         errors.append(guest_error)
-    for error in (drafting_error(config.get("drafting")), vision_elastic_error(config.get("vision_elastic"))):
+    for error in (drafting_error(config.get("drafting")), vision_elastic_error(config.get("vision_elastic")),
+                  conversation_spill_mib_error(config.get("conversation_spill_mib"))):
         if error:
             errors.append(error)
     params = config.get("model_params")
@@ -1006,9 +1023,28 @@ _CACHE_LOSS_KINDS = (
     ("borrow refused", re.compile(r"cannot borrow from a parked conversation|no room beside the parked conversation")),
     ("picture changed", re.compile(r"has this prompt's tokens but picture \d+ .*cannot be reused")),
     ("stage CUDA failed", re.compile(r"skip parking \(stage CUDA\d+:")),
+    # The SSD tier (Strata v0.2.16, generate.cpp spill_ready / spill_write). Only the
+    # "evicted from RAM" ones: the same lines with "the RAM floor after the capture" are
+    # followed by a `skip parking (RAM floor ...)` line, which counts that loss.
+    ("not spilling", re.compile(r"conversation cache: not spilling \d+ tokens \(evicted from RAM\)")),
+    ("could not spill", re.compile(
+        r"conversation cache: could not spill (?:\d+ tokens )?to the SSD tier \(evicted from RAM")),
+    ("could not read back", re.compile(r"conversation cache: could not read \d+ tokens back from the SSD tier")),
     ("snapshot size failed", re.compile(r"skip parking \(")),
 )
 _CACHE_LOSS_SHOWN = 3
+# An eviction that went to the SSD tier is not a loss; the line is the only sign of it
+# (the launcher's /metrics has no spill field at v0.2.19). The RAM-floor spill is no eviction.
+_SSD_SPILLED_RE = re.compile(r"conversation cache: spilled \d+ tokens to the SSD tier \(evicted from RAM")
+_SSD_READ_BACK_RE = re.compile(r"conversation cache: read \d+ tokens back from the SSD tier")
+# The engine's own start line for the tier (generate.cpp, v0.2.19). Printed only when the
+# `--conversation-spill-mib` it was given is not 0, so with the field at 0 it is silent.
+_SSD_TIER_ON_RE = re.compile(r"conversation cache: SSD tier in (?P<dir>.+), up to (?P<mib>\d+) MiB")
+_SSD_TIER_OFF_RE = re.compile(r"conversation cache: no SSD tier: (?P<why>.+)")
+# Flags the alias field `conversation_spill_mib` owns; the same flag in `extra_args` wins.
+_SPILL_FLAGS = ("--conversation-spill-mib", "--conversation-spill-dir")
+# The SSD tier's folder inside the alias's `slot_save_path` (Strata's own name for it).
+SSD_TIER_FOLDER = "conversation-spill"
 
 
 def cache_loss_kind(line: str) -> Optional[str]:
@@ -1084,6 +1120,19 @@ class StrataSupervisor(LlamaServerSupervisor):
         # every eviction, the budget and slot ones too, which have no log line.
         self._cache_evictions_polled: Optional[int] = None
         self._cache_evictions_logged = 0
+        # The engine-log lines of the SSD tier since this launch: evictions the log shows
+        # as spilled (all seen; already set against the counter; already said), the loss
+        # lines and read-backs the scan found and `log_restore_refusals` has not said yet.
+        self._ssd_spills_seen = 0
+        self._ssd_spills_netted = 0
+        self._ssd_spills_said = 0
+        # (evictions counted, of them spilled) at the last `_new_cache_evictions`, for the log line.
+        self._eviction_netting = (0, 0)
+        # The engine's own start line for the tier of this launch, said once by `log_ssd_tier`:
+        # (on, "<dir>, up to <N> MiB" or the engine's reason).
+        self._ssd_tier_unsaid: Optional[tuple] = None
+        self._cache_losses_unsaid: List[str] = []
+        self._ssd_read_backs_unsaid: List[str] = []
         # The launcher's whole `/metrics` conversation_cache as last read, with `at`
         # (monotonic), and the (parked, slots, bytes, budget_mib) the last INFO line
         # printed: the occupancy is logged when it changes, not on every poll.
@@ -1092,7 +1141,8 @@ class StrataSupervisor(LlamaServerSupervisor):
         # The one entry a peer may hold in the conversation cache (C2): the peer's
         # node id and the eviction count when its call went out with checkpointing
         # on; None when no peer holds one. Any later eviction may have taken it,
-        # so a changed count drops it from here (`_guest_entry_holder`).
+        # so a count that rose by more than the SSD-tier spills since drops it
+        # from here (`_guest_entry_holder`).
         self._guest_entry: Optional[Dict[str, Any]] = None
         # Per peer, the sizes (prompt plus reply tokens) of its last two calls.
         self._guest_sizes: Dict[str, List[int]] = {}
@@ -1339,11 +1389,28 @@ class StrataSupervisor(LlamaServerSupervisor):
         refusal = slot_save_path_error(slot_value)
         if refusal:
             raise LlamaServerError(f"strata[{self.alias}]: {refusal}")
+        spill_folder = None
         if slot_value:
             # Off this launch (a missing parent): written empty, which the pin reads as off
             # (serve/server.py: `if a.slot_save_path or cfg.get("slot_save_path")`).
             off = self._kv_prepared and self._kv_folder_off_this_launch()
             cfg["slot_save_path"] = "" if off else str(slot_value)
+            if not off:
+                spill_folder = Path(str(slot_value)) / SSD_TIER_FOLDER
+        # The conversation cache's SSD tier is opt-in (`conversation_spill_mib`, 0 = off) and
+        # lives inside the KV snapshots folder, never in the engine's own default folder beside
+        # the packs, on a disk the user did not choose. No folder, or its disk missing this
+        # launch: off.
+        refusal = conversation_spill_mib_error(c.get("conversation_spill_mib"))
+        if refusal:
+            raise LlamaServerError(f"strata[{self.alias}]: {refusal}")
+        spill_mib = conversation_spill_mib_of(c)
+        if spill_mib > 0 and spill_folder is not None:
+            args = _set_flag(args, "--conversation-spill-dir", spill_folder)
+            args = _set_flag(args, "--conversation-spill-mib", spill_mib)
+        else:
+            args = _drop_flag(args, lambda f: f == "--conversation-spill-dir")
+            args = _set_flag(args, "--conversation-spill-mib", 0)
         # The drafter and the picture reader: written only when the alias chooses; "auto"
         # (absent) leaves Strata's own pick, and a base config's own key stays as it is.
         for refusal in (drafting_error(c.get("drafting")), vision_elastic_error(c.get("vision_elastic"))):
@@ -1516,6 +1583,8 @@ class StrataSupervisor(LlamaServerSupervisor):
                 ) from None
             if missing:
                 cfg["slot_save_path"] = ""
+                cfg["args"] = _set_flag(cfg["args"], "--conversation-spill-mib", 0)  # the tier is off with the layer
+        self._say_the_spill_inputs(cfg)
         if self.install_is_the_pin() and strata_fetcher.engine_folder(self.install_dir()) is None:
             raise LlamaServerError(
                 f"strata[{self.alias}]: DPC's own install of Strata {STRATA_RELEASE_TAG} at "
@@ -1535,6 +1604,24 @@ class StrataSupervisor(LlamaServerSupervisor):
         os.replace(tmp, path)
         self.start_config_used = path
         return path
+
+    def _say_the_spill_inputs(self, cfg: Dict[str, Any]) -> None:
+        """Once per start: why the tier is off though the alias asks for it, and an `extra_args`
+        flag that overrides the field."""
+        asked = conversation_spill_mib_of(self.config)
+        alias_slot = self.config.get("slot_save_path")
+        if asked > 0 and not (alias_slot and cfg.get("slot_save_path")):
+            why = ("slot_save_path is empty and the SSD tier lives inside that folder" if not alias_slot
+                   else f"the disk of slot_save_path {alias_slot} is missing at this start, so the "
+                        "KV snapshots layer is off")
+            logger.info("strata[%s]: conversation_spill_mib is %d MiB but the SSD tier is off: %s",
+                        self.alias, asked, why)
+        tokens = [str(a) for a in (self.config.get("extra_args") or [])]
+        for flag in _SPILL_FLAGS:
+            if flag in tokens:
+                logger.warning(
+                    "strata[%s]: extra_args carries %s, which overrides the alias field "
+                    "conversation_spill_mib; that field is the place for it", self.alias, flag)
 
     def _unload_expected(self) -> bool:
         """Whether an `unloaded` engine is a configured state rather than a death.
@@ -1922,6 +2009,7 @@ class StrataSupervisor(LlamaServerSupervisor):
             raise
         self._kv_engine_loaded = True  # the smoke's call loaded the model, lazy_load or not
         self._kv_loaded_mono = time.monotonic()  # slot 0 holds the smoke's prompt, no call's
+        self.log_ssd_tier()
         self._start_watch()
         return self.props or props
 
@@ -2309,14 +2397,22 @@ class StrataSupervisor(LlamaServerSupervisor):
 
     def _guest_entry_holder(self) -> Optional[str]:
         """The peer that holds the one guest entry, or None; an eviction since, or
-        GUEST_ENTRY_IDLE_S without a call by the holder, dropped it."""
+        GUEST_ENTRY_IDLE_S without a call by the holder, dropped it.
+
+        An eviction the engine log shows as spilled to the SSD tier took nothing: the entry
+        can be read back. A spill is seen only as a line, and the SSD tier drops its oldest
+        entries without one when its budget needs room, so GUEST_ENTRY_IDLE_S is what
+        covers that."""
         entry = self._guest_entry
         if entry is None:
             return None
+        self._scan_engine_log()
         then, now = entry.get("evictions"), self._cache_evictions_polled
-        if then is not None and now is not None and now != then:
-            self._guest_entry = None
-            return None
+        if then is not None and now is not None:
+            spilled = self._ssd_spills_seen - entry.get("spills", 0)
+            if now < then or now - then > spilled:
+                self._guest_entry = None
+                return None
         idle = time.monotonic() - entry["at"]
         if idle > GUEST_ENTRY_IDLE_S:
             self._guest_entry = None
@@ -2330,8 +2426,9 @@ class StrataSupervisor(LlamaServerSupervisor):
 
     def _reserve_guest_entry(self, peer_id: str) -> None:
         """Make `peer_id` the holder of the one guest entry, as of now."""
+        self._scan_engine_log()  # the spills before now are not "since the entry"
         self._guest_entry = {"peer": peer_id, "evictions": self._cache_evictions_polled,
-                             "at": time.monotonic()}
+                             "spills": self._ssd_spills_seen, "at": time.monotonic()}
 
     def note_guest_call(self, peer_id: str, size: Optional[int], checkpoint_on: bool) -> None:
         """Record a finished call served to `peer_id`: its size (prompt plus reply
@@ -2454,8 +2551,15 @@ class StrataSupervisor(LlamaServerSupervisor):
         `make_room()` calls (include/strata/core/conversation_cache.hpp), increments
         `evictions_` and prints nothing, so the text lines of `_CACHE_LOSS_KINDS`
         only name a reason for some of the evictions.
+
+        The counter also counts an eviction that went to the SSD tier, nothing lost: those
+        are taken off, as many as the engine log showed spilled and not set against an
+        earlier count. A spill line written after the poll that counted its eviction is
+        set against the next count instead.
         """
+        self._scan_engine_log()
         polled = self._cache_evictions_polled
+        self._eviction_netting = (0, 0)
         if polled is None:
             return 0
         if polled < self._cache_evictions_logged:
@@ -2465,7 +2569,10 @@ class StrataSupervisor(LlamaServerSupervisor):
             self._cache_evictions_logged = 0
         delta = polled - self._cache_evictions_logged
         self._cache_evictions_logged = polled
-        return delta
+        spilled = max(0, min(delta, self._ssd_spills_seen - self._ssd_spills_netted))
+        self._ssd_spills_netted += spilled
+        self._eviction_netting = (delta, spilled)
+        return delta - spilled
 
     def _tail_engine_log(self, n: int = 12) -> List[str]:
         try:
@@ -2519,6 +2626,11 @@ class StrataSupervisor(LlamaServerSupervisor):
         super().prime_restore_scan()
         self._cache_evictions_polled = None
         self._cache_evictions_logged = 0
+        self._ssd_spills_seen = self._ssd_spills_netted = self._ssd_spills_said = 0
+        self._eviction_netting = (0, 0)
+        self._ssd_tier_unsaid = None
+        self._cache_losses_unsaid = []
+        self._ssd_read_backs_unsaid = []
         # A new launch starts with an empty cache: its first reading is said whatever it is.
         self.cache_view = None
         self._cache_view_logged = None
@@ -2529,22 +2641,15 @@ class StrataSupervisor(LlamaServerSupervisor):
             self._engine_scan_offset = 0
         self._engine_start_offset = self._engine_scan_offset
 
-    def new_cache_losses(self) -> List[str]:
-        """Engine-log lines since the last scan where the cache gave a conversation up.
-
-        Each line is one of the engine's own reasons (`_CACHE_LOSS_KINDS`): a
-        parked conversation evicted, a snapshot not parked, a parked image
-        discarded or not borrowable at restore. Each ends in a re-prefill on a
-        later call. `borrowed`, `parked`, `restored` and `dropped ... superseded
-        copy` lines are the
-        cache working, not losing, and are left out. Only whole lines are taken:
-        the cursor stops after the last newline, so a line the engine is still
-        writing is read next time, complete.
-        """
+    def _scan_engine_log(self) -> None:
+        """Read the engine-log lines written since the last scan and sort them: a loss line
+        (`_CACHE_LOSS_KINDS`) waits in `_cache_losses_unsaid`, an eviction spilled to the SSD
+        tier is counted, a read-back from it waits in `_ssd_read_backs_unsaid`. Only whole
+        lines are taken: the cursor stops after the last newline, so a line the engine is
+        still writing is read next time, complete. Before the first launch, nothing."""
         offset = self._engine_scan_offset
         if offset is None:
-            self.prime_restore_scan()
-            return []
+            return
         try:
             with open(self._engine_log_path, "rb") as f:
                 f.seek(0, 2)
@@ -2555,16 +2660,59 @@ class StrataSupervisor(LlamaServerSupervisor):
                 f.seek(start)
                 data = f.read(self._SCAN_CHUNK)
         except OSError:
-            return []
+            return
         whole = data.rfind(b"\n") + 1
         if whole == 0 and len(data) == self._SCAN_CHUNK:
             whole = len(data)  # one line longer than the cap must not stall the cursor
         self._engine_scan_offset = start + whole
-        return [
-            line.strip()
-            for line in data[:whole].decode("utf-8", errors="replace").splitlines()
-            if cache_loss_kind(line) is not None
-        ]
+        for raw in data[:whole].decode("utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if cache_loss_kind(line) is not None:
+                self._cache_losses_unsaid.append(line)
+            elif _SSD_SPILLED_RE.search(line):
+                self._ssd_spills_seen += 1
+            elif _SSD_READ_BACK_RE.search(line):
+                self._ssd_read_backs_unsaid.append(line)
+            elif (m := _SSD_TIER_ON_RE.search(line)):
+                self._ssd_tier_unsaid = (True, f"{m.group('dir')}, up to {m.group('mib')} MiB")
+            elif (m := _SSD_TIER_OFF_RE.search(line)):
+                self._ssd_tier_unsaid = (False, m.group("why").strip())
+
+    def new_cache_losses(self) -> List[str]:
+        """Engine-log lines since the last call where the cache gave a conversation up.
+
+        Each line is one of the engine's own reasons (`_CACHE_LOSS_KINDS`): a
+        parked conversation evicted, a snapshot not parked, a parked image
+        discarded or not borrowable at restore, a conversation the SSD tier could not
+        take or give back. Each ends in a re-prefill on a later call. `borrowed`,
+        `parked`, `restored`, `spilled`, `read back` and `dropped ... superseded copy`
+        lines are the cache working, not losing, and are left out.
+        """
+        if self._engine_scan_offset is None:
+            self.prime_restore_scan()
+            return []
+        self._scan_engine_log()
+        lost, self._cache_losses_unsaid = self._cache_losses_unsaid, []
+        return lost
+
+    def log_ssd_tier(self) -> None:
+        """Say the tier as the engine's own start line has it, once per launch: INFO with its
+        folder and cap; a no-tier line is INFO when the alias field is 0 and WARNING when the
+        field asks for it (the field says on, the engine says off). Silent while the engine
+        has printed neither line (the field at 0 makes it print none)."""
+        self._scan_engine_log()
+        seen, self._ssd_tier_unsaid = self._ssd_tier_unsaid, None
+        if seen is None:
+            return
+        on, text = seen
+        asked = conversation_spill_mib_of(self.config)
+        if on:
+            logger.info("strata[%s]: conversation cache: SSD tier in %s", self.alias, text)
+        elif asked > 0:
+            logger.warning("strata[%s]: conversation_spill_mib is %d MiB but the engine started with no "
+                           "SSD tier: %s", self.alias, asked, text)
+        else:
+            logger.info("strata[%s]: conversation cache: no SSD tier: %s", self.alias, text)
 
     def log_restore_refusals(self) -> int:
         """Say what the conversation cache gave up since the last call; INFO.
@@ -2572,8 +2720,27 @@ class StrataSupervisor(LlamaServerSupervisor):
         Keeps the base name because the provider asks for it by that name after
         every call; the count is the number of events, not of calls.
         """
+        self.log_ssd_tier()
         lost = self.new_cache_losses()
         evictions = self._new_cache_evictions()
+        # Matched by count and order, not by conversation: the engine names none at an eviction.
+        counted, netted = self._eviction_netting
+        netting = f" (evictions=+{counted} spilled=+{netted} lost=+{evictions})" if counted else ""
+        spilled = self._ssd_spills_seen - self._ssd_spills_said
+        self._ssd_spills_said = self._ssd_spills_seen
+        read_back, self._ssd_read_backs_unsaid = self._ssd_read_backs_unsaid, []
+        if spilled:
+            logger.info(
+                "strata[%s]: %d evicted conversation(s) spilled to the SSD tier since the last call "
+                "(not lost)%s", self.alias, spilled, netting,
+            )
+        if read_back:
+            logger.info(
+                "strata[%s]: %d conversation(s) read back from the SSD tier since the last call: %s%s",
+                self.alias, len(read_back), " | ".join(line[:300] for line in read_back[:_CACHE_LOSS_SHOWN]),
+                f" (+{len(read_back) - _CACHE_LOSS_SHOWN} more in the engine log)"
+                if len(read_back) > _CACHE_LOSS_SHOWN else "",
+            )
         if lost:
             shown = [line[:300] for line in lost[:_CACHE_LOSS_SHOWN]]
             more = len(lost) - len(shown)
@@ -2583,13 +2750,13 @@ class StrataSupervisor(LlamaServerSupervisor):
                 "strata[%s]: %d conversation-cache loss(es) since the last call (%s): %s%s%s",
                 self.alias, len(lost), classes, " | ".join(shown),
                 f" (+{more} more in the engine log)" if more > 0 else "",
-                f"; engine eviction counter +{evictions}" if evictions else "",
+                f"; engine eviction counter +{evictions}{netting}" if evictions else "",
             )
         elif evictions:
             # Slot and budget evictions leave no log line; only the counter has them.
             logger.info(
-                "strata[%s]: engine eviction counter +%d since the last call, no loss line in the engine log",
-                self.alias, evictions,
+                "strata[%s]: engine eviction counter +%d since the last call, no loss line in the engine log%s",
+                self.alias, evictions, netting,
             )
         return len(lost)
 

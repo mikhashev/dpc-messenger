@@ -57,6 +57,8 @@ _STRATA_FLAG_KEYS = (
     "conversation_cache_slots", "conversation_cache_min_free_mib", "conversation_cache_min_tokens",
     "conversation_cache_park_gain", "max_context", "resident_budget_gib", "vram_reserve_mib",
     "slot_save_path",
+    # The conversation cache's SSD tier: an engine flag pair, so an edit takes a restart.
+    "conversation_spill_mib",
     "vision", "control_vector",
     # The drafter and when the picture reader starts (Strata's `drafting` and the vision block's `elastic`).
     "drafting", "vision_elastic",
