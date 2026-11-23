@@ -49,10 +49,9 @@ def length_band(audio_s: Any) -> Optional[str]:
 
 # Start figures per device until this provider measures its own (ADR-052 L10, L12). `warm` is the
 # real-time ratio (audio s per wall s) and `penalty_s` the seconds a first call after a load adds on
-# top of `audio / warm`, both by length band; `load_first_s` is a device's first load in this
-# process, `load_reload_s` any later load on that device (S3 follow-up 6: per device, so a CPU twin's
-# load never makes the GPU's first load read as a reload). Sources (ADR-052, "GPU figures on speech"
-# for cuda, L12's table for cpu):
+# top of `audio / warm`, both by length band; `load_first_s` is a model's first load on a device in
+# this process, `load_reload_s` any later load of it there (`_LOADED_WEIGHTS`). Sources (ADR-052,
+# "GPU figures on speech" for cuda, L12's table for cpu):
 #   cuda warm: the slowest clip's median per band: en_30 21.1x, ru_118 27.4x, en_300 15.9x; <=180 is
 #     estimated from the batch-2 figure (batch 4 was never measured).
 #   cuda penalty_s 1.0 in every band: ru_10's first call after the load, +0.91 s, rounded up. Only
@@ -68,7 +67,8 @@ def length_band(audio_s: Any) -> Optional[str]:
 #     picks the twin less often than it could. The bands are not monotonic (<=120 1.15x against
 #     <=180 0.98x), so an estimate jumps at 120/121 s by the table, not by data (≈19 s at 120 s).
 #   cpu penalty_s 0: L12's "load + first call ≈ 9 s" is all in load_first_s 9.0; load_reload_s 1.0
-#     is the running backend's log, "Whisper model loaded in 1.0 seconds (device=cpu)".
+#     is the running backend's log, "Whisper model loaded in 1.0 seconds (device=cpu)". The 9.0 is
+#     a cold process's: with torch already imported the twin loaded in 1.09 s (Forge #60).
 # A device absent here (mps, mlx) is unknown until measured.
 _START_FIGURES: Dict[str, Dict[str, Any]] = {
     "cuda": {"warm": {"<=60": 21.1, "<=120": 27.4, "<=180": 15.9, ">180": 15.9},
@@ -79,13 +79,12 @@ _START_FIGURES: Dict[str, Dict[str, Any]] = {
             "penalty_s": {band: 0.0 for band in _LENGTH_BANDS},
             "load_first_s": 9.0, "load_reload_s": 1.0},
 }
-# The devices a Whisper load has run on in this process (any provider object): the next load on one
-# of them is a reload. Kept per process because a providers reload builds new objects; per device
-# (S3 follow-up 6, Forge #48-1, Ark #49-1) because a CPU twin's load says nothing of the GPU's: a
-# process-wide flag made the GPU's first load read 0.8 s after the twin loaded, and its ETA ran into
-# "unknown" for the rest of a ~12 s load. A GPU first load after the twin now reads 12.8 s where the
-# imports are already paid, so it errs long (safe: a peer is told a longer wait) instead of short.
-_LOADED_DEVICES: set = set()
+# The (device, model) pairs a Whisper load has run on in this process (any provider object): the next
+# load of that model on that device is a reload. Per process because a providers reload builds new
+# objects; per device and model because the reload figure is a second read of the same weights, which
+# neither the twin's load (for the GPU) nor another model's load is. A pair not loaded yet reads the
+# first-load figure, which errs long where the imports are already paid (ADR-052 S3 follow-ups 6, 7).
+_LOADED_WEIGHTS: set = set()
 # A batch-descent length (the estimate's) and the decoded length further apart than this are logged
 # (S3 follow-up 6, Ark #49-3): the warm figure is recorded against the decoded one.
 _LENGTH_MISMATCH_S = 1.0
@@ -561,6 +560,11 @@ class LocalWhisperProvider(AIProvider):
         """
         if self.model_loaded:
             return
+        if self.is_cpu_twin:
+            # L12's RAM check where the twin loads: the seam's is a snapshot (ADR-052 "Enough RAM").
+            room, words = cpu_ram_check()
+            if not room:
+                raise RuntimeError(f"the CPU twin '{self.alias}' does not load: {words}")
 
         import time
         logger.info(f"Loading Whisper model '{self.model_name}' (this may take a minute on first use)...")
@@ -710,14 +714,13 @@ class LocalWhisperProvider(AIProvider):
     # -- the speed figures (ADR-052 S3a: the producer of `expected_s`) --
 
     def _note_load(self, device: str, load_s: float) -> None:
-        """A load finished on `device` (where the model really is): its time is recorded as that
-        device's first load in this process or as a reload (S3 follow-up 4; per device since
-        follow-up 6), and the next call is the first after a load. From here every load on `device`
-        in this process is a reload."""
+        """A load finished on `device` (where the model really is): its time is recorded as this
+        model's first load on that device in this process or as a reload (`_LOADED_WEIGHTS`), and the
+        next call is the first after a load."""
         self._loaded_device = device
         self._calls_since_load = 0
-        key = "load_reload_s" if device in _LOADED_DEVICES else "load_first_s"
-        _LOADED_DEVICES.add(device)
+        key = "load_reload_s" if (device, self.model_name) in _LOADED_WEIGHTS else "load_first_s"
+        _LOADED_WEIGHTS.add((device, self.model_name))
         seconds = _a_positive(load_s)
         if seconds is not None:
             self._measured.setdefault(device, {})[key] = seconds
@@ -774,15 +777,16 @@ class LocalWhisperProvider(AIProvider):
     def speed_figures(self, device: str) -> Dict[str, Any]:
         """`warm` and `penalty_s` (each by length band), `load_first_s` and `load_reload_s` for
         `device`: each figure measured here, else the start figure, else absent (a band) or None
-        (unknown). `load_s` is the one the next load on `device` costs: the reload once a load has
-        run on `device` in this process, else the first load."""
+        (unknown). `load_s` is the one the next load on `device` costs: the reload once this model
+        has loaded on `device` in this process, else the first load."""
         measured = self._measured.get(device, {})
         start = _START_FIGURES.get(device, {})
         figures: Dict[str, Any] = {
             key: {**start.get(key, {}), **measured.get(key, {})} for key in ("warm", "penalty_s")}
         for key in ("load_first_s", "load_reload_s"):
             figures[key] = measured.get(key, start.get(key))
-        figures["load_s"] = figures["load_reload_s" if device in _LOADED_DEVICES else "load_first_s"]
+        loaded = (device, self.model_name) in _LOADED_WEIGHTS
+        figures["load_s"] = figures["load_reload_s" if loaded else "load_first_s"]
         return figures
 
     @staticmethod
@@ -939,7 +943,7 @@ class LocalWhisperProvider(AIProvider):
         value = self.config.get("let_peers_use_cpu_twin", False)
         if isinstance(value, str):
             return value.strip().lower() in ("true", "1", "yes")
-        return value is True
+        return value is True or (type(value) is int and value == 1)  # JSON's 1, as the string "1"
 
     def _note_route(self, decision: Dict[str, Any]) -> None:
         """L12's choice, observable: kept as `last_route` and logged at INFO (DEBUG on a free card)."""
@@ -1021,11 +1025,19 @@ class LocalWhisperProvider(AIProvider):
         wait_s = view["wait_s"]
         gpu_s = None if wait_s is None or gpu_work is None else wait_s + gpu_work
         cold = not twin.model_loaded
-        decision.update(cpu_s=cpu_s, gpu_s=gpu_s, factor=factor, cold=cold)
-        gpu_words = "long (unknown)" if gpu_s is None else f"≈{gpu_s:.0f} s"
+        decision.update(cpu_s=cpu_s, gpu_s=gpu_s, factor=factor, cold=cold, gpu_compared=gpu_s is not None)
+        # Behind an engine that stays (item 1a) nothing of the GPU is estimated: the line must not
+        # read as a comparison, nor a factor of 1 as a penalty.
         if view["engine_stays"]:
-            gpu_words += ", behind a local engine on the card"
-        busy = f", x{factor:g} for a busy Strata" if view["cpu_busy"] else ""
+            gpu_words = "not compared: its wait is not estimated behind a local engine on the card (item 1a)"
+        else:
+            gpu_words = "long (unknown)" if gpu_s is None else f"≈{gpu_s:.0f} s"
+        if not view["cpu_busy"]:
+            busy = ""
+        elif factor == 1.0:
+            busy = ", a busy Strata, cpu_contention_factor 1, no penalty"
+        else:
+            busy = f", x{factor:g} for a busy Strata"
         compared = f"CPU ≈{cpu_s:.0f} s ({'cold' if cold else 'warm'}{busy}) against the GPU {gpu_words}"
         if gpu_s is not None and cpu_s >= gpu_s:
             to("line", f"{compared}: the GPU is sooner")

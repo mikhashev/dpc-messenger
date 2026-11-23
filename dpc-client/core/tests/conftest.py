@@ -205,16 +205,16 @@ def _no_card_claims_cross_tests():
 
 @pytest.fixture(autouse=True)
 def _no_whisper_load_has_run_in_this_process():
-    """The devices a Whisper load has run on in this process are module state (ADR-052 S3
-    follow-up 4, per device since follow-up 6: they pick the reload figure over the first load's).
+    """The (device, model) pairs a Whisper load has run on in this process are module state (ADR-052
+    S3 follow-ups 4, 6, 7: they pick the reload figure over the first load's).
     Each test starts as a fresh backend would, with no load run; the module is not imported here for
     a test that never imports it."""
     import sys
 
     def clear():
         module = sys.modules.get("dpc_client_core.providers.whisper_provider")
-        if module is not None and hasattr(module, "_LOADED_DEVICES"):
-            module._LOADED_DEVICES.clear()
+        if module is not None and hasattr(module, "_LOADED_WEIGHTS"):
+            module._LOADED_WEIGHTS.clear()
 
     clear()
     yield
