@@ -31,6 +31,8 @@ _FORMATS = ("txt", "srt", "json")
 _FORMAT_SUFFIX = {"txt": ".txt", "srt": ".srt", "json": ".json"}
 # The tool's own timeout, also the caller's deadline its wait for the card keeps under (ADR-052 L4).
 _TOOL_TIMEOUT_S = 1800
+# `queue_wait_s`'s default, for a context with no Settings to ask (the seed table's is the same 600).
+_DEFAULT_QUEUE_WAIT_S = 600.0
 
 
 def _turn_holds_wait_left() -> Optional[float]:
@@ -43,6 +45,20 @@ def _turn_holds_wait_left() -> Optional[float]:
         return max(0.0, float(hold.accepted_at) + float(hold.wait_s) - _sup._swap_clock())
     except (AttributeError, TypeError, ValueError):
         return None
+
+
+def _card_wait_bound_s(ctx: ToolContext) -> float:
+    """What the tool's wait for the card is bounded by (ADR-052 L4, Mike 2026-11-23): the turn
+    hold's time left when there is one, never more than `[local_transcription] queue_wait_s`
+    (600 by default); outside a turn, `queue_wait_s` alone. The smaller wins."""
+    settings = getattr(getattr(ctx, "dpc_service", None), "settings", None)
+    getter = getattr(settings, "get_local_transcription_queue_wait_s", None)
+    try:
+        cap = float(getter()) if callable(getter) else _DEFAULT_QUEUE_WAIT_S
+    except (TypeError, ValueError):
+        cap = _DEFAULT_QUEUE_WAIT_S
+    held = _turn_holds_wait_left()
+    return cap if held is None else min(cap, held)
 
 
 def _whisper_providers(ctx: ToolContext) -> dict:
@@ -187,7 +203,7 @@ async def transcribe_audio_file(
     ctx.emit_progress(f"Transcribing {source.name}...")
 
     ask = await asyncio.to_thread(card_ask, provider, "agent tool", str(source),
-                                  bound_s=_turn_holds_wait_left(), caller_left_s=_TOOL_TIMEOUT_S)
+                                  bound_s=_card_wait_bound_s(ctx), caller_left_s=_TOOL_TIMEOUT_S)
     # ADR-052 3.1: a wait for the card is told through the tool's progress.
     ask["on_wait"] = lambda estimate: ctx.emit_progress(f"Waiting for the card: {card_wait_words(estimate)}")
     try:

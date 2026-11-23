@@ -364,3 +364,64 @@ class TestRegistration:
         schema = get_tools()[0].schema
 
         assert schema["parameters"]["properties"]["format"]["enum"] == ["txt", "srt", "json"]
+
+
+class _SettingsWithQueueWait:
+    def __init__(self, seconds):
+        self._seconds = seconds
+
+    def get_local_transcription_queue_wait_s(self):
+        return self._seconds
+
+
+class TestCardWaitCap:
+    """ADR-052 L4 (Mike 2026-11-23): without a turn hold the tool waits for the card at most
+    `queue_wait_s`; a turn hold that bounds it tighter still wins."""
+
+    @pytest.fixture
+    def asked(self, monkeypatch):
+        import dpc_client_core.dpc_agent.tools.transcribe as tool
+        seen = {}
+        real = tool.card_ask
+
+        def spy(*args, **kwargs):
+            ask = real(*args, **kwargs)
+            seen.update(ask)
+            return ask
+
+        monkeypatch.setattr(tool, "card_ask", spy)
+        return seen
+
+    def _ctx(self, agent_root, queue_wait_s=None):
+        ctx = make_ctx(agent_root, {"whisper": FakeWhisperProvider()})
+        if queue_wait_s is not None:
+            ctx.dpc_service.settings = _SettingsWithQueueWait(queue_wait_s)
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_no_turn_hold_caps_the_wait_at_the_default_600(self, agent_root, audio_file, asked, monkeypatch):
+        import dpc_client_core.dpc_agent.tools.transcribe as tool
+        monkeypatch.setattr(tool, "_turn_holds_wait_left", lambda: None)
+        await transcribe_audio_file(self._ctx(agent_root), "voice.ogg")
+        assert asked["wait_s"] is not None and asked["wait_s"] <= 600
+
+    @pytest.mark.asyncio
+    async def test_a_turn_hold_of_120_bounds_the_wait_tighter(self, agent_root, audio_file, asked, monkeypatch):
+        import dpc_client_core.dpc_agent.tools.transcribe as tool
+        monkeypatch.setattr(tool, "_turn_holds_wait_left", lambda: 120.0)
+        await transcribe_audio_file(self._ctx(agent_root, 600), "voice.ogg")
+        assert asked["wait_s"] <= 120
+
+    @pytest.mark.asyncio
+    async def test_the_configured_queue_wait_is_the_cap(self, agent_root, audio_file, asked, monkeypatch):
+        import dpc_client_core.dpc_agent.tools.transcribe as tool
+        monkeypatch.setattr(tool, "_turn_holds_wait_left", lambda: None)
+        await transcribe_audio_file(self._ctx(agent_root, 300), "voice.ogg")
+        assert asked["wait_s"] == 300
+
+    @pytest.mark.asyncio
+    async def test_a_turn_hold_longer_than_the_cap_does_not_lift_it(self, agent_root, audio_file, asked, monkeypatch):
+        import dpc_client_core.dpc_agent.tools.transcribe as tool
+        monkeypatch.setattr(tool, "_turn_holds_wait_left", lambda: 1500.0)
+        await transcribe_audio_file(self._ctx(agent_root, 300), "voice.ogg")
+        assert asked["wait_s"] == 300
