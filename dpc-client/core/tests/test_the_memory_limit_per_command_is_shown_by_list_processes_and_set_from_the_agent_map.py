@@ -228,8 +228,9 @@ class TestSetShellMemoryLimit:
     @pytest.mark.parametrize("bad", [-1, -4096, "lots", "4096", 1.5, 4096.0, True, None])
     async def test_a_negative_or_non_integer_value_is_refused_with_a_reason_and_writes_nothing(self, home, bad):
         write_config(home, 1000)
+        held = host(home)  # Settings seeds its missing keys here, before the snapshot
         before = (home / "config.ini").read_bytes()
-        out = await CoreService.set_shell_memory_limit(host(home), mb=bad)
+        out = await CoreService.set_shell_memory_limit(held, mb=bad)
         assert out["status"] == "error" and out["message"]
         assert "mb" in out["message"]
         assert (home / "config.ini").read_bytes() == before
@@ -239,10 +240,11 @@ class TestSetShellMemoryLimit:
     @pytest.mark.parametrize("names", [(ENV_OLD,), (ENV_GENERIC,), (ENV_OLD, ENV_GENERIC)])
     async def test_while_an_environment_variable_decides_it_refuses_and_names_the_variable(self, home, monkeypatch, names):
         write_config(home, 1000)
+        held = host(home)  # Settings seeds its missing keys here, before the snapshot
         before = (home / "config.ini").read_bytes()
         for name in names:
             monkeypatch.setenv(name, "2000")
-        out = await CoreService.set_shell_memory_limit(host(home), mb=4096)
+        out = await CoreService.set_shell_memory_limit(held, mb=4096)
         assert out["status"] == "error"
         assert names[0] in out["message"], "the variable that is in force, the old name first"
         assert (home / "config.ini").read_bytes() == before, "editing config would have changed nothing"
