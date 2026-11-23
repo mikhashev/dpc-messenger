@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from dpc_client_core.managers.card_lease import LeaseWaitedTooLong
-from dpc_client_core.providers.whisper_provider import card_wait_words
+from dpc_client_core.providers.whisper_provider import LocalWhisperProvider, card_wait_words
 from dpc_client_core.settings import Settings
 
 from tests._card_lease_helpers import BOUND, fast, hold_open, music, nothing_left, until, waiting  # noqa: F401
@@ -95,7 +95,9 @@ def test_the_ui_waits_for_the_dictation_bound_plus_the_margin(tmp_path):
     margin = int(re.search(r"TRANSCRIBE_WORK_MARGIN_MS\s*=\s*([\d_]+)", source).group(1).replace("_", ""))
     assert bound == Settings(tmp_path).get_local_transcription_queue_wait_s() * 1000 == 600_000
     # The margin covers the transcription itself: at least L4's 10 s, and a 300 s dictation (the
-    # recorder's cap) loaded cold on the GPU at the start figures (12.8 s + 300 / 8.8 = 46.9 s).
-    assert margin >= 47_000
+    # recorder's cap) loaded cold on the GPU at the start figures (load + 300 s at the >180 s band's
+    # warm ratio + the first call's penalty, about 32.7 s; S3 follow-up 2).
+    cold_300 = LocalWhisperProvider("w", {"type": "local_whisper", "device": "cuda"}).expected_seconds(300)
+    assert margin >= max(10_000, cold_300 * 1000)
     assert re.search(r"command === 'transcribe_audio'\)\s*\{[^}]*timeout = TRANSCRIBE_QUEUE_WAIT_MS \+ "
                      r"TRANSCRIBE_WORK_MARGIN_MS", source)

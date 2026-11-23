@@ -1,14 +1,16 @@
 """ADR-052 slice S3a: the producer of `expected_s`.
 
-The local Whisper provider records its measured real-time ratio per device after every
-transcription, a **cold** figure for the first call after a load and a **warm** one for the calls
-after it (Johnny's bench: the first call is 3-5x slower), and the time of each load. Before it has
-measured anything it starts from the ADR's figures (L12's CPU table, "GPU figures on speech"); a
-device the ADR gives no figure (mps, mlx) is unknown until measured (L10). `expected_seconds` turns
-an audio length into wall seconds with `card_lease.seconds_from_ratio`: the load when the model is
-not loaded, plus the audio divided by the cold or the warm ratio. `card_ask` is what a door passes
-to `transcribe`: its purpose, its bound by L4's `min(caller's remaining - margin, bound)` and the
-estimate.
+The local Whisper provider records its measured speed per device after every transcription: the
+first call after a load gives `penalty_s`, the seconds it took beyond the warm work, and every later
+call the warm real-time ratio of its length band; and the time of each load. Before it has measured
+anything it starts from `_START_FIGURES` (L12's CPU table, "GPU figures on speech"); a device the
+ADR gives no figure (mps, mlx) is unknown until measured (L10). `expected_seconds` turns an audio
+length into wall seconds with `card_lease.seconds_from_ratio`: the load when the model is not
+loaded, plus the audio divided by its band's warm ratio, plus the penalty for a first call (S3
+follow-up 2, Johnny #24-1/2; the model itself is pinned by
+`test_whisper_counts_the_first_call_in_seconds_and_the_warm_speed_by_length_band.py`). `card_ask` is
+what a door passes to `transcribe`: its purpose, its bound by L4's `min(caller's remaining - margin,
+bound)` and the estimate.
 
 The pipeline, librosa and torch are fakes; no model is loaded.
 """
@@ -21,10 +23,16 @@ import pytest
 
 from dpc_client_core.managers.card_lease import seconds_from_ratio
 from dpc_client_core.providers import whisper_provider
-from dpc_client_core.providers.whisper_provider import LocalWhisperProvider, card_ask
+from dpc_client_core.providers.whisper_provider import _START_FIGURES, LocalWhisperProvider, card_ask
 
-GPU_WARM, GPU_COLD, GPU_LOAD = 15.9, 8.8, 12.8
-CPU_RATIO, CPU_LOAD = 300.0 / 306.0, 9.0
+# Zcode #22-3: the start figures are the provider's, never copied here.
+GPU, CPU = _START_FIGURES["cuda"], _START_FIGURES["cpu"]
+GPU_WARM_30, GPU_PENALTY, GPU_LOAD = GPU["warm"]["<=60"], GPU["penalty_s"], GPU["load_s"]
+CPU_WARM_30, CPU_LOAD = CPU["warm"]["<=60"], CPU["load_s"]
+
+
+def _start(figures):
+    return {"warm": dict(figures["warm"]), "penalty_s": figures["penalty_s"], "load_s": figures["load_s"]}
 
 
 @pytest.fixture(autouse=True)
@@ -61,37 +69,37 @@ def _close(a, b):
 class TestStartFigures:
     def test_the_gpu_starts_from_the_speech_figures(self):
         p = _provider("cuda")
-        assert p.speed_figures("cuda") == {"warm": GPU_WARM, "cold": GPU_COLD, "load_s": GPU_LOAD}
+        assert p.speed_figures("cuda") == _start(GPU)
 
     def test_the_cpu_starts_from_l12s_table(self):
         p = _provider("cpu")
         figures = p.speed_figures("cpu")
-        assert _close(figures["warm"], CPU_RATIO) and _close(figures["cold"], CPU_RATIO)
+        assert _close(figures["warm"][">180"], 300.0 / 306.0) and figures["penalty_s"] == 0.0
         assert figures["load_s"] == CPU_LOAD
 
     @pytest.mark.parametrize("device", ["mps", "mlx"])
     def test_a_device_the_adr_gives_no_figure_is_unknown(self, device):
         p = _provider(device)
-        assert p.speed_figures(device) == {"warm": None, "cold": None, "load_s": None}
+        assert p.speed_figures(device) == {"warm": {}, "penalty_s": None, "load_s": None}
         assert p.expected_seconds(30, device=device, loaded=False) is None
         assert p.expected_seconds(30, device=device, loaded=True) is None
 
 
 class TestTheEstimate:
-    def test_not_loaded_counts_the_load_and_the_cold_first_call(self):
+    def test_not_loaded_counts_the_load_the_warm_work_and_the_first_calls_penalty(self):
         p = _provider("cuda")
-        assert _close(p.expected_seconds(30), GPU_LOAD + seconds_from_ratio(30, GPU_COLD))
+        assert _close(p.expected_seconds(30), GPU_LOAD + seconds_from_ratio(30, GPU_WARM_30) + GPU_PENALTY)
 
-    def test_loaded_but_unused_since_the_load_is_still_cold(self):
+    def test_loaded_but_unused_since_the_load_still_pays_the_penalty(self):
         p = _provider("cuda", loaded=True)
-        assert _close(p.expected_seconds(30), seconds_from_ratio(30, GPU_COLD))
+        assert _close(p.expected_seconds(30), seconds_from_ratio(30, GPU_WARM_30) + GPU_PENALTY)
 
     @pytest.mark.asyncio
     async def test_after_a_call_on_the_loaded_model_it_is_warm(self):
         p = _provider("cuda", loaded=True)
         await p.transcribe("a10.wav")
-        warm = p.speed_figures("cuda")["warm"]
-        assert warm == GPU_WARM, "one call was cold: the warm figure is still the start value"
+        warm = p.speed_figures("cuda")["warm"]["<=60"]
+        assert warm == GPU_WARM_30, "the first call gave the penalty: the warm figure is still the start value"
         assert _close(p.expected_seconds(30), seconds_from_ratio(30, warm))
 
     def test_the_cpu_cold_estimate_is_l12s_cold_row(self):
@@ -106,7 +114,7 @@ class TestTheEstimate:
     def test_the_device_and_the_loaded_state_can_be_given(self):
         p = _provider("cuda", loaded=True)
         assert _close(p.expected_seconds(30, device="cpu", loaded=False),
-                      CPU_LOAD + seconds_from_ratio(30, CPU_RATIO))
+                      CPU_LOAD + seconds_from_ratio(30, CPU_WARM_30) + CPU["penalty_s"])
 
     def test_a_configured_device_needs_no_detection(self, monkeypatch):
         p = _provider("cuda")
@@ -124,20 +132,19 @@ class TestTheEstimate:
 
 class TestRecording:
     @pytest.mark.asyncio
-    async def test_the_first_call_after_a_load_is_recorded_cold_the_next_warm(self):
+    async def test_the_first_call_after_a_load_gives_the_penalty_the_next_the_warm_figure(self):
         p = _provider("cpu", work_s=0.05)
         p._note_load("cpu", 1.5)
         p.model_loaded = True
         await p.transcribe("a30.wav")
         figures = p.speed_figures("cpu")
         assert figures["load_s"] == 1.5
-        assert figures["cold"] > 50, "30 s in about 0.05 s: the measured cold ratio replaced 0.98x"
-        assert _close(figures["warm"], CPU_RATIO), "no warm call yet"
-        cold = figures["cold"]
+        assert figures["penalty_s"] == 0.0, "30 s in about 0.05 s: faster than warm, so no penalty"
+        assert _close(figures["warm"]["<=60"], CPU_WARM_30), "no warm call yet"
 
         await p.transcribe("a30.wav")
         figures = p.speed_figures("cpu")
-        assert figures["warm"] > 50 and figures["cold"] == cold
+        assert figures["warm"]["<=60"] > 50 and figures["penalty_s"] == 0.0
 
     @pytest.mark.asyncio
     async def test_a_new_load_makes_the_next_call_cold_again(self):
@@ -145,13 +152,16 @@ class TestRecording:
         await p.transcribe("a10.wav")
         await p.transcribe("a10.wav")
         p._note_load("cpu", 0.8)
-        assert _close(p.expected_seconds(30, loaded=True), seconds_from_ratio(30, p.speed_figures("cpu")["cold"]))
+        figures = p.speed_figures("cpu")
+        assert _close(p.expected_seconds(30, loaded=True),
+                      seconds_from_ratio(30, figures["warm"]["<=60"]) + figures["penalty_s"])
 
     @pytest.mark.asyncio
     async def test_a_ratio_measured_on_one_device_does_not_change_another(self):
         p = _provider("cpu", loaded=True, work_s=0.01)
         await p.transcribe("a30.wav")
-        assert p.speed_figures("cuda") == {"warm": GPU_WARM, "cold": GPU_COLD, "load_s": GPU_LOAD}
+        await p.transcribe("a30.wav")
+        assert p.speed_figures("cuda") == _start(GPU)
 
     def test_a_load_that_fell_back_to_the_cpu_is_recorded_for_the_cpu(self):
         p = _provider("cuda")
@@ -160,23 +170,24 @@ class TestRecording:
         assert p.speed_figures("cpu")["load_s"] == 2.0
         assert p.speed_figures("cuda")["load_s"] == GPU_LOAD
         # The estimate follows the device the model is loaded on.
-        assert _close(p.expected_seconds(30), seconds_from_ratio(30, CPU_RATIO))
+        assert _close(p.expected_seconds(30), seconds_from_ratio(30, CPU_WARM_30) + CPU["penalty_s"])
 
     def test_a_zero_or_negative_figure_is_not_recorded(self):
         p = _provider("cuda")
         p._note_load("cuda", 0.0)
-        p._note_run("cuda", 30.0, 0.0, cold=True)
-        p._note_run("cuda", 0.0, 1.0, cold=False)
-        assert p.speed_figures("cuda") == {"warm": GPU_WARM, "cold": GPU_COLD, "load_s": GPU_LOAD}
+        p._note_run("cuda", 30.0, 0.0, first=True)
+        p._note_run("cuda", 0.0, 1.0, first=False)
+        assert p.speed_figures("cuda") == _start(GPU)
 
     @pytest.mark.asyncio
     async def test_the_figures_survive_a_providers_reload(self):
         old = _provider("cpu", loaded=True, work_s=0.01)
         await old.transcribe("a30.wav")
-        cold = old.speed_figures("cpu")["cold"]
+        await old.transcribe("a30.wav")
+        figures = old.speed_figures("cpu")
         new = _provider("cpu")
         old.hand_over_to(new)
-        assert new.speed_figures("cpu")["cold"] == cold
+        assert new.speed_figures("cpu") == figures
         assert old.expected_seconds(30) == new.expected_seconds(30)
 
     def test_the_figures_live_in_memory_on_the_provider(self):
@@ -189,7 +200,7 @@ class TestTheDoorsAsk:
     def test_a_persons_door_waits_its_bound_when_it_has_no_deadline_of_its_own(self):
         ask = card_ask(_provider("cuda", loaded=True), "dictation", "x.webm", bound_s=600, audio_s=30)
         assert ask["purpose"] == "dictation" and ask["wait_s"] == 600
-        assert _close(ask["expected_s"], seconds_from_ratio(30, GPU_COLD))
+        assert _close(ask["expected_s"], seconds_from_ratio(30, GPU_WARM_30) + GPU_PENALTY)
 
     def test_the_queues_deadline_is_never_longer_than_the_callers(self):
         # L4: wait_s = min(caller's remaining - margin, bound); margin = max(10 s, estimate).

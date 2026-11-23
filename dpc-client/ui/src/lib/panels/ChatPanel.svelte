@@ -1254,11 +1254,13 @@
       fileOfferToastMessage = 'Transcribing voice message...';
       showFileOfferToast = true;
       const selectedProviderId = selectedVoiceProvider || selectedTextProvider;
-      let transcribeArgs: Record<string, string>;
+      // duration_seconds: the recorder's length, which the backend uses for the card's estimate
+      // only when it cannot read the file's own (ADR-052 L10; a WebM without ffprobe).
+      let transcribeArgs: Record<string, string | number>;
       if (preview.filePath) {
-        transcribeArgs = { file_path: preview.filePath, mime_type: preview.blob.type || 'audio/wav', provider_alias: selectedProviderId };
+        transcribeArgs = { file_path: preview.filePath, mime_type: preview.blob.type || 'audio/wav', provider_alias: selectedProviderId, duration_seconds: preview.duration };
       } else {
-        transcribeArgs = { audio_base64: await _blobToBase64(preview.blob), mime_type: preview.blob.type || 'audio/webm', provider_alias: selectedProviderId };
+        transcribeArgs = { audio_base64: await _blobToBase64(preview.blob), mime_type: preview.blob.type || 'audio/webm', provider_alias: selectedProviderId, duration_seconds: preview.duration };
       }
       const response = await sendCommand('transcribe_audio', transcribeArgs);
       if (response.error) throw new Error(response.error);

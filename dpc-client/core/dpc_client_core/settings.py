@@ -107,15 +107,23 @@ class Settings:
         """Write each `_SEEDED_KEYS` entry the loaded config lacks, as one line put under its section
         header (the section appended when absent), so every other line and comment stays as it is.
         Nothing is written when none is missing; a file that cannot be written is left alone, and
-        the getters read the same default."""
+        the getters read the same default.
+
+        The file keeps its own line endings (CRLF or LF, read with `newline=''`; a file with any
+        CRLF is written back with CRLF), so a seed never rewrites every line of it (Johnny #24).
+        Both opens use the locale's default encoding, as `self._config.read` in `__init__` and
+        `reload` does: an explicit UTF-8 here would read and write the file differently from them.
+        The values in memory are then the file's, read back from it."""
         missing = [(section, key) for (section, key) in _SEEDED_KEYS
                    if not self._config.has_option(section, key)]
         if not missing:
             return
         named = ", ".join(f"[{section}] {key}" for section, key in missing)
         try:
-            with open(self.config_file, 'r') as f:
-                lines = f.read().splitlines()
+            with open(self.config_file, 'r', newline='') as f:
+                text = f.read()
+            newline = "\r\n" if "\r\n" in text else "\n"
+            lines = text.splitlines()
             for section, key in missing:
                 value, comment = _SEEDED_KEYS[(section, key)]
                 line = f"{key} = {value}  # {comment}"
@@ -126,15 +134,23 @@ class Settings:
                     lines += ["", f"[{section}]", line]
                 else:  # a header this reader does not find: a second one would break the file
                     raise OSError(f"the [{section}] header was not found in the file")
-            with open(self.config_file, 'w') as f:
-                f.write("\n".join(lines) + "\n")
+            with open(self.config_file, 'w', newline='') as f:
+                f.write(newline.join(lines) + newline)
         except OSError as e:
             logger.warning("config.ini: could not write %s (%s); the defaults apply unwritten", named, e)
             return
+        try:
+            self._config.read(self.config_file)
+        except configparser.Error as e:
+            logger.warning("config.ini: %s written but the file does not read back (%s)", named, e)
         for section, key in missing:
-            if not self._config.has_section(section):
-                self._config.add_section(section)
-            self._config.set(section, key, _SEEDED_KEYS[(section, key)][0])
+            if not self._config.has_option(section, key):
+                # Not read back from the file: the default the getters use, said in the log.
+                logger.warning("config.ini: [%s] %s did not read back from the file; the default applies",
+                               section, key)
+                if not self._config.has_section(section):
+                    self._config.add_section(section)
+                self._config.set(section, key, _SEEDED_KEYS[(section, key)][0])
         logger.info("config.ini: wrote %s with the default", named)
 
     def _section_named(self, line: str) -> Optional[str]:

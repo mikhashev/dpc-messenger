@@ -4650,7 +4650,8 @@ class CoreService(MusicCommandsMixin):
         audio_base64: str = "",
         mime_type: str = "audio/webm",
         provider_alias: str | None = None,
-        file_path: str | None = None
+        file_path: str | None = None,
+        duration_seconds: float | None = None
     ) -> dict:
         """
         Transcribe audio to text using local Whisper (primary), OpenAI API (fallback), or remote peer.
@@ -4668,6 +4669,9 @@ class CoreService(MusicCommandsMixin):
             mime_type: Audio MIME type (default: audio/webm)
             provider_alias: Optional provider alias to use for transcription
                            Format: "local:alias" or "remote:node_id:alias"
+            duration_seconds: The recorder's own length of the audio, when the caller has it.
+                           The local Whisper's card ask uses it only when the probe reads no
+                           length (ADR-052 L10; Johnny #24-3: soundfile does not read WebM).
 
         Returns:
             dict with transcription text and provider info
@@ -4835,7 +4839,8 @@ class CoreService(MusicCommandsMixin):
                 from .providers.whisper_provider import card_ask
                 ask = await asyncio.to_thread(
                     card_ask, provider_obj, "dictation", temp_path,
-                    bound_s=self.settings.get_local_transcription_queue_wait_s())
+                    bound_s=self.settings.get_local_transcription_queue_wait_s(),
+                    declared_s=duration_seconds)
                 ask["on_wait"] = lambda estimate: self._tell_the_card_wait("dictation", estimate)
                 voice_message_check = _VOICE_MESSAGE_CARD_CHECK.get()
                 if voice_message_check is not None:
@@ -5255,7 +5260,9 @@ class CoreService(MusicCommandsMixin):
                             continue
                         try:
                             logger.info(f"Attempting transcription with provider: {provider_alias}")
-                            result = await self.transcribe_audio(audio_base64, mime_type, provider_alias)
+                            result = await self.transcribe_audio(
+                                audio_base64, mime_type, provider_alias,
+                                duration_seconds=voice_metadata.get("duration_seconds"))
                         except _TheSendersTranscriptArrived:
                             logger.info(f"Transcription received from peer while waiting for the card, "
                                         f"cancelling local attempt for {transfer_id}")

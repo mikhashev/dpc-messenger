@@ -124,7 +124,7 @@ async def test_a_guest_that_left_before_the_grant_is_dropped_and_nothing_loads(m
 
 @pytest.mark.asyncio
 async def test_a_guest_that_leaves_during_the_wait_leaves_the_line(monkeypatch):
-    # 10 s of audio: its own trip is known (cold load 12.8 s + 10 / 8.8), so it may wait.
+    # 10 s of audio: its own trip is known (load + 10 s at the warm ratio + the first call's penalty).
     monkeypatch.setattr(whisper_provider, "audio_seconds", lambda path: 10.0)
     other = whisper("other", eta=3.0)
     over, task = await _busy(other)

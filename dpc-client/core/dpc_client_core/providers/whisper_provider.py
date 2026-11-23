@@ -28,17 +28,51 @@ DEFAULT_IDLE_UNLOAD_S = 300.0
 # How long shutdown waits for running transcriptions before it unloads anyway.
 SHUTDOWN_DRAIN_S = 10.0
 
-# Start figures per device until this provider measures its own (ADR-052 L10, L12). Ratios are audio
-# seconds per wall second; `cold` is the first call after a load, `load_s` the load itself.
-#   cuda, "GPU figures on speech": warm 15.9x (the slowest row of 16-43x), cold 8.8x (the measured
-#     first call), load 12.8 s (the fresh-process cold load L13 counts).
-#   cpu, L12's table: 300 s of audio in 306 s; its "load + first call ≈ 9 s" is all in `load_s`.
+# The adaptive batch descent of `_transcribe_loaded`: over each length (audio seconds) the batch is
+# divided by its divisor. The warm figures are kept by the same bands (ADR-052 S3, Johnny #24-2), so
+# a band is a batch size: 16 up to 60 s, 8 up to 120 s, 4 up to 180 s, 2 over 180 s (batch 16).
+_BATCH_DESCENT = ((180.0, 8), (120.0, 4), (60.0, 2))
+_LENGTH_BANDS = ("<=60", "<=120", "<=180", ">180")
+
+
+def length_band(audio_s: Any) -> Optional[str]:
+    """The band of `_LENGTH_BANDS` an audio length falls in, on `_BATCH_DESCENT`'s thresholds (60 s
+    itself is "<=60", as the descent keeps batch 16 at 60 s), or None for an unknown length."""
+    seconds = _a_positive(audio_s)
+    if seconds is None:
+        return None
+    for (over, _), band in zip(_BATCH_DESCENT, _LENGTH_BANDS[:0:-1]):  # >180, <=180, <=120
+        if seconds > over:
+            return band
+    return "<=60"
+
+
+# Start figures per device until this provider measures its own (ADR-052 L10, L12). `warm` is the
+# real-time ratio (audio seconds per wall second) by length band; `penalty_s` the seconds the first
+# call after a load costs on top of `audio / warm` (added, never a ratio: Johnny #24-1); `load_s` the
+# load itself. An estimate is `load_s (not loaded) + audio / warm[band] + penalty_s (first call)`.
+#   cuda, "GPU figures on speech" (`gpu_run1.log`, SUMMARY, the slowest clip's median per band):
+#     <=60   21.1x  en_30 (1.42 s; ru_10 43.4x, ru_30 25.5x, ru_60 36.3x are faster)
+#     <=120  27.4x  ru_118 at batch 8 (4.31 s; en_120 29.4x)
+#     <=180  15.9x  no clip was measured at batch 4: the nearest measured longer band, which is
+#                   also the slowest figure measured, so a peer's estimate errs long
+#     >180   15.9x  en_300 at batch 2 (18.89 s)
+#     penalty_s 1.0: the one first call after a load in the log, ru_10 run0, took 1.14 s against
+#       the 0.23 s median (+0.91 s); the other clips' first runs on the loaded model were +0.67 s at
+#       60 s and within run-to-run spread at 30 s, 118 s, 120 s and 300 s (the ADR's "+0.9 s at
+#       10 s, +0.7 s at 60 s"). One constant, rounded up, covers every band.
+#     load_s 12.8: the fresh-process cold load L13 counts.
+#   cpu, L12's table (the slowest row per band): <=60 0.91x (10 s in 11 s warm), <=120 1.15x (120 s
+#     in 104 s), >180 0.98x (300 s in 306 s); <=180 has no row and takes >180's. Its "load + first
+#     call ≈ 9 s" is all in `load_s`, so `penalty_s` is 0 until measured.
 # A device absent here (mps, mlx) is unknown until measured.
-_START_FIGURES: Dict[str, Dict[str, float]] = {
-    "cuda": {"warm": 15.9, "cold": 8.8, "load_s": 12.8},
-    "cpu": {"warm": 300.0 / 306.0, "cold": 300.0 / 306.0, "load_s": 9.0},
+_START_FIGURES: Dict[str, Dict[str, Any]] = {
+    "cuda": {"warm": {"<=60": 21.1, "<=120": 27.4, "<=180": 15.9, ">180": 15.9},
+             "penalty_s": 1.0, "load_s": 12.8},
+    "cpu": {"warm": {"<=60": 10.0 / 11.0, "<=120": 120.0 / 104.0, "<=180": 300.0 / 306.0,
+                     ">180": 300.0 / 306.0},
+            "penalty_s": 0.0, "load_s": 9.0},
 }
-_FIGURE_KEYS = ("warm", "cold", "load_s")
 # ADR-052 L4: the margin a person's door keeps for the transcription itself, `max(10 s, estimate)`.
 MIN_MARGIN_S = 10.0
 # ADR-052 L11: what a loaded Whisper holds on the card beyond its weights, MiB (torch reserved peak at
@@ -82,7 +116,8 @@ def audio_seconds(audio_path: str) -> Optional[float]:
 
 
 def card_ask(provider: Any, purpose: str, audio_path: str, *, bound_s: Optional[float] = None,
-             caller_left_s: Optional[float] = None, audio_s: Optional[float] = None) -> Dict[str, Any]:
+             caller_left_s: Optional[float] = None, audio_s: Optional[float] = None,
+             declared_s: Any = None) -> Dict[str, Any]:
     """What a door passes to `transcribe` for the card (ADR-052 L4, the S3 row): `purpose`, its
     `wait_s` and the transcription's `expected_s`. Blocking (it may run ffprobe): call it in a thread.
 
@@ -95,9 +130,16 @@ def card_ask(provider: Any, purpose: str, audio_path: str, *, bound_s: Optional[
 
     Slice S3a builds the ask and the doors pass it; since S3b `transcribe` hands these three to
     `CardLease.use` (`purpose` names the use, `wait_s` bounds the wait in the lease line, `expected_s`
-    is what a later waiter's estimate counts for this call)."""
+    is what a later waiter's estimate counts for this call).
+
+    The length is `audio_s` when the door has it, else the probe's (`audio_seconds`); when the probe
+    reads none (no ffprobe, and soundfile does not read WebM, the recorder's default) it is
+    `declared_s`, the recorder's own `duration_seconds` (ADR-052 L10: "ffprobe's, else the
+    recorder's declared one"; Johnny #24-3). The probe wins; the declared length is the fallback."""
     if audio_s is None:
         audio_s = audio_seconds(audio_path)
+    if _a_positive(audio_s) is None:
+        audio_s = _a_positive(declared_s)
     estimate = getattr(provider, "expected_seconds", None)
     expected_s = estimate(audio_s) if callable(estimate) else None
     wait_s = None if bound_s is None else max(0.0, float(bound_s))
@@ -243,10 +285,11 @@ class LocalWhisperProvider(AIProvider):
         # The object that took over this one's model in a providers reload: a
         # transcription still running here is counted and ended on that object.
         self._successor: Optional["LocalWhisperProvider"] = None
-        # ADR-052 S3a: the speed this provider measured, {device: {"warm"|"cold"|"load_s": s}}, over
-        # `_START_FIGURES`; the device the model is loaded on now (a load may fall back to the CPU);
-        # the calls since that load (0: the next one is cold); `auto` resolved for an estimate.
-        self._measured: Dict[str, Dict[str, float]] = {}
+        # ADR-052 S3a: the speed this provider measured, over `_START_FIGURES` and in its shape,
+        # {device: {"warm": {band: ratio}, "penalty_s": s, "load_s": s}}; the device the model is
+        # loaded on now (a load may fall back to the CPU); the calls since that load (0: the next one
+        # is the first, which pays `penalty_s`); `auto` resolved for an estimate.
+        self._measured: Dict[str, Dict[str, Any]] = {}
         self._loaded_device: Optional[str] = None
         self._calls_since_load = 0
         self._estimate_device: Optional[str] = None
@@ -481,20 +524,27 @@ class LocalWhisperProvider(AIProvider):
 
     def _note_load(self, device: str, load_s: float) -> None:
         """A load finished on `device` (where the model really is): its time is recorded and the
-        next call is the cold one."""
+        next call is the first after a load."""
         self._loaded_device = device
         self._calls_since_load = 0
         seconds = _a_positive(load_s)
         if seconds is not None:
             self._measured.setdefault(device, {})["load_s"] = seconds
 
-    def _note_run(self, device: Optional[str], audio_s: float, elapsed: float, *, cold: bool) -> None:
-        """One transcription of `audio_s` took `elapsed` on `device`: the ratio replaces the cold or
-        the warm figure. A ratio that cannot be computed is not recorded."""
-        audio, wall = _a_positive(audio_s), _a_positive(elapsed)
-        if device is None or audio is None or wall is None:
+    def _note_run(self, device: Optional[str], audio_s: float, elapsed: float, *, first: bool) -> None:
+        """One transcription of `audio_s` took `elapsed` on `device`. A later call replaces the warm
+        ratio of its own length band only. The first call after a load records `penalty_s`: what it
+        took beyond `audio / warm` of its band, at least 0 (Johnny #24-1: the first call costs
+        seconds, not a ratio). A figure that cannot be computed is not recorded."""
+        audio, wall, band = _a_positive(audio_s), _a_positive(elapsed), length_band(audio_s)
+        if device is None or audio is None or wall is None or band is None:
             return
-        self._measured.setdefault(device, {})["cold" if cold else "warm"] = audio / wall
+        if first:
+            warm = self.speed_figures(device)["warm"].get(band)
+            if warm is not None:
+                self._measured.setdefault(device, {})["penalty_s"] = max(0.0, wall - audio / warm)
+            return
+        self._measured.setdefault(device, {}).setdefault("warm", {})[band] = audio / wall
 
     def _device_in_use(self) -> Optional[str]:
         """The device the loaded model runs on, for recording a run."""
@@ -519,18 +569,22 @@ class LocalWhisperProvider(AIProvider):
             self._estimate_device = self._detected_device or self._detect_device()
         return self._estimate_device
 
-    def speed_figures(self, device: str) -> Dict[str, Optional[float]]:
-        """`warm`, `cold` and `load_s` for `device`: measured here, else the start figure, else None."""
+    def speed_figures(self, device: str) -> Dict[str, Any]:
+        """`warm` (by length band), `penalty_s` and `load_s` for `device`: each figure measured here,
+        else the start figure, else absent (a band of `warm`) or None (unknown)."""
         measured = self._measured.get(device, {})
         start = _START_FIGURES.get(device, {})
-        return {key: measured.get(key, start.get(key)) for key in _FIGURE_KEYS}
+        warm = {**start.get("warm", {}), **measured.get("warm", {})}
+        return {"warm": warm,
+                "penalty_s": measured.get("penalty_s", start.get("penalty_s")),
+                "load_s": measured.get("load_s", start.get("load_s"))}
 
     def expected_seconds(self, audio_s: Any, device: Optional[str] = None,
                          loaded: Optional[bool] = None) -> Optional[float]:
         """Wall seconds a transcription of `audio_s` would take, or None when unknown (ADR-052 L10,
-        L13 point 2): the load when the model is not loaded, plus the audio divided by the cold ratio
-        (the first call after a load) or the warm one, through `card_lease.seconds_from_ratio`.
-        `device` and `loaded` default to what this provider is now."""
+        L13 point 2): `load_s` when the model is not loaded, plus the audio divided by the warm ratio
+        of its length band (`card_lease.seconds_from_ratio`), plus `penalty_s` for the first call
+        after a load. `device` and `loaded` default to what this provider is now."""
         owner = self._current_owner()
         if owner is not self:
             return owner.expected_seconds(audio_s, device, loaded)
@@ -539,10 +593,15 @@ class LocalWhisperProvider(AIProvider):
         if loaded is None:
             loaded = self.model_loaded
         figures = self.speed_figures(device or self._route_device())
-        cold = not loaded or self._calls_since_load == 0
-        work = seconds_from_ratio(audio_s, figures["cold" if cold else "warm"])
+        band = length_band(audio_s)
+        work = None if band is None else seconds_from_ratio(audio_s, figures["warm"].get(band))
         if work is None:
             return None
+        if not loaded or self._calls_since_load == 0:
+            penalty = figures["penalty_s"]
+            if penalty is None:
+                return None
+            work += penalty
         if loaded:
             return work
         load = figures["load_s"]
@@ -1032,8 +1091,29 @@ class LocalWhisperProvider(AIProvider):
         if self._retired and self._successor is None:
             raise RuntimeError(f"Whisper provider '{self.alias}' was removed or shut down")
 
+    def _carry_figures_to(self, new: "LocalWhisperProvider", *, fresh_load: bool) -> None:
+        """The speed measured here goes to `new` when it is the same model's (ADR-052 S3a): `new`
+        keeps a figure it measured itself, band by band, except, with `fresh_load`, the load time of
+        the device this object has just loaded on, which is newer than anything `new` holds."""
+        if new.model_name != self.model_name:
+            return
+        for device, figures in self._measured.items():
+            kept = new._measured.setdefault(device, {})
+            for key, value in figures.items():
+                if key == "warm":
+                    for band, ratio in value.items():
+                        kept.setdefault("warm", {}).setdefault(band, ratio)
+                else:
+                    kept.setdefault(key, value)
+        if fresh_load and self._loaded_device in self._measured:
+            load_s = self._measured[self._loaded_device].get("load_s")
+            if load_s is not None:
+                new._measured.setdefault(self._loaded_device, {})["load_s"] = load_s
+
     def _copy_state_to(self, new: "LocalWhisperProvider") -> None:
         if not new.model_loaded and self.model_loaded:
+            # Zcode #22-2: a load that finished here after the hand-over measured its time here.
+            self._carry_figures_to(new, fresh_load=True)
             new.pipeline = self.pipeline
             new.model_loaded = True
             new._detected_device = self._detected_device
@@ -1073,12 +1153,8 @@ class LocalWhisperProvider(AIProvider):
             _card_lease._CARD_LEASES[lease.holder] = lease
         self._card_runs.update(new._card_runs)
         new._card_runs = self._card_runs
+        self._carry_figures_to(new, fresh_load=False)
         if new.model_name == self.model_name:
-            # The speed measured here is the same model's: `new` keeps what it measured itself.
-            for device, figures in self._measured.items():
-                kept = new._measured.setdefault(device, {})
-                for key, value in figures.items():
-                    kept.setdefault(key, value)
             if new.model_loaded and self.model_loaded and new._loaded_device is None:
                 new._loaded_device = self._loaded_device
                 new._calls_since_load = self._calls_since_load
@@ -1347,10 +1423,10 @@ class LocalWhisperProvider(AIProvider):
                     owner.schedule_idle_unload()  # also when this await was cancelled
 
     def _record_run(self, audio_s: float, elapsed: float) -> None:
-        """Record a finished run on the object that owns the model now: the first since its load is
-        the cold figure, every later one the warm figure."""
+        """Record a finished run on the object that owns the model now: the first since its load
+        gives `penalty_s`, every later one the warm figure of its length band."""
         owner = self._current_owner()
-        owner._note_run(owner._device_in_use(), audio_s, elapsed, cold=owner._calls_since_load == 0)
+        owner._note_run(owner._device_in_use(), audio_s, elapsed, first=owner._calls_since_load == 0)
         owner._calls_since_load += 1
 
     async def _transcribe_loaded(self, audio_path: str, language: Optional[str] = None,
@@ -1440,16 +1516,15 @@ class LocalWhisperProvider(AIProvider):
                 start_time = asyncio.get_event_loop().time()
 
                 # Adaptive batch_size for long audio
+                # (`_BATCH_DESCENT`, whose thresholds are also the warm figures' length bands)
                 adaptive_batch_size = self.batch_size
-                if duration_seconds > 180:
-                    adaptive_batch_size = max(1, self.batch_size // 8)
-                    logger.info(f"Long audio ({duration_seconds:.0f}s), reducing batch_size: {self.batch_size} → {adaptive_batch_size}")
-                elif duration_seconds > 120:
-                    adaptive_batch_size = max(1, self.batch_size // 4)
-                    logger.info(f"Long audio ({duration_seconds:.0f}s), reducing batch_size: {self.batch_size} → {adaptive_batch_size}")
-                elif duration_seconds > 60:
-                    adaptive_batch_size = max(1, self.batch_size // 2)
-                    logger.info(f"Medium audio ({duration_seconds:.0f}s), reducing batch_size: {self.batch_size} → {adaptive_batch_size}")
+                for over, divisor in _BATCH_DESCENT:
+                    if duration_seconds > over:
+                        adaptive_batch_size = max(1, self.batch_size // divisor)
+                        size = "Long" if over > 60 else "Medium"
+                        logger.info(f"{size} audio ({duration_seconds:.0f}s), reducing batch_size: "
+                                    f"{self.batch_size} → {adaptive_batch_size}")
+                        break
 
                 # return_timestamps is passed at call time (the standard place for
                 # it); the pipeline itself is built once and shared. Segment-level

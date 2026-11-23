@@ -128,6 +128,33 @@ class TestIdleUnloadSIsWrittenForTheOwner:
         assert s.get_local_transcription_idle_unload_s() == 300.0
 
 
+class TestTheSeedKeepsTheFile:
+    """S3 follow-up 2, Johnny #24 (minor): the seed keeps the file's own line endings, and the values
+    in memory are the ones read back from the file."""
+
+    @pytest.mark.parametrize("newline", ["\r\n", "\n"])
+    def test_the_files_line_endings_are_kept(self, tmp_path, newline):
+        text = newline.join(["# mine", "[hub]", "url = http://localhost:8000", "",
+                             "[local_transcription]", "device = cpu", ""])
+        (tmp_path / "config.ini").write_bytes(text.encode("utf-8"))
+        Settings(tmp_path)
+        raw = (tmp_path / "config.ini").read_bytes()
+        assert b"idle_unload_s = 300" in raw
+        lines = raw.split(b"\n")[:-1]
+        if newline == "\r\n":
+            assert all(line.endswith(b"\r") for line in lines), raw
+        else:
+            assert b"\r" not in raw, raw
+
+    def test_the_values_in_memory_are_the_files(self, tmp_path):
+        _old_config(tmp_path, {"device": "cpu"})
+        s = Settings(tmp_path)
+        on_disk = _read(tmp_path)
+        for section, key in (("local_transcription", "idle_unload_s"), ("local_transcription", "queue_wait_s")):
+            assert s._config.get(section, key) == on_disk[section][key]
+        assert s._config.get("local_transcription", "device") == "cpu"
+
+
 class TestQueueWaitSIsWrittenForTheOwnerToo:
     """Ark #20-3 (Mike #9/#15): the same carrier as `idle_unload_s`, code default and key in the file."""
 

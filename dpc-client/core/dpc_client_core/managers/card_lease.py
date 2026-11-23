@@ -652,7 +652,13 @@ class _LeaseWaiter:
         self.expected_s = _positive(expected_s)
         if self.for_a_peer:
             # What is left of the trip once its own work is counted, or its door's bound when shorter.
-            trip_left = max(0.0, PEER_TRIP_S - (self.expected_s or 0.0))
+            if self.expected_s is None:
+                # Its own work unknown: the trip is unknown, never "no work" (L10). `_enter` refuses
+                # such a peer at once on a blocked card (L13 point 2) and serves it only on a free
+                # one, where nothing waits; the whole 120 s is the bound only that grant reads.
+                trip_left = PEER_TRIP_S
+            else:
+                trip_left = max(0.0, PEER_TRIP_S - self.expected_s)
             wait_s = trip_left if wait_s is None else min(max(0.0, float(wait_s)), trip_left)
         self.wait_s = wait_s
         self.give_up_at = math.inf if wait_s is None else _clock() + max(0.0, float(wait_s))

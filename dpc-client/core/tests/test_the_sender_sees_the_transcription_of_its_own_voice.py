@@ -185,7 +185,7 @@ async def test_the_sender_records_the_file_name_with_its_own_transcription(tmp_p
     svc._transcription_locks = {}
     svc.p2p_manager = SimpleNamespace(node_id="dpc-node-" + "a" * 32)
     svc._check_transcription_capability = lambda check_model_loaded=False: _done(True)
-    svc.transcribe_audio = lambda audio_base64, mime_type, alias: _done(
+    svc.transcribe_audio = lambda audio_base64, mime_type, alias, **kw: _done(
         {"text": "проверка связи", "provider": alias, "confidence": 0.9, "language": "ru"}
     )
     svc._get_or_create_conversation_monitor = lambda cid: None
