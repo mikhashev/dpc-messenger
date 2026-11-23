@@ -99,7 +99,9 @@ def _tool_ctx(agent_root, provider):
 
 
 @pytest.mark.asyncio
-async def test_the_agent_tool_passes_its_timeout_less_the_margin(tmp_path):
+async def test_the_agent_tool_without_a_turn_hold_waits_at_most_queue_wait_s(tmp_path):
+    """Mike 2026-11-23: the cap is queue_wait_s (600 by default), below the tool's
+    own 1800 s timeout less the margin (1790), which was the wait before."""
     from dpc_client_core.dpc_agent.tools.transcribe import _TOOL_TIMEOUT_S, transcribe_audio_file
 
     (tmp_path / "voice.wav").write_bytes(b"RIFF....WAVEfmt fake")
@@ -107,8 +109,9 @@ async def test_the_agent_tool_passes_its_timeout_less_the_margin(tmp_path):
     await transcribe_audio_file(_tool_ctx(tmp_path, provider), "voice.wav")
 
     assert _TOOL_TIMEOUT_S == 1800
-    # The margin is max(10 s, estimate): 10 s for a 7.5 s estimate (L4).
-    assert provider.asks == [{"purpose": "agent tool", "wait_s": 1800.0 - 10.0, "expected_s": ESTIMATE_S}]
+    # Without Settings the door reads the default queue_wait_s, 600 s, which is below
+    # the timeout less the margin, max(10 s, estimate) = 10 s here (L4).
+    assert provider.asks == [{"purpose": "agent tool", "wait_s": 600.0, "expected_s": ESTIMATE_S}]
 
 
 @pytest.mark.asyncio
