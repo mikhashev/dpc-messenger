@@ -188,9 +188,11 @@ class VoiceService:
                         "error": f"Provider '{provider_alias}' is not a local Whisper provider"
                     }
             else:
-                # Find first local_whisper provider
+                # Find first local_whisper provider; a GPU alias's CPU twin is never preloaded as if
+                # it were the main alias (ADR-052 L12: never loaded speculatively).
+                from .providers.whisper_provider import is_cpu_twin
                 for provider in self.llm_manager.providers.values():
-                    if provider.config.get("type") == "local_whisper":
+                    if provider.config.get("type") == "local_whisper" and not is_cpu_twin(provider):
                         provider_obj = provider
                         provider_alias = provider.alias
                         break

@@ -1406,7 +1406,7 @@ class P2PCoordinator:
             # ADR-052 L13: no bound of its own; the lease line gives a peer what is left of the
             # guest's 120 s once its own work (`expected_s`) is counted.
             from .managers.llama_server_supervisor import serving_a_peer
-            from .providers.whisper_provider import card_ask
+            from .providers.whisper_provider import card_ask, transcribe_with_route
 
             async def the_peer_is_still_there() -> None:
                 # L13 point 3, the one cheap guard: in the wait and at the grant.
@@ -1418,7 +1418,7 @@ class P2PCoordinator:
                 # context, so the time spent reading the length is the peer's, as the call is.
                 ask = await asyncio.to_thread(card_ask, provider_instance, f"peer {peer_id}", temp_audio_path)
                 ask["check"] = the_peer_is_still_there
-                result = await provider_instance.transcribe(temp_audio_path, **overrides, **ask)
+                result = await transcribe_with_route(provider_instance, temp_audio_path, **overrides, **ask)
             logger.info("Transcription completed successfully for %s", peer_id)
 
             success_response = create_remote_transcription_response(

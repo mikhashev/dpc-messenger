@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from ...managers import llama_server_supervisor as _sup
-from ...providers.whisper_provider import card_ask, card_wait_words
+from ...providers.whisper_provider import card_ask, card_wait_words, is_cpu_twin, transcribe_with_route
 from .core import _resolve_file_path
 from .registry import ToolEntry, ToolContext
 
@@ -52,7 +52,8 @@ def _whisper_providers(ctx: ToolContext) -> dict:
     return {
         alias: p
         for alias, p in providers.items()
-        if getattr(p, "config", {}).get("type") == _WHISPER_PROVIDER_TYPE
+        # A GPU alias's CPU twin is reached through its GPU alias (ADR-052 L12), never picked here.
+        if getattr(p, "config", {}).get("type") == _WHISPER_PROVIDER_TYPE and not is_cpu_twin(p)
     }
 
 
@@ -190,7 +191,8 @@ async def transcribe_audio_file(
     # ADR-052 3.1: a wait for the card is told through the tool's progress.
     ask["on_wait"] = lambda estimate: ctx.emit_progress(f"Waiting for the card: {card_wait_words(estimate)}")
     try:
-        result = await provider.transcribe(str(source), **({"language": language} if language else {}), **ask)
+        result = await transcribe_with_route(provider, str(source),
+                                             **({"language": language} if language else {}), **ask)
     except Exception as e:
         log.error("Transcription failed for %s: %s", source, e, exc_info=True)
         return f"⚠️ Transcription failed: {e}"

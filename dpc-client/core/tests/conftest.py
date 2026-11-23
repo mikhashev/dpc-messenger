@@ -164,6 +164,19 @@ def _no_whisper_load_has_run_in_this_process():
 
 
 @pytest.fixture(autouse=True)
+def _the_hosts_ram_is_unknown_unless_a_test_says(monkeypatch):
+    """ADR-052 L12 (S3d): a cold CPU twin is taken only when available host RAM covers it, and RAM that
+    cannot be read does not. A runner's real RAM would decide a test's route, as a GPU would, so each
+    test starts with it unreadable (the CPU route closed, every GPU call to the line as before S3d) and
+    a test of the CPU route says how much there is. L12's settings source a `CoreService` registered
+    in another test is dropped too: the code defaults apply."""
+    from dpc_client_core.providers import whisper_provider
+
+    monkeypatch.setattr(whisper_provider, "available_ram_mib", lambda: None)
+    monkeypatch.setattr(whisper_provider, "_cpu_route_source", None)
+
+
+@pytest.fixture(autouse=True)
 def _engine_pins_in_tmp(tmp_path, monkeypatch):
     """A passed start writes its pin's marker and may prune the older pins (B2 step 3).
     The pins folders default to this machine's ~/.dpc/bin, so every test gets its own

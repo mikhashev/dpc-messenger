@@ -82,6 +82,129 @@ _WHISPER_OVERHEAD_MIB = 2900
 # The words a Stop or a refusal adds about a Whisper holder (ADR-052 2.2 item 7).
 _STOP_HINT = "It lets go when idle; Stop unloads it now."
 
+# ADR-052 L12 (slice S3d): the CPU twin of a GPU alias. Its alias is the GPU alias plus this suffix;
+# it lives beside its GPU alias, never in `providers.json` nor in the providers manager's list.
+CPU_TWIN_SUFFIX = "@cpu"
+# The twin's own idle unload (L12, "Residency": short, proposed 60 s; Mike #71). A start value.
+TWIN_IDLE_UNLOAD_S = 60.0
+# L12, "Enough RAM": a cold CPU route is taken only when available host RAM covers the twin plus a
+# margin. The twin's figure is L12's table (≈4 GB, up to ≈10 GB on long recordings), unverified; the
+# margin is a start value. Both are read only here.
+_TWIN_RAM_MIB = 4096
+_RAM_MARGIN_MIB = 1024
+# L12's three settings, `[local_transcription]` (settings.py reads the file first): the code defaults
+# when no source is registered (a provider built outside the service). Item 9 (2026-11-23): cpu_max_s
+# 600 and the factor 1.0; cpu_max_audio_s 300 (Mike #71).
+DEFAULT_CPU_MAX_S = 600.0
+DEFAULT_CPU_MAX_AUDIO_S = 300.0
+DEFAULT_CPU_CONTENTION_FACTOR = 1.0
+_CPU_ROUTE_KEYS = {"cpu_max_s": DEFAULT_CPU_MAX_S, "cpu_max_audio_s": DEFAULT_CPU_MAX_AUDIO_S,
+                   "cpu_contention_factor": DEFAULT_CPU_CONTENTION_FACTOR}
+_cpu_route_source: Optional[Callable[[], Dict[str, Any]]] = None
+
+
+def set_cpu_route_source(source: Optional[Callable[[], Dict[str, Any]]]) -> None:
+    """Where L12 reads `cpu_max_s`, `cpu_max_audio_s` and `cpu_contention_factor` (a dict of them). A
+    getter, read on every choice, so a settings change applies without a restart."""
+    global _cpu_route_source
+    _cpu_route_source = source
+
+
+def cpu_route_settings() -> Dict[str, float]:
+    """L12's three numbers: the registered source's, each one that is not a figure above 0 replaced
+    by the code default (logged)."""
+    values = dict(_CPU_ROUTE_KEYS)
+    source = _cpu_route_source
+    if source is None:
+        return values
+    try:
+        read = source() or {}
+    except Exception:
+        logger.warning("Whisper: L12's settings are unreadable; using the defaults", exc_info=True)
+        return values
+    for key, default in _CPU_ROUTE_KEYS.items():
+        figure = _a_positive(read.get(key))
+        if figure is None:
+            if key in read:
+                logger.warning("Whisper: [local_transcription] %s %r is not a figure above 0; using %g",
+                               key, read.get(key), default)
+            continue
+        values[key] = figure
+    return values
+
+
+def available_ram_mib() -> Optional[float]:
+    """Available host RAM in MiB (`psutil.virtual_memory().available`, the one instrument of L12's
+    gate, log and UI), or None when it cannot be read."""
+    try:
+        import psutil
+        return _a_positive(psutil.virtual_memory().available / 2**20)
+    except Exception:
+        logger.debug("Whisper: the host's available RAM could not be read", exc_info=True)
+        return None
+
+
+def cpu_ram_check() -> tuple:
+    """(ok, words): whether available host RAM covers a CPU Whisper (`_TWIN_RAM_MIB`) plus the margin
+    (ADR-052 L12, "Enough RAM"). RAM that cannot be read does not cover it: a route that cannot be
+    shown to fit is not taken."""
+    need = _TWIN_RAM_MIB + _RAM_MARGIN_MIB
+    available = available_ram_mib()
+    if available is None:
+        return False, f"the host's available RAM could not be read ({need} MiB needed)"
+    if available < need:
+        return False, f"{available:.0f} MiB of host RAM available, {need} MiB needed"
+    return True, f"{available:.0f} MiB of host RAM available, {need} MiB needed"
+
+
+def is_cpu_twin(provider: Any) -> bool:
+    """Whether `provider` is a GPU alias's CPU twin (ADR-052 L12): never a default, never preloaded."""
+    return getattr(provider, "is_cpu_twin", False) is True
+
+
+class RoutedToCpu(Exception):
+    """L12 sent this call to the GPU alias's CPU twin (ADR-052 3.1, "Selection"). Not a refusal:
+    nothing waited and nothing was asked of the card. `transcribe_with_route` catches it and calls
+    `twin` with the same arguments. `decision` is what L12 read; `if_it_fails` is set for an agent's
+    tool inside its own turn on a local alias (section 3.5), whose twin failure is refused at once."""
+
+    def __init__(self, twin: "LocalWhisperProvider", decision: Dict[str, Any],
+                 if_it_fails: Optional[Callable[[str], Exception]] = None):
+        super().__init__(f"routed to the CPU twin '{twin.alias}'")
+        self.twin = twin
+        self.decision = decision
+        self.if_it_fails = if_it_fails
+
+
+async def transcribe_with_route(provider: Any, audio_path: str, release_if_loaded_here: bool = False,
+                                **kwargs: Any) -> Dict[str, Any]:
+    """The selector every door calls instead of `provider.transcribe` (ADR-052 3.1, L12): the call
+    as asked, and when the GPU alias's L12 says CPU (`RoutedToCpu`), the CPU twin with the same
+    `language`, `task`, length and `release_if_loaded_here`. The card's own arguments (`purpose`,
+    `wait_s`, `expected_s`, `on_wait`) have no use there; `check` runs once before the twin starts, as
+    it would at a grant. No switch in mid-flight (Zcode #69): a twin's failure is the call's failure,
+    and a call sent to the line never comes back here."""
+    try:
+        # Passed only when set, as each door passed it before the selector.
+        return await provider.transcribe(
+            audio_path, **({"release_if_loaded_here": True} if release_if_loaded_here else {}), **kwargs)
+    except RoutedToCpu as routed:
+        twin = routed.twin
+        check = kwargs.get("check")
+        if check is not None:
+            await check()
+        try:
+            result = await twin.transcribe(audio_path, release_if_loaded_here,
+                                           language=kwargs.get("language"), task=kwargs.get("task"),
+                                           audio_s=kwargs.get("audio_s"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if routed.if_it_fails is None:
+                raise
+            raise routed.if_it_fails(str(exc) or type(exc).__name__) from exc
+        return {**(result or {}), "device": "cpu"}
+
 
 def _a_positive(value: Any) -> Optional[float]:
     """A finite figure above 0, else None (unknown, never 0: ADR-052 L10)."""
@@ -168,7 +291,11 @@ def asks_for_the_card(provider: Any) -> bool:
     (`_route_device`: torch's CUDA check, no model load; Johnny #30-7), so an unloaded `auto` alias
     on a machine with no GPU is not skipped after a refusal. Only a detection that fails counts as a
     card's, the side a cascade the card has just refused must err on. It may import torch: blocking,
-    call it in a thread."""
+    call it in a thread.
+
+    A question writes nothing (Ark #44-2, S3d): a detection made here is not kept; the call keeps its
+    own (`_route_device(remember=True)` in `_lease_for_the_card` and `expected_seconds`), and this
+    reads it once there is one."""
     if (getattr(provider, "config", None) or {}).get("type") != "local_whisper":
         return False
     current = provider._current_owner() if hasattr(provider, "_current_owner") else provider
@@ -182,7 +309,7 @@ def asks_for_the_card(provider: Any) -> bool:
     if device is None:
         route = getattr(current, "_route_device", None)
         try:
-            device = route() if callable(route) else None
+            device = route(remember=False) if callable(route) else None
         except Exception:
             logger.debug("Whisper: the device of %s could not be detected; counted as the card's",
                          getattr(current, "alias", current), exc_info=True)
@@ -325,6 +452,13 @@ class LocalWhisperProvider(AIProvider):
         self._card_lease: Optional[Any] = None
         self._card_runs: Dict[int, Any] = {}
         self._card_load: Dict[str, Any] = {}
+        # ADR-052 L12 (S3d): `is_cpu_twin` marks a GPU alias's CPU twin (built by `_the_cpu_twin`, its
+        # config naming the GPU alias in `_cpu_twin_of`); `_cpu_twin` is this GPU alias's twin, built
+        # on the first call L12 routes there and handed over in a providers reload; `last_route` is
+        # L12's last choice for this alias, as logged.
+        self.is_cpu_twin = bool(config.get("_cpu_twin_of"))
+        self._cpu_twin: Optional["LocalWhisperProvider"] = None
+        self.last_route: Optional[Dict[str, Any]] = None
 
         logger.info(f"LocalWhisperProvider '{alias}' initialized (model={self.model_name}, device={self.device})")
 
@@ -492,7 +626,13 @@ class LocalWhisperProvider(AIProvider):
             except (RuntimeError, AssertionError) as e:
                 if "NVIDIA" in str(e) or "CUDA" in str(e) or "not compiled" in str(e).lower():
                     logger.warning(f"Failed to initialize {device}: {e}")
-                    logger.info("Forcing CPU mode for Whisper model")
+                    # A CPU route L12 never approved (ADR-052 3.1, Ark #30): it passes L12's RAM
+                    # check, or the call is refused with the reason.
+                    room, words = cpu_ram_check()
+                    if not room:
+                        raise RuntimeError(f"the load on {device} failed and the CPU cannot take the "
+                                           f"model instead ({words})") from e
+                    logger.info("Forcing CPU mode for Whisper model (%s)", words)
                     device = "cpu"
                     torch_dtype = torch.float32
                     model.to(device)
@@ -590,18 +730,26 @@ class LocalWhisperProvider(AIProvider):
             return self._detected_device
         return None if self.device == "auto" else self.device
 
-    def _route_device(self) -> str:
+    def _route_device(self, remember: bool = True) -> str:
         """The device a call would run on now: the loaded model's, else the configured one; `auto`
-        is detected once (it may import torch: call from a thread when that matters)."""
+        is detected once (it may import torch: call from a thread when that matters).
+
+        Only a detection that returned is kept, and only with `remember` (Ark #44-2, S3d): the call's
+        own paths (`_lease_for_the_card`, `expected_seconds` from the door's `card_ask`) keep it; a
+        question (`asks_for_the_card`) passes False and leaves the provider as it found it."""
         if self.model_loaded:
             in_use = self._device_in_use()
             if in_use is not None:
                 return in_use
         if self.device != "auto":
             return self.device
-        if self._estimate_device is None:
-            self._estimate_device = self._detected_device or self._detect_device()
-        return self._estimate_device
+        known = self._estimate_device or self._detected_device
+        if known is not None:
+            return known
+        detected = self._detect_device()
+        if remember:
+            self._estimate_device = detected
+        return detected
 
     def speed_figures(self, device: str) -> Dict[str, Any]:
         """`warm` and `penalty_s` (each by length band), `load_first_s` and `load_reload_s` for
@@ -699,6 +847,162 @@ class LocalWhisperProvider(AIProvider):
     async def _yield_for_the_card(self, why: str) -> str:
         """The lease's `on_yield`: the object that owns the model now lets go."""
         return await self._current_owner().yield_card(why)
+
+    # -- the CPU twin and L12 (ADR-052 S3d) --
+
+    def _the_cpu_twin(self) -> "LocalWhisperProvider":
+        """This GPU alias's CPU twin, built once (ADR-052 3.1, "The CPU route"): a `local_whisper`
+        provider `<alias>@cpu`, the same model and settings on `device: cpu`, its own load lock, idle
+        timer (`TWIN_IDLE_UNLOAD_S`, or the GPU alias's `cpu_idle_unload_s`) and speed figures, no
+        lease. Not in the providers manager's list, so nothing reads it as a configured alias."""
+        if self._cpu_twin is None:
+            config = {key: value for key, value in self.config.items()
+                      if key not in ("idle_unload_s", "let_peers_use_cpu_twin", "cpu_idle_unload_s")}
+            config.update(alias=f"{self.alias}{CPU_TWIN_SUFFIX}", device="cpu", compile_model=False,
+                          _cpu_twin_of=self.alias,
+                          idle_unload_s=self.config.get("cpu_idle_unload_s", TWIN_IDLE_UNLOAD_S))
+            self._cpu_twin = LocalWhisperProvider(config["alias"], config)
+        return self._cpu_twin
+
+    def _hand_the_twin_to(self, new: Optional["LocalWhisperProvider"]) -> None:
+        """A providers reload: the twin goes to `new`'s twin the way the providers manager carries a
+        GPU alias (load lock shared, a loaded model carried unless its unload runs, `hand_over_to`).
+        With no `new` (retired), or one that takes no twin (a CPU device) or another model, the old
+        twin is retired and its model unloaded."""
+        old = self._cpu_twin
+        self._cpu_twin = None
+        if old is None:
+            return
+        if new is not None and new.device != "cpu" and new.model_name == old.model_name:
+            twin = new._the_cpu_twin()
+            twin._load_lock = old._load_lock
+            if old.model_loaded and not old._unloading:
+                twin.pipeline = old.pipeline
+                twin.model_loaded = True
+                twin._detected_device = old._detected_device
+            old.hand_over_to(twin)
+            twin.schedule_idle_unload()
+            return
+        old.retire()
+        if old.model_loaded:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.warning("Whisper '%s': the CPU twin of a replaced alias stays loaded (no event "
+                               "loop to unload it on)", old.alias)
+                return
+            loop.create_task(old.unload_model_async("alias replaced"))
+
+    def _lets_peers_use_the_twin(self) -> bool:
+        """The owner's optional `let_peers_use_cpu_twin` on the GPU alias (Mike #71, 6C: off by
+        default; S5 puts it beside the device selector)."""
+        value = self.config.get("let_peers_use_cpu_twin", False)
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "1", "yes")
+        return value is True
+
+    def _note_route(self, decision: Dict[str, Any]) -> None:
+        """L12's choice, observable: kept as `last_route` and logged at INFO (DEBUG on a free card)."""
+        self.last_route = decision
+        where = {"cpu": "CPU twin", "gpu": "GPU"}.get(decision["route"], "line for the card")
+        logger.log(logging.DEBUG if decision.get("free") else logging.INFO,
+                   "Whisper '%s': L12 sends %s to the %s: %s", self.alias, decision["what"], where,
+                   decision["why"])
+
+    async def _choose_route(self, lease: Any, what: str, expected_s: Optional[float],
+                            audio_s: Optional[float]) -> Optional[RoutedToCpu]:
+        """ADR-052 L12 at the seam before the lease is asked (item 1a): `RoutedToCpu` for the CPU
+        twin, None for the card (the GPU at once, or the line). Raises `LeaseWouldWaitOnItself` for an
+        agent's tool inside its own turn on a local alias the twin cannot take (section 3.5). Nothing
+        here waits, takes a place or asks a holder. The checks run in L12's order."""
+        from ..managers.card_lease import PEER_TRIP_S, LeaseWouldWaitOnItself, route_view
+        from ..managers.llama_server_supervisor import peer_being_served
+
+        view = await route_view(lease, expected_s=expected_s)
+        length = _a_positive(audio_s)
+        decision: Dict[str, Any] = {"what": what, "free": view["free"], "audio_s": length,
+                                    "behind": view["behind"]}
+
+        def to(route: str, why: str) -> None:
+            decision.update(route=route, why=why)
+            self._note_route(decision)
+
+        if view["free"]:  # L12 point 1 (L11's `fits` is S3e's)
+            to("gpu", "the card is free")
+            return None
+        settings = cpu_route_settings()
+        cap = settings["cpu_max_audio_s"]
+        if view["self_wait"] is not None:  # section 3.5: the cap and the RAM check, no comparison
+            alias, engine = view["self_wait"]
+
+            def refused(reason: str) -> Exception:
+                refusal = LeaseWouldWaitOnItself(
+                    f"Not transcribed: the CPU could not take it ({reason}), and this turn holds the "
+                    f"card (the local model '{alias}'), so nothing was queued.", alias, engine)
+                logger.info("card: %s refused: %s", what, refusal)
+                return refusal
+
+            if length is None or length > cap:
+                too_long = (f"A file over {cap:g} s needs the card" if length is not None else
+                            f"The length of this file cannot be read, and a file over {cap:g} s needs the card")
+                to("line", f"inside its own turn on '{alias}', {length or 'unknown'} s of audio: refused")
+                refusal = LeaseWouldWaitOnItself(
+                    f"Not transcribed: this turn runs on the local model '{alias}', which holds the "
+                    f"card. {too_long}, so nothing was queued.", alias, engine)
+                logger.info("card: %s refused: %s", what, refusal)
+                raise refusal
+            twin = self._the_cpu_twin()
+            if not twin.model_loaded:
+                room, words = cpu_ram_check()
+                if not room:
+                    to("line", f"inside its own turn on '{alias}', the twin is cold and {words}: refused")
+                    raise refused(words)
+            to("cpu", f"inside its own turn on '{alias}', {length:g} s of audio within {cap:g} s")
+            return RoutedToCpu(twin, decision, if_it_fails=refused)
+        peer = peer_being_served() is not None
+        if peer and not self._lets_peers_use_the_twin():
+            to("line", "a peer's call takes no CPU route (Mike #71)")
+            return None
+        if length is None:  # L12 point 2
+            to("line", "the length is unknown, so the CPU's time is too")
+            return None
+        if length > cap:
+            to("line", f"{length:g} s of audio is over cpu_max_audio_s {cap:g} s")
+            return None
+        factor = settings["cpu_contention_factor"] if view["cpu_busy"] else 1.0  # point 3
+        twin = self._the_cpu_twin()
+        cpu_s = twin.expected_seconds(length)
+        if cpu_s is None:
+            to("line", "the twin's time is unknown")
+            return None
+        cpu_s *= factor
+        # Point 4: the GPU's finish is the wait plus its own work; any unknown part is long.
+        gpu_work = _a_positive(expected_s) or self.expected_seconds(length)
+        wait_s = view["wait_s"]
+        gpu_s = None if wait_s is None or gpu_work is None else wait_s + gpu_work
+        cold = not twin.model_loaded
+        decision.update(cpu_s=cpu_s, gpu_s=gpu_s, factor=factor, cold=cold)
+        gpu_words = "long (unknown)" if gpu_s is None else f"≈{gpu_s:.0f} s"
+        if view["engine_stays"]:
+            gpu_words += ", behind a local engine on the card"
+        busy = f", x{factor:g} for a busy Strata" if view["cpu_busy"] else ""
+        compared = f"CPU ≈{cpu_s:.0f} s ({'cold' if cold else 'warm'}{busy}) against the GPU {gpu_words}"
+        if gpu_s is not None and cpu_s >= gpu_s:
+            to("line", f"{compared}: the GPU is sooner")
+            return None
+        if cpu_s > settings["cpu_max_s"]:
+            to("line", f"{compared}: over cpu_max_s {settings['cpu_max_s']:g} s")
+            return None
+        if peer and cpu_s > PEER_TRIP_S:
+            to("line", f"{compared}: over the guest's {PEER_TRIP_S:g} s (L13)")
+            return None
+        if cold:
+            room, words = cpu_ram_check()
+            if not room:
+                to("line", f"{compared}, but the twin is cold and {words}")
+                return None
+        to("cpu", compared)
+        return RoutedToCpu(twin, decision)
 
     def _card_eta(self) -> Optional[float]:
         """The lease's `eta_s`: the longest remaining expected time of the calls holding the card now,
@@ -1239,14 +1543,17 @@ class LocalWhisperProvider(AIProvider):
                 new._calls_since_load = self._calls_since_load
         if new.model_loaded:
             self.model_loaded = False  # one owner of the shared pipeline: `new`
+        self._hand_the_twin_to(new)
         self._successor = new
         self.retire()
 
     def retire(self) -> None:
         """This object is replaced (providers reload hands its model to the new one) or
-        shut down: stop its timer and never schedule another."""
+        shut down: stop its timer and never schedule another. A CPU twin still here (no hand-over
+        took it) is retired and unloaded."""
         self._retired = True
         self._cancel_idle_task()
+        self._hand_the_twin_to(None)
 
     async def shutdown(self) -> None:
         self.retire()
@@ -1425,10 +1732,13 @@ class LocalWhisperProvider(AIProvider):
         if lease is None:
             return await self._transcribe_holding(audio_path, release_if_loaded_here, language, task, None,
                                                   audio_s=audio_s)
-        # S3d seam (ADR-052 L12, item 1a): the GPU/CPU choice goes HERE, before the lease is
-        # asked; a call L12 sends to the CPU twin asks no lease and swaps nothing out. Until
-        # then every GPU call asks the lease.
         what = purpose or "transcription"
+        # ADR-052 L12, item 1a (S3d): the GPU/CPU choice, before the lease is asked. A call sent to
+        # the CPU twin asks no lease and swaps nothing out; the caller's `transcribe_with_route` runs
+        # it there. A call sent to the line stays there (no switch in mid-flight).
+        routed = await self._choose_route(lease, what, expected_s, audio_s)
+        if routed is not None:
+            raise routed
         logger.debug("Whisper '%s': %s asks for the card, bound %s, expected %s", self.alias, what,
                      "none" if wait_s is None else f"{wait_s:g} s",
                      "unknown" if expected_s is None else f"{expected_s:.1f} s")

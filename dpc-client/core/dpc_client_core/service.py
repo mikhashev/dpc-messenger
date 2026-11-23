@@ -830,8 +830,10 @@ class CoreService(MusicCommandsMixin):
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
         self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
-        from .providers.whisper_provider import set_idle_unload_source, set_unloaded_listener
+        from .providers.whisper_provider import (set_cpu_route_source, set_idle_unload_source,
+                                                 set_unloaded_listener)
         set_idle_unload_source(self.settings.get_local_transcription_idle_unload_s)
+        set_cpu_route_source(self.settings.get_local_transcription_cpu_route)
         set_unloaded_listener(self._on_whisper_unloaded)
 
         # Register callback for re-injecting CoreService after providers reload
@@ -4855,8 +4857,9 @@ class CoreService(MusicCommandsMixin):
                     if await asyncio.to_thread(asks_for_the_card, provider_obj):
                         ask["check"] = voice_message_check
                 try:
-                    # Use local Whisper provider
-                    result = await provider_obj.transcribe(temp_path, **ask)
+                    # Use local Whisper provider; L12 may send the call to its CPU twin (ADR-052 S3d).
+                    from .providers.whisper_provider import transcribe_with_route
+                    result = await transcribe_with_route(provider_obj, temp_path, **ask)
                     logger.info(f"Local transcription successful: {result['text'][:100]}...")
 
                 except _TheSendersTranscriptArrived:

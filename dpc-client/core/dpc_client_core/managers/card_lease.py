@@ -26,9 +26,10 @@ idle lease to a lease, the refusals and the wait estimate. Slice S2: the supervi
 too (L5), and a lease that `waits_for_engines` (music, Mike #70), first in both lines, swaps an idle
 supervisor out by the owner-start rule with the swap on. Any other lease waits for a supervisor
 holder until it goes by itself. Slice S3b: the local Whisper provider is a client (a lease per GPU
-alias, `waits_for_engines`, item 1a; `release_when_empty` for a grant with nothing loaded). Not here
-yet: the music engines as clients (S4), L11's one shared cell (S3e: `shares_with` is stored and not
-consulted), the probe of foreign GPU use (S8).
+alias, `waits_for_engines`, item 1a; `release_when_empty` for a grant with nothing loaded). Slice
+S3d: `route_view`, what Whisper's GPU/CPU choice (L12) reads before it asks. Not here yet: the music
+engines as clients (S4), L11's one shared cell (S3e: `shares_with` is stored and not consulted), the
+probe of foreign GPU use (S8).
 """
 
 import asyncio
@@ -919,10 +920,9 @@ def _refuse(waiter: _LeaseWaiter, refusal: LeaseRefusal) -> LeaseRefusal:
     return refusal
 
 
-def _refusal_for_a_self_wait(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optional[str]]]
-                             ) -> Optional[LeaseRefusal]:
-    """`LeaseWouldWaitOnItself` when the request stands on a holder in its way: a supervisor's alias
-    it holds or borrowed, or a lease with an open use under the same hold."""
+def _holder_it_stands_on(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optional[str]]]) -> Any:
+    """The holder in the way that the request itself stands on, or None: a supervisor's alias it
+    holds or borrowed, or a lease with an open use under the same hold."""
     hold = waiter.hold
     if hold is None or not getattr(hold, "live", False):
         return None
@@ -934,12 +934,56 @@ def _refusal_for_a_self_wait(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any
                 continue
         elif not _stands_on_supervisor(hold, what.alias):
             continue
-        return _refuse(waiter, LeaseWouldWaitOnItself(
-            f"{waiter.lease.display} would wait for '{what.alias}', which this very request stands on; "
-            "refused at once instead of waiting on itself",
-            what.alias, what.ENGINE,
-        ))
+        return what
     return None
+
+
+def _refusal_for_a_self_wait(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optional[str]]]
+                             ) -> Optional[LeaseRefusal]:
+    """`LeaseWouldWaitOnItself` when the request stands on a holder in its way."""
+    what = _holder_it_stands_on(waiter, blockers)
+    if what is None:
+        return None
+    return _refuse(waiter, LeaseWouldWaitOnItself(
+        f"{waiter.lease.display} would wait for '{what.alias}', which this very request stands on; "
+        "refused at once instead of waiting on itself",
+        what.alias, what.ENGINE,
+    ))
+
+
+def _a_cpu_engine_is_busy() -> bool:
+    """ADR-052 L12 point 3 (Zcode #69): a resident Strata child is busy by its own test,
+    `_busy_for_the_card` (a live `accepted_request` hold in `_CARD_HOLDS`, a call in flight, a child
+    starting), not by a guess from timing."""
+    return any(getattr(sup, "ENGINE", "") == "strata" and sup._busy_for_the_card(state)
+               for sup, state in _sup._live_claims())
+
+
+@_sup.on_the_owner_loop
+async def route_view(lease: CardLease, *, expected_s: Optional[float] = None) -> Dict[str, Any]:
+    """What L12 reads before a transcription asks `lease` (ADR-052 L12, slice S3d), on the owner loop:
+    the request's blockers as `_enter` would find them, with no place taken, no holder asked and
+    nothing logged. The peer mark and the card hold travel with the call (contextvars).
+
+    `free`: nothing in the way (L12 point 1). `wait_s`: the wait estimate (L10), None for long; a
+    supervisor in the way that is not already going makes it None too (item 1a: an idle one would be
+    swapped out at a cost no figure holds, its reload or Strata's parked conversations; a busy one
+    has no ETA). `engine_stays` says so. `self_wait`: (alias, engine) of a holder the request itself
+    stands on (section 3.5), else None. `cpu_busy`: L12 point 3. `behind`: who is in the way."""
+    probe = _LeaseWaiter(lease, "L12", None, True, expected_s)
+    blockers = _blockers(probe)
+    view: Dict[str, Any] = {"free": not blockers, "wait_s": None, "known": False, "behind": [],
+                            "engine_stays": False, "self_wait": None, "cpu_busy": _a_cpu_engine_is_busy()}
+    if not blockers:
+        return view
+    estimate = _estimate(probe, blockers)
+    stays = any(kind == "holder" and not _a_lease(what) and not (what._draining or state == "stopping")
+                for kind, what, state in blockers)
+    stands_on = _holder_it_stands_on(probe, blockers)
+    view.update(wait_s=None if stays else estimate["wait_s"], known=estimate["known"] and not stays,
+                behind=estimate["behind"], engine_stays=stays,
+                self_wait=None if stands_on is None else (stands_on.alias, stands_on.ENGINE))
+    return view
 
 
 def _refusal_at_the_deadline(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optional[str]]]

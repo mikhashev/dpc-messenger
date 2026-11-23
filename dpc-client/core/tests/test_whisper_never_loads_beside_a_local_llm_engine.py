@@ -5,9 +5,11 @@ With Strata on the card a Whisper load never shares it. A busy Strata (a turn in
 for, within the door's bound. An idle one, with the swap on and nothing waiting, is swapped out by
 the owner-start rule, as for music (`swap_out_for_a_lease`): the live conversation saved first, the
 parked count read and said. With the swap off the dictation waits and nothing is stopped. An agent's
-own tool inside a turn on Strata is refused at once (`LeaseWouldWaitOnItself`). No "loaded beside"
-line is ever written. L12's CPU twin, which takes a file up to 300 s first, is S3d's: until then
-every file takes the line.
+own tool inside a turn on Strata with a file of unknown length is refused at once
+(`LeaseWouldWaitOnItself`). No "loaded beside" line is ever written. These calls carry no length, so
+L12 (S3d) sends each to the line; L12's CPU twin, which takes a file up to 300 s first, is pinned in
+test_a_busy_strata_lets_short_files_on_the_cpu_with_the_contention_factor.py and
+test_an_agents_transcription_inside_its_own_turn.py.
 
 Real supervisors faked at their seams (`test_one_local_engine_holds_the_card.py`).
 """

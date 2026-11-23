@@ -318,7 +318,7 @@ class MusicCommandsMixin:
                 "too_large",
                 f"the file is {size_mb:.1f} MB, over the local transcription limit of {limit:g} MB "
                 f"([local_transcription] max_file_size_mb)")
-        from ..providers.whisper_provider import card_ask, card_wait_words
+        from ..providers.whisper_provider import card_ask, card_wait_words, transcribe_with_route
         from .lyrics import show_card_wait
         # ADR-052 L4: a person's click with no bound of its own; it waits until cancelled.
         ask = await asyncio.to_thread(card_ask, provider, "music Transcribe", str(path))
@@ -328,7 +328,7 @@ class MusicCommandsMixin:
         try:
             # A model this run loads is released when the run ends (decided under the
             # provider's lock); a warm one stays, and the idle timer frees it in time.
-            result = await provider.transcribe(str(path), release_if_loaded_here=True, **ask)
+            result = await transcribe_with_route(provider, str(path), release_if_loaded_here=True, **ask)
         except Exception as exc:
             from ..providers.base import ModelNotCachedError
             missing = exc if isinstance(exc, ModelNotCachedError) else (

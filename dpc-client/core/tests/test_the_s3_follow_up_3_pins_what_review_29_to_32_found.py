@@ -84,10 +84,12 @@ class TestAnAutoAliasIsReadByItsDetection:
     def test_a_detection_that_fails_counts_as_the_cards(self, monkeypatch):
         assert asks_for_the_card(_auto(monkeypatch, RuntimeError("no driver answer"))) is True
 
-    def test_the_detection_is_kept_for_the_call(self, monkeypatch):
+    def test_the_question_keeps_no_detection(self, monkeypatch):
+        """S3d (Ark #44-2): a question writes nothing on the provider; the call keeps its own
+        detection (test_l12_settings_peers_and_a_twin_that_is_never_the_default.py)."""
         p = _auto(monkeypatch, "cpu")
         asks_for_the_card(p)
-        assert p._estimate_device == "cpu" and not p.model_loaded, "detected, nothing loaded"
+        assert p._estimate_device is None and not p.model_loaded, "detected, nothing kept or loaded"
 
     @pytest.mark.asyncio
     async def test_after_a_refusal_an_unloaded_auto_alias_detected_on_the_cpu_is_tried(

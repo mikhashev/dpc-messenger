@@ -57,6 +57,13 @@ class TestQueueWaitS:
         assert Settings(tmp_path).get_local_transcription_queue_wait_s() == 0
 
 
+def _every_seeded_key() -> dict:
+    from dpc_client_core.settings import _SEEDED_KEYS
+
+    return {key: value for (section, key), (value, _comment) in _SEEDED_KEYS.items()
+            if section == "local_transcription"}
+
+
 class TestIdleUnloadSIsWrittenForTheOwner:
     def test_a_fresh_config_has_it(self, tmp_path):
         Settings(tmp_path)
@@ -83,7 +90,8 @@ class TestIdleUnloadSIsWrittenForTheOwner:
         assert s.get_local_transcription_idle_unload_s() == 45.0
 
     def test_a_file_that_has_the_key_is_not_rewritten(self, tmp_path):
-        _old_config(tmp_path, {"idle_unload_s": "300", "queue_wait_s": "600"})
+        # Every seeded key present (S3d added L12's three): nothing is missing, nothing is written.
+        _old_config(tmp_path, _every_seeded_key())
         before = (tmp_path / "config.ini").read_bytes()
         Settings(tmp_path)
         assert (tmp_path / "config.ini").read_bytes() == before
@@ -174,7 +182,7 @@ class TestQueueWaitSIsWrittenForTheOwnerToo:
         assert section["idle_unload_s"] == "300"
 
     def test_the_owners_value_is_never_touched_and_wins(self, tmp_path):
-        _old_config(tmp_path, {"queue_wait_s": "45", "idle_unload_s": "30"})
+        _old_config(tmp_path, {**_every_seeded_key(), "queue_wait_s": "45", "idle_unload_s": "30"})
         before = (tmp_path / "config.ini").read_bytes()
         s = Settings(tmp_path)
         assert (tmp_path / "config.ini").read_bytes() == before
