@@ -11,7 +11,8 @@ grant rule in test_a_peers_long_transcription_is_refused_even_on_a_free_card.py.
 - Ark (6): the received-voice check is handed only to a call that asks the card.
 - Forge #31-8: an LLM turn behind a warm idle Whisper gets the card within seconds of the yield,
   not after `idle_unload_s`.
-- Johnny #30-6: one audio length by value: the band of the estimate is the band of the execution.
+- Johnny #30-6: one audio length by value: the band of the estimate is the band of the execution
+  (the batch); since S3 follow-up 6 (Ark #49-3) the run is recorded in the decoded length's band.
 - Johnny #30-1: the queue ahead is sequential, so `_estimate` adds a going holder's stop to the work
   of the waiters ahead, and that sum is the model the line runs, not a margin.
 
@@ -317,7 +318,9 @@ class TestOneAudioLengthByValue:
 
         assert ask["audio_s"] == probed
         assert p.batches == [_batch_of(p, estimated_band)], "the batch of the estimate's band"
-        assert set(p._measured["cuda"]["warm"]) == {estimated_band}, "recorded in the estimate's band"
+        # S3 follow-up 6 (Ark #49-3): the run is recorded against the decoded length, the one its
+        # time was measured on; the batch stays the estimate's.
+        assert set(p._measured["cuda"]["warm"]) == {decoded_band}, "recorded in the decoded band"
         await nothing_left()
 
     @pytest.mark.asyncio

@@ -181,7 +181,9 @@ class TestTheOrder:
 
         starts = [_another_request(x.ensure_running()) for x in (s, g, h)]
         try:
-            await asyncio.sleep(0.02)
+            # All three in the line before the card frees, by state and not by a 20 ms pause (ADR-052
+            # S3 follow-up 6, Ark #49-4): a slow runner could free it before the line was formed.
+            await _until(lambda: _in_line() == [S, G, h.alias])
             async with slot:
                 pass
             await asyncio.wait_for(asyncio.gather(*starts), 15)

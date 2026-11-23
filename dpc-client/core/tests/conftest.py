@@ -70,6 +70,38 @@ def _embedding_cache_in_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(memory, "_disk_cache", None)
 
 
+# Module-level copies of `Path.home() / ".dpc"` (and paths built on it at import), which a later
+# `Path.home` patch cannot reach: (module, attribute, path under the home). Every one found by grep
+# across `dpc_client_core` and the `dpc_protocol` modules it imports; the training scripts' `DPC_HOME`
+# (CLI only, never reached by the service) and `local_engine_pin_fetcher.DPC_HOME` (its own fixture
+# below) are not listed. A new one belongs here.
+_HOME_COPIES = (
+    ("dpc_client_core.service", "DPC_HOME_DIR", ""),
+    ("dpc_client_core.p2p_manager", "DPC_HOME_DIR", ""),
+    ("dpc_client_core.device_context_collector", "DPC_HOME_DIR", ""),
+    ("dpc_client_core.message_handlers.certificate_handler", "DPC_HOME_DIR", ""),
+    ("dpc_client_core.coordinators.discord_coordinator", "DPC_HOME", ""),
+    ("dpc_client_core.local_api", "WS_TOKEN_PATH", ".ws_token"),
+    ("dpc_client_core.telegram_service", "DPC_HOME_DIR", ""),
+    ("dpc_client_core.voice_service", "DPC_HOME_DIR", ""),
+    ("dpc_client_core.single_instance", "DEFAULT_LOCK", "run_service.pid"),
+    ("dpc_protocol.crypto", "DPC_HOME_DIR", ""),
+    ("dpc_protocol.crypto", "KEY_FILE", "node.key"),
+    ("dpc_protocol.crypto", "CERT_FILE", "node.crt"),
+    ("dpc_protocol.crypto", "NODE_ID_FILE", "node.id"),
+    ("dpc_protocol.commit_integrity", "DPC_HOME_DIR", ""),
+    ("dpc_protocol.markdown_manager", "DPC_HOME_DIR", ""),
+    ("dpc_protocol.pcm_core", "DPC_HOME_DIR", ""),
+)
+# Functions whose default arguments hold a path under the home, bound when they were defined:
+# (module, function path). Each such default is pointed at the same place under the stand-in.
+_HOME_DEFAULTS = (
+    ("dpc_client_core.llm_manager", "LLMManager.__init__"),
+    ("dpc_client_core.single_instance", "acquire"),
+    ("dpc_client_core.single_instance", "release"),
+)
+
+
 @pytest.fixture(autouse=True)
 def _settings_never_open_the_real_home(tmp_path, monkeypatch):
     """A Settings built on this machine's own ~/.dpc reads and may write its config.ini: a fresh
@@ -100,6 +132,31 @@ def _settings_never_open_the_real_home(tmp_path, monkeypatch):
         original_init(self, dpc_home_dir, *args, **kwargs)
 
     monkeypatch.setattr(settings_module.Settings, "__init__", init)
+
+    # The whole home, not only Settings (Johnny #47-2, ADR-052 S3 follow-up 6): `CoreService()`
+    # also writes `privacy_rules.json` (`ContextFirewall(DPC_HOME_DIR / ...)`, which seeds and prunes
+    # tool keys) and `providers.json` (`LLMManager`'s default config and `save_config`), and builds
+    # the identity, the token cache and more under `service.DPC_HOME_DIR`. Each module-level copy of
+    # the home is pointed at the same stand-in, which Settings already uses; a test that sets its
+    # own home patches after this fixture and wins. Guarded by
+    # test_a_test_run_never_writes_the_real_home.
+    import importlib
+
+    for module_name, attribute, under in _HOME_COPIES:
+        module = importlib.import_module(module_name)
+        monkeypatch.setattr(module, attribute, stand_in / under if under else stand_in)
+    for module_name, function_path in _HOME_DEFAULTS:
+        function = importlib.import_module(module_name)
+        for name in function_path.split("."):
+            function = getattr(function, name)
+
+        def moved(value):
+            try:
+                return stand_in / Path(value).resolve().relative_to(real_home)
+            except (TypeError, ValueError, OSError):
+                return value
+
+        monkeypatch.setattr(function, "__defaults__", tuple(moved(v) for v in function.__defaults__))
 
 
 @pytest.fixture(autouse=True)
@@ -148,15 +205,16 @@ def _no_card_claims_cross_tests():
 
 @pytest.fixture(autouse=True)
 def _no_whisper_load_has_run_in_this_process():
-    """Whether a Whisper load has run in this process is module state (ADR-052 S3 follow-up 4: it
-    picks the reload figure over the fresh process's). Each test starts as a fresh backend would,
-    with no load run; the module is not imported here for a test that never imports it."""
+    """The devices a Whisper load has run on in this process are module state (ADR-052 S3
+    follow-up 4, per device since follow-up 6: they pick the reload figure over the first load's).
+    Each test starts as a fresh backend would, with no load run; the module is not imported here for
+    a test that never imports it."""
     import sys
 
     def clear():
         module = sys.modules.get("dpc_client_core.providers.whisper_provider")
-        if module is not None and hasattr(module, "_A_LOAD_RAN"):
-            module._A_LOAD_RAN = False
+        if module is not None and hasattr(module, "_LOADED_DEVICES"):
+            module._LOADED_DEVICES.clear()
 
     clear()
     yield

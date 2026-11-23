@@ -49,16 +49,24 @@ def length_band(audio_s: Any) -> Optional[str]:
 
 # Start figures per device until this provider measures its own (ADR-052 L10, L12). `warm` is the
 # real-time ratio (audio s per wall s) and `penalty_s` the seconds a first call after a load adds on
-# top of `audio / warm`, both by length band; `load_first_s` is a load before any load ran in this
-# process (imports included), `load_reload_s` any later load. Sources (ADR-052, "GPU figures on
-# speech" for cuda, L12's table for cpu):
+# top of `audio / warm`, both by length band; `load_first_s` is a device's first load in this
+# process, `load_reload_s` any later load on that device (S3 follow-up 6: per device, so a CPU twin's
+# load never makes the GPU's first load read as a reload). Sources (ADR-052, "GPU figures on speech"
+# for cuda, L12's table for cpu):
 #   cuda warm: the slowest clip's median per band: en_30 21.1x, ru_118 27.4x, en_300 15.9x; <=180 is
 #     estimated from the batch-2 figure (batch 4 was never measured).
-#   cuda penalty_s 1.0 in every band: ru_10's first call after the load, +0.91 s, rounded up; no
-#     other band measured a first call after a load.
-#   cuda load_first_s 12.8 (a fresh process), load_reload_s 0.8 (reload after an unload,
-#     0.76-0.83 s; Forge 0.6-0.9 s).
+#   cuda penalty_s 1.0 in every band: ru_10's first call after the load, +0.91 s, rounded up. Only
+#     the <=60 band is measured; the bands over 60 s carry ru_10's figure, where the log shows a
+#     first call of 118 s and longer within run-to-run spread (≈0), so they err long by about 1 s.
+#   cuda load_first_s 12.8 (a fresh process), load_reload_s 0.8 (the backend's reload after an
+#     unload, 0.76-0.83 s; Forge's 0.6-0.9 s is a direct `from_pretrained` outside the backend, not
+#     the `pipeline(...)` path).
 #   cpu warm: 0.91x (10 s in 11 s), 1.15x (120 s in 104 s), 0.98x (300 s in 306 s; <=180 takes it).
+#     The carrier is L12's table: numbers reported in chat, slower than the repo's own measurement
+#     (`ideas/measurements/whisper-gpu-bench-2026-11-22/cpu_run.log`: ru_30 1.5x, ru_118 1.1x) and
+#     Forge's runs (2.36x / 1.53x / 1.42x at 30 / 118 / 300 s). Kept as conservative seeds: L12
+#     picks the twin less often than it could. The bands are not monotonic (<=120 1.15x against
+#     <=180 0.98x), so an estimate jumps at 120/121 s by the table, not by data (≈19 s at 120 s).
 #   cpu penalty_s 0: L12's "load + first call ≈ 9 s" is all in load_first_s 9.0; load_reload_s 1.0
 #     is the running backend's log, "Whisper model loaded in 1.0 seconds (device=cpu)".
 # A device absent here (mps, mlx) is unknown until measured.
@@ -71,9 +79,16 @@ _START_FIGURES: Dict[str, Dict[str, Any]] = {
             "penalty_s": {band: 0.0 for band in _LENGTH_BANDS},
             "load_first_s": 9.0, "load_reload_s": 1.0},
 }
-# Whether a Whisper load has run in this process (any provider object, any device): the next load
-# is then a reload. Process-wide because torch and transformers are imported once per process.
-_A_LOAD_RAN = False
+# The devices a Whisper load has run on in this process (any provider object): the next load on one
+# of them is a reload. Kept per process because a providers reload builds new objects; per device
+# (S3 follow-up 6, Forge #48-1, Ark #49-1) because a CPU twin's load says nothing of the GPU's: a
+# process-wide flag made the GPU's first load read 0.8 s after the twin loaded, and its ETA ran into
+# "unknown" for the rest of a ~12 s load. A GPU first load after the twin now reads 12.8 s where the
+# imports are already paid, so it errs long (safe: a peer is told a longer wait) instead of short.
+_LOADED_DEVICES: set = set()
+# A batch-descent length (the estimate's) and the decoded length further apart than this are logged
+# (S3 follow-up 6, Ark #49-3): the warm figure is recorded against the decoded one.
+_LENGTH_MISMATCH_S = 1.0
 # ADR-052 L4: the margin a person's door keeps for the transcription itself, `max(10 s, estimate)`.
 MIN_MARGIN_S = 10.0
 # ADR-052 L11: what a loaded Whisper holds on the card beyond its weights, MiB (torch reserved peak at
@@ -88,8 +103,13 @@ CPU_TWIN_SUFFIX = "@cpu"
 # The twin's own idle unload (L12, "Residency": short, proposed 60 s; Mike #71). A start value.
 TWIN_IDLE_UNLOAD_S = 60.0
 # L12, "Enough RAM": a cold CPU route is taken only when available host RAM covers the twin plus a
-# margin. The twin's figure is L12's table (≈4 GB, up to ≈10 GB on long recordings), unverified; the
-# margin is a start value. Both are read only here.
+# margin. Both are read only here; the values are kept. What they stand for (Forge's measurement,
+# 2026-11-23, this machine, CUDA hidden, 4 runs): the twin loads fp32 weights, 3086 MiB (not the
+# 1543 of fp16); from an empty process `import torch` adds 656 MiB, the weights 3101, the pipeline
+# 19, the transcription 914-1355 by batch; total RSS +4527 MiB (30 s, batch 16), +5125 (118 s,
+# batch 4), +4688 (300 s, batch 2). So `_TWIN_RAM_MIB` 4096 is about the import plus the weights,
+# and `_RAM_MARGIN_MIB` 1024 is about the transcription's activations: the "margin" is the second
+# half of the load, not headroom. 5120 MiB in all covers every measured run but 118 s at batch 4.
 _TWIN_RAM_MIB = 4096
 _RAM_MARGIN_MIB = 1024
 # L12's three settings, `[local_transcription]` (settings.py reads the file first): the code defaults
@@ -294,7 +314,7 @@ def asks_for_the_card(provider: Any) -> bool:
     call it in a thread.
 
     A question writes nothing (Ark #44-2, S3d): a detection made here is not kept; the call keeps its
-    own (`_route_device(remember=True)` in `_lease_for_the_card` and `expected_seconds`), and this
+    own (`_route_device(remember=True)` in `_route_for_the_card` and `expected_seconds`), and this
     reads it once there is one."""
     if (getattr(provider, "config", None) or {}).get("type") != "local_whisper":
         return False
@@ -690,14 +710,14 @@ class LocalWhisperProvider(AIProvider):
     # -- the speed figures (ADR-052 S3a: the producer of `expected_s`) --
 
     def _note_load(self, device: str, load_s: float) -> None:
-        """A load finished on `device` (where the model really is): its time is recorded as the
-        process's first load or as a reload (S3 follow-up 4), and the next call is the first after a
-        load. From here every load in this process is a reload."""
-        global _A_LOAD_RAN
+        """A load finished on `device` (where the model really is): its time is recorded as that
+        device's first load in this process or as a reload (S3 follow-up 4; per device since
+        follow-up 6), and the next call is the first after a load. From here every load on `device`
+        in this process is a reload."""
         self._loaded_device = device
         self._calls_since_load = 0
-        key = "load_reload_s" if _A_LOAD_RAN else "load_first_s"
-        _A_LOAD_RAN = True
+        key = "load_reload_s" if device in _LOADED_DEVICES else "load_first_s"
+        _LOADED_DEVICES.add(device)
         seconds = _a_positive(load_s)
         if seconds is not None:
             self._measured.setdefault(device, {})[key] = seconds
@@ -735,7 +755,7 @@ class LocalWhisperProvider(AIProvider):
         is detected once (it may import torch: call from a thread when that matters).
 
         Only a detection that returned is kept, and only with `remember` (Ark #44-2, S3d): the call's
-        own paths (`_lease_for_the_card`, `expected_seconds` from the door's `card_ask`) keep it; a
+        own paths (`_route_for_the_card`, `expected_seconds` from the door's `card_ask`) keep it; a
         question (`asks_for_the_card`) passes False and leaves the provider as it found it."""
         if self.model_loaded:
             in_use = self._device_in_use()
@@ -754,16 +774,31 @@ class LocalWhisperProvider(AIProvider):
     def speed_figures(self, device: str) -> Dict[str, Any]:
         """`warm` and `penalty_s` (each by length band), `load_first_s` and `load_reload_s` for
         `device`: each figure measured here, else the start figure, else absent (a band) or None
-        (unknown). `load_s` is the one the next load costs: the reload once a load has run in this
-        process, else the first load."""
+        (unknown). `load_s` is the one the next load on `device` costs: the reload once a load has
+        run on `device` in this process, else the first load."""
         measured = self._measured.get(device, {})
         start = _START_FIGURES.get(device, {})
         figures: Dict[str, Any] = {
             key: {**start.get(key, {}), **measured.get(key, {})} for key in ("warm", "penalty_s")}
         for key in ("load_first_s", "load_reload_s"):
             figures[key] = measured.get(key, start.get(key))
-        figures["load_s"] = figures["load_reload_s" if _A_LOAD_RAN else "load_first_s"]
+        figures["load_s"] = figures["load_reload_s" if device in _LOADED_DEVICES else "load_first_s"]
         return figures
+
+    @staticmethod
+    def _load_left(figures: Dict[str, Any], elapsed: float) -> Optional[float]:
+        """What is left of a load that has run `elapsed` seconds, from a device's `speed_figures`:
+        `load_s` less `elapsed`. A reload past its figure falls back to the device's first-load
+        figure (S3 follow-up 6): an overrun reload is most likely reading the weights from disk
+        again, which the first load also did, imports aside, so that figure is the slower load this
+        device is known for. Past every figure, None (L10: unknown, never a guess)."""
+        ceilings = [figures["load_s"]]
+        if figures["load_s"] == figures["load_reload_s"] and figures["load_first_s"] is not None:
+            ceilings.append(figures["load_first_s"])
+        for figure in ceilings:
+            if figure is not None and figure - elapsed > 0:
+                return figure - elapsed
+        return None
 
     def _first_call_seconds(self, audio_s: Any, device: str) -> Optional[float]:
         """The first call after a load on `device`: `audio / warm[band] + penalty_s[band]`, or None."""
@@ -806,19 +841,24 @@ class LocalWhisperProvider(AIProvider):
 
     # -- the card lease (ADR-052 S3b) --
 
-    async def _lease_for_the_card(self) -> Optional[Any]:
-        """The lease a call holds the card under, or None when it runs on the CPU (ADR-052 3.1: a CPU
-        device builds no lease; a model that fell back to the CPU routes there). The route's device
-        is `_route_device`: an explicit device is used as is (no torch import), `auto` is detected
-        once, in a thread."""
-        if (self.device == "auto" and not self.model_loaded and self._estimate_device is None
-                and self._detected_device is None):
+    def _would_detect(self) -> bool:
+        """Whether `_route_device` would detect the device now (and so may import torch)."""
+        if self.model_loaded and self._device_in_use() is not None:
+            return False
+        return self.device == "auto" and self._estimate_device is None and self._detected_device is None
+
+    async def _route_for_the_card(self) -> tuple:
+        """`(device, lease)`: the device a call routes on (`_route_device`) and the lease it holds the
+        card under, None when that device is the CPU (ADR-052 3.1: a CPU device builds no lease; a
+        model that fell back to the CPU routes there). An explicit device is used as is (no torch
+        import); a detection runs in a thread, never on the loop (Forge #48-4), and is kept. The
+        device is the one L12's estimates read; it is carried into `_load_under_the_lease`, so the
+        ETA during a load reads the same device (Ark #49-2)."""
+        if self._would_detect():
             device = await asyncio.to_thread(self._route_device)
         else:
             device = self._route_device()
-        if device == "cpu":
-            return None
-        return self._the_card_lease()
+        return device, (None if device == "cpu" else self._the_card_lease())
 
     def _the_card_lease(self) -> Any:
         """This alias's lease, built once: holder `whisper:<alias>`, a cheap yield (an unload), and
@@ -1010,18 +1050,21 @@ class LocalWhisperProvider(AIProvider):
         (`_positive`).
 
         While a load runs under the lease (S3 follow-up 4, Ark #40-1, Johnny #41-5) it is the load's
-        remaining time, from its start and the current load figure of its device, plus the longest
-        first-call work of the calls waiting for it (none for a preload); a call whose length is not
-        known counts its own `expected_s - elapsed` instead, and one with neither leaves it unknown.
-        A load past its figure is unknown too."""
+        remaining time, from its start and the load figure of the device the call routed on (the
+        one L12 read, follow-up 6), plus the longest first-call work of the calls waiting for it
+        (none for a preload). A call whose length is not known counts its own `expected_s -
+        elapsed` instead, and one with neither leaves it unknown; that call and the load are
+        compared (max), never added, since its `expected_s` already holds the load when the model
+        was not loaded at its ask (Forge #48-5, read with the code: no double count). A reload past
+        its figure falls back to the first-load figure, and a load past that is unknown
+        (`_load_left`)."""
         owner = self._current_owner()
         runs = list(owner._card_runs.values())
         load = dict(owner._card_load)
         now = time.monotonic()
         if load:
-            figure = owner.speed_figures(load["device"])["load_s"]
-            load_left = None if figure is None else figure - (now - load["since"])
-            if load_left is None or load_left <= 0:
+            load_left = owner._load_left(owner.speed_figures(load["device"]), now - load["since"])
+            if load_left is None:
                 return None
             left = [load_left]
             for started, expected, audio_s in runs:
@@ -1063,11 +1106,18 @@ class LocalWhisperProvider(AIProvider):
             logger.warning("Whisper '%s': the load fell back to the CPU; the card is let go", self.alias)
             lease.release("the load fell back to the CPU")
 
-    async def _load_under_the_lease(self, lease: Optional[Any]):
+    async def _load_under_the_lease(self, lease: Optional[Any], device: Optional[str] = None):
         """`_load_model` in its thread, the lease marked `starting` meanwhile. The caller holds
-        `_load_lock`. Returns `_finish_thread`'s triple."""
+        `_load_lock`. Returns `_finish_thread`'s triple.
+
+        `device` is the route's (`_route_for_the_card`), the one L12 estimated on: the load's ETA
+        reads its figures, and nothing here detects a device on the loop (Forge #48-4, Ark #49-2;
+        with no `device` given it is read in a thread). A model that loaded on another device is
+        logged at WARNING: the ETA during the load read the other device's figures."""
         if lease is not None:
-            self._card_load.update(since=time.monotonic(), device=self._route_device())
+            if device is None:
+                device = await asyncio.to_thread(self._route_device)
+            self._card_load.update(since=time.monotonic(), device=device)
             lease.mark_starting()
         try:
             outcome = await self._finish_thread(self._load_model)
@@ -1075,6 +1125,10 @@ class LocalWhisperProvider(AIProvider):
             if lease is not None:
                 self._card_load.clear()
                 lease.mark_running()
+        if (lease is not None and outcome[1] is None and self.model_loaded
+                and self._loaded_device is not None and self._loaded_device != device):
+            logger.warning("Whisper '%s': the load was estimated on %s and ran on %s; the ETA during "
+                           "the load read %s's figures", self.alias, device, self._loaded_device, device)
         self._off_the_card_after_a_load(lease)
         return outcome
 
@@ -1111,7 +1165,7 @@ class LocalWhisperProvider(AIProvider):
         self._refuse_if_retired()
         if self.model_loaded:
             return
-        lease = await self._lease_for_the_card()
+        device, lease = await self._route_for_the_card()
         if lease is None:
             return await self._preload(None)
         from ..managers.card_lease import LeaseSkipped
@@ -1119,19 +1173,19 @@ class LocalWhisperProvider(AIProvider):
             # A use, not a bare grant: busy while it loads, so no contender asks it to let go before
             # the load starts (a grant with no use is idle, L6).
             async with lease.use("preload", wait_s=0, background=True):
-                await self._preload(lease)
+                await self._preload(lease, device)
         except LeaseSkipped as skipped:
             logger.info("Whisper preload skipped: %s", skipped)
             raise
         finally:
             self._let_go_of_an_empty_grant("the preload loaded nothing")
 
-    async def _preload(self, lease: Optional[Any]) -> None:
+    async def _preload(self, lease: Optional[Any], device: Optional[str] = None) -> None:
         async with self._load_lock:
             if self.model_loaded:
                 return
             self._refuse_if_retired()
-            _, error, cancelled = await self._load_under_the_lease(lease)
+            _, error, cancelled = await self._load_under_the_lease(lease, device)
             if error is not None:
                 raise error
             self._settle_finished_load()
@@ -1718,7 +1772,9 @@ class LocalWhisperProvider(AIProvider):
         point 3). A refusal is a `CardQueueRefusal` (L3). On the CPU none of this applies.
 
         `audio_s` is the length the door's estimate was made from (`card_ask`); when given, the
-        batch descent and the recorded run read it rather than the decoded samples' (Johnny #30-6)."""
+        batch descent reads it rather than the decoded samples' (Johnny #30-6), so the call runs the
+        batch its estimate assumed. The recorded run reads the decoded length, the one its elapsed
+        time was measured on (S3 follow-up 6, Ark #49-3)."""
         # A stale reference to a replaced object forwards to the object that replaced it,
         # so a use is counted and ended on one object.
         current = self._current_owner()
@@ -1728,7 +1784,7 @@ class LocalWhisperProvider(AIProvider):
                                             wait_s=wait_s, expected_s=expected_s,
                                             on_wait=on_wait, check=check, audio_s=audio_s)
         self._refuse_if_retired()
-        lease = await self._lease_for_the_card()
+        device, lease = await self._route_for_the_card()
         if lease is None:
             return await self._transcribe_holding(audio_path, release_if_loaded_here, language, task, None,
                                                   audio_s=audio_s)
@@ -1752,7 +1808,8 @@ class LocalWhisperProvider(AIProvider):
                 runs[id(token)] = (time.monotonic(), _a_positive(expected_s), _a_positive(audio_s))
                 try:
                     return await self._transcribe_holding(audio_path, release_if_loaded_here,
-                                                          language, task, lease, audio_s=audio_s)
+                                                          language, task, lease, audio_s=audio_s,
+                                                          device=device)
                 finally:
                     runs.pop(id(token), None)
         finally:
@@ -1760,15 +1817,17 @@ class LocalWhisperProvider(AIProvider):
 
     async def _transcribe_holding(self, audio_path: str, release_if_loaded_here: bool,
                                   language: Optional[str], task: Optional[str],
-                                  lease: Optional[Any], audio_s: Optional[float] = None) -> Dict[str, Any]:
-        """The body of `transcribe` once the card is held (`lease`) or not needed (None)."""
+                                  lease: Optional[Any], audio_s: Optional[float] = None,
+                                  device: Optional[str] = None) -> Dict[str, Any]:
+        """The body of `transcribe` once the card is held (`lease`) or not needed (None); `device` is
+        the route's, for a load under the lease."""
         # The lock is taken even when the model is loaded, so the use is counted
         # atomically with the load and an unload in progress is waited for.
         async with self._load_lock:
             self._refuse_if_retired()
             loaded_here = not self.model_loaded
             if loaded_here:
-                _, error, cancelled = await self._load_under_the_lease(lease)
+                _, error, cancelled = await self._load_under_the_lease(lease, device)
                 if error is not None:
                     raise error
                 if cancelled:
@@ -1810,9 +1869,20 @@ class LocalWhisperProvider(AIProvider):
                 finally:
                     owner.schedule_idle_unload()  # also when this await was cancelled
 
+    def _note_length_mismatch(self, audio_s: Optional[float], decoded_s: float) -> None:
+        """A WARNING when the estimate's length and the decoded one differ by more than
+        `_LENGTH_MISMATCH_S` (Ark #49-3): the batch followed the first, the record follows the
+        second."""
+        estimated = _a_positive(audio_s)
+        if estimated is not None and abs(estimated - decoded_s) > _LENGTH_MISMATCH_S:
+            logger.warning("Whisper '%s': the estimate read %.1f s of audio and the decode gives %.1f s; "
+                           "the batch follows the estimate, the warm figure the decode", self.alias,
+                           estimated, decoded_s)
+
     def _record_run(self, audio_s: float, elapsed: float) -> None:
         """Record a finished run on the object that owns the model now: the first since its load
-        gives `penalty_s`, every later one the warm figure of its length band."""
+        gives `penalty_s`, every later one the warm figure of its length band. `audio_s` is the
+        decoded length the run was measured on (S3 follow-up 6)."""
         owner = self._current_owner()
         owner._note_run(owner._device_in_use(), audio_s, elapsed, first=owner._calls_since_load == 0)
         owner._calls_since_load += 1
@@ -1865,8 +1935,9 @@ class LocalWhisperProvider(AIProvider):
                 result = await asyncio.to_thread(mlx_transcribe)
 
                 elapsed = asyncio.get_event_loop().time() - start_time
-                # The estimate's length when the door had one (Johnny #30-6), else the decoded one.
-                self._record_run(_a_positive(audio_s) or duration_seconds, elapsed)
+                # The measurement is the decoded length's (Ark #49-3); MLX has no batch descent.
+                self._note_length_mismatch(audio_s, duration_seconds)
+                self._record_run(duration_seconds, elapsed)
                 text = result.get("text", "").strip()
                 detected_language = result.get("language", "unknown")
 
@@ -1905,8 +1976,10 @@ class LocalWhisperProvider(AIProvider):
                 start_time = asyncio.get_event_loop().time()
 
                 # One length by value (Johnny #30-6): the band the door's estimate read, when it read
-                # one, is the band this call runs (batch size) and records in; else the decoded length.
+                # one, is the band this call runs (batch size), as its estimate assumed; else the
+                # decoded length. The run is recorded against the decoded length (Ark #49-3).
                 run_s = _a_positive(audio_s) or duration_seconds
+                self._note_length_mismatch(audio_s, duration_seconds)
 
                 # Adaptive batch_size for long audio
                 # (`_BATCH_DESCENT`, whose thresholds are also the warm figures' length bands)
@@ -1931,7 +2004,7 @@ class LocalWhisperProvider(AIProvider):
                 )
 
                 elapsed = asyncio.get_event_loop().time() - start_time
-                self._record_run(run_s, elapsed)
+                self._record_run(duration_seconds, elapsed)
                 text = result.get("text", "").strip()
 
                 detected_language = "unknown"

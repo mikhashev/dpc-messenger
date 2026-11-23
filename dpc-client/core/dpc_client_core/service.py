@@ -808,7 +808,7 @@ class CoreService(MusicCommandsMixin):
         # CC<->agent chain depth per agent conversation; a human message resets it.
         self._cc_ark_chain_depths: Dict[str, int] = {}
 
-        DPC_HOME_DIR.mkdir(exist_ok=True)
+        DPC_HOME_DIR.mkdir(parents=True, exist_ok=True)  # a test's stand-in home has no parent yet
 
         # Load settings (supports environment variables and config file)
         self.settings = Settings(DPC_HOME_DIR)

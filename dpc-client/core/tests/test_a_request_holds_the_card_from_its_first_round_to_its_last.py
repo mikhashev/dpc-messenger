@@ -196,6 +196,20 @@ def _untouched(sup):
     assert _alive(sup) and sup._draining is False and sup._swap_for is None
 
 
+async def _until(predicate, timeout=10.0):
+    """Wait for a state, not for a fixed pause (ADR-052 S3 follow-up 6, Ark #49-4): a slow runner
+    takes longer and still passes; a state that never comes fails at the generous bound."""
+    async def looking():
+        while not predicate():
+            await asyncio.sleep(0.002)
+
+    await asyncio.wait_for(looking(), timeout)
+
+
+def _in_line() -> list:
+    return [place.alias for place in base_mod._CARD_QUEUE]
+
+
 def _another_request(coro) -> asyncio.Task:
     """`coro` as a request of its own: a task made here would inherit this one's hold and
     be taken for it, which is what rule 9 asks of a request's own tool."""
@@ -532,11 +546,10 @@ class TestWhatAHoldIs:
         one = asyncio.ensure_future(a_request(end_first))
         await first.wait()
         start = asyncio.ensure_future(s.ensure_running())
-        await asyncio.sleep(0.03)
+        await _until(lambda: _in_line() == [S])
         assert not start.done()
         two = asyncio.ensure_future(a_request(end_second))
-        await asyncio.sleep(0.03)
-        assert _held() == {F: 2}
+        await _until(lambda: _held() == {F: 2})
         assert not start.done(), "the first request still stands there"
 
         end_first.set()
@@ -549,16 +562,27 @@ class TestWhatAHoldIs:
 
     @pytest.mark.asyncio
     async def test_a_holder_still_starting_is_busy_and_is_not_marked(self, tmp_path):
+        # The holder stays "starting" until the test lets its /health answer (S3 follow-up 6, Ark
+        # #49-4): with a 0.1 s health delay and fixed 20/30 ms pauses, a slow runner saw it start
+        # before the asserts, and an idle holder is marked.
         f, s, _engines, _manager = _pair(tmp_path)
-        _fake_child(f, health_delay=0.1)
+        _fake_child(f)
+        healthy = asyncio.Event()
+
+        async def health():
+            await healthy.wait()
+            return True
+
+        f._health_ok = health
         starting = asyncio.ensure_future(f.ensure_running())
-        await asyncio.sleep(0.02)
-        assert [h["state"] for h in card_holders()] == ["starting"]
+        await _until(lambda: [h["state"] for h in card_holders()] == ["starting"])
 
         start = asyncio.ensure_future(s.ensure_running())
-        await asyncio.sleep(0.03)
+        await _until(lambda: _in_line() == [S])
+        assert [h["state"] for h in card_holders()] == ["starting"]
         assert f._draining is False and f._swap_for is None and not start.done()
 
+        healthy.set()
         assert await asyncio.wait_for(starting, 10) == {"total_slots": 1}, "its own start is not cut"
         assert await asyncio.wait_for(start, 10) == {"total_slots": 1}
         assert not _alive(f)
@@ -572,11 +596,11 @@ class TestWhatAHoldIs:
         await f.ensure_running()
         slot = f.call_slot()
         start = asyncio.ensure_future(s.ensure_running())
-        await asyncio.sleep(0.03)
+        await _until(lambda: _in_line() == [S])
 
         stopping = asyncio.ensure_future(base_mod.stop_by_hand(f))
-        await asyncio.sleep(0.03)
-        assert f._draining is True and f._swap_for is None and not start.done()
+        await _until(lambda: f._draining is True)
+        assert f._swap_for is None and not start.done()
 
         async with slot:
             pass
@@ -1018,10 +1042,11 @@ class TestTheOwnerLoop:
         async def from_a_tool_s_own_loop():
             assert threading.get_ident() != here
             async with base_mod.card_held_for(F, "accepted_request", conversation_id="c"):
-                await asyncio.sleep(0.05)
+                # The owner loop writes the hold; wait for the write, not for 50 ms (Ark #49-4).
+                await _until(lambda: _held() == {F: 1})
                 seen.append(_held())
                 base_mod.card_hold_follows(S)
-                await asyncio.sleep(0.05)
+                await _until(lambda: _held() == {S: 1})
                 seen.append(_held())
 
         await asyncio.to_thread(asyncio.run, from_a_tool_s_own_loop())
