@@ -4793,9 +4793,15 @@ class CoreService(MusicCommandsMixin):
             result = None
 
             if transcription_method == "local_whisper":
+                # ADR-052 L4: the owner's dictation (and both Telegram paths, which come here) waits
+                # for the card at most the dictation bound.
+                from .providers.whisper_provider import card_ask
+                ask = await asyncio.to_thread(
+                    card_ask, provider_obj, "dictation", temp_path,
+                    bound_s=self.settings.get_local_transcription_queue_wait_s())
                 try:
                     # Use local Whisper provider
-                    result = await provider_obj.transcribe(temp_path)
+                    result = await provider_obj.transcribe(temp_path, **ask)
                     logger.info(f"Local transcription successful: {result['text'][:100]}...")
 
                 except Exception as local_error:

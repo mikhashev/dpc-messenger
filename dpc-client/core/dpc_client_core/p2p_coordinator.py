@@ -1395,7 +1395,13 @@ class P2PCoordinator:
             if task:
                 overrides["task"] = task
 
-            result = await provider_instance.transcribe(temp_audio_path, **overrides)
+            # ADR-052 L13: no bound of its own; the lease line gives a peer what is left of the
+            # guest's 120 s once its own work (`expected_s`) is counted.
+            from .managers.llama_server_supervisor import serving_a_peer
+            from .providers.whisper_provider import card_ask
+            ask = await asyncio.to_thread(card_ask, provider_instance, f"peer {peer_id}", temp_audio_path)
+            with serving_a_peer(peer_id):
+                result = await provider_instance.transcribe(temp_audio_path, **overrides, **ask)
             logger.info("Transcription completed successfully for %s", peer_id)
 
             success_response = create_remote_transcription_response(

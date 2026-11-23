@@ -2,6 +2,7 @@
 
 import asyncio
 import gc
+import math
 import os
 import logging
 import threading
@@ -25,6 +26,79 @@ _VOICE_MEMORY_HINT = (
 DEFAULT_IDLE_UNLOAD_S = 300.0
 # How long shutdown waits for running transcriptions before it unloads anyway.
 SHUTDOWN_DRAIN_S = 10.0
+
+# Start figures per device until this provider measures its own (ADR-052 L10, L12). Ratios are audio
+# seconds per wall second; `cold` is the first call after a load, `load_s` the load itself.
+#   cuda, "GPU figures on speech": warm 15.9x (the slowest row of 16-43x), cold 8.8x (the measured
+#     first call), load 12.8 s (the fresh-process cold load L13 counts).
+#   cpu, L12's table: 300 s of audio in 306 s; its "load + first call ≈ 9 s" is all in `load_s`.
+# A device absent here (mps, mlx) is unknown until measured.
+_START_FIGURES: Dict[str, Dict[str, float]] = {
+    "cuda": {"warm": 15.9, "cold": 8.8, "load_s": 12.8},
+    "cpu": {"warm": 300.0 / 306.0, "cold": 300.0 / 306.0, "load_s": 9.0},
+}
+_FIGURE_KEYS = ("warm", "cold", "load_s")
+# ADR-052 L4: the margin a person's door keeps for the transcription itself, `max(10 s, estimate)`.
+MIN_MARGIN_S = 10.0
+
+
+def _a_positive(value: Any) -> Optional[float]:
+    """A finite figure above 0, else None (unknown, never 0: ADR-052 L10)."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def audio_seconds(audio_path: str) -> Optional[float]:
+    """The length of an audio file, or None when it cannot be read (ADR-052 L10: "the duration is
+    ffprobe's"). ffprobe when it is on PATH, read as `service.measure_recording_seconds` reads it;
+    else soundfile, which reads WAV, FLAC and Ogg but not WebM. 0 is unknown. Blocking."""
+    try:
+        from pathlib import Path
+        from ..music.identity import MediaTools, probe_metadata
+
+        tools = MediaTools.discover()
+        if tools.ffprobe:
+            seconds = _a_positive(probe_metadata(Path(audio_path), tools).get("duration_s"))
+            if seconds is not None:
+                return seconds
+    except Exception:
+        logger.debug("Whisper: ffprobe could not read the length of %s", audio_path, exc_info=True)
+    try:
+        import soundfile as sf
+        return _a_positive(sf.info(audio_path).duration)
+    except Exception:
+        return None
+
+
+def card_ask(provider: Any, purpose: str, audio_path: str, *, bound_s: Optional[float] = None,
+             caller_left_s: Optional[float] = None, audio_s: Optional[float] = None) -> Dict[str, Any]:
+    """What a door passes to `transcribe` for the card (ADR-052 L4, the S3 row): `purpose`, its
+    `wait_s` and the transcription's `expected_s`. Blocking (it may run ffprobe): call it in a thread.
+
+    `expected_s` is the provider's own estimate for this file (`expected_seconds`), None when unknown
+    or when the provider keeps no figures. `wait_s` follows L4, "the queue's deadline is never longer
+    than its caller's": `min(caller_left_s - margin, bound_s)`, the margin being `max(10 s,
+    expected_s)` (10 s when the estimate is unknown). Either side None drops out; both None is no
+    deadline (`wait_s=None`, until cancelled). A peer's door passes neither: the lease line gives a
+    peer what is left of its 120 s trip (`card_lease.PEER_TRIP_S`, L13).
+
+    Slice S3a builds the ask and the doors pass it; the provider holds no lease until S3b, which
+    hands these three to `CardLease.use`."""
+    if audio_s is None:
+        audio_s = audio_seconds(audio_path)
+    estimate = getattr(provider, "expected_seconds", None)
+    expected_s = estimate(audio_s) if callable(estimate) else None
+    wait_s = None if bound_s is None else max(0.0, float(bound_s))
+    if caller_left_s is not None:
+        margin = max(MIN_MARGIN_S, expected_s or 0.0)
+        left = max(0.0, float(caller_left_s) - margin)
+        wait_s = left if wait_s is None else min(wait_s, left)
+    return {"purpose": purpose, "wait_s": wait_s, "expected_s": expected_s}
 
 _idle_unload_source: Optional[Callable[[], float]] = None
 
@@ -117,6 +191,13 @@ class LocalWhisperProvider(AIProvider):
         # The object that took over this one's model in a providers reload: a
         # transcription still running here is counted and ended on that object.
         self._successor: Optional["LocalWhisperProvider"] = None
+        # ADR-052 S3a: the speed this provider measured, {device: {"warm"|"cold"|"load_s": s}}, over
+        # `_START_FIGURES`; the device the model is loaded on now (a load may fall back to the CPU);
+        # the calls since that load (0: the next one is cold); `auto` resolved for an estimate.
+        self._measured: Dict[str, Dict[str, float]] = {}
+        self._loaded_device: Optional[str] = None
+        self._calls_since_load = 0
+        self._estimate_device: Optional[str] = None
 
         logger.info(f"LocalWhisperProvider '{alias}' initialized (model={self.model_name}, device={self.device})")
 
@@ -223,6 +304,7 @@ class LocalWhisperProvider(AIProvider):
                     self.model_loaded = True
 
                     elapsed = time.time() - start_time
+                    self._note_load("mlx", elapsed)
                     logger.info(f"MLX Whisper initialized in {elapsed:.1f} seconds (lazy model loading)")
                     return
 
@@ -328,6 +410,7 @@ class LocalWhisperProvider(AIProvider):
 
             self.model_loaded = True
             elapsed = time.time() - start_time
+            self._note_load(device, elapsed)
             logger.info(f"Whisper model loaded in {elapsed:.1f} seconds (device={device})")
 
         except Exception as e:
@@ -336,6 +419,77 @@ class LocalWhisperProvider(AIProvider):
 
     def is_model_loaded(self) -> bool:
         return self.model_loaded
+
+    # -- the speed figures (ADR-052 S3a: the producer of `expected_s`) --
+
+    def _note_load(self, device: str, load_s: float) -> None:
+        """A load finished on `device` (where the model really is): its time is recorded and the
+        next call is the cold one."""
+        self._loaded_device = device
+        self._calls_since_load = 0
+        seconds = _a_positive(load_s)
+        if seconds is not None:
+            self._measured.setdefault(device, {})["load_s"] = seconds
+
+    def _note_run(self, device: Optional[str], audio_s: float, elapsed: float, *, cold: bool) -> None:
+        """One transcription of `audio_s` took `elapsed` on `device`: the ratio replaces the cold or
+        the warm figure. A ratio that cannot be computed is not recorded."""
+        audio, wall = _a_positive(audio_s), _a_positive(elapsed)
+        if device is None or audio is None or wall is None:
+            return
+        self._measured.setdefault(device, {})["cold" if cold else "warm"] = audio / wall
+
+    def _device_in_use(self) -> Optional[str]:
+        """The device the loaded model runs on, for recording a run."""
+        if self.pipeline == "mlx":
+            return "mlx"
+        if self._loaded_device is not None:
+            return self._loaded_device
+        if self._detected_device is not None:
+            return self._detected_device
+        return None if self.device == "auto" else self.device
+
+    def _route_device(self) -> str:
+        """The device a call would run on now: the loaded model's, else the configured one; `auto`
+        is detected once (it may import torch: call from a thread when that matters)."""
+        if self.model_loaded:
+            in_use = self._device_in_use()
+            if in_use is not None:
+                return in_use
+        if self.device != "auto":
+            return self.device
+        if self._estimate_device is None:
+            self._estimate_device = self._detected_device or self._detect_device()
+        return self._estimate_device
+
+    def speed_figures(self, device: str) -> Dict[str, Optional[float]]:
+        """`warm`, `cold` and `load_s` for `device`: measured here, else the start figure, else None."""
+        measured = self._measured.get(device, {})
+        start = _START_FIGURES.get(device, {})
+        return {key: measured.get(key, start.get(key)) for key in _FIGURE_KEYS}
+
+    def expected_seconds(self, audio_s: Any, device: Optional[str] = None,
+                         loaded: Optional[bool] = None) -> Optional[float]:
+        """Wall seconds a transcription of `audio_s` would take, or None when unknown (ADR-052 L10,
+        L13 point 2): the load when the model is not loaded, plus the audio divided by the cold ratio
+        (the first call after a load) or the warm one, through `card_lease.seconds_from_ratio`.
+        `device` and `loaded` default to what this provider is now."""
+        owner = self._current_owner()
+        if owner is not self:
+            return owner.expected_seconds(audio_s, device, loaded)
+        from ..managers.card_lease import seconds_from_ratio
+
+        if loaded is None:
+            loaded = self.model_loaded
+        figures = self.speed_figures(device or self._route_device())
+        cold = not loaded or self._calls_since_load == 0
+        work = seconds_from_ratio(audio_s, figures["cold" if cold else "warm"])
+        if work is None:
+            return None
+        if loaded:
+            return work
+        load = figures["load_s"]
+        return None if load is None else load + work
 
     async def ensure_model_loaded(self) -> None:
         owner = self._current_owner()
@@ -687,6 +841,8 @@ class LocalWhisperProvider(AIProvider):
             new.pipeline = self.pipeline
             new.model_loaded = True
             new._detected_device = self._detected_device
+            new._loaded_device = self._loaded_device
+            new._calls_since_load = self._calls_since_load
             self.model_loaded = False  # one owner of the shared pipeline: `new`
 
     def _settle_finished_load(self) -> None:
@@ -712,6 +868,15 @@ class LocalWhisperProvider(AIProvider):
         if self._unload_when_idle:
             new._unload_when_idle = True
             new._unload_reason = self._unload_reason
+        if new.model_name == self.model_name:
+            # The speed measured here is the same model's: `new` keeps what it measured itself.
+            for device, figures in self._measured.items():
+                kept = new._measured.setdefault(device, {})
+                for key, value in figures.items():
+                    kept.setdefault(key, value)
+            if new.model_loaded and self.model_loaded and new._loaded_device is None:
+                new._loaded_device = self._loaded_device
+                new._calls_since_load = self._calls_since_load
         if new.model_loaded:
             self.model_loaded = False  # one owner of the shared pipeline: `new`
         self._successor = new
@@ -872,19 +1037,27 @@ class LocalWhisperProvider(AIProvider):
         return segments
 
     async def transcribe(self, audio_path: str, release_if_loaded_here: bool = False,
-                         language: Optional[str] = None, task: Optional[str] = None) -> Dict[str, Any]:
+                         language: Optional[str] = None, task: Optional[str] = None, *,
+                         purpose: Optional[str] = None, wait_s: Optional[float] = None,
+                         expected_s: Optional[float] = None) -> Dict[str, Any]:
         """Transcribe `audio_path`. With `release_if_loaded_here`, a model this very call
         had to load is unloaded as the call ends, unless another transcription is using
         it (the decision is made under the load lock, so it cannot race).
 
         `language` ("auto" = detect) and `task` apply to this call only; None keeps the
-        provider's configured value. Nothing here mutates the shared provider."""
+        provider's configured value. Nothing here mutates the shared provider. So do
+        `purpose`, `wait_s` and `expected_s`, the door's ask for the card (`card_ask`)."""
         # A stale reference to a replaced object forwards to the object that replaced it,
         # so a use is counted and ended on one object.
         current = self._current_owner()
         if current is not self:
             return await current.transcribe(audio_path, release_if_loaded_here,
-                                            language=language, task=task)
+                                            language=language, task=task, purpose=purpose,
+                                            wait_s=wait_s, expected_s=expected_s)
+        if purpose is not None:  # the lease that takes the ask is S3b's (ADR-052)
+            logger.debug("Whisper '%s': %s asks for the card, bound %s, expected %s", self.alias,
+                         purpose, "none" if wait_s is None else f"{wait_s:g} s",
+                         "unknown" if expected_s is None else f"{expected_s:.1f} s")
         self._refuse_if_retired()
         # The lock is taken even when the model is loaded, so the use is counted
         # atomically with the load and an unload in progress is waited for.
@@ -931,6 +1104,13 @@ class LocalWhisperProvider(AIProvider):
                                              owner.alias)
                 finally:
                     owner.schedule_idle_unload()  # also when this await was cancelled
+
+    def _record_run(self, audio_s: float, elapsed: float) -> None:
+        """Record a finished run on the object that owns the model now: the first since its load is
+        the cold figure, every later one the warm figure."""
+        owner = self._current_owner()
+        owner._note_run(owner._device_in_use(), audio_s, elapsed, cold=owner._calls_since_load == 0)
+        owner._calls_since_load += 1
 
     async def _transcribe_loaded(self, audio_path: str, language: Optional[str] = None,
                                  task: Optional[str] = None) -> Dict[str, Any]:
@@ -980,6 +1160,7 @@ class LocalWhisperProvider(AIProvider):
                 result = await asyncio.to_thread(mlx_transcribe)
 
                 elapsed = asyncio.get_event_loop().time() - start_time
+                self._record_run(duration_seconds, elapsed)
                 text = result.get("text", "").strip()
                 detected_language = result.get("language", "unknown")
 
@@ -1041,6 +1222,7 @@ class LocalWhisperProvider(AIProvider):
                 )
 
                 elapsed = asyncio.get_event_loop().time() - start_time
+                self._record_run(duration_seconds, elapsed)
                 text = result.get("text", "").strip()
 
                 detected_language = "unknown"

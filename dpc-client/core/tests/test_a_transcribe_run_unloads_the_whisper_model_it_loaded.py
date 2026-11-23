@@ -50,7 +50,7 @@ class FakeWhisper:
     def is_model_loaded(self):
         return self.loaded
 
-    async def transcribe(self, path, release_if_loaded_here=False):
+    async def transcribe(self, path, release_if_loaded_here=False, **card_ask):
         loaded_here = not self.loaded
         self.loaded = True
         try:

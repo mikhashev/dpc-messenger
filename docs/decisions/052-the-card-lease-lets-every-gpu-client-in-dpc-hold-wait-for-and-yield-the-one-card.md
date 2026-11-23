@@ -35,7 +35,8 @@ session: "AI Studio group chat (group-60aff6110f02), 2026-11-21 — Whisper plan
 > lists them; **Open for Mike** keeps what is still open. Anything marked **[unverified]**
 > was not confirmed. **Since then (2026-11-22 and 2026-11-23):** item 7 (Whisper's idle
 > unload, 300 s), and, at #15 of 2026-11-23, items 1a, 2, 6A and 9 at their proposed defaults,
-> item 7's carrier, and one VRAM reserve per engine (Decided by Mike).
+> item 7's carrier, and one VRAM reserve per engine; at #17, the L13 rule for a peer's long audio
+> (Decided by Mike).
 >
 > **Second revision** (same day): answers Zcode #59, Ark #60 and #61, and Mike #62, checked
 > against `dev` HEAD `d80d76f7`. **Third revision:** answers Ark #64 on the GPU/CPU choice
@@ -682,7 +683,10 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
     audio length); then `eta = variants left × duration_s × factor − elapsed in the current
     variant`, floored at 0 and marked as an estimate. Acestep's progress is as coarse
     (`runner.py:734-784`).
-  - Supervisors: None.
+  - Supervisors: None: a supervisor has no ETA. **One that is going** (stopping, draining, or an
+    idle one the waiter itself swaps out) counts its stop, `_expected_stop_s()`: the last stop it
+    measured, else its grace default (S3a, Ark #10-4). A busy one, a starting one and an idle one
+    nobody stops for this waiter stay unknown.
 
 **L11. One shared cell: Whisper beside a busy music engine when it provably fits**
 (decision 6, option (d); accepted with conditions by Zcode #52 and Ark #53; **proposed,
@@ -1104,24 +1108,31 @@ already decided, from the card queue to the lease line.
    music job and a busy supervisor have unknown ETAs, and the backend itself has never loaded
    Whisper on the GPU, so the per-device recorded ratio is empty (the seed figures of "GPU
    figures on speech" stand in, Q7), so a peer is in practice served when the card is free or
-   Whisper is warm and refused at once otherwise; it never swaps Strata out, whose stop has no figure. The line opens to
+   Whisper is warm and refused at once otherwise; it never swaps Strata out (evicting a supervisor is the owner's mechanism, "As built" below). The line opens to
    peers as figures accrue. **Known limit (Ark #13):** the guest tries its candidates in turn
    (`service.py:10157-10172`, `continue` after a failure), so a person on the guest's side may
    wait candidates × 120 s. Not changed here.
+   **A rule, decided by Mike #17, 2026-11-23:** a peer's transcription whose whole trip does not
+   fit the guest's 120 s (`PEER_TRIP_S`) is refused at once, long audio that would go to the CPU
+   twin included: at the CPU ratio of 1.1–1.5×, 300 s of audio takes about 200–270 s, so it is
+   refused. Before #17 the refusal followed from the arithmetic; now it is stated.
    **As built in the lease line (S2 follow-up; Mike's option (a), by consensus, review #75–#91).**
    A supervisor's claim: a peer gets the card only when no claim stands on it; the card queue and
    the eviction of a supervisor are the owner's mechanism. In the code: a peer's lease request is
    granted at once when nothing is in its way, and is refused at once whenever a supervisor holds
-   the card (starting, idle or busy, swap on or off: a supervisor has no ETA and its stop no figure)
-   or any owner's place stands in the card queue (`_estimate` reads both as unknown). Behind lease
+   the card and is not going (starting, idle or busy, swap on or off: a supervisor has no ETA, and a
+   peer stops none) or any owner's place stands in the card queue (`_estimate` reads both as
+   unknown). **S3a:** a supervisor that is already going (stopping or draining) counts its stop,
+   `_expected_stop_s()`, so a peer behind it may wait when that stop plus its own `expected_s` fits. Behind lease
    holders and lease waiters only, it may wait: each part of the estimate is known (a busy lease's
    `eta_s`, an idle cheap lease's 1 s unload when `_may_ask` allows a peer to ask, each waiter
    ahead's `expected_s`; an idle engine-cost lease has no figure) and that wait plus the peer's
    own `expected_s` fits in `PEER_TRIP_S` = 120 s. The line's bound for a peer is
    `min(door's bound, 120 − expected_s)`, and 120 − `expected_s` when the door gave none
    (`_a_peers_slot_wait_s()` is no longer read for a lease). A peer whose own `expected_s` is unknown
-   is refused unless the card is free (L10: an unknown part leaves the trip unknown). No provider
-   produces `expected_s` before S3, so until then a peer that cannot be granted at once is refused.
+   is refused unless the card is free (L10: an unknown part leaves the trip unknown). The provider
+   produces `expected_s` since S3a (`LocalWhisperProvider.expected_seconds`, `card_ask`); the lease
+   that takes it is S3b's, so until then Whisper holds no lease and a peer's door only carries it.
 3. **Where the wait sits.** In `_LEASE_LINE`, before `_load_lock`, behind every owner waiter
    (L5a), the handler wrapped in `serving_a_peer` (S3). A frame held open has no "second ask":
    the place ends at a grant, at its deadline (`wait_s` above), or when the guest's connection ends.
@@ -2410,7 +2421,7 @@ coordinated with the agents editing it rather than postponed.
 |---|---|---|---|---|
 | S0 | docs: this ADR (the design proposed an ADR-044 amendment; this record carries the matrix, L1–L12 and the decisions instead), revised after reviews #41–#89, the new count's #10–#15, and Mike #68–#71 and #11 | `docs/decisions/052-…md` | — | This commit |
 | S1 | feat(card-lease): lease registry, lease line, one order across both lines (L5a), refusals, wait estimate; `card_holders`/`card_queue` include lease rows through the hook (supervisor rows first, `until_cancelled`); `card_holder()` stays supervisor-only | new `managers/card_lease.py`; `llama_server_supervisor.py` (`_LEASE_HOLDERS`, `_LEASE_WAITERS`, `_live_holders`, `card_holders`, `card_queue`); `tests/conftest.py` | tests 1–3, 6–8, 14 with fake clients only | Built at 53a2eaf5 (2026-11-22); **S1 follow-up (review #54–#57)** in the commit after it (`for_a_peer` in the waiter hook, lease rows in the UI readers, `seconds_from_ratio`, `let_go_by_hand` answers False at its bound, pins; see Review notes, "S1 follow-up"), reviewed and accepted as the base for S2; S1-level parts of tests 3 (b) and 8 only, the rest of 3 (b) and 3 (c) are S2, the 120 s door of test 8 is S3; a third hook `_LEASE_QUEUE_ROWS` added (one lease, several waiters) |
-| S3 | feat(whisper): the local model holds a card lease, yields by unloading when idle (`yield_card`, releasing only when the unload ran), loads beside busy music only in the one shared cell when it provably fits (L11), otherwise chooses the CPU twin when its estimate beats the GPU wait (L12, Mike #62, Ark #64) or queues before `_load_lock`; the CPU twin is a separate `local_whisper` provider with `device: cpu` and no lease, selected by `transcribe_with_route`; doors pass `purpose` and their bounds; every caller gets a deadline and the queue's is shorter; a card refusal ends the provider cascade; the peer check runs again after a wait; a peer's transcription waits only when its whole trip fits the guest's 120 s, else is refused at once (L13); a load that fell back to the CPU releases the lease; an agent's transcription inside its own turn on a local alias goes to the twin up to 300 s or is refused at once (3.5); the provider records the real-time ratio per device, the carrier L10's Whisper estimate needs (S3, not S1); the twin starts from L12's table; llama-server children record `predicted_vram_mib`; L11 reads `free` and `total` through `read_vram_mib` and never per-process figures | `providers/whisper_provider.py`; `service.py` (`transcribe_audio` bound, the cascade at 5152, the peer check), `music/commands.py:324`, `tools/transcribe.py:172` (`purpose`, `on_wait`); `p2p_coordinator.py:1398` (`serving_a_peer`); Telegram needs no edit of its own, it reaches the provider through `service.transcribe_audio` (four doors, Forge #20-7); `settings.py` (`queue_wait_s`, `cpu_max_s`, `cpu_max_audio_s`, `cpu_contention_factor`); `ui/src/lib/coreService.ts:1492`; `llama_server_supervisor.py` (`predicted_vram_mib`, one attribute set at launch); `managers/commit_memory.py` (a function that clears `at` and `free` of the 30 s VRAM reading, never `total`) | 9, 10, 18–24, 26–28, 30–34, 36–38, 40 | Pending; first slice |
+| S3 | feat(whisper): the local model holds a card lease, yields by unloading when idle (`yield_card`, releasing only when the unload ran), loads beside busy music only in the one shared cell when it provably fits (L11), otherwise chooses the CPU twin when its estimate beats the GPU wait (L12, Mike #62, Ark #64) or queues before `_load_lock`; the CPU twin is a separate `local_whisper` provider with `device: cpu` and no lease, selected by `transcribe_with_route`; doors pass `purpose` and their bounds; every caller gets a deadline and the queue's is shorter; a card refusal ends the provider cascade; the peer check runs again after a wait; a peer's transcription waits only when its whole trip fits the guest's 120 s, else is refused at once (L13); a load that fell back to the CPU releases the lease; an agent's transcription inside its own turn on a local alias goes to the twin up to 300 s or is refused at once (3.5); the provider records the real-time ratio per device, the carrier L10's Whisper estimate needs (S3, not S1); the twin starts from L12's table; llama-server children record `predicted_vram_mib`; L11 reads `free` and `total` through `read_vram_mib` and never per-process figures | `providers/whisper_provider.py`; `service.py` (`transcribe_audio` bound, the cascade at 5152, the peer check), `music/commands.py:324`, `tools/transcribe.py:172` (`purpose`, `on_wait`); `p2p_coordinator.py:1398` (`serving_a_peer`); Telegram needs no edit of its own, it reaches the provider through `service.transcribe_audio` (four doors, Forge #20-7); `settings.py` (`queue_wait_s`, `cpu_max_s`, `cpu_max_audio_s`, `cpu_contention_factor`); `ui/src/lib/coreService.ts:1492`; `llama_server_supervisor.py` (`predicted_vram_mib`, one attribute set at launch); `managers/commit_memory.py` (a function that clears `at` and `free` of the 30 s VRAM reading, never `total`) | 9, 10, 18–24, 26–28, 30–34, 36–38, 40 | **S3a built** (2026-11-23, branch `feat/card-lease-s3-s4`): the producer of `expected_s` (per-device cold/warm ratio and load time, start figures from L12 and "GPU figures on speech"), the four doors' ask (`purpose`, bound, `expected_s`) carried to `transcribe`, a going supervisor's stop figure in `_estimate`, `queue_wait_s` and item 7's carrier; see Review notes, "S3a build". S3b–S3e pending; first slice |
 | S4 | feat(music): music engines hold the card lease (acquired before `_the_lock`); the runner waits through it and names lease holders; a `running` job may wait for the card (both gates: `jobs.py` and the runner's wait loop) | `music/engine_base.py`, `music/runner.py`, `music/commands.py` (start by hand), `music/jobs.py`, `music/acestep.py`/`yue2.py`, test helpers, `ui/src/lib/utils/musicCreate.ts` | **4 (Done-when)**, 11, 13, 15, 17, 29 | Pending; first slice |
 | S2 | feat(card): llama-server and Strata wait for a busy lease and unload an idle one, with the swap on or off; a lease contender swaps an idle supervisor on the owner-start path, reading the parked count first (2.4); one order across both lines; an inference peer waits behind a lease only once ADR-044's amendment of 2026-11-18 is built (L13) | `llama_server_supervisor.py` (2.2 items 3–13), `providers/llamacpp_server_provider.py` (`stop_local_engine`, then `card_holder` may return lease rows) | 5, 16, 35, 39, and the full list of existing card tests green | Built at 1e57932f (2026-11-22), in review; also the supervisor side of tests 3 (b) and 3 (c), test 6 extended to every new S2 path with no lease registered, and `strata_provider.py`'s peer refusal worded without a lease's name. ADR-044's amendment of 2026-11-18 is still not built, so an inference peer keeps today's refusal while a lease is busy (L13). `card_holder()` stays supervisor-only (the Stop engine button is unchanged; S5). Readings of this record taken in the build: see Review notes, "S2 build". **S2 follow-up (review #75–#91)** in the commit after it: see Review notes, "S2 follow-up" |
 | S5 | feat(ui): lease rows and lease waiters in the existing holder and queue lines, "until cancelled", unknown ETA as "—"; whether the block shows without a local LLM provider; the optional "let peers use the CPU twin" setting beside the device selector of a Whisper provider (Mike #71) | `ProvidersEditor.svelte`, `cardQueue.ts`, `cardQueue.test.ts`, `MusicCreate.svelte`; the status payload | 25 and manual | Pending |
@@ -2558,6 +2569,9 @@ Recorded as decided; each line names the message.
   source of truth, the one that is set"; #15, "do as you proposed"). Strata reads the alias's
   `vram_reserve_mib` (live 1152), with 2048 as the fallback; llama-server keeps
   `_DESKTOP_RESERVE_MIB` = 2048. Detail in L11, "One reserve per engine".
+- **#17 (2026-11-23), a peer's long audio:** L13 states it as a rule: a peer's transcription whose
+  whole trip does not fit the guest's 120 s (`PEER_TRIP_S`) is refused at once, including long
+  audio that would go to the CPU twin (1.1–1.5×: 300 s of audio takes ≈200–270 s). L13, point 2.
 - **2026-11-22, N11: in scope, and CC writes S10, the ComfyUI client half included.** The yield
   verb for ComfyUI is its own `POST /free {"unload_models": true, "free_memory": true}` plus
   `POST /interrupt` (Forge verified it live, 24.9 → 1.8 GB). Order: after S1.
@@ -2570,9 +2584,8 @@ proposed default.
 
 - Items 1a, 2, 6A and 9 were decided on 2026-11-23 at their proposed defaults (Mike #15; all in
   Decided by Mike).
-- **L13, a peer's long audio on the CPU twin** (Forge #12, Ark #10): whether L13 should state
-  as a rule that a peer's long audio on the CPU twin is refused (the guest's 120 s trip bound,
-  `PEER_TRIP_S` 120, against the CPU ratio 1.1–1.5×). Not decided; today the estimate decides.
+- **L13, a peer's long audio on the CPU twin** (Forge #12, Ark #10): **decided** by Mike #17,
+  2026-11-23: refused at once as a rule (Decided by Mike; L13, point 2).
 - Items 10, 11 and 13 were answered at #11; item 12 by reading the flow, as he asked; item 8
   closes with item 10; item 7 was answered on 2026-11-22, its carrier on 2026-11-23 (all in Decided by Mike).
 - **The reference for the GPU real-time ratio** (Forge #21, §5): **closed.** Mike's answer,
@@ -2862,10 +2875,15 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   **Recorded for the slices that close them:**
   - **`swap_when_idle` defaults to `false`** (`settings.py`, Mike's call 2026-11-02). With it off no supervisor is evicted for a lease (`swap_out_for_a_lease` and `_swaps_engines` read it) and a peer asks no holder to let go. **Required state for the S3 and L11 live acceptance:** `[local_engines] swap_when_idle = true` (this machine has `true`, `swap_wait_s = 1800`, read by Zcode).
   - **S3: a card refusal ends the provider cascade.** Not yet: the received-voice cascade (`service.py`, `for provider_alias in provider_priority:` with `except Exception: … continue`) tries the next provider after a card refusal, and so does the guest's peer-candidate loop (`_request_transcription_from_peer`, the same `continue`).
-  - **S3: the producer of `expected_s`.** `seconds_from_ratio` is called only in `card_lease` and one test; no provider passes `expected_s`, so until S3 a peer's estimate behind an engine is unknown and it is refused.
+  - **S3: the producer of `expected_s`.** `seconds_from_ratio` is called only in `card_lease` and one test; no provider passes `expected_s`, so until S3 a peer's estimate behind an engine is unknown and it is refused. **Built in S3a** (see "S3a build" below).
   - **S3: `vram_mib` on lease rows** has no role yet; S3 gives it one in L11's fit or removes it.
   - **S3: L11's live veto** (`_free_vram_mib() >= whisper_peak + growth_left`, point 3) is not built; when it is, no unit test reaches a real card, and only the live run checks it.
   - **Open, no slice yet: Stop by hand on a lease alias** (`stop_local_engine` → `_let_a_lease_go_by_hand` → `let_go_by_hand`) waits up to `LEASE_STOP_BY_HAND_S` = 120 s, since `service.stop_local_engine` passes no `timeout`; the UI's command timeout for `stop_local_engine` is 180 s (`coreService.ts`), so the call is held, not cut. The `CardHeldError` naming the holder reaches only the owner's UI; a peer's start that meets a lease gets `CardQueueRefusal(…, "", "")` (`_a_peer_cannot_swap_refusal`).
+- **S3a build (CC, 2026-11-23, branch `feat/card-lease-s3-s4`): where this record was read one way, and why.** For review.
+  - **The producer of `expected_s`** (L10, L13 point 2; Johnny obj. 2). `LocalWhisperProvider` keeps, per device it really ran on (a load that fell back to the CPU counts as `cpu`), the last measured **warm** ratio, **cold** ratio (the first call after a load) and **load** time, in memory, carried across a providers reload and never persisted (the record asks for "the last measured ratio", not a store). Start figures until measured: cuda warm 15.9× (the slowest row of "GPU figures on speech"), cold 8.8× (Johnny's measured first call), load 12.8 s (the fresh-process cold load L13 counts); cpu 300 s in 306 s from L12's table, warm and cold alike, its ≈9 s of load and first call carried by `load_s`; mps and mlx unknown until measured. `expected_seconds(audio_s)` = load (when not loaded) + `seconds_from_ratio(audio_s, cold or warm)`. Read as: the last measured ratio of any length stands for every length, as L10 says; a 10 s clip at 43× then underestimates a 300 s file (15.9×) until it is measured. Interpolation by length is L12's for the twin (S3d).
+  - **The doors** carry `purpose`, `wait_s` and `expected_s` to `transcribe` (keyword arguments, as 3.1 writes them), computed by `card_ask` with L4's `min(caller's remaining − margin, bound)`: `service.transcribe_audio` "dictation" with `queue_wait_s` (600; both Telegram paths and the received-voice cascade come through it); music Transcribe "music Transcribe", no bound; the agent tool "agent tool", 1800 s less the margin, capped by the turn hold's `accepted_at + wait_s`; the peer door "peer <node>", no bound (the lease line gives 120 − `expected_s`), wrapped in `serving_a_peer`. The length is ffprobe's, else soundfile's, else unknown. **Not built here (S3b):** the lease that consumes them, `on_wait`, the UI's 240 s at `coreService.ts:1492`, and the re-check of `peer_id in peers` at the grant.
+  - **A going supervisor's stop figure** (Ark #10-4). The review note said "so a peer is not refused behind a resident engine merely for lack of a figure". Read with L13's "As built" (Mike's option (a)): only a supervisor that is already going (stopping, draining, or an idle one this very waiter swaps out, which a peer never is) counts `_expected_stop_s()`. A running supervisor that nobody stops for the waiter, idle or busy, stays unknown, so a peer is still refused at once behind it, as pinned by `test_a_running_supervisor_idle_or_busy_refuses_a_peer_at_once`. Giving an idle resident a figure for a peer would make the peer wait for a stop nobody starts; letting a peer stop a supervisor is a change of option (a), for Mike. No `[unverified]` mark stood on the stop figure, so none was removed.
+  - **Item 7's carrier.** No code wrote a missing key into an existing `config.ini` before; the precedent followed is the firewall's merge-on-startup for `privacy_rules.json` (`_seed_missing_tools_into_rules`, b1c6df06): only a missing key is written, an owner's value never, and a file that has it is not touched. The key goes in as one line under its section header (the section appended when absent) so the owner's other lines and comments stay; `Settings.set` rewrites the whole file through configparser, which drops comments, so it was not used.
 
 ## Review history
 
@@ -3000,7 +3018,8 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   - **Corrected:** the Strata peak 30575 was derived, not measured (L11, "One reserve per
     engine").
   - **Open, not decided:** the L13 rule for a peer's long audio on the CPU twin (Open for
-    Mike).
+    Mike). **Decided at #17, Mike:** refused at once as a rule when the whole trip does not fit
+    the guest's 120 s, CPU twin included (Decided by Mike; L13, point 2).
 
 ## Authors
 

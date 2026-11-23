@@ -26,7 +26,7 @@ class FakeWhisperProvider:
         self._language = language
         self._segments = segments
 
-    async def transcribe(self, audio_path, language=None):
+    async def transcribe(self, audio_path, language=None, **card_ask):
         self.calls.append({"audio_path": audio_path, "language": language})
         result = {"text": self._text, "language": self._language, "duration": 1816.28}
         if self._segments is not None:
@@ -181,7 +181,7 @@ class TestLanguageOverride:
     async def test_a_failure_leaves_the_provider_language_alone(self, agent_root, audio_file):
         provider = FakeWhisperProvider()
 
-        async def boom(_path, language=None):
+        async def boom(_path, language=None, **card_ask):
             raise RuntimeError("cuda oom")
 
         provider.transcribe = boom
@@ -227,7 +227,7 @@ class TestFailures:
     async def test_transcription_error_surfaced(self, agent_root, audio_file):
         provider = FakeWhisperProvider()
 
-        async def boom(_path):
+        async def boom(_path, **card_ask):
             raise RuntimeError("model load failed")
 
         provider.transcribe = boom

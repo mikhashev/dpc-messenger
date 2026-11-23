@@ -129,7 +129,9 @@ class _FakeWhisper:
         object.__setattr__(self, name, value)
 
     async def transcribe(self, path, **kwargs):
-        self.calls.append(kwargs)
+        # The card ask (ADR-052 S3a: purpose, wait_s, expected_s) is the doors' test's; here the
+        # language and the task.
+        self.calls.append({k: v for k, v in kwargs.items() if k in ("language", "task")})
         return {"text": "hello", "language": "ru"}
 
 

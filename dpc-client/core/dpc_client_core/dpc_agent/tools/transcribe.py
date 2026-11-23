@@ -12,11 +12,14 @@ absolute → firewall extended-path check.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
 from typing import Any, List, Optional
 
+from ...managers import llama_server_supervisor as _sup
+from ...providers.whisper_provider import card_ask
 from .core import _resolve_file_path
 from .registry import ToolEntry, ToolContext
 
@@ -26,6 +29,20 @@ _WHISPER_PROVIDER_TYPE = "local_whisper"
 _PREVIEW_CHARS = 300
 _FORMATS = ("txt", "srt", "json")
 _FORMAT_SUFFIX = {"txt": ".txt", "srt": ".srt", "json": ".json"}
+# The tool's own timeout, also the caller's deadline its wait for the card keeps under (ADR-052 L4).
+_TOOL_TIMEOUT_S = 1800
+
+
+def _turn_holds_wait_left() -> Optional[float]:
+    """Seconds left of the turn hold's deadline (its acceptance plus its wait, the card queue's
+    clock), or None outside a turn: an agent's tool waits no longer than its turn would (L4)."""
+    hold = _sup.current_card_hold()
+    if hold is None or not getattr(hold, "live", False):
+        return None
+    try:
+        return max(0.0, float(hold.accepted_at) + float(hold.wait_s) - _sup._swap_clock())
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _whisper_providers(ctx: ToolContext) -> dict:
@@ -168,8 +185,10 @@ async def transcribe_audio_file(
 
     ctx.emit_progress(f"Transcribing {source.name}...")
 
+    ask = await asyncio.to_thread(card_ask, provider, "agent tool", str(source),
+                                  bound_s=_turn_holds_wait_left(), caller_left_s=_TOOL_TIMEOUT_S)
     try:
-        result = await provider.transcribe(str(source), **({"language": language} if language else {}))
+        result = await provider.transcribe(str(source), **({"language": language} if language else {}), **ask)
     except Exception as e:
         log.error("Transcription failed for %s: %s", source, e, exc_info=True)
         return f"⚠️ Transcription failed: {e}"
@@ -290,7 +309,7 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=transcribe_audio_file,
-            timeout_sec=1800,
+            timeout_sec=_TOOL_TIMEOUT_S,
             default_enabled=False,
         ),
     ]

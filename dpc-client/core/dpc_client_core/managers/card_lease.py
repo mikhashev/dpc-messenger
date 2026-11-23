@@ -56,10 +56,12 @@ _LEASE_POLL_S = 0.1
 # How soon a waiter asks a holder again after `refused` or `could_not_let_go` is the supervisors'
 # `_LEASE_ASK_AGAIN_S`, read where used; at most `_MAX_SWAP_ROUNDS` asks per holder and waiter.
 # The wait estimate's figure for a cheap holder letting go (Whisper unloads in 0.35-0.61 s, ADR-052
-# "GPU figures on speech"). An engine's stop has no figure: unknown.
+# "GPU figures on speech"). A music engine's stop has no figure: unknown. A supervisor that is going
+# counts its own `_expected_stop_s()` (`_supervisor_stop_estimate`).
 _CHEAP_YIELD_S = 1.0
 # A peer's whole trip (ADR-052 L13, point 2): its wait and its own `expected_s` fit in this, or it is
-# refused at once, whatever bound its door passes.
+# refused at once, whatever bound its door passes. A rule, not only arithmetic (Mike #17, 2026-11-23):
+# a peer's long audio that only the CPU would take in time is refused too.
 PEER_TRIP_S = 120.0
 
 # Every lease, by holder name, granted or not. Registered when built.
@@ -801,11 +803,15 @@ def _estimate(waiter: _LeaseWaiter, blockers: Optional[List[Tuple[str, Any, Opti
             if seconds is not None:
                 holders_s = max(holders_s, seconds)
         elif kind == "holder":
-            # A supervisor: no ETA (L10), and its stop has no figure either.
+            # A supervisor has no ETA (L10): one that is going counts its stop, one that is not
+            # (busy, starting, or idle with nobody stopping it for this waiter) is unknown.
             swapping = what._draining or state == "stopping" or (
                 _swaps_engines(waiter) and state == "running" and not what._busy_for_the_card(state))
-            seconds, where = None, "yielding" if swapping else "busy_holder"
+            seconds = _supervisor_stop_estimate(what) if swapping else None
+            where = "yielding" if swapping else "busy_holder"
             behind.append(f"{what.ENGINE} '{what.alias}'")
+            if seconds is not None:
+                holders_s = max(holders_s, seconds)
         elif kind == "draining":
             seconds, where = None, "yielding"
             behind.append(f"{what.display} (letting go for {what._swap_for})")
@@ -830,6 +836,19 @@ def _estimate(waiter: _LeaseWaiter, blockers: Optional[List[Tuple[str, Any, Opti
 
 def _yield_estimate(holder: CardLease) -> Optional[float]:
     return _CHEAP_YIELD_S if holder.yield_cost == "cheap" else None
+
+
+def _supervisor_stop_estimate(sup: Any) -> Optional[float]:
+    """Seconds a going supervisor's stop takes (ADR-052 S3a, Ark #10-4): its own `_expected_stop_s()`,
+    the last stop it measured, else its grace default. None (unknown) when it keeps no figure."""
+    expected = getattr(sup, "_expected_stop_s", None)
+    if not callable(expected):
+        return None
+    try:
+        return _positive(expected())
+    except Exception:
+        logger.debug("card: the stop figure of %s could not be read", getattr(sup, "alias", sup), exc_info=True)
+        return None
 
 
 def _why_it_waits(waiter: _LeaseWaiter, kind: str, what: Any, state: Optional[str]) -> Tuple[str, str]:
@@ -945,7 +964,8 @@ def _ask_idle_holders(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optio
 def _swaps_engines(waiter: _LeaseWaiter) -> bool:
     """Whether `waiter` swaps an idle supervisor out (section 2.2 item 12): an owner's request for a
     lease that `waits_for_engines`, with the swap on (the owner-start rule, gated by the switch,
-    Mike #70). A peer never does (L13: a supervisor's stop has no figure), nor does any other lease."""
+    Mike #70). A peer never does (L13, "As built": evicting a supervisor is the owner's mechanism),
+    nor does any other lease."""
     return (waiter.lease.waits_for_engines and not waiter.for_a_peer and not waiter.lease._granted
             and _sup.swap_policy()[0])
 
