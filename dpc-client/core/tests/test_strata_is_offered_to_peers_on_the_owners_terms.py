@@ -328,8 +328,11 @@ class TestAPeerStartsAStoppedLauncher:
 
         reason = await p.peer_refusal(PEER)
         await asyncio.sleep(0)
-        needed = CARD_MIB - base_mod._DESKTOP_RESERVE_MIB
+        # One reserve per engine (ADR-052 L11, Mike 2026-11-23): the alias sets none, so the base
+        # config's --vram-reserve-mib 1536 is the bar, not the 2048 fallback.
+        needed = CARD_MIB - 1536
         assert f"20000 MiB of VRAM free, {needed} MiB needed" in reason
+        assert "less 1536 MiB (the base config's --vram-reserve-mib)" in reason
         assert started == []
 
     @pytest.mark.asyncio

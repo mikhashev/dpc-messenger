@@ -854,12 +854,24 @@ pending Mike's OK**).
     is, per engine:
     - **Strata:** the single source is the alias's `vram_reserve_mib` (live value 1152 in
       `providers.json`), the value the engine itself honours as `--vram-reserve-mib`. The peer
-      start gate (`strata_provider.py:456`, today `total - _base._DESKTOP_RESERVE_MIB`) and
-      the L11 fit read it instead of the 2048 constant. When an alias has no
-      `vram_reserve_mib`, 2048 is the fallback, and the refusal line names which number it
-      used.
+      start gate (`strata_provider._peer_start_refusal`, before S3e `total -
+      _base._DESKTOP_RESERVE_MIB`) and the L11 fit read it instead of the 2048 constant. When an
+      alias has no `vram_reserve_mib`, 2048 is the fallback, and the refusal line names which
+      number it used. **As built (S3e, `strata_supervisor.vram_reserve_of`,
+      `StrataSupervisor.vram_reserve`)**, the layers are the ones the start config applies, in
+      its order: the alias's typed `vram_reserve_mib` (0 is a value, Strata's "leave nothing"),
+      then the alias's older `model_params.vram_reserve_mib`, then the **base config's**
+      `--vram-reserve-mib` (the UI shows it as the base value, 1536 in the test install), and
+      only then 2048. Read as: "the value that is configured" is what the engine will actually
+      be started with, and the base config is configured too; skipping it would bar a start at
+      total − 2048 while the engine leaves 1536. A `model_params` value of None drops the base's
+      flag (the engine's own default applies, which DPC does not know), so it reads as the
+      fallback. `STRATA_DEFAULTS["vram_reserve_mib"]` is None ("keeps the base config's value"),
+      so it adds no layer of its own.
     - **llama-server:** it has no engine reserve flag, so `_DESKTOP_RESERVE_MIB = 2048`
-      (`llama_server_supervisor.py:1943`, used at `:3820`) stays the only number.
+      (`llama_server_supervisor.py:1943`, used by `_admission`) stays the only number;
+      `LlamaServerSupervisor.vram_reserve()` answers it, so L11 reads every engine's reserve
+      through one method.
     - **Why this was needed.** Today the two numbers do not add up anywhere in code: 2048 is a
       pre-start check only, and 1152 is what the engine leaves untouched. The gate therefore
       assumes Strata takes up to total − 2048 = 30575 MiB (derived, not measured; to be re-measured on v0.2.20 before it becomes a test constant (Forge #12, Zcode #22-5)), while the engine takes up to

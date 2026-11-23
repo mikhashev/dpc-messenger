@@ -1940,6 +1940,9 @@ _DEFAULT_OVERHEAD_MIB = 4608
 # The card is shared with the desktop; a load that consumes it all is the
 # paging regime measured 2026-08-17 ("card busy computing nothing, window
 # full"). The reserve keeps that from being re-created by arithmetic.
+# One reserve per engine (ADR-052 L11; Mike's decision of 2026-11-23): llama-server, which has no
+# engine reserve flag, uses this; Strata uses the alias's `vram_reserve_mib` (alias, then base
+# config) and this only as the fallback (`vram_reserve`). The two are never summed.
 _DESKTOP_RESERVE_MIB = 2048
 
 _OOM_MARKERS = ("out of memory", "failed to allocate", "cuda error")
@@ -3803,6 +3806,13 @@ class LlamaServerSupervisor:
                 self.alias, configured, _DEFAULT_OVERHEAD_MIB,
             )
             return _DEFAULT_OVERHEAD_MIB
+
+    def vram_reserve(self) -> Tuple[int, str]:
+        """(MiB, source) of the VRAM this engine leaves for the desktop (ADR-052 L11, "One reserve
+        per engine"; Mike's decision of 2026-11-23): llama-server has no engine reserve flag, so it
+        is `_DESKTOP_RESERVE_MIB`, the number its own admission subtracts. Strata overrides this
+        with the alias's `vram_reserve_mib`."""
+        return _DESKTOP_RESERVE_MIB, "llama-server has no engine reserve flag"
 
     def _admission(self) -> Optional[Tuple[int, int, int]]:
         """(budget_mib, weights_mib, kv_dims) for the arithmetic, or None when

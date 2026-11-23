@@ -66,7 +66,7 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from . import kv_snapshots as _kv
 from . import llama_server_supervisor as _base
@@ -370,6 +370,38 @@ def budget_error(key: str, value: Any) -> Optional[str]:
         return None
     rule = "a whole number, at least 0" if whole else "a number more than 0"
     return f"{key}: expected {rule}, not {value!r}"
+
+
+def vram_reserve_of(config: Dict[str, Any], base_args: Optional[List[Any]]) -> Tuple[int, str]:
+    """(MiB, source) of the VRAM a Strata alias leaves free for the desktop and other programs: the
+    value the engine itself honours as `--vram-reserve-mib` (ADR-052 L11, "One reserve per engine";
+    Mike's decision of 2026-11-23, "one source of truth, the value that is configured").
+
+    The layers, in the order `build_start_config` applies them: the alias's typed
+    `vram_reserve_mib` (0 is a value: Strata's own "leave nothing"), then the alias's older
+    `model_params.vram_reserve_mib` (a None there drops the flag, so the engine's own default
+    applies), then the base config's `--vram-reserve-mib` (`base_args`, None when the base cannot be
+    read). Only when none of them gives a number does `_DESKTOP_RESERVE_MIB` (2048) stand in, and
+    the source says so. Never summed with that constant."""
+    fallback = _base._DESKTOP_RESERVE_MIB
+    typed = config.get("vram_reserve_mib")
+    if typed is not None and budget_error("vram_reserve_mib", typed) is None:
+        return int(typed), "the alias's vram_reserve_mib"
+    params = config.get("model_params")
+    if isinstance(params, dict) and "vram_reserve_mib" in params:
+        value = params["vram_reserve_mib"]
+        if value is not None and budget_error("vram_reserve_mib", value) is None:
+            return int(value), "the alias's model_params.vram_reserve_mib"
+        return fallback, (f"the {fallback} MiB fallback: the alias's model_params.vram_reserve_mib "
+                          "drops the base config's flag and the engine's own default is not known")
+    if base_args is not None:
+        raw = _number_or_raw(_flag_value([str(a) for a in base_args], "--vram-reserve-mib"))
+        if raw is not None and budget_error("vram_reserve_mib", raw) is None:
+            return int(raw), "the base config's --vram-reserve-mib"
+        return fallback, (f"the {fallback} MiB fallback: no vram_reserve_mib on the alias or in the "
+                          "base config")
+    return fallback, (f"the {fallback} MiB fallback: no vram_reserve_mib on the alias, and the base "
+                      "config could not be read")
 
 
 def slot_save_path_error(value: Any) -> Optional[str]:
@@ -2812,6 +2844,20 @@ class StrataSupervisor(LlamaServerSupervisor):
         except (LlamaServerError, ValueError, KeyError, TypeError):
             return None
         return _flag_value([str(a) for a in args], "--native")
+
+    def vram_reserve(self) -> Tuple[int, str]:
+        """(MiB, source) of this alias's own reserve (`vram_reserve_of`): what the peer start gate
+        subtracts from the card's total and what L11's fit counts for a Strata child (ADR-052 L11,
+        "One reserve per engine"). Reads the base config only when the alias sets no value of its
+        own: blocking, so an async caller runs it in a thread."""
+        typed = self.config.get("vram_reserve_mib")
+        if typed is not None and budget_error("vram_reserve_mib", typed) is None:
+            return vram_reserve_of(self.config, None)
+        try:
+            args: Optional[List[Any]] = read_base_config(self.base_config_path())["args"]
+        except (LlamaServerError, ValueError, KeyError, TypeError):
+            args = None
+        return vram_reserve_of(self.config, args)
 
     def _expected_stop_s(self) -> float:
         """The last stop of a loaded engine, which holds the VRAM release wait (inside

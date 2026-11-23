@@ -405,8 +405,10 @@ class StrataProvider(LlamaServerProvider):
             same again before it marks anything; the card's free VRAM is not read, because the
             holder is what takes it, and the owner's own swap reads none either.
         (b) Free VRAM: Strata sizes its expert cache to what is free, so the
-            config holds no per-model figure; the bar is the llama-server
-            admission budget, physical VRAM less the desktop reserve."""
+            config holds no per-model figure; the bar is physical VRAM less this
+            alias's own reserve (`vram_reserve`: the alias's `vram_reserve_mib`,
+            else the base config's `--vram-reserve-mib`, else the 2048 MiB
+            fallback; ADR-052 L11, one reserve per engine), named in the refusal."""
         sup = self.supervisor
         pending = sup.peer_start_task
         if pending is not None and not pending.done():
@@ -448,16 +450,19 @@ class StrataProvider(LlamaServerProvider):
         if refusal:
             return refusal
         if not swaps_the_holder:
-            free, total = await asyncio.gather(
+            free, total, (reserve, source) = await asyncio.gather(
                 asyncio.to_thread(_base._free_vram_mib), asyncio.to_thread(_base._total_vram_mib),
+                asyncio.to_thread(sup.vram_reserve),
             )
             if free is None or total is None:
                 return f"{not_started}: the card's free VRAM cannot be read"
-            needed = total - _base._DESKTOP_RESERVE_MIB
+            # One reserve per engine (ADR-052 L11; Mike's decision of 2026-11-23): what this alias
+            # leaves free, the engine's own `--vram-reserve-mib`, and 2048 only when nothing is set.
+            needed = total - reserve
             if free < needed:
                 return (
-                    f"{not_started}: {free} MiB of VRAM free, {needed} MiB needed "
-                    f"(the card's {total} MiB less {_base._DESKTOP_RESERVE_MIB} MiB for the desktop)"
+                    f"{not_started}: {free} MiB of VRAM free, {needed} MiB needed: the card's "
+                    f"{total} MiB less {reserve} MiB ({source})"
                 )
             # Asked again: the reads above awaited, and an owner start may have claimed the card.
             refusal = card_refusal()
@@ -473,8 +478,8 @@ class StrataProvider(LlamaServerProvider):
             else:
                 logger.info(
                     "strata '%s': peer %s started the launcher (the card not held by the other "
-                    "engine, %d MiB of VRAM free, %d MiB needed)",
-                    self.alias, peer_id or "unknown", free, needed,
+                    "engine, %d MiB of VRAM free, %d MiB needed: %d MiB less %d MiB, %s)",
+                    self.alias, peer_id or "unknown", free, needed, total, reserve, source,
                 )
         return None
 
