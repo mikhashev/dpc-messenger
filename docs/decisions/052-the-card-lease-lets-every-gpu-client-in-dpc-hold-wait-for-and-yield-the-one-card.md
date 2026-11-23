@@ -33,7 +33,9 @@ session: "AI Studio group chat (group-60aff6110f02), 2026-11-21 — Whisper plan
 > (#71); a model stays in memory only while something waits for it (#71); peers do not use
 > the owner's CPU by default, with an optional setting (#71). Section **Decided by Mike**
 > lists them; **Open for Mike** keeps what is still open. Anything marked **[unverified]**
-> was not confirmed.
+> was not confirmed. **Since then (2026-11-22 and 2026-11-23):** item 7 (Whisper's idle
+> unload, 300 s), and, at #15 of 2026-11-23, items 1a, 2, 6A and 9 at their proposed defaults,
+> item 7's carrier, and one VRAM reserve per engine (Decided by Mike).
 >
 > **Second revision** (same day): answers Zcode #59, Ark #60 and #61, and Mike #62, checked
 > against `dev` HEAD `d80d76f7`. **Third revision:** answers Ark #64 on the GPU/CPU choice
@@ -65,6 +67,13 @@ session: "AI Studio group chat (group-60aff6110f02), 2026-11-21 — Whisper plan
 >
 > **Ninth revision:** the last review before S1 code (new count #30–#33). Text only: Whisper's
 > estimate divides by the ratio, a peer has one clock, the flat peak is a named choice.
+>
+> **Tenth revision, 2026-11-23 (text only):** records Mike's answers of 2026-11-23 (AI Studio
+> group, #7–#9 and #15; CC's proposal #14, confirmation #16) and the reviews #10 Ark, #11 Johnny
+> and #12 Forge, folded into the S3 plan. Items 1a, 2, 6A and 9 move from Open for Mike to
+> Decided by Mike; the design text is not rewritten, only the places that said "proposed" or
+> "open" for those items. One reserve per engine replaces the single 2048 constant (L11, "One
+> reserve"). The numbers #7–#16 are the group's count of 2026-11-23.
 >
 > **ADR-051 N11** (how an external GPU job joins the card queue): Mike decided on 2026-11-22
 > that it is in scope and that CC writes S10 (Decided by Mike). This ADR answers it as
@@ -486,9 +495,9 @@ them as "never retried".
 
 **L4. Deadlines.** One deadline per acquire, fixed at acceptance (rule 5). A person's
 doors queue the way model starts do (decision 6, Mike #49–#50), with a bound of their own:
-the **dictation bound**, a new `[local_transcription] queue_wait_s`, proposed 600 s (Zcode
+the **dictation bound**, a new `[local_transcription] queue_wait_s`, 600 s (Zcode
 #52; the alternative is to inherit `swap_wait_s`, 1800 s on this machine). The shape is
-decided (Mike #62, #70, #71); the bound is **Open for Mike, item 6A**.
+decided (Mike #62, #70, #71); the bound, 600 s, was decided on 2026-11-23 (item 6A, Mike #15).
 
 **The queue's deadline is never longer than its caller's** (Ark #53): `wait_s = min(caller's
 remaining time − margin, bound)`, where the margin is the transcription's own expected time,
@@ -824,10 +833,26 @@ pending Mike's OK**).
     each lease event too; Forge measured one probe at about 30 ms. The reset never passes a
     future `now` (`commit_memory.py:147, 155`: an `at` in the future switches the cache off for
     the rest of the process).
-  - **One reserve** (Forge #15 §4): Strata's admission budgets `total − _DESKTOP_RESERVE_MIB`
-    (`llama_server_supervisor.py:1815-1817`, `3552`); L11's declared check is that same
-    arithmetic with the same constant, and only its live veto reads `free`, which already
-    holds the desktop (section 5). S2 adds no second reserve.
+  - **One reserve per engine, from the engine's own config** (Forge #15 §4; amended by Mike's
+    decision of 2026-11-23, #7 and #15: "one source of truth, the one that is set"). L11's
+    declared check is the engine's admission arithmetic, and only its live veto reads `free`,
+    which already holds the desktop (section 5). S2 adds no second reserve. What the reserve
+    is, per engine:
+    - **Strata:** the single source is the alias's `vram_reserve_mib` (live value 1152 in
+      `providers.json`), the value the engine itself honours as `--vram-reserve-mib`. The peer
+      start gate (`strata_provider.py:456`, today `total - _base._DESKTOP_RESERVE_MIB`) and
+      the L11 fit read it instead of the 2048 constant. When an alias has no
+      `vram_reserve_mib`, 2048 is the fallback, and the refusal line names which number it
+      used.
+    - **llama-server:** it has no engine reserve flag, so `_DESKTOP_RESERVE_MIB = 2048`
+      (`llama_server_supervisor.py:1943`, used at `:3820`) stays the only number.
+    - **Why this was needed.** Today the two numbers do not add up anywhere in code: 2048 is a
+      pre-start check only, and 1152 is what the engine leaves untouched. The gate therefore
+      assumes Strata takes up to total − 2048 = 30575 MiB, while the engine takes up to
+      total − 1152 = 31471 MiB, 896 MiB more.
+    - **The Strata peak 30575** in L11's arithmetic and test 28 was derived from the gate line
+      (total − 2048), not measured. It is to be re-measured on Strata v0.2.20 before it becomes
+      a test constant (Forge #12, 2026-11-23).
   - **By platform**:
 
     | Platform | `total` / `free` | Result in L11 |
@@ -925,10 +950,10 @@ Around the rule:
 - **No switch in mid-flight** (Zcode #69): the choice is final for that call. A dictation
   that started on the CPU twin stays there even if the card frees a second later; only new
   calls take the GPU. A call sent to the line does not later jump to the CPU.
-- **`cpu_max_s`, proposed 600 s:** neither route makes a person wait longer than the
+- **`cpu_max_s`, 600 s (start value, decided 2026-11-23, item 9):** neither route makes a person wait longer than the
   dictation bound. With the measured factor of about 1.0–1.1× real time, the 300 s audio
   cap binds first when nothing contends.
-- **`cpu_contention_factor`, proposed 1.0 until measured**, defined as the CPU ratio with an
+- **`cpu_contention_factor`, 1.0 (start value, decided 2026-11-23, item 9; tuned from operation)**, defined as the CPU ratio with an
   engine computing divided by the CPU ratio alone; the base CPU speed on speech (1.1–1.5×) is
   the twin's own figure, not this factor (Ark #30). Mike's #71 and the logs
   (`~/.dpc/logs/dpc-client.log*`: the Whisper alias ran with `device=cpu` on 2026-11-14 to
@@ -1122,7 +1147,7 @@ Mike's words (#20, #68, #70) and the cost of a reload.
 | llama-server start | arithmetic, as today | excludes | **excludes: waits while busy, yields while idle** | **excludes: waits while busy, yields while idle** |
 | strata start | excludes | excludes | **same** | **same** |
 | music start | **excludes: waits while busy; idle and nothing waiting → swaps it out like an owner's start, with swap on** (Mike #70, SPEC decision 32 amended) | same | music engines: `exclusive()` as today; their leases agree | **excludes: waits while busy, yields while idle** |
-| whisper load | **excludes (Mike #68): busy → L12 (CPU twin or the line); idle → L12 first, then a swap with swap on (item 1a, proposed)** | **same** | **busy: the one shared cell, beside if it provably fits (L11), else L12; idle: yields** | same holder: re-entrant; another whisper alias: excludes |
+| whisper load | **excludes (Mike #68): busy → L12 (CPU twin or the line); idle → L12 first, then a swap with swap on (item 1a, decided 2026-11-23)** | **same** | **busy: the one shared cell, beside if it provably fits (L11), else L12; idle: yields** | same holder: re-entrant; another whisper alias: excludes |
 | embedder / ner (background) | granted only if the card is free, otherwise CPU | CPU | CPU | CPU |
 
 **Whisper waits for supervisors** (Mike #68: "no, it must not load beside").
@@ -1134,8 +1159,8 @@ Mike's words (#20, #68, #70) and the cost of a reload.
   goes to the CPU twin (Mike #71), a longer one takes the line.
 - **The consequence Zcode #69 names:** a dictation longer than the CPU allowance (300 s
   audio) during a long agent turn takes the line, and if the turn holds the card past the
-  dictation bound (600 s proposed) the dictation is refused.
-- **An idle supervisor (item 1a, proposed, pending Mike):** L12 first (a file up to 300 s
+  dictation bound (600 s) the dictation is refused.
+- **An idle supervisor (item 1a, decided 2026-11-23, Mike #15):** L12 first (a file up to 300 s
   goes to the CPU twin, so a dictation never costs the LLM its reload or Strata its parked
   conversations); a longer file, with the swap on and nothing waiting, swaps the idle
   supervisor out exactly as an owner's start or a music job does (section 3.2). With the
@@ -1156,9 +1181,9 @@ Mike's words (#20, #68, #70) and the cost of a reload.
   5–9 GB model reload. Whisper's reload is measured (0.76–0.83 s, a fresh process, not inside
   the backend); **[unverified: the music engine's boot and reload time]**. Neither
   loses anyone's work.
-- **Open for Mike, item 2.** It now interacts with Mike #70: music swapping an idle
+- **Item 2, decided 2026-11-23 (Mike #15).** It interacts with Mike #70: music swapping an idle
   supervisor **is** gated by `swap_when_idle` (owner-start rule), while a music engine or
-  Whisper yielding to another lease is not (if item 2 stays at its default).
+  Whisper yielding to another lease is not.
 
 #### 2.2 How llama-server and Strata start honouring leases
 
@@ -1335,7 +1360,7 @@ touched in 2.2:
 #### 2.4 What swapping Strata out for a lease drops, and who is told
 
 This is the cost of 2.2 item 12: a lease contender swaps an idle supervisor out (music, Mike
-#70; a long dictation, item 1a, still open). It does not apply to a lease that yields
+#70; a long dictation, item 1a, decided 2026-11-23). It does not apply to a lease that yields
 (`DROPS_PARKED_ON_STOP` is False for a lease), nor to a supervisor start that waits for a
 lease, nor with `swap_when_idle` off, when nothing is stopped.
 
@@ -1965,7 +1990,7 @@ Unify-versus-replace of `_CARD_CLAIMS` is a separate sub-choice (section 2.3).
   (`_live_holders() == _live_claims()` with no lease registered, pinned by a test).
 - **Negative:** where L11 answers `does_not_fit` or `unknown` (a smaller card, macOS, AMD,
   a size it cannot read), the owner's dictation during a music job **waits** in the line,
-  up to the dictation bound (600 s proposed), instead of today's load beside. The person
+  up to the dictation bound (600 s), instead of today's load beside. The person
   sees why and can cancel; a music job longer than the bound still ends in a refusal
   (decision 6).
 - **Negative:** `service.transcribe_audio` and the Telegram paths gain a deadline they do
@@ -2515,6 +2540,24 @@ Recorded as decided; each line names the message.
 - **2026-11-22, item 7: the GPU Whisper alias's idle unload stays at 300 s** ("ok 300s"),
   because a reload costs 0.6–0.9 s (Forge #21; CC on speech, 2026-11-22: 0.76–0.83 s) and a
   cold load 1–2.4 s (12.8 s in a fresh process with library init), so holding the model costs less than a second when it is wanted again.
+  **The carrier (Mike #9 and #15, 2026-11-23):** the default is in code (`settings.py`, the
+  default block, `'idle_unload_s': '300'`) **and** a key `[local_transcription] idle_unload_s`
+  is written in `config.ini`; the key in the file wins over the code default, the pattern used
+  in many places already. S3 builds the writing of the key.
+- **2026-11-23, items 1a, 2, 6A and 9: accepted at their proposed defaults** (Mike #15, "по
+  дефолтам"; CC's proposal #14, confirmation #16).
+  - **Item 1a, an idle supervisor in front of a dictation:** L12 first (a file up to 5
+    minutes goes to the CPU twin); a longer file, with the swap on and nothing waiting, swaps
+    the idle supervisor out by the owner-start rule, like music. With the swap off it waits.
+  - **Item 2:** lease yields (unloading Whisper, stopping an idle music engine for another
+    lease) are not gated by `swap_when_idle`. Music swapping an idle supervisor still is.
+  - **Item 6A:** `[local_transcription] queue_wait_s` = 600 s.
+  - **Item 9:** `cpu_max_s` = 600 s and `cpu_contention_factor` = 1.0, as start values, tuned
+    from operation.
+- **2026-11-23, one VRAM reserve per engine, from the engine's own config** (Mike #7: "one
+  source of truth, the one that is set"; #15, "do as you proposed"). Strata reads the alias's
+  `vram_reserve_mib` (live 1152), with 2048 as the fallback; llama-server keeps
+  `_DESKTOP_RESERVE_MIB` = 2048. Detail in L11, "One reserve per engine".
 - **2026-11-22, N11: in scope, and CC writes S10, the ComfyUI client half included.** The yield
   verb for ComfyUI is its own `POST /free {"unload_models": true, "free_memory": true}` plus
   `POST /interrupt` (Forge verified it live, 24.9 → 1.8 GB). Order: after S1.
@@ -2522,27 +2565,16 @@ Recorded as decided; each line names the message.
 
 ## Open for Mike
 
-Still open after #68–#71 and #11. Each has a proposed default.
+Still open after #68–#71, #11 and the decisions of 2026-11-22 and 2026-11-23. Each has a
+proposed default.
 
-- **Item 2.** **Lease yields not gated by `swap_when_idle`.** Unloading Whisper or stopping an idle
-  music engine for another lease happens even with the switch off. *Proposed default:* not
-  gated (CC #66 question 4; Zcode and Ark for). It interacts with decision 4: music
-  swapping an idle **supervisor** is gated by the switch (owner-start rule).
-- **Item 6A.** **The dictation bound** `[local_transcription] queue_wait_s`: *proposed* 600 s (CC #66
-  question 8; Zcode and Ark for). The alternative, `swap_wait_s` (1800 s here), would
-  leave the agent tool no time to transcribe after a full wait (Ark #60 §7). Johnny and
-  Forge abstain until it is measured.
-- **Item 1a.** **An idle supervisor in front of a dictation** (follows from #68 and #70). *Proposed:*
-  L12 first (a file up to 5 minutes goes to the CPU twin and costs the LLM nothing); a
-  longer file, with the swap on and nothing waiting, swaps the idle supervisor out by the
-  owner-start rule, like music. *Alternative:* a dictation never stops a supervisor and
-  waits. Votes: "L12 first" (Ark, Johnny).
-- **Item 9.** **`cpu_max_s`** (proposed 600 s) and **`cpu_contention_factor`** (proposed 1.0 until the
-  Strata measurement). They ship as start values and are tuned from operation (Mike #11's
-  line); the numbers themselves are not decided. The in-turn path (3.5) no longer depends
-  on them. Start values accepted by Johnny, with the named RAM constant.
+- Items 1a, 2, 6A and 9 were decided on 2026-11-23 at their proposed defaults (Mike #15; all in
+  Decided by Mike).
+- **L13, a peer's long audio on the CPU twin** (Forge #12, Ark #10): whether L13 should state
+  as a rule that a peer's long audio on the CPU twin is refused (the guest's 120 s trip bound,
+  `PEER_TRIP_S` 120, against the CPU ratio 1.1–1.5×). Not decided; today the estimate decides.
 - Items 10, 11 and 13 were answered at #11; item 12 by reading the flow, as he asked; item 8
-  closes with item 10; item 7 was answered on 2026-11-22 (all in Decided by Mike).
+  closes with item 10; item 7 was answered on 2026-11-22, its carrier on 2026-11-23 (all in Decided by Mike).
 - **The reference for the GPU real-time ratio** (Forge #21, §5): **closed.** Mike's answer,
   2026-11-22: CC measures it on real speech; done, ≈16–43× (L12, "GPU figures on speech").
 
@@ -2815,7 +2847,7 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   - **Known debts (Zcode #54).** (1) A double bare `acquire()` on one lease and the cancel of the first: `_leaves` gives the grant back from under the second granted waiter; every ordinary client goes through `use()`: closed in **S4**. (3) `LeaseRefusedForPeer.wait` carries display names: **S3 must not serialize `.wait`** to a peer, only `str(e)`. (4) `acquire_blocking` calls `.result()` with no timeout: an owner loop that dies at shutdown leaves the thread waiting: closed in **S3/S4** with the first thread client (Whisper, the embedder).
   - **`_MAX_SWAP_ROUNDS`** (4) is one constant shared with the supervisor's swap rounds, and the budget is **per (waiter, holder) pair**: a stream of short requests gives each new waiter its own four asks, with no aggregate ceiling. In S2 the lease's asks and the supervisor's rounds count separately, so one holder may be asked up to 4 times by each; if a ping-pong appears, this is where it is cut (Johnny small 1, Forge 4).
 - **S2 build, `1e57932f` (CC, 2026-11-22): where this record was read one way, and why.** For review.
-  - **`waits_for_engines`.** S1 stored it as "whether a waiting lease swaps an idle supervisor out"; section 3.2 builds music engines with `True`, and music is the client that swaps (Mike #70). Read as: `True` = waits for a busy supervisor and swaps an idle one out by the owner-start rule (swap on, first in both lines); `False` (the default; Whisper while item 1a is open) = waits for a supervisor until it goes by itself. No production client sets it yet.
+  - **`waits_for_engines`.** S1 stored it as "whether a waiting lease swaps an idle supervisor out"; section 3.2 builds music engines with `True`, and music is the client that swaps (Mike #70). Read as: `True` = waits for a busy supervisor and swaps an idle one out by the owner-start rule (swap on, first in both lines); `False` (the default; Whisper while item 1a was open, decided 2026-11-23) = waits for a supervisor until it goes by itself. No production client sets it yet.
   - **Item 5's bound.** `_stop_for_the_swap` calls `give_up_for(self.alias)` with no bound, not with `request.stop_bound`: a `TimeoutError` out of `give_up_for` would reach the stop task's exception path, which ends the mark while the yield still runs. `_wait_for_the_stop` bounds the request's wait instead, and its refusal names the lease ("is already letting go … The yield goes on").
   - **A lease that refuses or could not let go** is asked again after `_LEASE_ASK_AGAIN_S` (1 s), at most `_MAX_SWAP_ROUNDS` times per start; such an ask is not one of the start's rounds (nothing was swapped out), and after the last ask the lease is waited for like a busy holder until the deadline, not refused early by the out-of-rounds path (L6: "the contender keeps waiting until its deadline").
   - **Item 3.** `for_leases` is set on the request; with the swap off, a place taken for leases alone leaves the line (today's refusal at the claim) if a supervisor comes into its way. A request accepted with the swap on whose switch is thrown off mid-wait keeps today's behaviour (leaves, refused at the claim), even when only a lease is in its way. A start with the swap off and nothing in its way takes no place, as written; if a lease is granted in the awaits between that check and the claim, the claim refuses naming the lease (a race the record accepts by "with nothing blocking, the swap-off early return stays as today").
@@ -2947,6 +2979,28 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   and the GPU-ratio open item are closed; the CPU same-speech figures sit beside step 5.
 - **Ninth revision, 2026-11-22 (text only).** **#30 Ark, #31 Zcode, #32 Johnny, #33 Forge** on
   `ffc81e00`, all "go for S1" after the fixes (Review notes).
+
+- **New count, 2026-11-23 (#7–#16), text only.** **#7–#9, #15 Mike:** one source of truth for
+  the reserve (#7), the carrier of item 7's 300 s (#9), and "по дефолтам" for items 1a, 2, 6A
+  and 9 with "do as you proposed" for the reserve (#15) (Decided by Mike). **#14 CC:** the
+  proposal; **#16 CC:** the confirmation. Reviews folded into the S3 plan:
+  - **#10 Ark, #11 Johnny, #12 Forge.** **S3a:** the supervisor branch of `_estimate`
+    (`card_lease.py:803-808`) takes its stop estimate from `_expected_stop_s()`
+    (`llama_server_supervisor.py:4510`, overridden at `strata_supervisor.py:2816`) instead of
+    `None`, so a peer is not refused behind a resident engine merely for lack of a figure;
+    `expected_s` carries a cold and a warm ratio, since the first call after an unload is 3–5×
+    slower (Johnny's bench). **S3c:** the addresses are `service.py` about `:4844-4863` and
+    `:5156`; the guest peer-candidate path tries one peer, and there is no second `continue`
+    loop (Ark correcting his own point of 2026-11-22). **S3e:** Whisper's `need` follows the
+    same batch descent by audio length as the call (`whisper_provider.py:1020-1030`) rather
+    than the constant 4447; the Whisper peak is re-measured beside `strata.exe` and at batch
+    16. Strata v0.2.20's `--conversation-spill-persist` (opt-in, off here) means that "a stop
+    loses the parking" is a property of the config, not of the engine; S3e decides whether
+    the cold-read price is paid.
+  - **Corrected:** the Strata peak 30575 was derived, not measured (L11, "One reserve per
+    engine").
+  - **Open, not decided:** the L13 rule for a peer's long audio on the CPU twin (Open for
+    Mike).
 
 ## Authors
 
