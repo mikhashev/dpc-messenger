@@ -728,6 +728,13 @@ class ToolRegistry:
                     asyncio.set_event_loop(loop)
                     result = loop.run_until_complete(result)
                 finally:
+                    # A provider client opened on this loop is closed here, on it:
+                    # its pooled sockets die with the loop and nobody can close them later.
+                    try:
+                        from ...providers.loop_clients import close_this_loop
+                        loop.run_until_complete(close_this_loop())
+                    except Exception:
+                        pass
                     # Clean up the event loop properly to prevent memory leaks
                     try:
                         loop.run_until_complete(loop.shutdown_asyncgens())

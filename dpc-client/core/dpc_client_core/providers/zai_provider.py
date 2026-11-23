@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 
 from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, first_finish_reason, image_base64,
                    tool_use_of, network_client_bounds, with_stop)
+from .loop_clients import LoopClients, client_property
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,9 @@ class ZaiProvider(AIProvider):
     # The unit of this vendor's price table and of its daily ceiling.
     BILLING_CURRENCY = "USD"
 
+    # One client per event loop; `provider.client = x` pins one for all (loop_clients.py).
+    client = client_property()
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
 
@@ -128,8 +132,10 @@ class ZaiProvider(AIProvider):
                 f"{ZAI_DEFAULT_BASE_URL}"
             )
 
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url,
-                                  **network_client_bounds(config, default_retries=0))
+        bounds = network_client_bounds(config, default_retries=0)
+        self._clients = LoopClients(
+            lambda: AsyncOpenAI(api_key=api_key, base_url=base_url, **bounds))
+        self._clients.get()
         self.base_url = base_url
 
         self.max_tokens = config.get("max_tokens", 8192)

@@ -12,6 +12,7 @@ from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, tool
                    configured_reasoning_default, first_finish_reason,
                    image_base64, network_client_bounds,
                    normalize_reasoning_effort, positive_ceiling, with_stop)
+from .loop_clients import LoopClients, client_property
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ class DeepSeekProvider(AIProvider):
     # The unit of this vendor's price table and of its daily ceiling.
     BILLING_CURRENCY = "USD"
 
+    # One client per event loop; `provider.client = x` pins one for all (loop_clients.py).
+    client = client_property()
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
 
@@ -70,8 +74,10 @@ class DeepSeekProvider(AIProvider):
             raise ValueError(f"API key not found for DeepSeek provider '{self.alias}'")
 
         base_url = config.get("base_url", DEEPSEEK_DEFAULT_BASE_URL)
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url,
-                                  **network_client_bounds(config, default_retries=0))
+        bounds = network_client_bounds(config, default_retries=0)
+        self._clients = LoopClients(
+            lambda: AsyncOpenAI(api_key=api_key, base_url=base_url, **bounds))
+        self._clients.get()
         # Kept for the REST balance endpoint (/user/balance); the openai SDK doesn't cover it.
         self._api_key = api_key
         self._base_url = base_url

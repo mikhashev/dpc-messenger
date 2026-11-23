@@ -39,6 +39,7 @@ from openai import AsyncOpenAI
 from .base import (AIProvider, EngineCountError, REASONING_OFF, declared_reasoning_words, image_base64,
                    image_blocks_in_turns, positive_ceiling, tool_use_of, with_tool_call_blocks)
 from .deepseek_provider import DeepSeekProvider
+from .loop_clients import LoopClients
 
 from ..managers import kv_snapshots
 from ..managers import llama_server_supervisor as _llama_server_supervisor_module
@@ -303,8 +304,8 @@ class LlamaServerProvider(DeepSeekProvider):
                     )
         _ACTIVE_SUPERVISORS[alias] = self.supervisor
 
-        self._openai: Optional[AsyncOpenAI] = None
         self._port: Optional[int] = None
+        self._loop_clients()
 
         self.max_tokens = config.get("max_tokens", 8192)
         self.thinking_enabled = bool(config.get("thinking", {}).get("enabled", True))
@@ -392,6 +393,33 @@ class LlamaServerProvider(DeepSeekProvider):
 
     # --- lifecycle -----------------------------------------------------------
 
+    def _new_client(self) -> AsyncOpenAI:
+        # The server ignores the key but the SDK insists on one.
+        return AsyncOpenAI(api_key="local", base_url=f"http://127.0.0.1:{self._port}/v1")
+
+    def _loop_clients(self) -> LoopClients:
+        """The clients aimed at this child's port, one per event loop: an agent tool
+        (describe_image) runs on a loop of its own, and a pooled connection belongs to
+        the loop that opened it. Made on first touch so a test double built without
+        `__init__` still works."""
+        holder = self.__dict__.get("_clients")
+        if holder is None:
+            holder = self.__dict__["_clients"] = LoopClients(self._new_client)
+        return holder
+
+    @property
+    def _openai(self) -> Optional[AsyncOpenAI]:
+        """The running loop's client, None while there is none (not built yet, or reset)."""
+        return self._loop_clients().peek()
+
+    @_openai.setter
+    def _openai(self, client: Optional[AsyncOpenAI]) -> None:
+        # None forgets every loop's client; anything else is one pinned for all loops.
+        if client is None:
+            self._loop_clients().reset()
+        else:
+            self._loop_clients().pin(client)
+
     async def _ensure_running(self) -> Dict[str, Any]:
         """`ensure_running` of this provider's supervisor, and this provider follows the call if
         a settings save passed it on: a request that had not started on the supervisor that was
@@ -429,13 +457,11 @@ class LlamaServerProvider(DeepSeekProvider):
         None reads the ones `_ensure_for` set."""
         props = await self._ensure_running()
         await self._wait_for_the_slot()
-        if self._openai is None or self._port != self.supervisor.port:
+        if self._port != self.supervisor.port:
+            # A new port replaces the clients of every loop, not only this one's.
             self._port = self.supervisor.port
-            # The server ignores the key but the SDK insists on one.
-            self._openai = AsyncOpenAI(
-                api_key="local", base_url=f"http://127.0.0.1:{self.supervisor.port}/v1"
-            )
-        client = self._openai
+            self._openai = None
+        client = self._loop_clients().get()
         if messages is None:
             messages = _WIRE_MESSAGES.get()
         await self._note_engine_call(messages)

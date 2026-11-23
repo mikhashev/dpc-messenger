@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, List
 from anthropic import AsyncAnthropic
 
 from .base import AIProvider, ANTHROPIC_THINKING_MODELS, image_base64, network_client_bounds
+from .loop_clients import LoopClients, client_property
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,9 @@ class AnthropicProvider(AIProvider):
 
     DECLARED_OUTPUT_INCLUDES_THINKING = "includes"
 
+    # One client per event loop; `provider.client = x` pins one for all (loop_clients.py).
+    client = client_property()
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         api_key_env = config.get("api_key_env")
@@ -43,7 +47,9 @@ class AnthropicProvider(AIProvider):
         if not api_key:
             raise ValueError(f"API key environment variable not set for Anthropic provider '{self.alias}'")
 
-        self.client = AsyncAnthropic(api_key=api_key, **network_client_bounds(config))
+        bounds = network_client_bounds(config)
+        self._clients = LoopClients(lambda: AsyncAnthropic(api_key=api_key, **bounds))
+        self._clients.get()
 
         # Read max_tokens from config (optional, defaults to 4096  if not specified)
         # Set to None or omit from config to use model's maximum

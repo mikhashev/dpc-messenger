@@ -12,6 +12,7 @@ from .base import (AIProvider, REASONING_OFF, anthropic_to_openai_messages, tool
                    configured_reasoning_default, image_base64,
                    network_client_bounds, normalize_reasoning_effort,
                    numeric_setting, positive_ceiling, first_finish_reason, with_stop)
+from .loop_clients import LoopClients, client_property
 from ..dpc_agent.pricing import (COST_BASIS_CHARGED, COST_BASIS_LIST_PRICE_REFERENCE,
                                  COST_BASIS_UNKNOWN, NEURALDEEP_CURRENCY, compute_cost_rub)
 from .neuraldeep_prices import REFRESH_INTERVAL, RETRY_AFTER_FAILURE, price_source
@@ -184,6 +185,9 @@ class NeuralDeepProvider(AIProvider):
     # i.e. reasoning is counted inside completion (vLLM counts every generated token).
     DECLARED_OUTPUT_INCLUDES_THINKING = "includes"
 
+    # One client per event loop; `provider.client = x` pins one for all (loop_clients.py).
+    client = client_property()
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
 
@@ -196,8 +200,10 @@ class NeuralDeepProvider(AIProvider):
             raise ValueError(f"API key not found for NeuralDeep provider '{self.alias}'")
 
         base_url = config.get("base_url", NEURALDEEP_DEFAULT_BASE_URL)
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url,
-                                  **network_client_bounds(config, default_retries=0))
+        bounds = network_client_bounds(config, default_retries=0)
+        self._clients = LoopClients(
+            lambda: AsyncOpenAI(api_key=api_key, base_url=base_url, **bounds))
+        self._clients.get()
         # For GET /v1/limits, which the openai SDK does not cover.
         self._api_key = api_key
         self._base_url = base_url

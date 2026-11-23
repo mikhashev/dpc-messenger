@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 
 from .base import (AIProvider, OPENAI_THINKING_MODELS, first_finish_reason, image_base64,
                    network_client_bounds, with_stop, with_tool_call_blocks)
+from .loop_clients import LoopClients, client_property
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,9 @@ class OpenAICompatibleProvider(AIProvider):
     any other host it stays `unknown` until that vendor's own page says otherwise.
     """
 
+    # One client per event loop; `provider.client = x` pins one for all (loop_clients.py).
+    client = client_property()
+
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         api_key = config.get("api_key")
@@ -44,8 +48,11 @@ class OpenAICompatibleProvider(AIProvider):
         if not api_key:
             raise ValueError(f"API key not found for OpenAI compatible provider '{self.alias}'")
 
-        self.client = AsyncOpenAI(base_url=config.get("base_url"), api_key=api_key,
-                                  **network_client_bounds(config))
+        base_url = config.get("base_url")
+        bounds = network_client_bounds(config)
+        self._clients = LoopClients(
+            lambda: AsyncOpenAI(base_url=base_url, api_key=api_key, **bounds))
+        self._clients.get()
         self.DECLARED_OUTPUT_INCLUDES_THINKING = (
             "includes" if self._is_openais_own_endpoint() else "unknown"
         )
