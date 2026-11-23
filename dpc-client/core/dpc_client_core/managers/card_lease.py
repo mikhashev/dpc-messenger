@@ -27,9 +27,12 @@ too (L5), and a lease that `waits_for_engines` (music, Mike #70), first in both 
 supervisor out by the owner-start rule with the swap on. Any other lease waits for a supervisor
 holder until it goes by itself. Slice S3b: the local Whisper provider is a client (a lease per GPU
 alias, `waits_for_engines`, item 1a; `release_when_empty` for a grant with nothing loaded). Slice
-S3d: `route_view`, what Whisper's GPU/CPU choice (L12) reads before it asks. Not here yet: the music
-engines as clients (S4), L11's one shared cell (S3e: `shares_with` is stored and not consulted), the
-probe of foreign GPU use (S8).
+S3d: `route_view`, what Whisper's GPU/CPU choice (L12) reads before it asks. Slice S3e: L11's one
+shared cell (`shares_with`, `l11_arithmetic`, `_try_beside`): a lease that shares with a busy holder
+(Whisper with a music lease) is granted beside it only when the declared peaks fit the card's total
+and the live free-VRAM reading does not veto; the card's VRAM reading is dropped on every change of
+holder (`commit_memory.forget_vram_reading`). Not here yet: the music engines as clients (S4), so the
+cell is reached by no production pair before S4; the probe of foreign GPU use (S8).
 """
 
 import asyncio
@@ -40,6 +43,7 @@ import math
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
+from . import commit_memory as _commit_memory
 from . import llama_server_supervisor as _sup
 from .llama_server_supervisor import CardQueueRefusal
 
@@ -258,7 +262,7 @@ class CardLease:
                  yield_cost: Literal["cheap", "engine"],
                  on_yield: Callable[[str], Awaitable[YieldOutcome]],
                  waits_for_engines: bool = False,
-                 shares_with: Optional[Callable[["CardLease"], Awaitable[Optional[str]]]] = None,
+                 shares_with: Optional[Callable[["CardLease"], bool]] = None,
                  eta_s: Callable[[], Optional[float]] = lambda: None,
                  stop_hint: str = ""):
         if not holder or not isinstance(holder, str):
@@ -283,11 +287,15 @@ class CardLease:
         # supervisor holder until that holder goes by itself. No lease ever loads beside a
         # supervisor (Mike #68).
         self.waits_for_engines = waits_for_engines
-        # L11's one shared cell, consulted from S3 on.
+        # L11's one shared cell (S3e): True for a holder this lease may be granted beside when the
+        # arithmetic proves it fits (Whisper: a busy music lease). The arithmetic is this module's
+        # (`l11_arithmetic`), never the client's; None (every other lease) never shares.
         self.shares_with = shares_with
         self._eta_s = eta_s
         self.stop_hint = stop_hint
-        self.beside: Optional[str] = None
+        # The holder this grant was made beside (L11), and the declared peak it was fitted with.
+        self._beside: Optional["CardLease"] = None
+        self._beside_peak: Optional[int] = None
         self._granted = False
         self._grant_no = 0
         self._granted_at: Optional[float] = None
@@ -323,6 +331,13 @@ class CardLease:
     def granted(self) -> bool:
         return self._granted
 
+    @property
+    def beside(self) -> Optional[str]:
+        """The alias of the holder this lease was granted beside by L11, while both hold the card;
+        None otherwise (`card_holders`' `beside`)."""
+        other = self._beside
+        return other.alias if self._granted and other is not None and other._granted else None
+
     def _waiters(self) -> List["_LeaseWaiter"]:
         return [w for w in _LEASE_LINE if w.lease is self and not w.granted]
 
@@ -356,6 +371,7 @@ class CardLease:
         """The client has loaded: busy only while a use is open."""
         if self._starting:
             self._starting = False
+            _the_card_changed()
             _wake()
 
     # -- the holder surface (section 2.2.1) --
@@ -481,6 +497,9 @@ class CardLease:
         self._granted_at = _clock()
         self._since = time.time()
         self._starting = False
+        self._beside = None
+        self._beside_peak = None
+        _the_card_changed()
         logger.info("card: %s granted (%s)", self.display, what)
 
     def _open(self, what: str, arrival: int, hold: Any) -> _Use:
@@ -501,7 +520,9 @@ class CardLease:
         self._starting = False
         self._draining = False
         self._swap_for = None
-        self.beside = None
+        self._beside = None
+        self._beside_peak = None
+        _the_card_changed()
         logger.info("card: %s let go (%s), held %.0f s", self.display, why, held)
         # The next waiter is granted in this same stretch (L5a point 2).
         _settle()
@@ -511,7 +532,7 @@ class CardLease:
     async def acquire(self, what: str, *, wait_s: Optional[float], background: bool = False,
                       check: Optional[Callable[[], Awaitable[None]]] = None,
                       on_wait: Optional[Callable[[Dict[str, Any]], None]] = None,
-                      expected_s: Optional[float] = None) -> None:
+                      expected_s: Optional[float] = None, vram_mib: Optional[int] = None) -> None:
         """Hold the card: at once when nothing excludes this lease and nobody earlier waits (L1,
         L5a), else in `_LEASE_LINE` up to `wait_s` seconds from now (None: until `check` raises or
         the caller is cancelled). A granted lease is granted again at once. `background` never
@@ -519,9 +540,11 @@ class CardLease:
         whole trip is known and fits: the estimate plus its own `expected_s` within `PEER_TRIP_S`
         and `wait_s` (L13). `on_wait` is told the wait estimate (L10) whenever who it
         waits for changes; `expected_s` is how long this request will hold the card once granted,
-        which the estimate of a later waiter counts."""
+        which the estimate of a later waiter counts. `vram_mib` is this request's own declared peak
+        (Whisper's by the call's length band, S3e), which L11's fit reads instead of the lease's
+        `vram_mib` (None: the lease's)."""
         await _enter(self, what, wait_s=wait_s, background=background, check=check, on_wait=on_wait,
-                     expected_s=expected_s, opens_a_use=False)
+                     expected_s=expected_s, vram_mib=vram_mib, opens_a_use=False)
 
     @_sup.on_the_owner_loop
     async def _open_a_use(self, what: str, ticket: "_Ticket", **acquire_kw: Any) -> None:
@@ -641,12 +664,18 @@ class _LeaseWaiter:
 
     __slots__ = ("lease", "what", "arrival", "queued_at", "give_up_at", "wait_s", "for_a_peer", "hold",
                  "opens_a_use", "expected_s", "event", "granted", "use", "made_the_grant", "grant_no",
-                 "out", "asks", "said", "ticket")
+                 "out", "asks", "said", "ticket", "vram_mib", "fitted_for")
 
     def __init__(self, lease: CardLease, what: str, wait_s: Optional[float], opens_a_use: bool,
-                 expected_s: Optional[float], ticket: Optional[_Ticket] = None):
+                 expected_s: Optional[float], ticket: Optional[_Ticket] = None,
+                 vram_mib: Optional[int] = None):
         self.lease = lease
         self.what = what
+        # This request's declared peak for L11 (MiB), else the lease's (S3e).
+        self.vram_mib = vram_mib if isinstance(vram_mib, int) and vram_mib > 0 else lease.vram_mib
+        # The holders L11 last tried a fit beside for, so a waiting round reads the card once per
+        # change of who holds it, not every poll.
+        self.fitted_for: Optional[Tuple[int, ...]] = None
         self.arrival = next(_sup._CARD_ARRIVAL)
         self.queued_at = time.time()
         self.for_a_peer = _sup.peer_being_served() is not None
@@ -712,6 +741,12 @@ def _blockers(waiter: _LeaseWaiter) -> List[Tuple[str, Any, Optional[str]]]:
             found.append(("draining", lease, "draining"))
         if not waiter.opens_a_use:
             return found
+        shared = lease._beside
+        if (shared is not None and shared._granted and shared._busy_for_the_card(shared.state)
+                and not _within_the_fitted_peak(waiter)):
+            # A grant made beside a busy holder (L11) was fitted for one peak; a use that declares a
+            # larger one (a longer length band) is fitted again before it is admitted (S3e).
+            found.append(("holder", shared, shared.state))
         found.extend(("waiter", other, None) for other in _LEASE_LINE
                      if other is not waiter and not other.granted and other.lease is not lease
                      and _goes_before(other, waiter))
@@ -912,6 +947,181 @@ def _holder_of(kind: str, what: Any) -> Tuple[str, str]:
     return what.alias, ""
 
 
+# --- L11: the one shared cell (S3e) ---------------------------------------------------------------
+
+
+def _card_vram() -> Tuple[Optional[int], Optional[int]]:
+    """(free, total) MiB through the agent map's reader (`commit_memory.read_vram_mib`), never the
+    per-process figures (ADR-052 L11, "The quantities"). Blocking."""
+    return _commit_memory.read_vram_mib()
+
+
+# What L11 reads the card with; `conftest.py` starts every test with no reading.
+_READ_THE_CARD: Callable[[], Tuple[Optional[int], Optional[int]]] = _card_vram
+
+
+def _the_card_changed() -> None:
+    """The card's holders changed: drop the cached free-VRAM reading (`total` stays). Never raises."""
+    try:
+        _commit_memory.forget_vram_reading()
+    except Exception:
+        logger.debug("card: the VRAM reading could not be dropped", exc_info=True)
+
+
+def _within_the_fitted_peak(waiter: "_LeaseWaiter") -> bool:
+    """A new use of a grant made beside a holder declares no more than the grant was fitted with."""
+    fitted, peak = waiter.lease._beside_peak, waiter.vram_mib
+    return fitted is not None and peak is not None and peak <= fitted
+
+
+def _declared_peak(holder: Any) -> Optional[int]:
+    """A resident's declared peak in MiB, or None: a lease's `vram_mib`, a supervisor child's
+    `predicted_vram_mib` (llama-server; a Strata child has none)."""
+    figure = holder.vram_mib if _a_lease(holder) else getattr(holder, "predicted_vram_mib", None)
+    return figure if isinstance(figure, int) and not isinstance(figure, bool) and figure > 0 else None
+
+
+def _resident_name(holder: Any) -> str:
+    return holder.display if _a_lease(holder) else f"{holder.ENGINE} '{holder.alias}'"
+
+
+def _reserve_of(supervisors: List[Any]) -> Tuple[int, str]:
+    """(MiB, source): each resident engine's own `vram_reserve()`, the largest, never a sum; with no
+    engine on the card the 2048 MiB desktop reserve. May read a Strata base config: blocking."""
+    found: List[Tuple[int, str]] = []
+    for sup in supervisors:
+        reader = getattr(sup, "vram_reserve", None)
+        try:
+            mib, source = reader() if callable(reader) else (_sup._DESKTOP_RESERVE_MIB, "no reserve of its own")
+        except Exception:
+            logger.debug("card: the reserve of %s could not be read", getattr(sup, "alias", sup), exc_info=True)
+            mib, source = _sup._DESKTOP_RESERVE_MIB, "its reserve could not be read"
+        found.append((int(mib), f"{source}, {sup.ENGINE} '{sup.alias}'"))
+    if not found:
+        return _sup._DESKTOP_RESERVE_MIB, (f"the {_sup._DESKTOP_RESERVE_MIB} MiB desktop reserve: no "
+                                           "local engine on the card")
+    return max(found)
+
+
+def l11_arithmetic(peak_mib: Optional[int], residents: List[Tuple[str, Optional[int], bool]], *,
+                   reserve_mib: int, free_mib: Optional[int], total_mib: Optional[int]) -> Dict[str, Any]:
+    """ADR-052 L11 in MiB. `residents`: every holder but the contender, as (name, peak, grows).
+    Declared check `need = peak + Σ peaks + reserve <= total`, then the live veto `free >= peak +
+    growth_left` (the whole peak of every growing resident, a lease; a supervisor allocates at its
+    start). Any unknown size or reading is `unknown`, never "fits"."""
+    out: Dict[str, Any] = {"peak": peak_mib, "reserve": reserve_mib, "total": total_mib,
+                           "free": free_mib, "need": None, "growth_left": None}
+    if peak_mib is None:
+        return {**out, "outcome": "unknown", "why": "the contender's own peak is unknown"}
+    unsized = [name for name, peak, _grows in residents if peak is None]
+    if unsized:
+        return {**out, "outcome": "unknown", "why": f"{', '.join(unsized)} has no declared peak"}
+    need = peak_mib + sum(peak for _name, peak, _grows in residents) + reserve_mib
+    growth_left = sum(peak for _name, peak, grows in residents if grows)
+    out.update(need=need, growth_left=growth_left)
+    if total_mib is None or free_mib is None:
+        return {**out, "outcome": "unknown", "why": "the card's VRAM cannot be read"}
+    if need > total_mib:
+        return {**out, "outcome": "does_not_fit",
+                "why": f"{need} MiB declared against the card's {total_mib} MiB"}
+    if free_mib < peak_mib + growth_left:
+        return {**out, "outcome": "does_not_fit",
+                "why": (f"{free_mib} MiB free, {peak_mib + growth_left} MiB needed now ({peak_mib} of its "
+                        f"own and {growth_left} the holders may still grow)")}
+    return {**out, "outcome": "fits",
+            "why": f"{need} of {total_mib} MiB declared, {free_mib} MiB free"}
+
+
+def _shared_holders(waiter: "_LeaseWaiter", blockers: List[Tuple[str, Any, Optional[str]]]) -> List[CardLease]:
+    """The busy lease holders `waiter` may be granted beside, or [] when anything else is in its way
+    (a supervisor first of all: Mike #68's exclusion comes before any arithmetic)."""
+    lease = waiter.lease
+    if lease.shares_with is None or not blockers:
+        return []
+    found: List[CardLease] = []
+    for kind, what, state in blockers:
+        if kind != "holder" or not _a_lease(what) or what is lease:
+            return []
+        if what._draining or not what._busy_for_the_card(state):
+            return []
+        try:
+            shares = bool(lease.shares_with(what))
+        except Exception:
+            logger.debug("card: %s could not say whether it shares with %s", lease.display, what.display,
+                         exc_info=True)
+            shares = False
+        if not shares:
+            return []
+        found.append(what)
+    return found
+
+
+def _fit_now(waiter: "_LeaseWaiter", reading: Dict[str, Any]) -> Dict[str, Any]:
+    """L11's arithmetic on the residents of this very stretch and a reading already made."""
+    rows = [(_resident_name(holder), _declared_peak(holder), _a_lease(holder))
+            for holder, _state in _sup._live_holders() if holder is not waiter.lease]
+    fit = l11_arithmetic(waiter.vram_mib, rows, reserve_mib=reading["reserve"],
+                         free_mib=reading["free"], total_mib=reading["total"])
+    fit["reserve_source"] = reading["reserve_source"]
+    return fit
+
+
+async def _read_for_the_fit(waiter: "_LeaseWaiter") -> Dict[str, Any]:
+    """The card's free and total VRAM and the reserve, read in a thread (point 4). A None reading is
+    dropped from the cache, so it is not served for 30 s (Mike #11, item 13)."""
+    supervisors = [holder for holder, _state in _sup._live_holders()
+                   if holder is not waiter.lease and not _a_lease(holder)]
+
+    def read() -> Tuple[Optional[int], Optional[int], Tuple[int, str]]:
+        free, total = _READ_THE_CARD()
+        return free, total, _reserve_of(supervisors)
+
+    try:
+        free, total, (reserve, source) = await asyncio.to_thread(read)
+    except Exception:
+        logger.debug("card: the card could not be read for L11", exc_info=True)
+        free, total = None, None
+        reserve, source = _sup._DESKTOP_RESERVE_MIB, "the card could not be read"
+    if free is None or total is None:
+        _the_card_changed()
+    return {"free": free, "total": total, "reserve": reserve, "reserve_source": source}
+
+
+def _holders_key(holders: List[CardLease]) -> Tuple[int, ...]:
+    return tuple(x for holder in holders for x in (id(holder), holder._grant_no))
+
+
+async def _try_beside(waiter: "_LeaseWaiter", blockers: List[Tuple[str, Any, Optional[str]]]
+                      ) -> List[Tuple[str, Any, Optional[str]]]:
+    """L11 at the grant: read the card, check again in the stretch of the grant (L1), grant beside the
+    busy holder on `fits`. Returns what is still in the way ([] once granted). One reading per change
+    of those holders, not per poll; any other outcome leaves the waiter where it was."""
+    holders = _shared_holders(waiter, blockers)
+    if not holders or _holders_key(holders) == waiter.fitted_for:
+        return blockers
+    waiter.fitted_for = _holders_key(holders)
+    reading = await _read_for_the_fit(waiter)
+    if waiter.granted or waiter.out is not None:
+        return []
+    blockers = _blockers(waiter)
+    now = _shared_holders(waiter, blockers)
+    if not now or _holders_key(now) != waiter.fitted_for:
+        return blockers
+    fit = _fit_now(waiter, reading)
+    lease, holder = waiter.lease, now[0]
+    if fit["outcome"] != "fits":
+        logger.info("card: L11 says %s for %s beside %s (%s)", fit["outcome"], lease.display,
+                    holder.display, fit["why"])
+        return blockers
+    _proceed(waiter)
+    lease._beside = holder
+    lease._beside_peak = max(lease._beside_peak or 0, waiter.vram_mib)
+    logger.info("card: %s loaded beside %s (fits: %d of %d MiB declared, %d MiB free; reserve %d MiB, %s)",
+                lease.display, holder.display, fit["need"], fit["total"], fit["free"], fit["reserve"],
+                fit["reserve_source"])
+    return []
+
+
 # --- acquire ----------------------------------------------------------------------------------------
 
 
@@ -960,22 +1170,33 @@ def _a_cpu_engine_is_busy() -> bool:
 
 
 @_sup.on_the_owner_loop
-async def route_view(lease: CardLease, *, expected_s: Optional[float] = None) -> Dict[str, Any]:
+async def route_view(lease: CardLease, *, expected_s: Optional[float] = None,
+                     vram_mib: Optional[int] = None) -> Dict[str, Any]:
     """What L12 reads before a transcription asks `lease` (ADR-052 L12, slice S3d), on the owner loop:
     the request's blockers as `_enter` would find them, with no place taken, no holder asked and
-    nothing logged. The peer mark and the card hold travel with the call (contextvars).
+    nothing logged. The peer mark and the card hold travel with the call (contextvars). The probe
+    draws a number on the card's clock, never a place: no waiter's order changes.
 
-    `free`: nothing in the way (L12 point 1). `wait_s`: the wait estimate (L10), None for long; a
+    `free`: nothing in the way (L12 point 1). `fit`: L11's answer (S3e) when everything in the way is
+    a busy holder the lease shares with, for this request's declared peak `vram_mib` (`fits` is L12
+    point 1's other half), else None. `wait_s`: the wait estimate (L10), None for long; a
     supervisor in the way that is not already going makes it None too (item 1a: an idle one would be
     swapped out at a cost no figure holds, its reload or Strata's parked conversations; a busy one
     has no ETA). `engine_stays` says so. `self_wait`: (alias, engine) of a holder the request itself
     stands on (section 3.5), else None. `cpu_busy`: L12 point 3. `behind`: who is in the way."""
-    probe = _LeaseWaiter(lease, "L12", None, True, expected_s)
+    probe = _LeaseWaiter(lease, "L12", None, True, expected_s, vram_mib=vram_mib)
     blockers = _blockers(probe)
     view: Dict[str, Any] = {"free": not blockers, "wait_s": None, "known": False, "behind": [],
-                            "engine_stays": False, "self_wait": None, "cpu_busy": _a_cpu_engine_is_busy()}
+                            "engine_stays": False, "self_wait": None, "cpu_busy": _a_cpu_engine_is_busy(),
+                            "fit": None}
     if not blockers:
         return view
+    if _shared_holders(probe, blockers):
+        view["fit"] = _fit_now(probe, await _read_for_the_fit(probe))
+        blockers = _blockers(probe)
+        if not blockers:
+            view["free"] = True
+            return view
     estimate = _estimate(probe, blockers)
     stays = any(kind == "holder" and not _a_lease(what) and not (what._draining or state == "stopping")
                 for kind, what, state in blockers)
@@ -1084,13 +1305,13 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
                  check: Optional[Callable[[], Awaitable[None]]] = None,
                  on_wait: Optional[Callable[[Dict[str, Any]], None]] = None,
                  expected_s: Optional[float] = None, opens_a_use: bool,
-                 ticket: Optional[_Ticket] = None) -> Optional[_Use]:
+                 ticket: Optional[_Ticket] = None, vram_mib: Optional[int] = None) -> Optional[_Use]:
     """The one way to the card for a lease, run on the owner loop. The check that nothing is in the
     way and the grant are one synchronous stretch (L1), here and in `_settle`."""
     if _CLOSED is not None:
         raise LeaseClosed(f"{lease.display}: the backend is stopping ({_CLOSED}); the card is not handed out",
                           wait=None)
-    waiter = _LeaseWaiter(lease, what, wait_s, opens_a_use, expected_s, ticket)
+    waiter = _LeaseWaiter(lease, what, wait_s, opens_a_use, expected_s, ticket, vram_mib)
     blockers = _blockers(waiter)
     if waiter.for_a_peer and waiter.expected_s is not None and waiter.expected_s > PEER_TRIP_S:
         # Mike #17 (L13, point 2), Ark #20-1: the 120 s rule holds at the grant too. Its own work alone
@@ -1119,6 +1340,18 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
     refusal = _refusal_for_a_self_wait(waiter, blockers)
     if refusal is not None:
         raise refusal
+    if _shared_holders(waiter, blockers):
+        # L11 (S3e): beside a busy holder it shares with, at once, when the fit proves it; a peer or a
+        # background call that does not fit meets the rules below as before.
+        blockers = await _try_beside(waiter, blockers)
+        if waiter.granted:
+            return waiter.use
+        if not blockers:
+            _proceed(waiter)
+            return waiter.use
+        refusal = _refusal_for_a_self_wait(waiter, blockers)
+        if refusal is not None:
+            raise refusal
     if background:
         kind, thing, state = blockers[0]
         who, why = _why_it_waits(waiter, kind, thing, state)
@@ -1160,6 +1393,14 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
             refusal = _refusal_for_a_self_wait(waiter, blockers)
             if refusal is not None:
                 raise refusal
+            if _shared_holders(waiter, blockers):
+                blockers = await _try_beside(waiter, blockers)
+                if waiter.granted:
+                    return waiter.use
+                if waiter.out is not None:
+                    raise waiter.out
+                if not blockers:
+                    continue
             now = _clock()
             if now >= waiter.give_up_at:
                 raise _refusal_at_the_deadline(waiter, blockers)

@@ -135,6 +135,17 @@ _vram_reading: Dict[str, Any] = {"at": None, "wall": None, "free": None, "total"
 _vram_reading_lock = threading.Lock()
 
 
+def forget_vram_reading() -> None:
+    """Drop the cached free-VRAM reading, so the next `read_vram_mib` probes again (ADR-052 L11,
+    "The cache, exactly"; Mike #11, item 13). Clears `at`, `wall` and `free`, never `total`: the
+    card's size is kept for the backend's life, and clearing it would cost every later read a second
+    nvidia-smi. Called by the card lease when the card changes (a grant, a load done, a release) and
+    by L11 after a reading that came back None, so neither a stale figure nor a failure is served
+    for the rest of the 30 s. Never sets a future `at`; never probes."""
+    with _vram_reading_lock:
+        _vram_reading.update(at=None, wall=None, free=None)
+
+
 def _reading_age(reading: Dict[str, Any], lock: threading.Lock, now: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
     with lock:
         at, wall = reading["at"], reading["wall"]

@@ -90,9 +90,16 @@ _LOADED_WEIGHTS: set = set()
 _LENGTH_MISMATCH_S = 1.0
 # ADR-052 L4: the margin a person's door keeps for the transcription itself, `max(10 s, estimate)`.
 MIN_MARGIN_S = 10.0
-# ADR-052 L11: what a loaded Whisper holds on the card beyond its weights, MiB (torch reserved peak at
-# batch 8 plus the CUDA context, less the weights; "GPU figures on speech"). A start value.
-_WHISPER_OVERHEAD_MIB = 2900
+# ADR-052 L11 (S3e): what a loaded Whisper holds on the card beyond its weights while it decodes, MiB,
+# by the call's length band: torch's reserved peak plus the CUDA context (485 MiB, the larger figure,
+# Strata resident) less the 1547 MiB of turbo fp16 weights, rounded up to 100. `gpu_run1.log`
+# (2026-11-22, empty card): <=60 s (batch 16) 1984-2618 reserved, the 2618 of ru_60 (two 30 s chunks
+# in one batch); <=120 s (batch 8) 3840-3948; >180 s (batch 2) 2660. The peak follows the chunks
+# decoded at once (1, 2 or 4), so <=180 s (batch 4, never measured) is **estimated** at the batch-8
+# figure, four chunks at once. Start values until Forge's live run measures each band beside strata.exe.
+_WHISPER_OVERHEAD_BY_BAND_MIB = {"<=60": 1600, "<=120": 2900, "<=180": 2900, ">180": 1600}
+# The worst band: the lease's own `vram_mib` (its row) and the figure for a call of unknown length.
+_WHISPER_OVERHEAD_MIB = max(_WHISPER_OVERHEAD_BY_BAND_MIB.values())
 # The words a Stop or a refusal adds about a Whisper holder (ADR-052 2.2 item 7).
 _STOP_HINT = "It lets go when idle; Stop unloads it now."
 
@@ -195,18 +202,23 @@ class RoutedToCpu(Exception):
         self.if_it_fails = if_it_fails
 
 
+class TwinDidNotLoad(RuntimeError):
+    """The CPU twin's load failed (its RAM check, a load error) before any audio was processed."""
+
+
 async def transcribe_with_route(provider: Any, audio_path: str, release_if_loaded_here: bool = False,
                                 **kwargs: Any) -> Dict[str, Any]:
     """The selector every door calls instead of `provider.transcribe` (ADR-052 3.1, L12): the call
     as asked, and when the GPU alias's L12 says CPU (`RoutedToCpu`), the CPU twin with the same
     `language`, `task`, length and `release_if_loaded_here`. The card's own arguments (`purpose`,
     `wait_s`, `expected_s`, `on_wait`) have no use there; `check` runs once before the twin starts, as
-    it would at a grant. No switch in mid-flight (Zcode #69): a twin's failure is the call's failure,
-    and a call sent to the line never comes back here."""
+    it would at a grant. No switch in mid-flight (Zcode #69), but a twin that did not load has not
+    flown (Johnny #63-5): that call goes to the card's line (`cpu_route=False`), or inside an agent's
+    own turn (3.5, `if_it_fails`) is refused at once. A failure while transcribing is the call's."""
+    # Passed only when set, as each door passed it before the selector.
+    released = {"release_if_loaded_here": True} if release_if_loaded_here else {}
     try:
-        # Passed only when set, as each door passed it before the selector.
-        return await provider.transcribe(
-            audio_path, **({"release_if_loaded_here": True} if release_if_loaded_here else {}), **kwargs)
+        return await provider.transcribe(audio_path, **released, **kwargs)
     except RoutedToCpu as routed:
         twin = routed.twin
         check = kwargs.get("check")
@@ -219,10 +231,15 @@ async def transcribe_with_route(provider: Any, audio_path: str, release_if_loade
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if routed.if_it_fails is None:
+            if routed.if_it_fails is not None:
+                raise routed.if_it_fails(str(exc) or type(exc).__name__) from exc
+            if not isinstance(exc, TwinDidNotLoad):
                 raise
-            raise routed.if_it_fails(str(exc) or type(exc).__name__) from exc
-        return {**(result or {}), "device": "cpu"}
+            logger.info("Whisper '%s': the CPU twin did not load (%s); %s goes to the line for the card",
+                        getattr(provider, "alias", provider), exc, kwargs.get("purpose") or "the call")
+        else:
+            return {**(result or {}), "device": "cpu"}
+    return await provider.transcribe(audio_path, **released, **kwargs, cpu_route=False)
 
 
 def _a_positive(value: Any) -> Optional[float]:
@@ -354,14 +371,26 @@ def card_wait_words(estimate: Optional[Dict[str, Any]]) -> str:
     return f"transcription queued behind {behind}, {when}"
 
 
-def whisper_vram_mib(model_name: str) -> Optional[int]:
+def whisper_vram_mib(model_name: str, audio_s: Any = None) -> Optional[int]:
     """The declared peak of a loaded Whisper model in MiB (ADR-052 3.1 and L11): the weights from
-    the measured size table plus `_WHISPER_OVERHEAD_MIB`, else None (unknown, never 0). Never asks
-    the network (`model_sizes.measured_size_bytes`)."""
+    the measured size table plus the overhead of the call's length band (`length_band`, the batch
+    descent's), the worst band's `_WHISPER_OVERHEAD_MIB` when the length is unknown, as for the
+    lease's own row; else None (unknown, never 0). Never asks the network
+    (`model_sizes.measured_size_bytes`). A CPU device holds no lease and has no such figure."""
     from .model_sizes import measured_size_bytes
 
     size = measured_size_bytes(model_name)
-    return None if not size else size // 2**20 + _WHISPER_OVERHEAD_MIB
+    if not size:
+        return None
+    band = length_band(audio_s)
+    return size // 2**20 + (_WHISPER_OVERHEAD_MIB if band is None else _WHISPER_OVERHEAD_BY_BAND_MIB[band])
+
+
+def _shares_with_music(holder: Any) -> bool:
+    """L11's one cell (decision 6): a Whisper lease may be granted beside a busy music lease, never
+    beside another Whisper, an embedder or a supervisor (Mike #68)."""
+    return getattr(holder, "kind", None) == "music"
+
 
 _idle_unload_source: Optional[Callable[[], float]] = None
 
@@ -884,7 +913,7 @@ class LocalWhisperProvider(AIProvider):
             display=f"Whisper ({self.model_name.rsplit('/', 1)[-1]})",
             vram_mib=whisper_vram_mib(self.model_name), yield_cost="cheap",
             on_yield=self._yield_for_the_card, waits_for_engines=True,
-            eta_s=self._card_eta, stop_hint=_STOP_HINT,
+            shares_with=_shares_with_music, eta_s=self._card_eta, stop_hint=_STOP_HINT,
         )
         return self._card_lease
 
@@ -954,7 +983,7 @@ class LocalWhisperProvider(AIProvider):
                    decision["why"])
 
     async def _choose_route(self, lease: Any, what: str, expected_s: Optional[float],
-                            audio_s: Optional[float]) -> Optional[RoutedToCpu]:
+                            audio_s: Optional[float], vram_mib: Optional[int] = None) -> Optional[RoutedToCpu]:
         """ADR-052 L12 at the seam before the lease is asked (item 1a): `RoutedToCpu` for the CPU
         twin, None for the card (the GPU at once, or the line). Raises `LeaseWouldWaitOnItself` for an
         agent's tool inside its own turn on a local alias the twin cannot take (section 3.5). Nothing
@@ -962,17 +991,24 @@ class LocalWhisperProvider(AIProvider):
         from ..managers.card_lease import PEER_TRIP_S, LeaseWouldWaitOnItself, route_view
         from ..managers.llama_server_supervisor import peer_being_served
 
-        view = await route_view(lease, expected_s=expected_s)
+        view = await route_view(lease, expected_s=expected_s, vram_mib=vram_mib)
         length = _a_positive(audio_s)
+        fit = view.get("fit")
         decision: Dict[str, Any] = {"what": what, "free": view["free"], "audio_s": length,
-                                    "behind": view["behind"]}
+                                    "behind": view["behind"], "vram_mib": vram_mib,
+                                    "l11": None if fit is None else fit["outcome"]}
 
         def to(route: str, why: str) -> None:
+            if fit is not None and fit["outcome"] != "fits":
+                why = f"{why} (L11 {fit['outcome']}: {fit['why']})"
             decision.update(route=route, why=why)
             self._note_route(decision)
 
-        if view["free"]:  # L12 point 1 (L11's `fits` is S3e's)
+        if view["free"]:  # L12 point 1
             to("gpu", "the card is free")
+            return None
+        if fit is not None and fit["outcome"] == "fits":  # L12 point 1, L11's one shared cell (S3e)
+            to("gpu", f"L11 fits it beside {', '.join(view['behind'])}: {fit['why']}")
             return None
         settings = cpu_route_settings()
         cap = settings["cpu_max_audio_s"]
@@ -1767,7 +1803,7 @@ class LocalWhisperProvider(AIProvider):
                          expected_s: Optional[float] = None,
                          on_wait: Optional[Callable[[Dict[str, Any]], None]] = None,
                          check: Optional[Callable[[], Awaitable[None]]] = None,
-                         audio_s: Optional[float] = None) -> Dict[str, Any]:
+                         audio_s: Optional[float] = None, cpu_route: bool = True) -> Dict[str, Any]:
         """Transcribe `audio_path`. With `release_if_loaded_here`, a model this very call
         had to load is unloaded as the call ends, unless another transcription is using
         it (the decision is made under the load lock, so it cannot race).
@@ -1786,7 +1822,10 @@ class LocalWhisperProvider(AIProvider):
         `audio_s` is the length the door's estimate was made from (`card_ask`); when given, the
         batch descent reads it rather than the decoded samples' (Johnny #30-6), so the call runs the
         batch its estimate assumed. The recorded run reads the decoded length, the one its elapsed
-        time was measured on (S3 follow-up 6, Ark #49-3)."""
+        time was measured on (S3 follow-up 6, Ark #49-3).
+
+        `cpu_route=False` skips L12 and asks the card: `transcribe_with_route` passes it after the CPU
+        twin failed to load before any audio was processed (Johnny #63-5, S3e)."""
         # A stale reference to a replaced object forwards to the object that replaced it,
         # so a use is counted and ended on one object.
         current = self._current_owner()
@@ -1794,26 +1833,30 @@ class LocalWhisperProvider(AIProvider):
             return await current.transcribe(audio_path, release_if_loaded_here,
                                             language=language, task=task, purpose=purpose,
                                             wait_s=wait_s, expected_s=expected_s,
-                                            on_wait=on_wait, check=check, audio_s=audio_s)
+                                            on_wait=on_wait, check=check, audio_s=audio_s,
+                                            cpu_route=cpu_route)
         self._refuse_if_retired()
         device, lease = await self._route_for_the_card()
         if lease is None:
             return await self._transcribe_holding(audio_path, release_if_loaded_here, language, task, None,
                                                   audio_s=audio_s)
         what = purpose or "transcription"
+        # L11 (S3e): this call's declared peak, by its length band (the worst band when unknown).
+        peak = whisper_vram_mib(self.model_name, audio_s)
         # ADR-052 L12, item 1a (S3d): the GPU/CPU choice, before the lease is asked. A call sent to
         # the CPU twin asks no lease and swaps nothing out; the caller's `transcribe_with_route` runs
         # it there. A call sent to the line stays there (no switch in mid-flight).
-        routed = await self._choose_route(lease, what, expected_s, audio_s)
-        if routed is not None:
-            raise routed
+        if cpu_route:
+            routed = await self._choose_route(lease, what, expected_s, audio_s, peak)
+            if routed is not None:
+                raise routed
         logger.debug("Whisper '%s': %s asks for the card, bound %s, expected %s", self.alias, what,
                      "none" if wait_s is None else f"{wait_s:g} s",
                      "unknown" if expected_s is None else f"{expected_s:.1f} s")
         token = object()
         try:
             async with lease.use(what, wait_s=wait_s, expected_s=expected_s, on_wait=on_wait,
-                                 check=check):
+                                 check=check, vram_mib=peak):
                 if check is not None:
                     await check()
                 runs = self._current_owner()._card_runs
@@ -1841,6 +1884,8 @@ class LocalWhisperProvider(AIProvider):
             if loaded_here:
                 _, error, cancelled = await self._load_under_the_lease(lease, device)
                 if error is not None:
+                    if self.is_cpu_twin and not isinstance(error, ModelNotCachedError):
+                        raise TwinDidNotLoad(str(error) or type(error).__name__) from error
                     raise error
                 if cancelled:
                     self._settle_finished_load()

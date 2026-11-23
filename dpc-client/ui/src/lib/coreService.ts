@@ -155,6 +155,9 @@ import type { MusicExportInfo, PlaylistExportAnswer, TrackExportAnswer } from '.
 // (`[local_transcription] queue_wait_s`, 600 s by default) and then transcribe; the margin is
 // the transcription's own allowance (the former 240 s timeout). A shorter timeout would cut a
 // wait the backend still runs. A `queue_wait_s` raised above 600 in config.ini is not seen here.
+// The carrier of 600 is the backend's seed table (settings.py `queue_wait_s`); this literal is a
+// third copy of it, beside the agent tool's `_DEFAULT_QUEUE_WAIT_S`, pinned equal by
+// transcribeTimeout.test.ts and test_a_queued_transcription_outlives_no_caller.py.
 const TRANSCRIBE_QUEUE_WAIT_MS = 600_000;
 const TRANSCRIBE_WORK_MARGIN_MS = 240_000;
 

@@ -2466,6 +2466,12 @@ class LlamaServerSupervisor:
     # its own engine's included. Two llama-server aliases are left to the
     # admission arithmetic, as before the check existed.
     EXCLUSIVE_ON_THE_CARD = False
+    # The declared peak of the running child in MiB, the figure its own start admitted it with
+    # (`_predicted_total_mib` for the KV type it runs), set at launch and read by ADR-052 L11's fit as
+    # a resident's peak; None before a start, for a child the admission could not size, and for Strata.
+    predicted_vram_mib: Optional[int] = None
+    # The last `_admission()` this supervisor computed, which the launch that follows records from.
+    _last_admission: Optional[Tuple[int, int, int]] = None
     # The process registry's launcher word for this engine (ADR-046 point 3).
     PROCESS_LAUNCHER = "llamacpp_server"
     # A stop DPC asks for outside its own shutdown, outside a failed start and outside a
@@ -3820,6 +3826,7 @@ class LlamaServerSupervisor:
         listening for the child's own failures. Physical VRAM minus the desktop
         reserve is the budget: free memory moves with the desktop and predicts
         nothing about what the load will do to it."""
+        self._last_admission = None
         total = _total_vram_mib()
         if total is None:
             return None
@@ -3827,7 +3834,21 @@ class LlamaServerSupervisor:
         weights = _gguf_mib(self.config["gguf_path"])
         if dims is None or not weights:
             return None
-        return total - _DESKTOP_RESERVE_MIB, weights, dims
+        self._last_admission = (total - _DESKTOP_RESERVE_MIB, weights, dims)
+        return self._last_admission
+
+    def _predicted_vram_at_launch(self, cache_type: Optional[str]) -> Optional[int]:
+        """The child's declared peak (ADR-052 L11, S3e): what its start's admission predicted for the
+        KV type it is given (`cache_type`, else the configured `cache_type_k`), None when the start
+        could not size it. One figure, no measurement (per-process VRAM reads `[N/A]` under WDDM)."""
+        admission = self._last_admission
+        kind = cache_type or self.config.get("cache_type_k")
+        if admission is None or not kind:
+            return None
+        try:
+            return self._predicted_total_mib(admission, str(kind))
+        except (KeyError, TypeError, ValueError):
+            return None
 
     def _predicted_total_mib(self, admission: Tuple[int, int, int], cache_type: str) -> int:
         _, weights, (layers, width) = admission
@@ -4005,6 +4026,7 @@ class LlamaServerSupervisor:
         # Again per rung: a failed rung's stop released the card, and another
         # engine may have taken it since.
         self._claim_card()
+        self.predicted_vram_mib = None
         self._kv_engine_fresh = False
         self._kv_cache_types = {
             key: str(value) for key in ("cache_type_k", "cache_type_v")
@@ -4038,6 +4060,7 @@ class LlamaServerSupervisor:
             self._answered_by(proc, "/props")
             self._check_build_info(props)
             self.props = props
+            self.predicted_vram_mib = self._predicted_vram_at_launch(cache_type)
             self._kv_engine_fresh = True  # served nothing yet: a restore may go in
             self._kv_launched_mono = time.monotonic()
             self._kv_restored_after_sent = None  # a new process holds nothing a restore left

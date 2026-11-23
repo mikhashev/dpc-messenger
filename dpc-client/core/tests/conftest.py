@@ -235,6 +235,16 @@ def _the_hosts_ram_is_unknown_unless_a_test_says(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _the_cards_vram_is_unknown_unless_a_test_says(monkeypatch):
+    """ADR-052 L11 (S3e): the one shared cell reads the card's free and total VRAM, and no reading is
+    `unknown`, never "fits". This machine's real card would decide a test's fit (and spawn nvidia-smi),
+    so each test starts with no reading, as a CI runner has none; a fit test says what the card reads."""
+    from dpc_client_core.managers import card_lease
+
+    monkeypatch.setattr(card_lease, "_READ_THE_CARD", lambda: (None, None))
+
+
+@pytest.fixture(autouse=True)
 def _engine_pins_in_tmp(tmp_path, monkeypatch):
     """A passed start writes its pin's marker and may prune the older pins (B2 step 3).
     The pins folders default to this machine's ~/.dpc/bin, so every test gets its own

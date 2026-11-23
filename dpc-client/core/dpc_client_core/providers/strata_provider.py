@@ -432,10 +432,14 @@ class StrataProvider(LlamaServerProvider):
         def card_refusal() -> Optional[str]:
             nonlocal swaps_the_holder
             swaps_the_holder = False
-            held = sup._card_held_error()
+            # Asked as the peer's: the P2P door calls this gate before it marks the call
+            # (`_local_engine_refusal` runs outside `serving_a_peer`), and unmarked
+            # `_card_held_error` names a card lease in the owner's words (ADR-052 L3, L13; S3e).
+            with _base.serving_a_peer(peer_id or "peer"):
+                held = sup._card_held_error()
+                why = sup._why_a_peer_may_not_swap() if held is not None else None
             if held is None:
                 return None
-            why = sup._why_a_peer_may_not_swap()
             if why is None and not isinstance(held, _base.CardQueueRefusal):
                 swaps_the_holder = True
                 return None
