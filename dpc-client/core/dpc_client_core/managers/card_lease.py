@@ -1058,11 +1058,15 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
         ))
     if waiter.for_a_peer and waiter.expected_s is None:
         # Mike #17 (L13, point 2), Johnny #30-4: a trip whose own work is unknown cannot be shown to fit
-        # the guest's 120 s, so it is refused at the grant too, free card or not, in the same class and
-        # words as behind a blocked card (L10: an unknown part leaves the trip unknown).
+        # the guest's 120 s, so it is refused at the grant too, free card or not, in the same class
+        # (L10: an unknown part leaves the trip unknown). The words name the cause, the audio's length
+        # (Ark #44-1): the card may be free, and when it is blocked the unknown length is still what
+        # makes the refusal certain (a known length could have waited its turn), so one text serves
+        # both. The blocked-card branch below is only reached with a known length.
         estimate = _estimate(waiter, blockers)
         raise _refuse(waiter, LeaseRefusedForPeer(
-            f"this node's GPU is busy with another job right now, {_peer_wait_words(estimate['wait_s'])}",
+            "this node cannot tell how long this audio is, so it cannot promise to finish it within "
+            "the time the request is given",
             wait=estimate,
         ))
     if not blockers:

@@ -60,9 +60,10 @@ async def _refused_at_once(lease, wait_s, expected_s=1):
     return refused.value
 
 
-def _names_nothing(refusal):
+def _names_nothing(refusal, *, about_the_length=False):
     text = str(refusal)
-    assert "right now" in text
+    # An unknown length is a property of the request, not of the moment (S3 follow-up 5, Ark #44-1).
+    assert ("how long this audio is" if about_the_length else "right now") in text
     for name in NAMES:
         assert name not in text, f"a peer was told {name!r}: {text}"
     assert refusal.holder_alias == "" and refusal.holder_engine == ""
@@ -240,7 +241,7 @@ class TestAnEstimateOverItOrUnknownIsRefusedAtOnce:
 
         refusal = await _refused_at_once(p.lease, 60, expected_s=None)
 
-        _names_nothing(refusal)
+        _names_nothing(refusal, about_the_length=True)
         assert refusal.wait["known"] is True and refusal.wait["wait_s"] == 5
         release.set()
         await asyncio.wait_for(dictation, BOUND)

@@ -2970,6 +2970,13 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   - **Lines only.** The up-to-180 s figure is "estimated from the batch-2 figure; batch 4 was never measured" (Johnny #41-1), in the code's comment and under "GPU figures on speech". `_CHEAP_YIELD_S` = 1.0 s is a lower bound (Ark #40-2; see "S3, Johnny obj. 2"). **One length by value** (Johnny #30-6) was resolved in `43503073` by carrying the estimate's length into the call (`card_ask`'s `audio_s`, read by the batch descent and `_record_run`). Forge #42-5 preferred the decoded samples' length; it is not taken because the samples exist only after a full decode (`librosa.load`), which runs inside the call after the card is granted, while the estimate is needed before the card is asked (the bound, a peer's 120 s, the wait estimate of later waiters); deciding by samples would mean a full decode on the door's side of every call, before the lease. The samples' length is still the returned `duration` and the segments' end.
   - **Not done here:** `vram_mib` per band (S3e), the reserves, the agent tool's 600/1790 s cap, protocol changes.
 
+- **S3 follow-up 5 (CC, 2026-11-23, branch `feat/card-lease-s3-s4`, on `3f10138c`): group-chat review #44 Ark.** For review.
+  - **A peer refused for an unknown length is told so** (Ark #44-1). `_enter` refused a peer whose `expected_s` is None with "this node's GPU is busy with another job right now, and how long is not known", also on a free card, where the card is not busy. It now says "this node cannot tell how long this audio is, so it cannot promise to finish it within the time the request is given" (same class, `LeaseRefusedForPeer`). **Blocked card with an unknown length uses the new text too:** the length is what is unknown, and it is what makes the refusal certain (a known length could have waited its turn); the unknown-length check runs before the blockers are read, so the blocked-card branch is only reached with a known length and keeps its own words ("busy ... for about N min", or "and how long is not known" when the wait, not the length, is unknown).
+  - **`ask["audio_s"]` follows the length, not the estimator** (Ark #44-2). `card_ask` carries `audio_s` whenever the length is known (probe or declared), also for a provider without `expected_seconds`. Consumers read it: `transcribe(audio_s=...)` (the only `transcribe` in the package is the Whisper provider's; every door passes `**ask` to it), `_card_runs`, the batch descent and `_record_run`; all already treat it as optional and positive, so a provider with no figures only gains the one length.
+  - **Module-scoped fixtures and the Settings guard** (Ark #44-3). Read: every `scope="module"`/`"session"` fixture in `tests/` (17 files). None builds `Settings`, `CoreService()`, `KnowledgeGraph`, nor reaches `dpc_agent/utils.py:644` or `webrtc_peer.py:48`: they are a signing key, local HTTP servers, Chromium contexts (`AuthBrowser(agent_id=...)` does not read Settings), `git archive` snapshots into `tmp_path_factory`, a gaia module load and ids. The function-scoped guard `_settings_never_open_the_real_home` is enough today; a new module fixture that builds one would escape it, and that is the thing to grep for.
+  - **Notes.** (a) The batch descent (and later `vram_mib` by band) uses the probe or declared length. `declared_s` precision is not checked by a decode; Forge measured probe against samples at about 0.1% on synthetic opus. (b) On a node without ffprobe the peer path for WebM is fully dead: soundfile does not read WebM, the length is unknown and the peer is refused even on a free card. The fix is a length field in the peer transcription protocol (`handle_transcription_request` has none); the guest sends only base64 audio, so the host-side voice metadata (`declared_s`) is not available at the peer door. (c) Item 7's acceptance is a live check of `~/.dpc/config.ini` in Forge's run: the guard hides the real file from the suite, so no test can see it.
+  - **Not done here:** `_route_device` caching from the predicate (S3d), `vram_mib` (S3e).
+
 ## Review history
 
 - **#41, Zcode** (architecture accepted; 11 of 14 load-bearing claims true, 3 corrected).
@@ -3126,6 +3133,11 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   figures, the fresh process's and the reload. Ark #40-3: the dead `_get_audio_duration` removed.
   Johnny #41-1, Ark #40-2: lines corrected. Forge #42-5: one length by value stays the
   estimate's, with the reason. See Review notes, "S3 follow-up 4".
+- **#44 Ark (group-chat review of the S3 branch), S3 follow-up 5.** Ark #44-1: a peer refused for an
+  unknown length is told the length is unknown, free card or blocked. #44-2: `audio_s` in the ask
+  follows the length, not the estimator. #44-3: module-scoped fixtures checked against the Settings
+  guard, none builds one. Written down: declared length precision, the WebM peer path without
+  ffprobe and the protocol field it needs, item 7's live acceptance. See Review notes, "S3 follow-up 5".
 
 ## Authors
 

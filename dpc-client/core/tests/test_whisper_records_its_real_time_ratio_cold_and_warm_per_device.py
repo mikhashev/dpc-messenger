@@ -231,7 +231,7 @@ class TestTheDoorsAsk:
 
     def test_a_provider_without_figures_gives_an_unknown_estimate(self):
         ask = card_ask(object(), "peer node-1", "x.wav", audio_s=30)
-        assert ask == {"purpose": "peer node-1", "wait_s": None, "expected_s": None}
+        assert ask == {"purpose": "peer node-1", "wait_s": None, "expected_s": None, "audio_s": 30.0}
 
     def test_an_unreadable_file_has_an_unknown_length(self, tmp_path):
         broken = tmp_path / "not-audio.webm"

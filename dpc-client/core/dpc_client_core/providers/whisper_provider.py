@@ -138,8 +138,8 @@ def card_ask(provider: Any, purpose: str, audio_path: str, *, bound_s: Optional[
     `declared_s`, the recorder's own `duration_seconds` (ADR-052 L10: "ffprobe's, else the
     recorder's declared one"; Johnny #24-3). The probe wins; the declared length is the fallback.
 
-    One length by value (Johnny #30-6): when the estimate was made from a known length, the ask
-    carries it as `audio_s`, and the call's batch descent and its recorded run read that same number
+    One length by value (Johnny #30-6): when the length is known (probe or declared), the ask
+    carries it as `audio_s`, whether or not the provider keeps an estimator (Ark #44-2), and the call's batch descent and its recorded run read that same number
     instead of the decoded samples' (which may differ by a fraction of a second across a band
     boundary), so the band the estimate read is the band the call runs and records in."""
     if audio_s is None:
@@ -154,7 +154,7 @@ def card_ask(provider: Any, purpose: str, audio_path: str, *, bound_s: Optional[
         left = max(0.0, float(caller_left_s) - margin)
         wait_s = left if wait_s is None else min(wait_s, left)
     ask: Dict[str, Any] = {"purpose": purpose, "wait_s": wait_s, "expected_s": expected_s}
-    if callable(estimate) and _a_positive(audio_s) is not None:
+    if _a_positive(audio_s) is not None:
         ask["audio_s"] = float(audio_s)
     return ask
 

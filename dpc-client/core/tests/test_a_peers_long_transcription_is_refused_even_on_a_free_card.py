@@ -58,11 +58,13 @@ async def test_the_limit_itself_fits_and_a_second_over_does_not():
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_own_time_is_refused_on_a_free_card_in_the_blocked_cards_words():
+async def test_an_unknown_own_time_is_refused_on_a_free_card_in_words_that_name_the_length():
     p = whisper("small")
     with pytest.raises(LeaseRefusedForPeer) as refused:
         await _peer_acquire(p.lease, None)
-    assert str(refused.value) == "this node's GPU is busy with another job right now, and how long is not known"
+    assert str(refused.value) == ("this node cannot tell how long this audio is, so it cannot promise to finish it "
+                                  "within the time the request is given")
+    assert "busy" not in str(refused.value), "the card is free, so it is not called busy"
     assert holding() == [], "nothing was granted"
     await nothing_left()
 
