@@ -40,7 +40,7 @@ from tests.test_the_strata_install_is_fetched_by_its_pin_and_its_engine_is_check
 ALIAS = "flash next"
 NAME = "strata"
 PLAT = "windows-x86_64"
-EXACT = 490_092_153  # the cuda13 package of v0.2.19 on Windows: what the updater would report
+EXACT = 494_695_625  # the cuda13 package of v0.2.20 on Windows: what the updater would report
 LABEL = f"engine {sf.STRATA_ENGINE_VERSION} {PLAT}-cuda-cuda13"
 
 
@@ -145,7 +145,7 @@ def test_the_size_is_control_plus_the_largest_engine_of_the_platform():
         assert sf.ENGINE_SIZE_MAX[plat] > 0 and sf.ENGINE_INSTALLED_BYTES_MAX[plat] > sf.ENGINE_SIZE_MAX[plat]
         assert row["installed_bytes"] > row["size"]
     # The largest Windows package (cuda12), not the one this card would get (cuda13).
-    assert sf.ENGINE_SIZE_MAX[PLAT] == 743_821_368 > EXACT
+    assert sf.ENGINE_SIZE_MAX[PLAT] == 754_388_005 > EXACT
     assert sf.SIZE_SOURCE == "package_max"
 
 
@@ -433,7 +433,7 @@ def test_run_supervised_hands_each_stdout_line_over_while_the_child_runs(tmp_pat
 
 # --- the sizes are the feed rows' maxima and minima --------------------------
 
-_ROWS = json.loads((Path(__file__).parent / "fixtures" / "strata_v0.2.19_feed_packages.json").read_text(encoding="utf-8"))
+_ROWS = json.loads((Path(__file__).parent / "fixtures" / "strata_v0.2.20_feed_packages.json").read_text(encoding="utf-8"))
 
 
 def test_the_pinned_sizes_are_the_extremes_of_the_feed_rows_of_the_pinned_release():

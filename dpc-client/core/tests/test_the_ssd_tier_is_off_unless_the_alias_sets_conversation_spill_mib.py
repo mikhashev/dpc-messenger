@@ -4,10 +4,10 @@ Mike's call, 2026-11-23: opt-in. Since Strata v0.2.16 the engine spills the park
 RAM tier evicts to an SSD tier, on by default, in a folder beside the packs. DPC writes the tier itself:
 `conversation_spill_mib` 0 or absent = `--conversation-spill-mib 0`; N > 0 = inside the alias's
 `slot_save_path` (the KV snapshots folder), capped at N MiB; no folder or its disk missing = off.
-The engine log is the only place a spill shows (the launcher's /metrics has no spill field at v0.2.19),
+The engine log is the only place a spill shows (the launcher's /metrics has no spill field at v0.2.20),
 so the scanner reads it: an eviction that went to disk is not a loss and does not take a peer's guest entry.
 
-The log lines are the engine's own format strings (generate.cpp, v0.2.19). No engine runs.
+The log lines are the engine's own format strings (generate.cpp, v0.2.20). No engine runs.
 """
 
 import json
@@ -469,11 +469,11 @@ class TestOurSweepLeavesStratasFolderAlone:
         files = self._spill_tree(tmp_path)
         _, final = kv.new_snapshot_names(tmp_path)
         (tmp_path / final).write_bytes(b"k" * 16)
-        entry = kv.new_entry(file=final, alias="flash", engine="strata", identity={"engine_version": "0.1.65"},
+        entry = kv.new_entry(file=final, alias="flash", engine="strata", identity={"engine_version": "0.1.66"},
                              record={}, n_saved=10, nbytes=16, save_ms=1, now=time.time(), ttl_s=3600)
         assert kv.add_entry(tmp_path, entry, cap_bytes=1000)
         # a cap the index's one entry fits and the subfolder's 192 bytes would not
-        out = kv.sweep(tmp_path, alias="flash", now=time.time(), expected={"engine_version": "0.1.65"},
+        out = kv.sweep(tmp_path, alias="flash", now=time.time(), expected={"engine_version": "0.1.66"},
                        cap_bytes=100)
         assert out == []
         assert all(f.exists() for f in files) and (tmp_path / final).exists()
@@ -500,7 +500,7 @@ class TestTheLaunchSaysIt:
     async def test_a_real_launch_reads_the_engines_start_line_before_any_call(self, tmp_path, home, monkeypatch, caplog):
         from tests.test_strata_supervisor import _started_through_the_real_launch
         sup = _sup(_install(tmp_path), slot_save_path=str(tmp_path / "kv"), conversation_spill_mib=4096)
-        spawned = _started_through_the_real_launch(sup, monkeypatch, metrics={"engine": {"version": "0.1.65"}})
+        spawned = _started_through_the_real_launch(sup, monkeypatch, metrics={"engine": {"version": "0.1.66"}})
         real_spawn = sup._spawn
 
         async def spawn_and_print(cmd, env):

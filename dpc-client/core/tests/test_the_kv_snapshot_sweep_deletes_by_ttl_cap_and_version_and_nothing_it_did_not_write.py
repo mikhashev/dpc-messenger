@@ -17,7 +17,7 @@ from dpc_client_core.managers import kv_snapshots as kv
 
 NOW = 2_000_000.0
 REAL_NOW = time.time()
-IDENTITY = {"engine_version": "0.1.65", "model": "flash-next", "drafter": "mtp"}
+IDENTITY = {"engine_version": "0.1.66", "model": "flash-next", "drafter": "mtp"}
 
 
 @pytest.fixture(autouse=True)

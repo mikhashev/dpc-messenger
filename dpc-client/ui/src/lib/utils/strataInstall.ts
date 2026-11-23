@@ -31,7 +31,7 @@ export interface StrataModelFamily {
 export const STRATA_ESTIMATE_LABEL = "Strata's estimate";
 
 /**
- * Strata's `on_this_pc` has two values (strata_control/fit_label.py, v0.2.19): "fits", and this
+ * Strata's `on_this_pc` has two values (strata_control/fit_label.py, v0.2.20): "fits", and this
  * one: the model's files, less the lookup table, are bigger than RAM plus the card's memory
  * together. Closing programs cannot make such a size fit, which is what `neverFits` says.
  */

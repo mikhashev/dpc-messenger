@@ -1,0 +1,190 @@
+{
+ "release_tag": "v0.2.20",
+ "source": "control.packages and engine.packages of the signed strata-feed.json and strata-feed-linux-aarch64.json of this release (sequence 132 for the first, 128 for the second), fields copied as listed: every engine row of both files, all version 0.1.66. Not included: the dsv41 member (DeepSeek-V4.1 engine packages, a separate download Strata's setup fetches when DeepSeek is chosen), and the shape_engines and drafters members (the model families' own packages: another card).",
+ "control": [
+  {
+   "platform": "linux-aarch64",
+   "url": "strata-control-0.1.66-linux-aarch64.tar.gz",
+   "sha256": "4d53d7cf560373b277762f15b0119ce53eeec08fcf628fce0c2a8ffc6aa23ff4",
+   "size": 78576646,
+   "installed_bytes": 263686234
+  },
+  {
+   "platform": "linux-x86_64",
+   "url": "strata-control-0.1.66-linux-x86_64.tar.gz",
+   "sha256": "5bd662d293ab4dc8b71156daafbb42995bddbb765dbeac48c5fd74165dfb2d0d",
+   "size": 94663788,
+   "installed_bytes": 325764544
+  },
+  {
+   "platform": "macos-arm64",
+   "url": "strata-control-0.1.66-macos-arm64.tar.gz",
+   "sha256": "ca350cd719e9d3ab14317273b55107342abaa8dcac451380b35e4b7bd5f9a047",
+   "size": 45823532,
+   "installed_bytes": 140150531
+  },
+  {
+   "platform": "windows-x86_64",
+   "url": "strata-control-0.1.66-windows-x86_64.zip",
+   "sha256": "2130761067a1c83a6066027866d1dde087402a820859e4008b113a3e5f758122",
+   "size": 67853572,
+   "installed_bytes": 219999453
+  }
+ ],
+ "engine": [
+  {
+   "platform": "linux-aarch64",
+   "backend": "cuda",
+   "variant": "cuda13",
+   "version": "0.1.66",
+   "build_id": "release-0.1.66-cuda13-13.0-aarch64-2e87c08db18a",
+   "url": "strata-engine-0.1.66-linux-aarch64-cuda-cuda13.tar.gz",
+   "sha256": "de6fdacfa1d7daf1c86c64add0d8e82844783919af39fc172d6b5134816be1be",
+   "size": 584529893,
+   "installed_bytes": 761928578
+  },
+  {
+   "platform": "linux-x86_64",
+   "backend": "cuda",
+   "variant": "cuda12",
+   "version": "0.1.66",
+   "build_id": "2e87c08db18a+cuda12.9",
+   "url": "strata-engine-0.1.66-linux-x86_64-cuda-cuda12.tar.gz",
+   "sha256": "74980aebedc70fb2cfcd96b3c15874cb3e7e517700ecdf8ed811247a9a577f30",
+   "size": 782739940,
+   "installed_bytes": 1252269356
+  },
+  {
+   "platform": "linux-x86_64",
+   "backend": "cuda",
+   "variant": "cuda13",
+   "version": "0.1.66",
+   "build_id": "2e87c08db18a+cuda13.0",
+   "url": "strata-engine-0.1.66-linux-x86_64-cuda-cuda13.tar.gz",
+   "sha256": "13c5bebeaf24574b02307857bce6abfd3f861f3682ca98dbe36c1c461fd5e059",
+   "size": 591563326,
+   "installed_bytes": 914888585
+  },
+  {
+   "platform": "linux-x86_64",
+   "backend": "hip",
+   "variant": "halo",
+   "version": "0.1.66",
+   "build_id": "0435d6950434+rocm",
+   "url": "strata-engine-0.1.66-linux-x86_64-hip-halo.tar.gz",
+   "sha256": "9198a10463da40c5330c9fb50ea363312aacf2c722900d57cf0512e704527d31",
+   "size": 270342555,
+   "installed_bytes": 1050797175
+  },
+  {
+   "platform": "linux-x86_64",
+   "backend": "hip",
+   "variant": "rx6000",
+   "version": "0.1.66",
+   "build_id": "0435d6950434+rocm",
+   "url": "strata-engine-0.1.66-linux-x86_64-hip-rx6000.tar.gz",
+   "sha256": "d850ff4929f13ac4553627236cc3e25d0e1b8a636d0cae17714bf3801598e8b1",
+   "size": 191888642,
+   "installed_bytes": 927739552
+  },
+  {
+   "platform": "linux-x86_64",
+   "backend": "hip",
+   "variant": "rx7900",
+   "version": "0.1.66",
+   "build_id": "0435d6950434+rocm",
+   "url": "strata-engine-0.1.66-linux-x86_64-hip-rx7900.tar.gz",
+   "sha256": "a9cc741a60c101689c0c8dbe5b731382526f22c1c55a92f22b2c1dfcd26dd86f",
+   "size": 276780592,
+   "installed_bytes": 1166069336
+  },
+  {
+   "platform": "linux-x86_64",
+   "backend": "hip",
+   "variant": "rx9070",
+   "version": "0.1.66",
+   "build_id": "0435d6950434+rocm",
+   "url": "strata-engine-0.1.66-linux-x86_64-hip-rx9070.tar.gz",
+   "sha256": "8ceaf7a82603a70b77f03bc890621626207ab50c57f5b3b1afe340b5cbc03d9b",
+   "size": 638192389,
+   "installed_bytes": 2293201658
+  },
+  {
+   "platform": "linux-x86_64",
+   "backend": "sycl",
+   "variant": "",
+   "version": "0.1.66",
+   "build_id": "2e87c08db18a-oneapi2026.1.1",
+   "url": "strata-engine-0.1.66-linux-x86_64-sycl.tar.gz",
+   "sha256": "b5c9599ac55ab0bf09f7663ae71c75cf8dfc247e05015a9344c5e513caa36c41",
+   "size": 189245164,
+   "installed_bytes": 695581385
+  },
+  {
+   "platform": "macos-arm64",
+   "backend": "metal",
+   "variant": "",
+   "version": "0.1.66",
+   "build_id": "2e87c08db18a+metal",
+   "url": "strata-engine-0.1.66-macos-arm64-metal.tar.gz",
+   "sha256": "d135beed9a508d0dad37300a2589097ac898e4226fe9f9ac255404b3a555d89a",
+   "size": 2786836,
+   "installed_bytes": 7096050
+  },
+  {
+   "platform": "windows-x86_64",
+   "backend": "cuda",
+   "variant": "cuda12",
+   "version": "0.1.66",
+   "build_id": "2e87c08db18a+cuda12.9",
+   "url": "strata-engine-0.1.66-windows-x86_64-cuda-cuda12.tar.gz",
+   "sha256": "dd24509106a5dd200c1f82be116ecc0091f7a5940e5b42dbb707bb78e8705d5b",
+   "size": 754388005,
+   "installed_bytes": 1165459707
+  },
+  {
+   "platform": "windows-x86_64",
+   "backend": "cuda",
+   "variant": "cuda13",
+   "version": "0.1.66",
+   "build_id": "2e87c08db18a+cuda13.0",
+   "url": "strata-engine-0.1.66-windows-x86_64-cuda-cuda13.tar.gz",
+   "sha256": "d0fa583e60aaf1d256926b6ea9889ff3ce42a98dbf56f2b556703a76b65e0a64",
+   "size": 494695625,
+   "installed_bytes": 712196851
+  },
+  {
+   "platform": "windows-x86_64",
+   "backend": "hip",
+   "variant": "rdna2",
+   "version": "0.1.66",
+   "build_id": "a34979fc94f3+rocm-win10.2.0a20260930",
+   "url": "strata-engine-0.1.66-windows-x86_64-hip-rdna2.tar.gz",
+   "sha256": "a2de379e9fbb7043465bd4e138b031949651a3cadeb80f3c83a1fe3657f5ce95",
+   "size": 167421956,
+   "installed_bytes": 501656154
+  },
+  {
+   "platform": "windows-x86_64",
+   "backend": "hip",
+   "variant": "rdna3",
+   "version": "0.1.66",
+   "build_id": "a34979fc94f3+rocm-win10.2.0a20260930",
+   "url": "strata-engine-0.1.66-windows-x86_64-hip-rdna3.tar.gz",
+   "sha256": "568b97fd55ac1309c38f2cce00597f5b327c7989fc32fe7b49d9f9772883977b",
+   "size": 220395581,
+   "installed_bytes": 609231093
+  },
+  {
+   "platform": "windows-x86_64",
+   "backend": "hip",
+   "variant": "rx9070",
+   "version": "0.1.66",
+   "build_id": "a34979fc94f3+rocm-win10.2.0a20260930",
+   "url": "strata-engine-0.1.66-windows-x86_64-hip-rx9070.tar.gz",
+   "sha256": "1f6c4a969cc41068423b8cee4e4996055f96cccbfb50eb2f113dfa8af626d5a0",
+   "size": 537054165,
+   "installed_bytes": 846714533
+  }
+ ]
+}

@@ -233,7 +233,7 @@ def test_many_pending_calls_never_sent_do_not_break_the_record(alias):
 def _entry(name, *, alias, conversation_id, agent_id="agent-1", saved_at=NOW - 100,
            caller_kind="agent"):
     return {
-        "file": name, "alias": alias, "engine": "strata", "engine_version": "0.1.65",
+        "file": name, "alias": alias, "engine": "strata", "engine_version": "0.1.66",
         "model": "model-a", "agent_id": agent_id, "conversation_id": conversation_id,
         "caller_kind": caller_kind, "n_saved": 1000, "bytes": 300, "save_ms": 5,
         "saved_at": saved_at, "expires_at": saved_at + 24 * HOUR,

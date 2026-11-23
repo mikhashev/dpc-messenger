@@ -29,7 +29,7 @@ def _entry(name, *, saved_at, size=400, expires_at=None, conversation_id="conv-1
         "file": name,
         "alias": alias,
         "engine": "strata",
-        "engine_version": "0.1.65",
+        "engine_version": "0.1.66",
         "model": "model-a",
         "agent_id": agent_id,
         "conversation_id": conversation_id,

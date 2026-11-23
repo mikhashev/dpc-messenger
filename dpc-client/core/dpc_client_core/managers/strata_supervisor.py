@@ -1034,10 +1034,10 @@ _CACHE_LOSS_KINDS = (
 )
 _CACHE_LOSS_SHOWN = 3
 # An eviction that went to the SSD tier is not a loss; the line is the only sign of it
-# (the launcher's /metrics has no spill field at v0.2.19). The RAM-floor spill is no eviction.
+# (the launcher's /metrics has no spill field at v0.2.20). The RAM-floor spill is no eviction.
 _SSD_SPILLED_RE = re.compile(r"conversation cache: spilled \d+ tokens to the SSD tier \(evicted from RAM")
 _SSD_READ_BACK_RE = re.compile(r"conversation cache: read \d+ tokens back from the SSD tier")
-# The engine's own start line for the tier (generate.cpp, v0.2.19). Printed only when the
+# The engine's own start line for the tier (generate.cpp, v0.2.20). Printed only when the
 # `--conversation-spill-mib` it was given is not 0, so with the field at 0 it is silent.
 _SSD_TIER_ON_RE = re.compile(r"conversation cache: SSD tier in (?P<dir>.+), up to (?P<mib>\d+) MiB")
 _SSD_TIER_OFF_RE = re.compile(r"conversation cache: no SSD tier: (?P<why>.+)")

@@ -427,14 +427,15 @@ class TestThePinsEngineVersion:
         assert len(spawned) == 1 and sup._proc is None
 
     def test_the_pin_names_the_build_commit_of_the_package_the_marker_records(self, world):
-        # cuda12 engines come from another commit than the rest (v0.2.19): the fingerprint says which.
+        # The Windows hip engines come from another commit than the cuda ones (v0.2.20): the fingerprint says which.
         sup = world.sup()
         root = world.control()
+        hip = sf.pinned_commit(PLAT, "hip", "rdna3")
         marker = json.loads(pin.marker_path(root).read_text(encoding="utf-8"))
-        marker["engine"].update(variant="cuda12", build_id=f"{sf.pinned_commit(PLAT, 'cuda', 'cuda12')}+cuda12.9")
+        marker["engine"].update(backend="hip", variant="rdna3", build_id=f"{hip}+rocm")
         pin.marker_path(root).write_text(json.dumps(marker), encoding="utf-8")
-        assert COMMIT != sf.pinned_commit(PLAT, "cuda", "cuda12")
-        assert f"build commit {sf.pinned_commit(PLAT, 'cuda', 'cuda12')};" in sup._pin_fingerprints("0.1.1")
+        assert COMMIT != hip
+        assert f"build commit {hip};" in sup._pin_fingerprints("0.1.1")
         marker["engine"]["variant"] = "no-such-build"
         pin.marker_path(root).write_text(json.dumps(marker), encoding="utf-8")
         assert f"build commit {' or '.join(sf.pinned_commits(PLAT))};" in sup._pin_fingerprints("0.1.1")

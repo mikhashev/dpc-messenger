@@ -33,7 +33,7 @@ from dpc_client_core.managers import strata_fetcher as sf
 
 PLAT = "windows-x86_64"
 COMMIT = sf.pinned_commit(PLAT, "cuda", "cuda13")  # the commit of the package the fake updater installs
-CUDA12_COMMIT = sf.pinned_commit(PLAT, "cuda", "cuda12")
+HIP_COMMIT = sf.pinned_commit(PLAT, "hip", "rdna3")  # a package of the same platform from another commit
 FOLDER = f"{sf.STRATA_ENGINE_VERSION}-{PLAT}-cuda-cuda13"
 _REAL_RUN_SUPERVISED = process.run_supervised
 ENGINE_FILES = {"strata.exe": b"engine bytes", "BUILD.json": b'{"commit": "x"}', "strata-vision.exe": b"reader"}
@@ -177,10 +177,10 @@ def test_every_engine_package_names_the_build_commit_of_its_own():
             assert re.fullmatch(r"[0-9a-f]{9,12}", commit), (plat, backend, variant)
             assert sf.pinned_commit(plat, backend, variant) == commit
         assert set(sf.pinned_commits(plat)) == {row[4] for row in rows}
-    # v0.2.19 builds its cuda12 engines from another commit than every other engine.
-    assert CUDA12_COMMIT != COMMIT
-    assert sf.pinned_commit("linux-x86_64", "cuda", "cuda12") == CUDA12_COMMIT
-    assert sf.pinned_commit(PLAT, "hip", "rdna3") == COMMIT
+    # v0.2.20 builds the hip engines (Windows, and Linux x86_64 with its own commit) from other commits than the cuda ones.
+    assert HIP_COMMIT != COMMIT
+    assert sf.pinned_commit("linux-x86_64", "hip", "halo") not in (COMMIT, HIP_COMMIT)
+    assert sf.pinned_commit("linux-x86_64", "cuda", "cuda12") == COMMIT
     assert sf.pinned_commit(PLAT, "sycl", "") is None
     assert sf.pinned_commit("macos-arm64", "metal", None) == COMMIT
 
@@ -342,27 +342,30 @@ def test_every_engine_of_the_pinned_feed_carries_the_commit_its_platform_row_nam
     assert sf.check_engine_identity(folder)["build_id"] == row["build_id"]
 
 
-def _identity_of(world, tmp_path, variant, build_id):
+def _identity_of(world, tmp_path, variant, build_id, **more):
     folder = tmp_path / "pin" / "components" / "engine" / variant
     folder.mkdir(parents=True)
-    manifest = _manifest(variant=variant, build_id=build_id)
+    manifest = _manifest(variant=variant, build_id=build_id, **more)
     manifest["signature"] = _sign(world.key, manifest, world.public)
     (folder / "engine-component.json").write_bytes(json.dumps(manifest, ensure_ascii=False).encode("utf-8"))
     return sf.check_engine_identity(folder)
 
 
-def test_a_cuda12_build_id_is_the_commit_of_cuda12_and_not_of_cuda13(world, tmp_path):
-    # v0.2.19: the cuda12 engines come from another commit than the cuda13 one of the same platform.
-    assert _identity_of(world, tmp_path, "cuda12", f"{CUDA12_COMMIT}+cuda12.9")["variant"] == "cuda12"
+def test_a_hip_build_id_is_the_commit_of_hip_and_not_of_cuda13(world, tmp_path):
+    # v0.2.20: the Windows hip engines come from another commit than the cuda13 one of the same platform.
+    hip = {"backend": "hip"}
+    assert _identity_of(world, tmp_path, "rdna3", f"{HIP_COMMIT}+rocm", **hip)["variant"] == "rdna3"
+    shutil.rmtree(tmp_path / "pin")
     with pytest.raises(ValueError, match="build_id") as err:
-        _identity_of(world, tmp_path, "cuda13", f"{CUDA12_COMMIT}+cuda12.9")
-    assert f"build commit {COMMIT}" in str(err.value)
+        _identity_of(world, tmp_path, "rdna3", f"{COMMIT}+rocm", **hip)
+    assert f"build commit {HIP_COMMIT}" in str(err.value)
     # the other way round
     shutil.rmtree(tmp_path / "pin")
     assert _identity_of(world, tmp_path, "cuda13", f"{COMMIT}+cuda13.0")["variant"] == "cuda13"
+    shutil.rmtree(tmp_path / "pin")
     with pytest.raises(ValueError, match="build_id") as err:
-        _identity_of(world, tmp_path, "cuda12", f"{COMMIT}+cuda13.0")
-    assert f"build commit {CUDA12_COMMIT}" in str(err.value)
+        _identity_of(world, tmp_path, "cuda13", f"{HIP_COMMIT}+cuda13.0")
+    assert f"build commit {COMMIT}" in str(err.value)
 
 
 def test_an_engine_that_is_no_package_of_the_pin_is_refused(world, tmp_path):
