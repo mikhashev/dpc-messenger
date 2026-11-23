@@ -1985,7 +1985,10 @@ class StrataSupervisor(LlamaServerSupervisor):
             engine = (strata_fetcher.read_marker(root) or {}).get("engine") or {}
             found += (f" (DPC's install marker: version {engine.get('version')}, build_id "
                       f"{engine.get('build_id')}, variant {engine.get('variant')}, folder {engine.get('folder')})")
-            commit = strata_fetcher.PLATFORM_ASSETS[strata_fetcher.platform_tag()]["commit"]
+            plat = strata_fetcher.platform_tag()
+            # The package's own commit; a marker that names none lists the platform's.
+            commit = (strata_fetcher.pinned_commit(plat, engine.get("backend"), engine.get("variant"))
+                      or " or ".join(strata_fetcher.pinned_commits(plat)) or "unknown")
         except (LlamaServerError, ValueError, KeyError, AttributeError):
             pass
         pinned = f"pinned: Strata {STRATA_RELEASE_TAG}, engine {STRATA_ENGINE_VERSION}, build commit {commit}"

@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import time
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -31,7 +32,8 @@ from dpc_client_core.managers import local_engine_pin_fetcher as pin
 from dpc_client_core.managers import strata_fetcher as sf
 
 PLAT = "windows-x86_64"
-COMMIT = sf.PLATFORM_ASSETS[PLAT]["commit"]
+COMMIT = sf.pinned_commit(PLAT, "cuda", "cuda13")  # the commit of the package the fake updater installs
+CUDA12_COMMIT = sf.pinned_commit(PLAT, "cuda", "cuda12")
 FOLDER = f"{sf.STRATA_ENGINE_VERSION}-{PLAT}-cuda-cuda13"
 _REAL_RUN_SUPERVISED = process.run_supervised
 ENGINE_FILES = {"strata.exe": b"engine bytes", "BUILD.json": b'{"commit": "x"}', "strata-vision.exe": b"reader"}
@@ -165,9 +167,22 @@ def test_one_control_row_per_platform_of_one_control_version():
     for plat, row in sf.PLATFORM_ASSETS.items():
         assert plat in row["name"]
         assert re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) and row["size"] > 0
-        assert re.fullmatch(r"[0-9a-f]{9,12}", row["commit"])  # the Mac engines of v0.2.11 write nine digits
         versions.add(re.match(r"strata-control-(\d+\.\d+\.\d+)-", row["name"]).group(1))
     assert versions == {sf.STRATA_ENGINE_VERSION}
+
+
+def test_every_engine_package_names_the_build_commit_of_its_own():
+    for plat, rows in sf._ENGINE_PACKAGES.items():
+        for backend, variant, _size, _installed, commit in rows:
+            assert re.fullmatch(r"[0-9a-f]{9,12}", commit), (plat, backend, variant)
+            assert sf.pinned_commit(plat, backend, variant) == commit
+        assert set(sf.pinned_commits(plat)) == {row[4] for row in rows}
+    # v0.2.19 builds its cuda12 engines from another commit than every other engine.
+    assert CUDA12_COMMIT != COMMIT
+    assert sf.pinned_commit("linux-x86_64", "cuda", "cuda12") == CUDA12_COMMIT
+    assert sf.pinned_commit(PLAT, "hip", "rdna3") == COMMIT
+    assert sf.pinned_commit(PLAT, "sycl", "") is None
+    assert sf.pinned_commit("macos-arm64", "metal", None) == COMMIT
 
 
 def test_the_held_key_derives_strata_s_key_id():
@@ -271,7 +286,7 @@ def _other_public() -> str:
     ("bad_signature", "signature is 'one that does not verify'"),
     ("tampered", "signature is 'one that does not verify'"),
     ("platform", "platform is 'linux-x86_64'"),
-    ("commit", "build_id is 'version 0.1.57, build_id 4cf0d8cd3809+metal"),
+    ("commit", f"build_id is 'version {sf.STRATA_ENGINE_VERSION}, build_id 4cf0d8cd3809+metal"),
     ("file_hash", "files[strata.exe].sha256"),
 ])
 def test_an_engine_that_is_not_the_pin_is_refused_at_install(world, case, field):
@@ -302,12 +317,12 @@ def test_an_engine_that_is_not_the_pin_is_refused_at_install(world, case, field)
 
 def test_the_build_commit_counts_as_a_whole_token_wherever_build_id_puts_it(world):
     # linux-aarch64 engines carry the commit at the tail of build_id, the others at the head.
-    world.manifest = _manifest(build_id=f"release-0.1.57-cuda13-13.0-aarch64-{COMMIT}")
+    world.manifest = _manifest(build_id=f"release-{sf.STRATA_ENGINE_VERSION}-cuda13-13.0-aarch64-{COMMIT}")
     assert sf.install_pin().is_dir()
 
 
 def test_the_build_commit_spelled_in_full_counts_as_that_commit(world):
-    # The Linux sycl engine of v0.2.11 writes all 40 hex digits of the commit its siblings shorten to 12.
+    # The Linux sycl engine of v0.2.11 wrote all 40 hex digits of the commit its siblings shorten to 12: still the same commit.
     world.manifest = _manifest(build_id=f"{COMMIT}{'a' * (40 - len(COMMIT))}-oneapi2026.1.1")
     assert sf.install_pin().is_dir()
 
@@ -325,6 +340,34 @@ def test_every_engine_of_the_pinned_feed_carries_the_commit_its_platform_row_nam
     manifest["signature"] = _sign(world.key, manifest, world.public)
     (folder / "engine-component.json").write_bytes(json.dumps(manifest, ensure_ascii=False).encode("utf-8"))
     assert sf.check_engine_identity(folder)["build_id"] == row["build_id"]
+
+
+def _identity_of(world, tmp_path, variant, build_id):
+    folder = tmp_path / "pin" / "components" / "engine" / variant
+    folder.mkdir(parents=True)
+    manifest = _manifest(variant=variant, build_id=build_id)
+    manifest["signature"] = _sign(world.key, manifest, world.public)
+    (folder / "engine-component.json").write_bytes(json.dumps(manifest, ensure_ascii=False).encode("utf-8"))
+    return sf.check_engine_identity(folder)
+
+
+def test_a_cuda12_build_id_is_the_commit_of_cuda12_and_not_of_cuda13(world, tmp_path):
+    # v0.2.19: the cuda12 engines come from another commit than the cuda13 one of the same platform.
+    assert _identity_of(world, tmp_path, "cuda12", f"{CUDA12_COMMIT}+cuda12.9")["variant"] == "cuda12"
+    with pytest.raises(ValueError, match="build_id") as err:
+        _identity_of(world, tmp_path, "cuda13", f"{CUDA12_COMMIT}+cuda12.9")
+    assert f"build commit {COMMIT}" in str(err.value)
+    # the other way round
+    shutil.rmtree(tmp_path / "pin")
+    assert _identity_of(world, tmp_path, "cuda13", f"{COMMIT}+cuda13.0")["variant"] == "cuda13"
+    with pytest.raises(ValueError, match="build_id") as err:
+        _identity_of(world, tmp_path, "cuda12", f"{COMMIT}+cuda13.0")
+    assert f"build commit {CUDA12_COMMIT}" in str(err.value)
+
+
+def test_an_engine_that_is_no_package_of_the_pin_is_refused(world, tmp_path):
+    with pytest.raises(ValueError, match=r"backend is 'cuda \(cuda11\)'"):
+        _identity_of(world, tmp_path, "cuda11", f"{COMMIT}+cuda11.8")
 
 
 def test_the_build_commit_inside_a_longer_hex_run_is_not_the_commit(world):

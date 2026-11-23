@@ -30,6 +30,13 @@ export interface StrataModelFamily {
 /** The label that says where the numbers beside a size come from. */
 export const STRATA_ESTIMATE_LABEL = "Strata's estimate";
 
+/**
+ * Strata's `on_this_pc` has two values (strata_control/fit_label.py, v0.2.19): "fits", and this
+ * one: the model's files, less the lookup table, are bigger than RAM plus the card's memory
+ * together. Closing programs cannot make such a size fit, which is what `neverFits` says.
+ */
+export const STRATA_SLOWER_LABEL = 'may run slower';
+
 export const CACHE_SUGGESTION_MIN_MIB = 1024;
 export const CACHE_SUGGESTION_MAX_MIB = 16384;
 /** Left for the rest of the machine before the cache is sized. */
@@ -150,7 +157,7 @@ export function suggestedResidentBudget(
         cappedByArena,
         neverFits: total !== null && needed * 1024 > total
             ? `this PC has ${(total / 1024).toFixed(1)} GiB of RAM in all`
-            : verdict.startsWith('does not fit') ? `${STRATA_ESTIMATE_LABEL} for this PC: ${verdict}` : null,
+            : verdict.trim().toLowerCase() === STRATA_SLOWER_LABEL ? `${STRATA_ESTIMATE_LABEL} for this PC: ${verdict}` : null,
     };
 }
 

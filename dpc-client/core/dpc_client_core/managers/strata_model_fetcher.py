@@ -231,8 +231,15 @@ def download(
     ]
     if gguf_dir:
         cmd += ["--gguf-dir", gguf_dir]
+    # setup.py reads the signed feed (the model list, a model shape's engine, the tuned drafter,
+    # the CUDA 12 driver floor: update_cmd._feed_source, drafting_fetch._feed_source, v0.2.19), and
+    # `_control_env` drops every STRATA_* of ours, so with no address here it falls back to
+    # `releases/latest/download/strata-feed.json`: never the pin. A folder URL is the form
+    # `strata update --feed` gets too; feed.fetch appends the platform's feed file name
+    # (strata-feed-linux-aarch64.json on that machine, else strata-feed.json).
     env = strata_fetcher._control_env(root, data / "settings.json", {
         "STRATA_CONTROL_INSTALL": "1",
+        "STRATA_UPDATE_FEED": strata_fetcher.pinned_feed_source(),
         "STRATA_INSTALL_DIR": str(run_configs),
         "PYTHONUNBUFFERED": "1",
     })

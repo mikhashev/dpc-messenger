@@ -40,7 +40,7 @@ from tests.test_the_strata_install_is_fetched_by_its_pin_and_its_engine_is_check
 ALIAS = "flash next"
 NAME = "strata"
 PLAT = "windows-x86_64"
-EXACT = 627_812_560  # the cuda13 package of v0.2.11 on Windows: what the updater would report
+EXACT = 490_092_153  # the cuda13 package of v0.2.19 on Windows: what the updater would report
 LABEL = f"engine {sf.STRATA_ENGINE_VERSION} {PLAT}-cuda-cuda13"
 
 
@@ -60,14 +60,14 @@ FIXTURE_LINES = [
     "not json at all",
     _progress(100_000_000),
     "{broken",
-    _event(event="progress", phase="download", component="control", label="Control 0.1.57",
+    _event(event="progress", phase="download", component="control", label=f"Control {sf.STRATA_ENGINE_VERSION}",
            done=99, total=100, percent=99, bytes_per_second=1),
     _event(event="progress", phase="download", component="engine", label=LABEL,
            done="300000000", total=EXACT, percent=48, bytes_per_second=1),
     _progress(300_000_000),
     _progress(50_000_000),  # a download Strata restarted from 0: the bar holds
     _progress(EXACT),
-    _event(event="phase", phase="done", message="Engine 0.1.57 is installed", component="engine"),
+    _event(event="phase", phase="done", message=f"Engine {sf.STRATA_ENGINE_VERSION} is installed", component="engine"),
 ]
 
 
@@ -145,7 +145,7 @@ def test_the_size_is_control_plus_the_largest_engine_of_the_platform():
         assert sf.ENGINE_SIZE_MAX[plat] > 0 and sf.ENGINE_INSTALLED_BYTES_MAX[plat] > sf.ENGINE_SIZE_MAX[plat]
         assert row["installed_bytes"] > row["size"]
     # The largest Windows package (cuda12), not the one this card would get (cuda13).
-    assert sf.ENGINE_SIZE_MAX[PLAT] == 915_324_388 > EXACT
+    assert sf.ENGINE_SIZE_MAX[PLAT] == 743_821_368 > EXACT
     assert sf.SIZE_SOURCE == "package_max"
 
 
@@ -168,7 +168,7 @@ def test_the_owners_start_asks_once_and_refuses_before_the_card(sup, service):
     assert payload["provider_alias"] == ALIAS
     assert isinstance(payload["free_bytes"], int)
     assert err.download_name == NAME
-    assert "one-time download of up to 1.0 GB" in str(err)
+    assert "one-time download of up to 0.8 GB" in str(err)
     assert "the owner has been asked" in str(err) and "Do not retry until it has finished" in str(err)
     assert "dialog" not in str(err).lower()
     assert sup.claims == [] and sup not in base_mod._CARD_CLAIMS
@@ -185,7 +185,7 @@ def test_a_running_download_is_named_with_its_percent(sup, service):
 
     err = _refusal(sup)
 
-    assert "being downloaded now (42% of up to 1.0 GB)" in str(err)
+    assert "being downloaded now (42% of up to 0.8 GB)" in str(err)
     assert service.local_api.events == []
 
 
@@ -433,7 +433,7 @@ def test_run_supervised_hands_each_stdout_line_over_while_the_child_runs(tmp_pat
 
 # --- the sizes are the feed rows' maxima and minima --------------------------
 
-_ROWS = json.loads((Path(__file__).parent / "fixtures" / "strata_v0.2.11_feed_packages.json").read_text(encoding="utf-8"))
+_ROWS = json.loads((Path(__file__).parent / "fixtures" / "strata_v0.2.19_feed_packages.json").read_text(encoding="utf-8"))
 
 
 def test_the_pinned_sizes_are_the_extremes_of_the_feed_rows_of_the_pinned_release():
@@ -517,7 +517,7 @@ def test_the_llama_pin_keeps_its_one_size_check(service, monkeypatch):
 NO_SPACE_ERROR = ("not enough free space on C:\\: 1210 MiB free, 1498 MiB needed. "
                   "Free up some space on C:\\ and run the update again")
 NO_SPACE_REPORT = _event(
-    ok=False, feed={"source": "https://github.com/Niko1221/Strata/releases/download/v0.2.11", "sequence": 121,
+    ok=False, feed={"source": f"https://github.com/Niko1221/Strata/releases/download/{sf.STRATA_RELEASE_TAG}", "sequence": 131,
                     "channel": "stable", "key_id": "5d1bc23abbeffd0d"},
     results=[{"component": "engine", "status": "failed", "changed": False, "error": NO_SPACE_ERROR,
               "exit_code": 6, "installed_before": None}],

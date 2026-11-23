@@ -28,7 +28,7 @@ from dpc_client_core.providers.llamacpp_server_provider import _ACTIVE_SUPERVISO
 from tests.test_strata_supervisor import _FakeProc, _install, _started_through_the_real_launch
 
 PLAT = "windows-x86_64"
-COMMIT = sf.PLATFORM_ASSETS[PLAT]["commit"]
+COMMIT = sf.pinned_commit(PLAT, "cuda", "cuda13")
 FOLDER = f"{sf.STRATA_ENGINE_VERSION}-{PLAT}-cuda-cuda13-5d1bc23a"
 BUILD_ID = f"{COMMIT}+cuda13.0"
 
@@ -390,7 +390,8 @@ class TestTheFetchRunsWithTheCardHeld:
         monkeypatch.setattr(sup, "_launch", lambda *a, **k: pytest.fail("launched without an install"))
         with pytest.raises(LlamaServerError) as excinfo:
             await sup.ensure_running()
-        assert str(excinfo.value).startswith("strata[flash next]: DPC's own install of Strata v0.2.11")
+        assert str(excinfo.value).startswith(
+            f"strata[flash next]: DPC's own install of Strata {sf.STRATA_RELEASE_TAG}")
         assert "exit 6, failed" in str(excinfo.value)
         assert sup not in base_mod._CARD_CLAIMS
 
@@ -424,6 +425,19 @@ class TestThePinsEngineVersion:
         assert f"pinned: Strata {sf.STRATA_RELEASE_TAG}, engine {sf.STRATA_ENGINE_VERSION}, build commit {COMMIT}" in reason
         assert sup.smoke_posts == [], "no smoke after a refused version"
         assert len(spawned) == 1 and sup._proc is None
+
+    def test_the_pin_names_the_build_commit_of_the_package_the_marker_records(self, world):
+        # cuda12 engines come from another commit than the rest (v0.2.19): the fingerprint says which.
+        sup = world.sup()
+        root = world.control()
+        marker = json.loads(pin.marker_path(root).read_text(encoding="utf-8"))
+        marker["engine"].update(variant="cuda12", build_id=f"{sf.pinned_commit(PLAT, 'cuda', 'cuda12')}+cuda12.9")
+        pin.marker_path(root).write_text(json.dumps(marker), encoding="utf-8")
+        assert COMMIT != sf.pinned_commit(PLAT, "cuda", "cuda12")
+        assert f"build commit {sf.pinned_commit(PLAT, 'cuda', 'cuda12')};" in sup._pin_fingerprints("0.1.1")
+        marker["engine"]["variant"] = "no-such-build"
+        pin.marker_path(root).write_text(json.dumps(marker), encoding="utf-8")
+        assert f"build commit {' or '.join(sf.pinned_commits(PLAT))};" in sup._pin_fingerprints("0.1.1")
 
     @pytest.mark.asyncio
     async def test_the_pinned_version_on_the_pin_starts(self, world, monkeypatch):
@@ -472,7 +486,7 @@ class TestAPeerDoesNotFetch:
         monkeypatch.setattr(p.supervisor, "start_for_peer", lambda peer: pytest.fail("a peer began a start"))
         refusal = await p.peer_refusal("peer-1")
         assert refusal == (
-            "'flash' is not running: Strata v0.2.11 is not installed on this node yet, "
+            f"'flash' is not running: Strata {sf.STRATA_RELEASE_TAG} is not installed on this node yet, "
             "and a peer's request does not fetch it"
         )
 
@@ -505,7 +519,7 @@ class TestTheSaveWithoutAnInstallDir:
         errors = strata_config_errors({"strata_base_config": "strata-base.json", "conversation_cache_mib": 1})
         assert errors == [
             "strata_base_config: strata-base.json must be an absolute path when strata_install_dir is "
-            "empty — DPC's own install of Strata v0.2.11 holds no run config of yours to read it against"
+            f"empty — DPC's own install of Strata {sf.STRATA_RELEASE_TAG} holds no run config of yours to read it against"
         ]
         assert strata_config_errors({"strata_base_config": "strata-base.json", "conversation_cache_mib": 1},
                                     check_paths=True) == errors
@@ -514,7 +528,8 @@ class TestTheSaveWithoutAnInstallDir:
         errors = strata_config_errors({"conversation_cache_mib": 1})
         assert errors == [
             "needs strata_base_config: an existing Strata run config to start from (strata_install_dir "
-            "may stay empty: empty means DPC's own install of Strata v0.2.11 (engine 0.1.57))"
+            f"may stay empty: empty means DPC's own install of Strata {sf.STRATA_RELEASE_TAG} "
+            f"(engine {sf.STRATA_ENGINE_VERSION}))"
         ]
 
     def test_the_chat_template_of_a_relative_tokenizer_is_read_from_the_pin(self, world):

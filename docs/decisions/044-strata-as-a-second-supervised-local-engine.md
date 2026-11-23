@@ -2091,3 +2091,12 @@ The probe planted no markers and kept no answer text, so it says nothing about w
 **Open, Mike's.** A peer goes in between at its deadline less `_PEER_SAVE_ALLOWANCE_S`, a room for the save before its call; on Strata, and on `llama-server` with a host cache, no such save happens, so the peer gives up that many seconds of its wait for nothing. CC's pick: the allowance is 0 wherever the switch saves nothing.
 
 **Next.** Several conversations at once where the engine was started for them is a per-alias choice, `parallel_conversations` in the alias entry of `providers.json`, peers counting toward N (Mike, 2026-11-20); card `A-LOCAL-ALIAS-THAT-CAN-SERVE-SEVERAL-CONVERSATIONS-AT-ONCE-HAS-NO-SETTING-TO-LET-THEM`.
+
+## Amendment, 2026-11-23 — the pin moves to Strata v0.2.19 (engine 0.1.65)
+
+*(Mike's order to update, 2026-11-23. Read in the tags v0.2.11 and v0.2.19 of the Strata repository and in the release's signed feed and Control archives; the start smoke is recorded on the point-5 card.)*
+
+1. **The build commit is per engine package, not per platform.** v0.2.19's cuda12 engines (Windows and Linux x86_64) are built from `c6f6427d9de9`, every other engine from `26350e4387b8`, so one commit per platform would refuse cuda12. Each `_ENGINE_PACKAGES` row now carries its commit, and `check_engine_identity` takes the one of the engine's own backend and variant, as strict as before (a whole hex token or the same commit in 40 digits); an engine whose package the pin does not list is refused.
+2. **A model install reads the pinned feed.** From v0.2.12 `setup.py` fetches parts itself (the tuned drafter, a model shape's engine, the CUDA 12 driver floor) from the signed feed, and with no address it reads `releases/latest`. DPC gives it `STRATA_UPDATE_FEED`, the pinned release's folder, the address `strata update --feed` already gets.
+3. **What the Control archive kept.** v0.2.16 moved Strata's sources under `terminal/` and `engine/`; the Control archive keeps its old layout, so DPC's paths into an install are unchanged. The updater's flags, its jsonl, its exit codes, the slot API, `/metrics` and the start-config keys DPC writes did not change.
+4. **New and not yet decided:** the conversation cache's SSD tier is on by default from v0.2.16, and a spill counts as an eviction in `/metrics` (card `STRATA-COUNTS-A-SPILL-TO-ITS-SSD-TIER-AS-AN-EVICTION-AND-DPC-READS-IT-AS-A-LOST-CONVERSATION`); the model table offers families with their own engines (card `THE-STRATA-MODEL-LIST-OFFERS-FAMILIES-WITH-THEIR-OWN-ENGINES-THAT-DPC-HAS-NEVER-STARTED`).

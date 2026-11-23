@@ -3,7 +3,7 @@
 `strata_engine_backend` holds the word Strata's updater takes as `--backend`: a family of
 Strata's BACKEND_MATRIX, or for AMD `hip-<build>`; empty lets Strata pick by the card. The
 values offered on a platform are the matrix's families that the pinned feed has a package
-of (v0.2.11 has no cpu package), and the AMD builds of those packages; CUDA 12 or 13 stays
+of (v0.2.19 has no cpu package), and the AMD builds of those packages; CUDA 12 or 13 stays
 Strata's pick from the driver. The word reaches the updater as `--backend`; an installed
 engine of another backend is, for that alias, a missing pin: offered for download with the
 chosen package's sizes, never run. Nothing here reaches the network, a real updater or the
@@ -12,6 +12,7 @@ real ~/.dpc.
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,14 +36,18 @@ from tests.test_the_strata_install_is_fetched_by_its_pin_and_its_engine_is_check
 KEY = "strata_engine_backend"
 WIN = "windows-x86_64"
 ALIAS = "flash next"
-_ROWS = json.loads((Path(__file__).parent / "fixtures" / "strata_v0.2.11_feed_packages.json").read_text(encoding="utf-8"))
-_MATRIX = {  # Strata v0.2.11 strata_control/targets.py BACKEND_MATRIX, read from the pinned Control
+_ROWS = json.loads((Path(__file__).parent / "fixtures" / "strata_v0.2.19_feed_packages.json").read_text(encoding="utf-8"))
+_MATRIX = {  # Strata v0.2.19 terminal/strata_control/targets.py BACKEND_MATRIX, read from the pinned Control
     "metal": ("macos-arm64",),
     "cuda": ("windows-x86_64", "linux-x86_64", "linux-aarch64"),
     "hip": ("windows-x86_64", "linux-x86_64"),
     "sycl": ("linux-x86_64",),
     "cpu": ("macos-arm64", "macos-x86_64", "windows-x86_64", "linux-x86_64"),
 }
+
+
+def _commit_of(build_id):
+    return re.search(r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])", build_id).group(0)
 
 
 def _feed_rows(plat):
@@ -75,8 +80,10 @@ def _clean(tmp_path, monkeypatch):
 
 def test_the_package_rows_are_the_feed_rows_of_the_pinned_release():
     for plat in sf.PLATFORM_ASSETS:
+        # The commit is the one the package's own build_id carries as a whole hex token.
         assert sorted(sf._ENGINE_PACKAGES[plat]) == sorted(
-            (r["backend"], r["variant"], r["size"], r["installed_bytes"]) for r in _feed_rows(plat)), plat
+            (r["backend"], r["variant"], r["size"], r["installed_bytes"], _commit_of(r["build_id"]))
+            for r in _feed_rows(plat)), plat
     assert sf._BACKEND_MATRIX == _MATRIX
 
 
@@ -88,7 +95,7 @@ def test_the_allowed_values_are_the_matrix_families_with_a_package_and_the_amd_b
     allowed = sf.engine_backends(plat)
     assert set(allowed) == families | builds
     assert len(allowed) == len(set(allowed))
-    assert "cpu" not in allowed, "v0.2.11 publishes no cpu package"
+    assert "cpu" not in allowed, "v0.2.19 publishes no cpu package"
     assert not any(v.startswith("cuda") and v != "cuda" for v in allowed), "CUDA 12 or 13 is Strata's pick"
 
 
@@ -112,7 +119,7 @@ def test_the_value_is_normalised_as_strata_does(raw, expected):
 
 
 @pytest.mark.parametrize("raw,words", [
-    ("cpu", "Strata v0.2.11 publishes no cpu engine package for windows-x86_64"),
+    ("cpu", f"Strata {sf.STRATA_RELEASE_TAG} publishes no cpu engine package for windows-x86_64"),
     ("sycl", "sycl is not a supported combination on windows-x86_64; it is supported on linux-x86_64. "
              "Unsupported combinations are not attempted"),
     ("metal", "metal is not a supported combination on windows-x86_64"),
@@ -183,7 +190,9 @@ def test_the_status_carries_the_values_this_machine_may_take(monkeypatch):
 
 def _set_engine(world, backend, variant):
     world.folder = f"{sf.STRATA_ENGINE_VERSION}-{WIN}-{backend}" + (f"-{variant}" if variant else "")
-    world.manifest = _manifest(backend=backend, variant=variant)
+    # The build_id of that package in the pinned feed: its commit is the package's own.
+    (row,) = [r for r in _feed_rows(WIN) if (r["backend"], r["variant"]) == (backend, variant)]
+    world.manifest = _manifest(backend=backend, variant=variant, build_id=row["build_id"])
 
 
 @pytest.fixture

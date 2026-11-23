@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     STRATA_ESTIMATE_LABEL,
+    STRATA_SLOWER_LABEL,
     cacheSuggestionMayNotFit,
     freeCommitMibOf,
     RESIDENT_SUGGESTION_MIN_GIB,
@@ -153,11 +154,13 @@ describe('the words beside the resident budget', () => {
         expect(why).not.toContain('close other programs and choose');
     });
 
-    it("do not say it either when Strata's estimate says it does not fit", () => {
-        const size = { ram_needed_gb: 40, on_this_pc: 'does not fit: this Mac has too little memory' };
+    it("do not say it either when Strata's estimate says the size may run slower", () => {
+        const size = { ram_needed_gb: 40, on_this_pc: 'may run slower' };
         const why = residentSuggestionWhy(suggestedResidentBudget(POSIX(8192), size)!);
-        expect(why).toContain(`closing other programs will not make this size fit (${STRATA_ESTIMATE_LABEL} for this PC: does not fit: this Mac has too little memory)`);
-        for (const on_this_pc of ['tight', 'fits', null]) {
+        expect(why).toContain(`closing other programs will not make this size fit (${STRATA_ESTIMATE_LABEL} for this PC: may run slower)`);
+        expect(STRATA_SLOWER_LABEL).toBe('may run slower');
+        // Strata's two words are the only ones; the old ones it no longer sends say nothing here.
+        for (const on_this_pc of ['fits', 'does not fit', 'tight', null]) {
             expect(suggestedResidentBudget(POSIX(8192), { ram_needed_gb: 40, on_this_pc })?.neverFits, String(on_this_pc)).toBeNull();
         }
     });
@@ -267,7 +270,7 @@ const FAMILIES: StrataModelFamily[] = [
     {
         family: 'qwen', title: 'Qwen', sizes: [
             { model: 'Q2_0', id: 'q2_0', download_gb: 34, ram_needed_gb: 20, images: true, on_this_pc: 'fits', installed: false },
-            { model: 'IQ3_S', id: 'iq3_s', download_gb: 50.3, ram_needed_gb: 30.5, images: false, on_this_pc: 'does not fit', installed: true },
+            { model: 'IQ3_S', id: 'iq3_s', download_gb: 50.3, ram_needed_gb: 30.5, images: false, on_this_pc: 'may run slower', installed: true },
         ],
     },
 ];
@@ -289,7 +292,7 @@ describe('the line under a size', () => {
     it("puts Strata's words for this PC under their label, with the sizes", () => {
         expect(STRATA_ESTIMATE_LABEL).toBe("Strata's estimate");
         expect(strataSizeLine(FAMILIES[0].sizes[0])).toBe("download 34 GB · needs 20 GB RAM · Strata's estimate: fits");
-        expect(strataSizeLine(FAMILIES[0].sizes[1])).toContain("Strata's estimate: does not fit");
+        expect(strataSizeLine(FAMILIES[0].sizes[1])).toContain("Strata's estimate: may run slower");
     });
 
     it('leaves out what the table did not give', () => {

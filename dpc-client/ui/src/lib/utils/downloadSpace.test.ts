@@ -17,9 +17,9 @@ describe('spaceVerdict', () => {
     });
 
     it('a range refuses only below its smallest variant and warns below its largest', () => {
-        // Windows, v0.2.11: Control + the largest engine vs Control + the smallest.
-        const size = 73_411_113 + 915_324_388, installed = 229_788_151 + 1_479_343_085;
-        const sizeMin = 73_411_113 + 174_926_996, installedMin = 229_788_151 + 584_050_448;
+        // Windows, v0.2.19: Control + the largest engine vs Control + the smallest.
+        const size = 67_721_651 + 743_821_368, installed = 219_537_243 + 1_155_646_715;
+        const sizeMin = 67_721_651 + 166_003_861, installedMin = 219_537_243 + 496_744_538;
         const least = (sizeMin + installedMin) * 1.1, most = (size + installed) * 1.1;
         expect(spaceVerdict(least - 1, size, installed, sizeMin, installedMin)).toBe('short');
         expect(spaceVerdict(least + 1, size, installed, sizeMin, installedMin)).toBe('may_not_fit');

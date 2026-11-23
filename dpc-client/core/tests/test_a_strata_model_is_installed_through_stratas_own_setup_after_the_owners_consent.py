@@ -176,7 +176,7 @@ class TestTheCommand:
     @pytest.mark.asyncio
     async def test_control_not_installed_is_refused_with_the_reason_and_creates_nothing(
             self, host, tmp_path, monkeypatch):
-        missing = tmp_path / "bin" / "strata" / "v0.2.11" / "x"
+        missing = tmp_path / "bin" / "strata" / strata_fetcher.STRATA_RELEASE_TAG / "x"
         monkeypatch.setattr(strata_fetcher, "install_root", lambda *a, **k: missing)
         out = await _ask(host)
         assert out["status"] == "error" and "not installed" in out["message"] and str(missing) in out["message"]
@@ -232,10 +232,11 @@ class TestWhatIsRun:
         assert "--mtp" not in argv and "off" not in argv, "DPC leaves the draft layer on, Strata's default"
 
     @pytest.mark.asyncio
-    async def test_the_environment_has_none_of_ours_and_exactly_the_four_strata_settings(
+    async def test_the_environment_has_none_of_ours_and_exactly_the_five_strata_settings(
             self, host, control, tmp_path, monkeypatch):
         monkeypatch.setenv("STRATA_BAIT", "leak")
         monkeypatch.setenv("strata_no_acquire", "1")  # Windows names are case-blind
+        monkeypatch.setenv("STRATA_UPDATE_FEED", "https://example.invalid/somebody-elses-feed")
         monkeypatch.setenv("STRATA_INSTALL_DIR", str(tmp_path / "elsewhere"))
         monkeypatch.setenv("PYTHONPATH", str(tmp_path / "elsewhere"))
         monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "venv"))
@@ -243,12 +244,18 @@ class TestWhatIsRun:
         await host.model_download_service.download_model("strata-model")
         seen = _seen(control)
         assert {k.upper() for k in seen["strata_env"]} == {
-            "STRATA_COMPONENTS_DIR", "STRATA_SETTINGS_FILE", "STRATA_CONTROL_INSTALL", "STRATA_INSTALL_DIR"}
+            "STRATA_COMPONENTS_DIR", "STRATA_SETTINGS_FILE", "STRATA_CONTROL_INSTALL", "STRATA_INSTALL_DIR",
+            "STRATA_UPDATE_FEED"}
         env = {k.upper(): v for k, v in seen["strata_env"].items()}
         assert env["STRATA_CONTROL_INSTALL"] == "1"
         assert env["STRATA_INSTALL_DIR"] == str(_run_configs(host))
         assert env["STRATA_SETTINGS_FILE"] == str(host.folder / "strata" / "settings.json")
         assert env["STRATA_COMPONENTS_DIR"] == str(strata_fetcher.components_dir(control))
+        # setup.py reads Strata's signed feed from this address (update_cmd._feed_source), and the
+        # pin's own release folder is the one it must read, never the project's `releases/latest`.
+        assert env["STRATA_UPDATE_FEED"] == (
+            f"{strata_fetcher.STRATA_RELEASE_BASE}/{strata_fetcher.STRATA_RELEASE_TAG}")
+        assert "latest" not in env["STRATA_UPDATE_FEED"] and not env["STRATA_UPDATE_FEED"].endswith(".json")
         assert seen["env"]["PYTHONPATH"] is None and seen["env"]["VIRTUAL_ENV"] is None
         assert seen["env"]["PYTHONNOUSERSITE"] == "1" and seen["env"]["PYTHONUNBUFFERED"] == "1"
 
