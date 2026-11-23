@@ -27,12 +27,15 @@ from dpc_client_core.providers.whisper_provider import _START_FIGURES, LocalWhis
 
 # Zcode #22-3: the start figures are the provider's, never copied here.
 GPU, CPU = _START_FIGURES["cuda"], _START_FIGURES["cpu"]
-GPU_WARM_30, GPU_PENALTY, GPU_LOAD = GPU["warm"]["<=60"], GPU["penalty_s"], GPU["load_s"]
-CPU_WARM_30, CPU_LOAD = CPU["warm"]["<=60"], CPU["load_s"]
+# The 30 s band's figures; the load before any load has run in the process (S3 follow-up 4).
+GPU_WARM_30, GPU_PENALTY, GPU_LOAD = GPU["warm"]["<=60"], GPU["penalty_s"]["<=60"], GPU["load_first_s"]
+CPU_WARM_30, CPU_PENALTY, CPU_LOAD = CPU["warm"]["<=60"], CPU["penalty_s"]["<=60"], CPU["load_first_s"]
 
 
-def _start(figures):
-    return {"warm": dict(figures["warm"]), "penalty_s": figures["penalty_s"], "load_s": figures["load_s"]}
+def _start(figures, load_ran=False):
+    return {"warm": dict(figures["warm"]), "penalty_s": dict(figures["penalty_s"]),
+            "load_first_s": figures["load_first_s"], "load_reload_s": figures["load_reload_s"],
+            "load_s": figures["load_reload_s" if load_ran else "load_first_s"]}
 
 
 @pytest.fixture(autouse=True)
@@ -74,13 +77,14 @@ class TestStartFigures:
     def test_the_cpu_starts_from_l12s_table(self):
         p = _provider("cpu")
         figures = p.speed_figures("cpu")
-        assert _close(figures["warm"][">180"], 300.0 / 306.0) and figures["penalty_s"] == 0.0
+        assert _close(figures["warm"][">180"], 300.0 / 306.0) and figures["penalty_s"][">180"] == 0.0
         assert figures["load_s"] == CPU_LOAD
 
     @pytest.mark.parametrize("device", ["mps", "mlx"])
     def test_a_device_the_adr_gives_no_figure_is_unknown(self, device):
         p = _provider(device)
-        assert p.speed_figures(device) == {"warm": {}, "penalty_s": None, "load_s": None}
+        assert p.speed_figures(device) == {"warm": {}, "penalty_s": {}, "load_first_s": None,
+                                           "load_reload_s": None, "load_s": None}
         assert p.expected_seconds(30, device=device, loaded=False) is None
         assert p.expected_seconds(30, device=device, loaded=True) is None
 
@@ -114,7 +118,7 @@ class TestTheEstimate:
     def test_the_device_and_the_loaded_state_can_be_given(self):
         p = _provider("cuda", loaded=True)
         assert _close(p.expected_seconds(30, device="cpu", loaded=False),
-                      CPU_LOAD + seconds_from_ratio(30, CPU_WARM_30) + CPU["penalty_s"])
+                      CPU_LOAD + seconds_from_ratio(30, CPU_WARM_30) + CPU_PENALTY)
 
     def test_a_configured_device_needs_no_detection(self, monkeypatch):
         p = _provider("cuda")
@@ -138,13 +142,13 @@ class TestRecording:
         p.model_loaded = True
         await p.transcribe("a30.wav")
         figures = p.speed_figures("cpu")
-        assert figures["load_s"] == 1.5
-        assert figures["penalty_s"] == 0.0, "30 s in about 0.05 s: faster than warm, so no penalty"
+        assert figures["load_first_s"] == 1.5
+        assert figures["penalty_s"]["<=60"] == 0.0, "30 s in about 0.05 s: faster than warm, so no penalty"
         assert _close(figures["warm"]["<=60"], CPU_WARM_30), "no warm call yet"
 
         await p.transcribe("a30.wav")
         figures = p.speed_figures("cpu")
-        assert figures["warm"]["<=60"] > 50 and figures["penalty_s"] == 0.0
+        assert figures["warm"]["<=60"] > 50 and figures["penalty_s"]["<=60"] == 0.0
 
     @pytest.mark.asyncio
     async def test_a_new_load_makes_the_next_call_cold_again(self):
@@ -154,7 +158,7 @@ class TestRecording:
         p._note_load("cpu", 0.8)
         figures = p.speed_figures("cpu")
         assert _close(p.expected_seconds(30, loaded=True),
-                      seconds_from_ratio(30, figures["warm"]["<=60"]) + figures["penalty_s"])
+                      seconds_from_ratio(30, figures["warm"]["<=60"]) + figures["penalty_s"]["<=60"])
 
     @pytest.mark.asyncio
     async def test_a_ratio_measured_on_one_device_does_not_change_another(self):
@@ -167,17 +171,18 @@ class TestRecording:
         p = _provider("cuda")
         p._note_load("cpu", 2.0)
         p.model_loaded = True
-        assert p.speed_figures("cpu")["load_s"] == 2.0
-        assert p.speed_figures("cuda")["load_s"] == GPU_LOAD
+        assert p.speed_figures("cpu")["load_first_s"] == 2.0
+        assert p.speed_figures("cuda")["load_first_s"] == GPU_LOAD
         # The estimate follows the device the model is loaded on.
-        assert _close(p.expected_seconds(30), seconds_from_ratio(30, CPU_WARM_30) + CPU["penalty_s"])
+        assert _close(p.expected_seconds(30), seconds_from_ratio(30, CPU_WARM_30) + CPU_PENALTY)
 
     def test_a_zero_or_negative_figure_is_not_recorded(self):
         p = _provider("cuda")
         p._note_load("cuda", 0.0)
         p._note_run("cuda", 30.0, 0.0, first=True)
         p._note_run("cuda", 0.0, 1.0, first=False)
-        assert p.speed_figures("cuda") == _start(GPU)
+        # Nothing recorded; the load still ran, so the next one reads as a reload.
+        assert p.speed_figures("cuda") == _start(GPU, load_ran=True)
 
     @pytest.mark.asyncio
     async def test_the_figures_survive_a_providers_reload(self):
@@ -193,7 +198,8 @@ class TestRecording:
     def test_the_figures_live_in_memory_on_the_provider(self):
         a, b = _provider("cuda"), _provider("cuda")
         a._note_load("cuda", 1.0)
-        assert b.speed_figures("cuda")["load_s"] == GPU_LOAD
+        # b measured nothing: a's 1.0 s is not b's; only the process's "a load has run" is shared.
+        assert b.speed_figures("cuda") == _start(GPU, load_ran=True)
 
 
 class TestTheDoorsAsk:

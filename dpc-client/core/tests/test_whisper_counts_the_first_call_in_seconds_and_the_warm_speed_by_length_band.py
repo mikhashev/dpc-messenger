@@ -72,18 +72,18 @@ def _close(a, b, tol=1e-9):
 class TestTheFirstCallIsSecondsAdded:
     def test_a_cold_300_s_file_is_the_load_the_warm_work_and_the_penalty(self):
         p = _provider("cuda")
-        expected = CUDA["load_s"] + seconds_from_ratio(300, CUDA["warm"][">180"]) + CUDA["penalty_s"]
+        expected = CUDA["load_first_s"] + seconds_from_ratio(300, CUDA["warm"][">180"]) + CUDA["penalty_s"][">180"]
         assert _close(p.expected_seconds(300), expected)
         # The falsifier: the old cold ratio said 12.8 + 300 / 8.8 = 46.9 s; measured was ~31.7 s.
         assert p.expected_seconds(300) < 40
 
     def test_loaded_but_unused_pays_the_penalty_and_no_load(self):
         p = _provider("cuda", loaded=True)
-        assert _close(p.expected_seconds(30), seconds_from_ratio(30, CUDA["warm"]["<=60"]) + CUDA["penalty_s"])
+        assert _close(p.expected_seconds(30), seconds_from_ratio(30, CUDA["warm"]["<=60"]) + CUDA["penalty_s"]["<=60"])
 
     def test_the_start_penalty_is_the_logs_first_call_rounded_up(self):
         # gpu_run1.log: ru_10 run0 1.14 s against the 0.23 s median, +0.91 s.
-        assert 0.91 <= CUDA["penalty_s"] <= 1.5
+        assert 0.91 <= CUDA["penalty_s"]["<=60"] <= 1.5
 
     @pytest.mark.asyncio
     async def test_a_measured_first_call_sets_the_penalty_in_seconds(self, monkeypatch):
@@ -92,16 +92,16 @@ class TestTheFirstCallIsSecondsAdded:
         warm = CUDA["warm"]["<=60"]
         p._note_run("cuda", 10.0, 10.0 / warm + 2.5, first=True)
         figures = p.speed_figures("cuda")
-        assert _close(figures["penalty_s"], 2.5, 1e-6)
+        assert _close(figures["penalty_s"]["<=60"], 2.5, 1e-6)
         assert figures["warm"]["<=60"] == warm, "a first call never moves a warm figure"
-        # Still seconds added, whatever the length: 300 s on a just-loaded model.
-        assert _close(p.expected_seconds(300, loaded=True),
-                      seconds_from_ratio(300, CUDA["warm"][">180"]) + 2.5, 1e-6)
+        # Still seconds added, never a ratio: 50 s on a just-loaded model, the same band.
+        assert _close(p.expected_seconds(50, loaded=True),
+                      seconds_from_ratio(50, CUDA["warm"]["<=60"]) + 2.5, 1e-6)
 
     def test_a_first_call_faster_than_warm_gives_a_penalty_of_zero(self):
         p = _provider("cuda")
         p._note_run("cuda", 60.0, 0.5, first=True)
-        assert p.speed_figures("cuda")["penalty_s"] == 0.0
+        assert p.speed_figures("cuda")["penalty_s"]["<=60"] == 0.0
 
     @pytest.mark.asyncio
     async def test_the_first_real_call_after_a_load_is_the_one_recorded_as_the_penalty(self):
@@ -114,7 +114,7 @@ class TestTheFirstCallIsSecondsAdded:
 
     def test_the_cpu_keeps_l12s_cold_row_in_its_load(self):
         cpu = _START_FIGURES["cpu"]
-        assert cpu["penalty_s"] == 0.0 and cpu["load_s"] == 9.0
+        assert set(cpu["penalty_s"].values()) == {0.0} and cpu["load_first_s"] == 9.0
         # L12's table: 10 s of audio, 11 s warm, about 20 s cold.
         assert _close(_provider("cpu").expected_seconds(10), 9.0 + 11.0, 1e-6)
 
@@ -183,7 +183,8 @@ class TestTheFiguresFollowTheModel:
         old, new = _provider("cuda"), _provider("cuda", model="openai/whisper-small")
         old._note_run("cuda", 30.0, 1.0, first=False)
         old.hand_over_to(new)
-        assert new.speed_figures("cuda") == {**CUDA, "warm": dict(CUDA["warm"])}
+        assert new.speed_figures("cuda") == {**CUDA, "warm": dict(CUDA["warm"]),
+                                             "penalty_s": dict(CUDA["penalty_s"]), "load_s": CUDA["load_first_s"]}
 
     def test_a_load_that_finishes_on_the_old_object_after_the_hand_over_keeps_its_time(self):
         # Zcode #22-2: the reload happened while the old object was loading; its load lands there.
@@ -194,4 +195,5 @@ class TestTheFiguresFollowTheModel:
         old._note_load("cuda", 2.5)
         old._settle_finished_load()
         assert new.model_loaded and new._loaded_device == "cuda"
-        assert new.speed_figures("cuda")["load_s"] == 2.5
+        # The first load of the process (S3 follow-up 4 keeps it apart from a reload).
+        assert new.speed_figures("cuda")["load_first_s"] == 2.5

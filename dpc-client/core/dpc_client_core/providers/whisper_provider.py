@@ -48,31 +48,32 @@ def length_band(audio_s: Any) -> Optional[str]:
 
 
 # Start figures per device until this provider measures its own (ADR-052 L10, L12). `warm` is the
-# real-time ratio (audio seconds per wall second) by length band; `penalty_s` the seconds the first
-# call after a load costs on top of `audio / warm` (added, never a ratio: Johnny #24-1); `load_s` the
-# load itself. An estimate is `load_s (not loaded) + audio / warm[band] + penalty_s (first call)`.
-#   cuda, "GPU figures on speech" (`gpu_run1.log`, SUMMARY, the slowest clip's median per band):
-#     <=60   21.1x  en_30 (1.42 s; ru_10 43.4x, ru_30 25.5x, ru_60 36.3x are faster)
-#     <=120  27.4x  ru_118 at batch 8 (4.31 s; en_120 29.4x)
-#     <=180  15.9x  no clip was measured at batch 4: the nearest measured longer band, which is
-#                   also the slowest figure measured, so a peer's estimate errs long
-#     >180   15.9x  en_300 at batch 2 (18.89 s)
-#     penalty_s 1.0: the one first call after a load in the log, ru_10 run0, took 1.14 s against
-#       the 0.23 s median (+0.91 s); the other clips' first runs on the loaded model were +0.67 s at
-#       60 s and within run-to-run spread at 30 s, 118 s, 120 s and 300 s (the ADR's "+0.9 s at
-#       10 s, +0.7 s at 60 s"). One constant, rounded up, covers every band.
-#     load_s 12.8: the fresh-process cold load L13 counts.
-#   cpu, L12's table (the slowest row per band): <=60 0.91x (10 s in 11 s warm), <=120 1.15x (120 s
-#     in 104 s), >180 0.98x (300 s in 306 s); <=180 has no row and takes >180's. Its "load + first
-#     call ≈ 9 s" is all in `load_s`, so `penalty_s` is 0 until measured.
+# real-time ratio (audio s per wall s) and `penalty_s` the seconds a first call after a load adds on
+# top of `audio / warm`, both by length band; `load_first_s` is a load before any load ran in this
+# process (imports included), `load_reload_s` any later load. Sources (ADR-052, "GPU figures on
+# speech" for cuda, L12's table for cpu):
+#   cuda warm: the slowest clip's median per band: en_30 21.1x, ru_118 27.4x, en_300 15.9x; <=180 is
+#     estimated from the batch-2 figure (batch 4 was never measured).
+#   cuda penalty_s 1.0 in every band: ru_10's first call after the load, +0.91 s, rounded up; no
+#     other band measured a first call after a load.
+#   cuda load_first_s 12.8 (a fresh process), load_reload_s 0.8 (reload after an unload,
+#     0.76-0.83 s; Forge 0.6-0.9 s).
+#   cpu warm: 0.91x (10 s in 11 s), 1.15x (120 s in 104 s), 0.98x (300 s in 306 s; <=180 takes it).
+#   cpu penalty_s 0: L12's "load + first call ≈ 9 s" is all in load_first_s 9.0; load_reload_s 1.0
+#     is the running backend's log, "Whisper model loaded in 1.0 seconds (device=cpu)".
 # A device absent here (mps, mlx) is unknown until measured.
 _START_FIGURES: Dict[str, Dict[str, Any]] = {
     "cuda": {"warm": {"<=60": 21.1, "<=120": 27.4, "<=180": 15.9, ">180": 15.9},
-             "penalty_s": 1.0, "load_s": 12.8},
+             "penalty_s": {band: 1.0 for band in _LENGTH_BANDS},
+             "load_first_s": 12.8, "load_reload_s": 0.8},
     "cpu": {"warm": {"<=60": 10.0 / 11.0, "<=120": 120.0 / 104.0, "<=180": 300.0 / 306.0,
                      ">180": 300.0 / 306.0},
-            "penalty_s": 0.0, "load_s": 9.0},
+            "penalty_s": {band: 0.0 for band in _LENGTH_BANDS},
+            "load_first_s": 9.0, "load_reload_s": 1.0},
 }
+# Whether a Whisper load has run in this process (any provider object, any device): the next load
+# is then a reload. Process-wide because torch and transformers are imported once per process.
+_A_LOAD_RAN = False
 # ADR-052 L4: the margin a person's door keeps for the transcription itself, `max(10 s, estimate)`.
 MIN_MARGIN_S = 10.0
 # ADR-052 L11: what a loaded Whisper holds on the card beyond its weights, MiB (torch reserved peak at
@@ -307,19 +308,23 @@ class LocalWhisperProvider(AIProvider):
         # The object that took over this one's model in a providers reload: a
         # transcription still running here is counted and ended on that object.
         self._successor: Optional["LocalWhisperProvider"] = None
-        # ADR-052 S3a: the speed this provider measured, over `_START_FIGURES` and in its shape,
-        # {device: {"warm": {band: ratio}, "penalty_s": s, "load_s": s}}; the device the model is
-        # loaded on now (a load may fall back to the CPU); the calls since that load (0: the next one
-        # is the first, which pays `penalty_s`); `auto` resolved for an estimate.
+        # ADR-052 S3a: the speed this provider measured, over `_START_FIGURES` and in its shape, and
+        # the (device, key) of the last load measured; the device the model is loaded on now (a load
+        # may fall back to the CPU); the calls since that load (0: the next one is the first, which
+        # pays `penalty_s`); `auto` resolved for an estimate.
         self._measured: Dict[str, Dict[str, Any]] = {}
+        self._last_load: Optional[tuple] = None
         self._loaded_device: Optional[str] = None
         self._calls_since_load = 0
         self._estimate_device: Optional[str] = None
         # ADR-052 S3b: this alias's standing on the card, built on the first call that runs on a GPU
-        # device (never for the CPU) and handed over in a providers reload; and the calls holding it
-        # now, {token: (monotonic start, expected_s)}, shared with a successor, for its `eta_s`.
+        # device (never for the CPU) and handed over in a providers reload; the calls holding it now,
+        # {token: (monotonic start, expected_s, audio_s)}, and the load running under it now,
+        # {"since": monotonic start, "device": d} or empty, both shared with a successor, for its
+        # `eta_s`.
         self._card_lease: Optional[Any] = None
         self._card_runs: Dict[int, Any] = {}
+        self._card_load: Dict[str, Any] = {}
 
         logger.info(f"LocalWhisperProvider '{alias}' initialized (model={self.model_name}, device={self.device})")
 
@@ -545,26 +550,33 @@ class LocalWhisperProvider(AIProvider):
     # -- the speed figures (ADR-052 S3a: the producer of `expected_s`) --
 
     def _note_load(self, device: str, load_s: float) -> None:
-        """A load finished on `device` (where the model really is): its time is recorded and the
-        next call is the first after a load."""
+        """A load finished on `device` (where the model really is): its time is recorded as the
+        process's first load or as a reload (S3 follow-up 4), and the next call is the first after a
+        load. From here every load in this process is a reload."""
+        global _A_LOAD_RAN
         self._loaded_device = device
         self._calls_since_load = 0
+        key = "load_reload_s" if _A_LOAD_RAN else "load_first_s"
+        _A_LOAD_RAN = True
         seconds = _a_positive(load_s)
         if seconds is not None:
-            self._measured.setdefault(device, {})["load_s"] = seconds
+            self._measured.setdefault(device, {})[key] = seconds
+            self._last_load = (device, key)
 
     def _note_run(self, device: Optional[str], audio_s: float, elapsed: float, *, first: bool) -> None:
         """One transcription of `audio_s` took `elapsed` on `device`. A later call replaces the warm
-        ratio of its own length band only. The first call after a load records `penalty_s`: what it
-        took beyond `audio / warm` of its band, at least 0 (Johnny #24-1: the first call costs
-        seconds, not a ratio). A figure that cannot be computed is not recorded."""
+        ratio of its own length band only. The first call after a load records the `penalty_s` of
+        its own length band: what it took beyond `audio / warm` of that band, at least 0 (Johnny
+        #24-1: the first call costs seconds, not a ratio; Johnny #41-2: by band, so a long first
+        call leaves a short one's penalty). A figure that cannot be computed is not recorded."""
         audio, wall, band = _a_positive(audio_s), _a_positive(elapsed), length_band(audio_s)
         if device is None or audio is None or wall is None or band is None:
             return
         if first:
             warm = self.speed_figures(device)["warm"].get(band)
             if warm is not None:
-                self._measured.setdefault(device, {})["penalty_s"] = max(0.0, wall - audio / warm)
+                penalty = self._measured.setdefault(device, {}).setdefault("penalty_s", {})
+                penalty[band] = max(0.0, wall - audio / warm)
             return
         self._measured.setdefault(device, {}).setdefault("warm", {})[band] = audio / wall
 
@@ -592,21 +604,36 @@ class LocalWhisperProvider(AIProvider):
         return self._estimate_device
 
     def speed_figures(self, device: str) -> Dict[str, Any]:
-        """`warm` (by length band), `penalty_s` and `load_s` for `device`: each figure measured here,
-        else the start figure, else absent (a band of `warm`) or None (unknown)."""
+        """`warm` and `penalty_s` (each by length band), `load_first_s` and `load_reload_s` for
+        `device`: each figure measured here, else the start figure, else absent (a band) or None
+        (unknown). `load_s` is the one the next load costs: the reload once a load has run in this
+        process, else the first load."""
         measured = self._measured.get(device, {})
         start = _START_FIGURES.get(device, {})
-        warm = {**start.get("warm", {}), **measured.get("warm", {})}
-        return {"warm": warm,
-                "penalty_s": measured.get("penalty_s", start.get("penalty_s")),
-                "load_s": measured.get("load_s", start.get("load_s"))}
+        figures: Dict[str, Any] = {
+            key: {**start.get(key, {}), **measured.get(key, {})} for key in ("warm", "penalty_s")}
+        for key in ("load_first_s", "load_reload_s"):
+            figures[key] = measured.get(key, start.get(key))
+        figures["load_s"] = figures["load_reload_s" if _A_LOAD_RAN else "load_first_s"]
+        return figures
+
+    def _first_call_seconds(self, audio_s: Any, device: str) -> Optional[float]:
+        """The first call after a load on `device`: `audio / warm[band] + penalty_s[band]`, or None."""
+        from ..managers.card_lease import seconds_from_ratio
+
+        figures = self.speed_figures(device)
+        band = length_band(audio_s)
+        work = None if band is None else seconds_from_ratio(audio_s, figures["warm"].get(band))
+        penalty = None if band is None else figures["penalty_s"].get(band)
+        return None if work is None or penalty is None else work + penalty
 
     def expected_seconds(self, audio_s: Any, device: Optional[str] = None,
                          loaded: Optional[bool] = None) -> Optional[float]:
         """Wall seconds a transcription of `audio_s` would take, or None when unknown (ADR-052 L10,
-        L13 point 2): `load_s` when the model is not loaded, plus the audio divided by the warm ratio
-        of its length band (`card_lease.seconds_from_ratio`), plus `penalty_s` for the first call
-        after a load. `device` and `loaded` default to what this provider is now."""
+        L13 point 2): `load_s` when the model is not loaded (the first load of this process or a
+        reload, `speed_figures`), plus the audio divided by the warm ratio of its length band
+        (`card_lease.seconds_from_ratio`), plus that band's `penalty_s` for the first call after a
+        load. `device` and `loaded` default to what this provider is now."""
         owner = self._current_owner()
         if owner is not self:
             return owner.expected_seconds(audio_s, device, loaded)
@@ -620,7 +647,7 @@ class LocalWhisperProvider(AIProvider):
         if work is None:
             return None
         if not loaded or self._calls_since_load == 0:
-            penalty = figures["penalty_s"]
+            penalty = figures["penalty_s"].get(band)
             if penalty is None:
                 return None
             work += penalty
@@ -675,13 +702,37 @@ class LocalWhisperProvider(AIProvider):
 
     def _card_eta(self) -> Optional[float]:
         """The lease's `eta_s`: the longest remaining expected time of the calls holding the card now,
-        None when any is unknown or none runs (L10). An overrun reads as unknown (`_positive`)."""
-        runs = list(self._current_owner()._card_runs.values())
+        None when any is unknown or nothing runs or loads (L10). An overrun reads as unknown
+        (`_positive`).
+
+        While a load runs under the lease (S3 follow-up 4, Ark #40-1, Johnny #41-5) it is the load's
+        remaining time, from its start and the current load figure of its device, plus the longest
+        first-call work of the calls waiting for it (none for a preload); a call whose length is not
+        known counts its own `expected_s - elapsed` instead, and one with neither leaves it unknown.
+        A load past its figure is unknown too."""
+        owner = self._current_owner()
+        runs = list(owner._card_runs.values())
+        load = dict(owner._card_load)
+        now = time.monotonic()
+        if load:
+            figure = owner.speed_figures(load["device"])["load_s"]
+            load_left = None if figure is None else figure - (now - load["since"])
+            if load_left is None or load_left <= 0:
+                return None
+            left = [load_left]
+            for started, expected, audio_s in runs:
+                work = None if audio_s is None else owner._first_call_seconds(audio_s, load["device"])
+                if work is not None:
+                    left.append(load_left + work)
+                elif expected is not None:
+                    left.append(expected - (now - started))
+                else:
+                    return None
+            return max(left)
         if not runs:
             return None
-        now = time.monotonic()
         left = []
-        for started, expected in runs:
+        for started, expected, _audio_s in runs:
             if expected is None:
                 return None
             left.append(expected - (now - started))
@@ -712,11 +763,13 @@ class LocalWhisperProvider(AIProvider):
         """`_load_model` in its thread, the lease marked `starting` meanwhile. The caller holds
         `_load_lock`. Returns `_finish_thread`'s triple."""
         if lease is not None:
+            self._card_load.update(since=time.monotonic(), device=self._route_device())
             lease.mark_starting()
         try:
             outcome = await self._finish_thread(self._load_model)
         finally:
             if lease is not None:
+                self._card_load.clear()
                 lease.mark_running()
         self._off_the_card_after_a_load(lease)
         return outcome
@@ -1115,22 +1168,24 @@ class LocalWhisperProvider(AIProvider):
 
     def _carry_figures_to(self, new: "LocalWhisperProvider", *, fresh_load: bool) -> None:
         """The speed measured here goes to `new` when it is the same model's (ADR-052 S3a): `new`
-        keeps a figure it measured itself, band by band, except, with `fresh_load`, the load time of
-        the device this object has just loaded on, which is newer than anything `new` holds."""
+        keeps a figure it measured itself, band by band for `warm` and `penalty_s`, except, with
+        `fresh_load`, the load this object has just measured (first or reload, on its device), which
+        is newer than anything `new` holds."""
         if new.model_name != self.model_name:
             return
         for device, figures in self._measured.items():
             kept = new._measured.setdefault(device, {})
             for key, value in figures.items():
-                if key == "warm":
-                    for band, ratio in value.items():
-                        kept.setdefault("warm", {}).setdefault(band, ratio)
+                if key in ("warm", "penalty_s"):
+                    for band, figure in value.items():
+                        kept.setdefault(key, {}).setdefault(band, figure)
                 else:
                     kept.setdefault(key, value)
-        if fresh_load and self._loaded_device in self._measured:
-            load_s = self._measured[self._loaded_device].get("load_s")
-            if load_s is not None:
-                new._measured.setdefault(self._loaded_device, {})["load_s"] = load_s
+        if fresh_load and self._last_load is not None:
+            device, key = self._last_load
+            seconds = self._measured.get(device, {}).get(key)
+            if seconds is not None:
+                new._measured.setdefault(device, {})[key] = seconds
 
     def _copy_state_to(self, new: "LocalWhisperProvider") -> None:
         if not new.model_loaded and self.model_loaded:
@@ -1175,6 +1230,8 @@ class LocalWhisperProvider(AIProvider):
             _card_lease._CARD_LEASES[lease.holder] = lease
         self._card_runs.update(new._card_runs)
         new._card_runs = self._card_runs
+        self._card_load.update(new._card_load)
+        new._card_load = self._card_load
         self._carry_figures_to(new, fresh_load=False)
         if new.model_name == self.model_name:
             if new.model_loaded and self.model_loaded and new._loaded_device is None:
@@ -1273,14 +1330,6 @@ class LocalWhisperProvider(AIProvider):
             await progress_callback("Download complete" if result["success"] else "Download failed", 1.0)
 
         return result
-
-    def _get_audio_duration(self, audio_path: str) -> float:
-        try:
-            import soundfile as sf
-            info = sf.info(audio_path)
-            return info.duration
-        except Exception:
-            return 0.0
 
     @staticmethod
     def _realtime_ratio(duration_seconds: float, elapsed: float) -> str:
@@ -1390,7 +1439,7 @@ class LocalWhisperProvider(AIProvider):
                 if check is not None:
                     await check()
                 runs = self._current_owner()._card_runs
-                runs[id(token)] = (time.monotonic(), _a_positive(expected_s))
+                runs[id(token)] = (time.monotonic(), _a_positive(expected_s), _a_positive(audio_s))
                 try:
                     return await self._transcribe_holding(audio_path, release_if_loaded_here,
                                                           language, task, lease, audio_s=audio_s)

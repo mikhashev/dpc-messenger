@@ -147,6 +147,23 @@ def _no_card_claims_cross_tests():
 
 
 @pytest.fixture(autouse=True)
+def _no_whisper_load_has_run_in_this_process():
+    """Whether a Whisper load has run in this process is module state (ADR-052 S3 follow-up 4: it
+    picks the reload figure over the fresh process's). Each test starts as a fresh backend would,
+    with no load run; the module is not imported here for a test that never imports it."""
+    import sys
+
+    def clear():
+        module = sys.modules.get("dpc_client_core.providers.whisper_provider")
+        if module is not None and hasattr(module, "_A_LOAD_RAN"):
+            module._A_LOAD_RAN = False
+
+    clear()
+    yield
+    clear()
+
+
+@pytest.fixture(autouse=True)
 def _engine_pins_in_tmp(tmp_path, monkeypatch):
     """A passed start writes its pin's marker and may prune the older pins (B2 step 3).
     The pins folders default to this machine's ~/.dpc/bin, so every test gets its own
