@@ -63,6 +63,16 @@ def _check_model_files_dir(raw: str) -> Path:
     return folder
 
 
+# Keys a config.ini written before them gets at start, with the code's default and its comment, so
+# the owner sees the value in the file; the file's value then wins, and one the owner wrote is never
+# touched (the firewall's `_seed_missing_tools_into_rules` does the same for privacy_rules.json).
+# ADR-052, item 7's carrier (Mike, 2026-11-23). {(section, key): (default, comment)}
+_SEEDED_KEYS: Dict[tuple, tuple] = {
+    ('local_transcription', 'idle_unload_s'): (
+        '300', 'Unload the model (frees VRAM) after this many idle seconds; 0 = never'),
+}
+
+
 class Settings:
     """
     Centralized settings management for DPC Client.
@@ -86,8 +96,49 @@ class Settings:
             except configparser.Error as e:
                 print(f"Warning: Failed to parse config file: {e}")
                 self._recreate_config_with_backup()
+            else:
+                self._seed_missing_keys()
         else:
             self._create_default_config()
+
+    def _seed_missing_keys(self) -> None:
+        """Write each `_SEEDED_KEYS` entry the loaded config lacks, as one line put under its section
+        header (the section appended when absent), so every other line and comment stays as it is.
+        Nothing is written when none is missing; a file that cannot be written is left alone, and
+        the getters read the same default."""
+        missing = [(section, key) for (section, key) in _SEEDED_KEYS
+                   if not self._config.has_option(section, key)]
+        if not missing:
+            return
+        named = ", ".join(f"[{section}] {key}" for section, key in missing)
+        try:
+            with open(self.config_file, 'r') as f:
+                lines = f.read().splitlines()
+            for section, key in missing:
+                value, comment = _SEEDED_KEYS[(section, key)]
+                line = f"{key} = {value}  # {comment}"
+                header = next((i for i, text in enumerate(lines) if self._section_named(text) == section), None)
+                if header is not None:
+                    lines.insert(header + 1, line)
+                elif not self._config.has_section(section):
+                    lines += ["", f"[{section}]", line]
+                else:  # a header this reader does not find: a second one would break the file
+                    raise OSError(f"the [{section}] header was not found in the file")
+            with open(self.config_file, 'w') as f:
+                f.write("\n".join(lines) + "\n")
+        except OSError as e:
+            logger.warning("config.ini: could not write %s (%s); the defaults apply unwritten", named, e)
+            return
+        for section, key in missing:
+            if not self._config.has_section(section):
+                self._config.add_section(section)
+            self._config.set(section, key, _SEEDED_KEYS[(section, key)][0])
+        logger.info("config.ini: wrote %s with the default", named)
+
+    def _section_named(self, line: str) -> Optional[str]:
+        """The section a config.ini line opens, read as configparser reads it, or None."""
+        found = self._config.SECTCRE.match(line.split('#', 1)[0].strip())
+        return found.group('header') if found else None
 
     def _recreate_config_with_backup(self):
         """Recreate config file after backing up the invalid one."""
@@ -377,7 +428,8 @@ class Settings:
             'fallback_to_openai': 'true',  # Fallback to OpenAI API if local fails
             'max_file_size_mb': '25',  # Max audio file size for local transcription (VRAM limit)
             'lazy_loading': 'true',  # Load model on first use (faster startup)
-            'idle_unload_s': '300'  # Unload the model (frees VRAM) after this many idle seconds; 0 = never
+            'idle_unload_s': _SEEDED_KEYS[('local_transcription', 'idle_unload_s')][0],  # Unload the model (frees VRAM) after this many idle seconds; 0 = never
+            'queue_wait_s': '600'  # How long a person's transcription may wait in line for the GPU; 0 = do not wait
         }
 
         self._config['vision'] = {
@@ -1303,6 +1355,24 @@ class Settings:
             logger.warning("[local_transcription] idle_unload_s is unreadable (%r); using 300", raw)
             return 300.0
         return value if value > 0 else 0.0
+
+    def get_local_transcription_queue_wait_s(self) -> int:
+        """`[local_transcription] queue_wait_s`: the dictation bound, seconds a person's
+        transcription waits in line for the card (0 = do not wait). Default 600 (ADR-052 L4,
+        item 6A, Mike 2026-11-23); a value that is not a whole number >= 0 reads as the default."""
+        try:
+            raw = self.get('local_transcription', 'queue_wait_s', '600').strip()
+        except configparser.Error as e:
+            logger.warning("[local_transcription] queue_wait_s is unreadable (%s); using the default", e)
+            return 600
+        try:
+            value = int(raw)
+        except ValueError:
+            value = -1
+        if value < 0:
+            logger.warning("[local_transcription] queue_wait_s %r is not a whole number >= 0; using the default", raw)
+            return 600
+        return value
 
     # Telegram Bot Integration Settings (v0.14.0+)
 
