@@ -108,6 +108,25 @@ def card_ask(provider: Any, purpose: str, audio_path: str, *, bound_s: Optional[
     return {"purpose": purpose, "wait_s": wait_s, "expected_s": expected_s}
 
 
+def asks_for_the_card(provider: Any) -> bool:
+    """Whether a transcription on `provider` would ask this node's card lease (ADR-052 3.1, queueing
+    condition 2, slice S3c): a local Whisper whose route is not the CPU. A cloud provider, a
+    `device: cpu` alias and a model that fell back to the CPU do not. Never imports torch: an `auto`
+    device not detected yet counts as a card's, the side a cascade the card has just refused must err
+    on (that refusal already says this machine has one)."""
+    if (getattr(provider, "config", None) or {}).get("type") != "local_whisper":
+        return False
+    current = provider._current_owner() if hasattr(provider, "_current_owner") else provider
+    if getattr(current, "model_loaded", False):
+        in_use = current._device_in_use()
+        if in_use is not None:
+            return in_use != "cpu"
+    device = getattr(current, "device", "auto")
+    if device == "auto":
+        device = getattr(current, "_estimate_device", None) or getattr(current, "_detected_device", None)
+    return device != "cpu"
+
+
 def card_wait_words(estimate: Optional[Dict[str, Any]]) -> str:
     """A person's line for a transcription waiting for the card (ADR-052 section 4): "transcription
     queued behind yue2.cpp (music job J), about 6 min" or "..., time unknown". From the lease's wait

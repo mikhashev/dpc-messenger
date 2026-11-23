@@ -1,6 +1,7 @@
 # dpc-client/core/dpc_client_core/service.py
 
 import asyncio
+import contextvars
 from dataclasses import asdict
 import hashlib
 import json
@@ -420,6 +421,19 @@ def keep_copy_under_a_free_name(source: Path, directory: Path, name: str) -> Pat
         target.unlink(missing_ok=True)
         raise
     return target
+
+
+# ADR-052 S3c (section 3.1, queueing condition 3): the received-voice cascade's `check` for the card,
+# carried to `transcribe_audio` beside its arguments, as `music.lyrics.show_card_wait` carries the
+# player's `on_wait`, so the command's signature stays. None everywhere else.
+_VOICE_MESSAGE_CARD_CHECK: "contextvars.ContextVar[Optional[Any]]" = contextvars.ContextVar(
+    "voice_message_card_check", default=None)
+
+
+class _TheSendersTranscriptArrived(Exception):
+    """Raised by the received-voice cascade's `check` while its call waits for the card: the
+    sender's transcript is in, so the local attempt is dropped before anything loads and nothing
+    falls back to the cloud or a peer (ADR-052 3.1, queueing condition 3; test 23)."""
 
 
 # What the UI may attach to a message in a 1:1 agent chat (`execute_ai_query`'s
@@ -4670,6 +4684,11 @@ class CoreService(MusicCommandsMixin):
         # rather than a caller having to match it out of the message text
         # (finding D, 2026-09-24: telegram_coordinator.py used to do exactly that).
         _model_not_cached_name: str | None = None
+        # ADR-052 S3c: set when the local Whisper was refused the card (a `CardQueueRefusal`), so the
+        # returned error dict carries it as a field, as `model_not_cached` is carried: the
+        # received-voice cascade then skips its further GPU aliases, which would only stand in the
+        # same line, and still tries a cloud or CPU one. The chain below runs as for a failure.
+        _card_refusal_name: str | None = None
 
         # 0. Check if this is a remote transcription request
         if provider_alias and provider_alias.startswith("remote:"):
@@ -4818,12 +4837,20 @@ class CoreService(MusicCommandsMixin):
                     card_ask, provider_obj, "dictation", temp_path,
                     bound_s=self.settings.get_local_transcription_queue_wait_s())
                 ask["on_wait"] = lambda estimate: self._tell_the_card_wait("dictation", estimate)
+                voice_message_check = _VOICE_MESSAGE_CARD_CHECK.get()
+                if voice_message_check is not None:
+                    ask["check"] = voice_message_check
                 try:
                     # Use local Whisper provider
                     result = await provider_obj.transcribe(temp_path, **ask)
                     logger.info(f"Local transcription successful: {result['text'][:100]}...")
 
+                except _TheSendersTranscriptArrived:
+                    raise
                 except Exception as local_error:
+                    from .managers.llama_server_supervisor import CardQueueRefusal
+                    if isinstance(local_error, CardQueueRefusal):
+                        _card_refusal_name = type(local_error).__name__
                     # Check if this is a model not cached error
                     from dpc_client_core.llm_manager import ModelNotCachedError
                     if isinstance(local_error.__cause__, ModelNotCachedError) or isinstance(local_error, ModelNotCachedError):
@@ -4918,6 +4945,8 @@ class CoreService(MusicCommandsMixin):
                 "fallback_reason": result.get("fallback_reason")
             }
 
+        except _TheSendersTranscriptArrived:
+            raise
         except Exception as e:
             logger.error(f"Audio transcription failed: {e}", exc_info=True)
 
@@ -4936,6 +4965,8 @@ class CoreService(MusicCommandsMixin):
                 # the message text — see the comment on `_model_not_cached_name`
                 # above (finding D).
                 result_dict["model_not_cached"] = _model_not_cached_name
+            if _card_refusal_name is not None:
+                result_dict["card_refusal"] = _card_refusal_name
             return result_dict
         finally:
             # Only delete the temp file if we created it (not if the caller passed file_path)
@@ -5047,6 +5078,28 @@ class CoreService(MusicCommandsMixin):
             }
 
     # Voice Transcription Methods (v0.13.2+ auto-transcription)
+
+    def _voice_alias_asks_for_the_card(self, provider_alias: str) -> bool:
+        """Whether `transcribe_audio(..., provider_alias)` would ask this node's card lease (ADR-052
+        S3c): read the way `transcribe_audio` reads the alias. `remote:` goes to a peer's card; a
+        configured alias is its provider's (`asks_for_the_card`); a name that is not configured falls
+        to `transcribe_audio`'s auto-detect, which takes the first local Whisper when local
+        transcription is on. That one is counted as the card's even when the file would be over the
+        local size limit and go to the cloud instead: after a refusal, the side to err on."""
+        from .providers.whisper_provider import asks_for_the_card
+
+        if not provider_alias or provider_alias.startswith("remote:"):
+            return False
+        if provider_alias.startswith("local:"):
+            provider_alias = provider_alias[6:]
+        providers = self.llm_manager.providers
+        if provider_alias in providers:
+            return asks_for_the_card(providers[provider_alias])
+        if not self.settings.get_local_transcription_enabled():
+            return False
+        first_local = next((p for p in providers.values()
+                            if (getattr(p, "config", None) or {}).get("type") == "local_whisper"), None)
+        return first_local is not None and asks_for_the_card(first_local)
 
     async def _maybe_transcribe_voice_message(
         self,
@@ -5178,14 +5231,47 @@ class CoreService(MusicCommandsMixin):
                 provider_priority = self.settings.get_voice_transcription_provider_priority()
                 result = None
 
-                for provider_alias in provider_priority:
-                    try:
-                        logger.info(f"Attempting transcription with provider: {provider_alias}")
-                        result = await self.transcribe_audio(audio_base64, mime_type, provider_alias)
-                        break  # Success, stop trying providers
-                    except Exception as e:
-                        logger.warning(f"Transcription failed with {provider_alias}: {e}")
-                        continue  # Try next provider
+                # ADR-052 3.1, queueing conditions 2 and 3 (S3c). A card refusal ends the walk over
+                # GPU aliases: each next one would queue again on the same busy card and load
+                # another model, so one message keeps one place in the line. A cloud alias, a
+                # `remote:` one and a `device: cpu` one do not touch this card and are still tried.
+                # While a call waits for the card, the sender's transcript arriving ends it.
+                async def the_senders_transcript_is_in() -> None:
+                    if transfer_id in self._voice_transcriptions:
+                        raise _TheSendersTranscriptArrived(transfer_id)
+
+                refused_by_the_card: Optional[str] = None
+                check_token = _VOICE_MESSAGE_CARD_CHECK.set(the_senders_transcript_is_in)
+                try:
+                    for provider_alias in provider_priority:
+                        if transfer_id in self._voice_transcriptions:
+                            logger.info(f"Transcription received from peer during the cascade, "
+                                        f"cancelling local attempt for {transfer_id}")
+                            return
+                        if refused_by_the_card is not None and self._voice_alias_asks_for_the_card(provider_alias):
+                            logger.info(f"Skipping {provider_alias} for {transfer_id}: the card refused "
+                                        f"this message ({refused_by_the_card}), and this alias would stand "
+                                        f"in the same line")
+                            continue
+                        try:
+                            logger.info(f"Attempting transcription with provider: {provider_alias}")
+                            result = await self.transcribe_audio(audio_base64, mime_type, provider_alias)
+                        except _TheSendersTranscriptArrived:
+                            logger.info(f"Transcription received from peer while waiting for the card, "
+                                        f"cancelling local attempt for {transfer_id}")
+                            return
+                        except Exception as e:
+                            logger.warning(f"Transcription failed with {provider_alias}: {e}")
+                            continue  # Try next provider
+                        if isinstance(result, dict) and result.get("card_refusal"):
+                            refused_by_the_card = result["card_refusal"]
+                            logger.warning(f"Transcription with {provider_alias} was refused the card: "
+                                           f"{result.get('error')}")
+                            result = None
+                            continue
+                        break  # A result: stop trying providers
+                finally:
+                    _VOICE_MESSAGE_CARD_CHECK.reset(check_token)
 
                 if result is None:
                     logger.error(f"All transcription providers failed for transfer {transfer_id}")
