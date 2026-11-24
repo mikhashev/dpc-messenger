@@ -1919,6 +1919,14 @@ def schedule_task(
         if not hasattr(ctx, '_agent') or not hasattr(ctx._agent, 'queue'):
             return "⚠️ Task queue not available"
 
+        # A schedule_task this turn has only because a music tool is (ADR-051 D49, Zcode #67
+        # P1) takes nothing but a check_back to a music job this agent proposed that is still
+        # queued or running. Read from the turn's context, set by DpcAgent.process.
+        from .music import SCHEDULE_RETURN_ONLY_REFUSAL, music_return_text, own_music_job_to_return_to
+        return_only = bool(getattr(ctx, "schedule_task_music_return_only", False))
+        if return_only and task_type != "check_back":
+            return SCHEDULE_RETURN_ONLY_REFUSAL
+
         # Check if task type can be handled
         builtin_types = {"chat", "improvement", "review", "reminder", "check_back"}
         custom_handlers = getattr(ctx._agent, '_task_handlers', {})
@@ -1932,6 +1940,16 @@ def schedule_task(
         except json.JSONDecodeError:
             return "⚠️ task_data must be valid JSON"
 
+        # The music job this check_back returns to, when it is the agent's own and unfinished.
+        own_job = own_music_job_to_return_to(ctx, data) if task_type == "check_back" else None
+        if return_only and own_job is None:
+            named = data.get("music_job_id") if isinstance(data, dict) else None
+            why = (f" Job {named!r} is not a music job you proposed that is still queued or running."
+                   if named else " The task_data names no music_job_id.")
+            return SCHEDULE_RETURN_ONLY_REFUSAL + why
+        if not isinstance(data, dict):
+            return "⚠️ task_data must be a JSON object"
+
         # Map priority string
         from ..task_queue import TaskPriority
         priority_map = {
@@ -1942,6 +1960,7 @@ def schedule_task(
         }
         task_priority = priority_map.get(priority.lower(), TaskPriority.NORMAL)
 
+        music_return_note = ""
         if task_type == "check_back":
             conv = getattr(ctx, "current_task_id", None)
             depth = int(getattr(ctx, "check_back_depth", 0) or 0)
@@ -1973,20 +1992,38 @@ def schedule_task(
                     f"Cancel it first if this one should replace it."
                 )
 
+            # ADR-051 D49 (Mike #46, #53-#57; Zcode #67 P2): a return to a music job this
+            # agent proposed and that is still queued or running asks nothing, since the
+            # person approved that job when it was proposed. It is bound to the job alone:
+            # core sets its delay (check_back_delay_s) and composes its wake text, and a
+            # delay, text or anything else the agent put in is not used.
+            if own_job is not None:
+                from .music import check_back_delay_s
+                given_delay = delay_seconds
+                given_text = any(k not in ("music_job_id",) for k in data)
+                data = {"music_job_id": own_job.get("id"), "text": music_return_text(own_job)}
+                delay_seconds = check_back_delay_s(own_job)
+                ignored = []
+                if given_delay != delay_seconds:
+                    ignored.append(f"delay_seconds={given_delay}")
+                if given_text:
+                    ignored.append("the text and other task_data fields")
+                music_return_note = (
+                    f" A return to your own music job {own_job.get('id')}: core set the delay "
+                    f"({delay_seconds}s, the job's expected time on the card plus the cold start) and "
+                    f"the wake text"
+                    + (f"; what you gave ({', '.join(ignored)}) was not used." if ignored else "."))
+
             data["_check_back_depth"] = depth + 1
 
             # Owner's rule, 2026-08-04: a person approves before anything
             # enters the queue, so that what was scheduled — and for when — is
             # visible to a human before it runs. Fail-closed: an unanswered or
             # undeliverable request is a refusal, never a silent schedule.
-            #
-            # ADR-051 D49 (Mike #46, #53-#57): a return to a music job this agent
-            # proposed and that is still queued or running asks nothing; the person
-            # approved that job when it was proposed. Any doubt reads as "ask".
-            from .music import is_return_to_own_music_job
-            if is_return_to_own_music_job(ctx, data):
+            # A return to the agent's own unfinished music job is the exception above.
+            if own_job is not None:
                 log.info("check_back to the agent's own music job %s: no approval asked",
-                         data.get("music_job_id"))
+                         own_job.get("id"))
             elif _schedule_needs_approval(ctx):
                 when = f"in {delay_seconds}s" if delay_seconds else "immediately"
                 about = str(data.get("text") or data.get("message") or "")[:200]
@@ -2017,7 +2054,8 @@ def schedule_task(
             delay_seconds=delay_seconds,
         )
 
-        return f"✓ Scheduled task {task.id} (type={task_type}, priority={priority}, delay={delay_seconds}s)"
+        return (f"✓ Scheduled task {task.id} (type={task_type}, priority={priority}, delay={delay_seconds}s)"
+                + music_return_note)
 
     except Exception as e:
         return f"⚠️ Error scheduling task: {e}"

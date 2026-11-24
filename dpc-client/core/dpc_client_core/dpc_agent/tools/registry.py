@@ -314,6 +314,12 @@ class ToolContext:
     # Tool whitelist (if set, only these tools are allowed)
     tool_whitelist: Optional[set] = None
 
+    # schedule_task is in this turn's whitelist only because a music tool is, not because
+    # the firewall grants it (ADR-051 D49, music.with_check_back): schedule_task then takes
+    # nothing but a check_back to a music job this agent proposed that is still queued or
+    # running. Set by DpcAgent.process from the same computation as the whitelist.
+    schedule_task_music_return_only: bool = False
+
     # Firewall reference for extended sandbox paths (v0.16.0+)
     firewall: Optional[Any] = None
 

@@ -648,6 +648,8 @@ class DpcAgent:
         allowed_tools = self._get_allowed_tools(message_source=message_source,
                                                   conversation_id=conversation_id,
                                                   turn_class=audience_class)
+        schedule_return_only = self._schedule_task_music_return_only(
+            allowed_tools, message_source, conversation_id)
 
         # Collect firewall metadata for capabilities section (transparency)
         all_tools_map = None
@@ -822,6 +824,8 @@ class DpcAgent:
                 current_task_type="chat",
                 check_back_depth=check_back_depth,
                 tool_whitelist=allowed_tools,
+                # schedule_task brought only by a music tool: a return to an own job only.
+                schedule_task_music_return_only=schedule_return_only,
                 emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None, speed=None: None),
                 firewall=self._firewall,  # For extended sandbox paths
                 conversation_monitor=conversation_monitor,  # For knowledge extraction tool
@@ -1089,9 +1093,28 @@ class DpcAgent:
                          turn_class, len(owner_only), sorted(owner_only))
         # Wherever a music tool is still allowed, so is schedule_task: check_back is the way
         # back to a job (ADR-051 D49). After the owner_only filter, so a turn that is not the
-        # owner's gets no music tool and so no schedule_task from this rule.
+        # owner's gets no music tool and so no schedule_task from this rule. A schedule_task
+        # this rule alone brings is music-return-only (_schedule_task_music_return_only).
         from .tools.music import with_check_back  # ADR-051 D49
         return with_check_back(allowed)
+
+    def _schedule_task_music_return_only(self, allowed_tools: Optional[set],
+                                         message_source: Optional[str],
+                                         conversation_id: Optional[str]) -> bool:
+        """Whether this turn's schedule_task is there only because a music tool is: in
+        `allowed_tools` (what _get_allowed_tools gave) and not granted by the firewall
+        itself. Such a schedule_task takes only a check_back to the agent's own music job
+        that is still queued or running (ADR-051 D49, Zcode #67 P1). No gate (None) is
+        not this mode: every tool is allowed then."""
+        if allowed_tools is None or "schedule_task" not in allowed_tools:
+            return False
+        try:
+            granted = self._firewall_allowed_tools(message_source, conversation_id)
+        except Exception:
+            log.warning("Agent %s: firewall grant of schedule_task unknown; music-return-only",
+                        self.agent_root.name, exc_info=True)
+            return True
+        return granted is not None and "schedule_task" not in granted
 
     def _firewall_allowed_tools(self, message_source: Optional[str],
                                 conversation_id: Optional[str]) -> Optional[set]:

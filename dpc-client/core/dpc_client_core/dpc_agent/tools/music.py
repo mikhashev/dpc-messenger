@@ -661,26 +661,50 @@ def music_playlist_add(ctx: ToolContext, playlist_id: str, track_ids: Optional[L
 # For schedule_task, the allowed tools and the loop's Stop
 # ---------------------------------------------------------------------------
 
-def is_return_to_own_music_job(ctx: ToolContext, data: Any) -> bool:
-    """Whether a check_back's task data names a music job this agent proposed that is still
-    queued or running (D49): such a return asks no approval. Anything else, or any doubt,
-    is False, and the ordinary approval applies."""
+def own_music_job_to_return_to(ctx: ToolContext, data: Any) -> Optional[Dict[str, Any]]:
+    """The music job a check_back's task data names (`music_job_id`) when this agent proposed
+    it and it is still queued or running (D49), else None. Any doubt is None."""
     if not isinstance(data, dict):
-        return False
+        return None
     job_id = data.get("music_job_id")
     if not isinstance(job_id, str) or not job_id.strip():
-        return False
+        return None
     try:
         job, refused = _get_job(ctx, job_id)
     except Exception:
         log.debug("check_back: music job %s could not be read", job_id, exc_info=True)
-        return False
+        return None
     if refused or job is None:
-        return False
+        return None
     rb = js.requested_by_of(job)
     agent_id = _agent_id(ctx)
-    return (bool(agent_id) and rb.get("kind") == js.REQUESTER_AGENT and rb.get("agent_id") == agent_id
-            and job.get("state") in _UNFINISHED)
+    if (bool(agent_id) and rb.get("kind") == js.REQUESTER_AGENT and rb.get("agent_id") == agent_id
+            and job.get("state") in _UNFINISHED):
+        return job
+    return None
+
+
+def is_return_to_own_music_job(ctx: ToolContext, data: Any) -> bool:
+    """Whether a check_back's task data names a music job this agent proposed that is still
+    queued or running (D49): such a return asks no approval. Anything else, or any doubt,
+    is False, and the ordinary approval applies."""
+    return own_music_job_to_return_to(ctx, data) is not None
+
+
+def music_return_text(job: Dict[str, Any]) -> str:
+    """The wake text of an approval-free return to `job` (D49): core's words, never the agent's.
+    It names the job and the two tools that read it."""
+    job_id = job.get("id")
+    return (f"Check back on music job {job_id}, which you proposed: call music_check with job_id "
+            f"\"{job_id}\" for its state, and music_list_takes with that job_id once it is done.")
+
+
+# What a music-return-only schedule_task answers to anything but a return to the agent's own
+# unfinished music job (D49, Zcode #67 P1). It guides the model to the one call it may make.
+SCHEDULE_RETURN_ONLY_REFUSAL = (
+    "⚠️ schedule_task is not enabled for this agent; only a return to your own music job is: "
+    "task_type \"check_back\" with task_data {\"music_job_id\": \"<a job you proposed that is still "
+    "queued or running>\"}. Core sets its time and its text. Nothing was scheduled.")
 
 
 def with_check_back(allowed: Optional[set]) -> Optional[set]:
