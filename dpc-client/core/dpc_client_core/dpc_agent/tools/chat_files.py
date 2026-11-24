@@ -34,6 +34,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ...music import job_schemas as js
 from .core import _dpc_home, _resolve_file_path
 from .registry import ToolContext, ToolEntry, is_owner_turn
 
@@ -54,6 +55,42 @@ _REFUSED_SOURCES = {
 
 # One turn may run tools side by side: the count, the copy and the append are one step.
 _post_lock = threading.Lock()
+
+# A take is posted only when its job is finished (follow-up 12): not queued, running,
+# cancelled, failed or unsupported.
+POSTABLE_TAKE_JOB_STATES = frozenset({js.REVIEW, js.ACCEPTED})
+
+# File types that run or open something when clicked, never posted (follow-up 12, Zcode #68
+# P3): the chat shows a file in its folder, one click from running it. Compared lower-case,
+# by the last suffix, after the trailing dots and spaces Windows drops from a name.
+REFUSED_EXTENSIONS = frozenset({
+    ".exe", ".bat", ".cmd", ".com", ".lnk", ".ps1", ".vbs", ".scr", ".msi", ".sh", ".app", ".dmg",
+})
+
+
+def refused_extension(name: str) -> Optional[str]:
+    """The refused suffix of file name `name`, or None."""
+    suffix = Path(name.rstrip(". ")).suffix.lower()
+    return suffix if suffix in REFUSED_EXTENSIONS else None
+
+
+def remove_posted_copies(paths: List[str]) -> int:
+    """Remove the files `chat_post_file` copied into a chat's `files/` for a turn whose answer
+    is never written (the turn failed): with no record nothing shows them, and nothing else
+    removes them (follow-up 12, Zcode #68 P3). A file whose bytes were already there (reused)
+    is never in `paths`. Returns how many were removed."""
+    removed = 0
+    for raw in paths or ():
+        try:
+            Path(raw).unlink()
+            removed += 1
+        except FileNotFoundError:
+            continue
+        except OSError:
+            log.warning("chat_post_file: the copy %s of a failed turn was not removed", raw, exc_info=True)
+    if removed:
+        log.info("chat_post_file: removed %d copied file(s) of a turn that failed", removed)
+    return removed
 
 
 def _refusal(text: str) -> str:
@@ -101,7 +138,10 @@ def _dpc_home_refusal(ctx: ToolContext, resolved: Path) -> Optional[str]:
     try:
         home = _dpc_home().resolve()
     except OSError:
-        return None
+        # Fail closed (follow-up 12, Zcode #68 P3): a home that cannot be resolved cannot be
+        # told apart from the file.
+        return _refusal("the DPC home could not be resolved, so the file cannot be checked "
+                        "against it.")
     if not _inside(resolved, home):
         return None
     if _inside(resolved, ctx.agent_root.resolve()):
@@ -142,7 +182,11 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None,
         return refusal
     if not source.is_file():
         return _refusal(f"'{source}' is not a file.")
-    max_mb = service_mod.file_transfer_cap_mb(_rules(ctx))
+    bad = refused_extension(source.name)
+    if bad:
+        return _refusal(f"a {bad} file runs or opens something when clicked; such files "
+                        f"({', '.join(sorted(REFUSED_EXTENSIONS))}) are never posted.")
+    max_mb =service_mod.file_transfer_cap_mb(_rules(ctx))
     too_large = service_mod.file_transfer_cap_refusal(source.stat().st_size, max_mb)
     if too_large:
         return _refusal(f"{too_large}.")
@@ -174,6 +218,9 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None,
             return (f"{kept['filename']} is already attached to this answer; it is attached once. "
                     f"{len(posted)} of {MAX_FILES_PER_TURN} files this turn.")
         posted.append(kept)
+        if not reused:
+            # Removed again should the turn fail before its answer is written.
+            ctx.posted_new_copies.append(kept["file_path"])
         count = len(posted)
     log.info("chat_post_file: %s %s into %s (%s, %s bytes)", "reused" if reused else "copied",
              kept["filename"], ctx.conversation_id, kept["mime_type"], kept["size_bytes"])
@@ -202,6 +249,18 @@ def _post_take(ctx: ToolContext, take_id: str, caption: Optional[str]) -> str:
         code = answer.get("code", "error") if isinstance(answer, dict) else "error"
         return _refusal(f"take '{take_id}' could not be read ({code}).")
     take = answer.get("take") or {}
+    # Only a finished take the person has not discarded (follow-up 12, Zcode #68 P2): its job is
+    # done, the take is not rejected, and its library entry, when it has one, is not hidden.
+    job_state = take.get("job_state")
+    if job_state not in POSTABLE_TAKE_JOB_STATES:
+        return _refusal(f"take '{take_id}' belongs to a job that is {job_state or 'in an unknown state'}; "
+                        f"only a take of a finished job ({', '.join(sorted(POSTABLE_TAKE_JOB_STATES))}) "
+                        f"is posted.")
+    if take.get("state") == "rejected":
+        return _refusal(f"take '{take_id}' was discarded by the person.")
+    if take.get("library_track_id") and take.get("library_hidden") is not False:
+        why = "hidden (discarded)" if take.get("library_hidden") else "not found"
+        return _refusal(f"take '{take_id}': its library entry is {why}.")
     if not take.get("path") or not take.get("file_exists"):
         return _refusal(f"take '{take_id}' has no file on this computer.")
     music = {"track_id": take.get("library_track_id") or None,

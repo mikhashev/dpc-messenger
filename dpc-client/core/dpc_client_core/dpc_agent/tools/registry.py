@@ -359,6 +359,9 @@ class ToolContext:
     # order they were posted. DpcAgent.process hands them to the agent manager, which
     # writes them on the turn's answer record. One list per turn: the context is.
     posted_attachments: List[Dict[str, Any]] = field(default_factory=list)
+    # The paths of those files this turn copied anew (not reused): removed again when the
+    # turn fails before its answer is written (chat_files.remove_posted_copies).
+    posted_new_copies: List[str] = field(default_factory=list)
 
     # -----------------------------------------------------------------------
     # Path helpers (all sandboxed to agent_root)

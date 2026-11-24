@@ -513,10 +513,30 @@ class DpcAgent:
         except Exception:
             return False
 
-    def take_posted_attachments(self, conversation_id: str) -> List[Dict[str, Any]]:
+    def take_posted_attachments(self, conversation_id: str, with_copies: bool = False):
         """The attachments chat_post_file kept in this conversation's last turn, handed
-        over once: a second call returns []."""
-        return self._posted_by_conversation().pop(conversation_id, None) or []
+        over once: a second call returns []. With `with_copies`, (attachments, the paths
+        of the files the turn copied anew), for a caller that removes them should its
+        record not be written (chat_files.remove_posted_copies)."""
+        copies = self._posted_copies_by_conversation().pop(conversation_id, None) or []
+        attachments = self._posted_by_conversation().pop(conversation_id, None) or []
+        return (attachments, copies) if with_copies else attachments
+
+    def discard_posted_attachments(self, conversation_id: str) -> int:
+        """The last turn in this conversation will have no answer record (it failed, or nobody
+        took its attachments): drop its attachments and remove the files it copied anew into
+        the chat's files/, which nothing would show or remove otherwise (follow-up 12)."""
+        from .tools.chat_files import remove_posted_copies
+        self._posted_by_conversation().pop(conversation_id, None)
+        return remove_posted_copies(self._posted_copies_by_conversation().pop(conversation_id, None) or [])
+
+    def _posted_copies_by_conversation(self) -> Dict[str, List[str]]:
+        """The per-conversation paths of the files the last turn copied anew (made on first use,
+        as _posted_by_conversation)."""
+        store = self.__dict__.get("_posted_copies")
+        if store is None:
+            store = self.__dict__.setdefault("_posted_copies", {})
+        return store
 
     def _owner_only_names_for_prompt(self) -> set:
         """The owner_only tool names the capabilities section lists as withheld on a turn that
@@ -595,8 +615,9 @@ class DpcAgent:
         # to the daily quota a second time) and its trace (saved on this record).
         self._last_usage = {}
         self._last_trace = {}
-        # Nor the last turn's posted files, should nobody have taken them.
-        self._posted_by_conversation().pop(conversation_id, None)
+        # Nor the last turn's posted files, should nobody have taken them: no record shows
+        # them, so the copies go too.
+        self.discard_posted_attachments(conversation_id)
 
         task = {
             "id": conversation_id,
@@ -875,29 +896,35 @@ class DpcAgent:
                     _record_tail()
 
             # Run LLM loop under the turn's hold, so its holder is busy between rounds too; the
-            # loop moves the hold when a switch lands between rounds.
-            response, usage, trace = await run_llm_loop(
-                messages=messages,
-                tools=self.tools,
-                llm=self.llm,
-                agent_root=self.agent_root,
-                emit_progress=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None, speed=None: None),
-                task_id=conversation_id,
-                budget_remaining_usd=None if self.config.billing_model == "subscription" else self.config.budget_usd,
-                max_rounds=self.config.max_rounds,
-                on_stream_chunk=on_stream_chunk,
-                conversation_id=conversation_id,
-                stop_event=stop_event,
-                kill_event=kill_event,
-                reasoning_effort=reasoning_effort,
-                # The live strip carries the same pair this guard has just decided
-                # on: the window every round is measured against, and the headroom
-                # below which the next round is refused. Until now those two numbers
-                # existed only in a DEBUG line nobody watching the agent can see.
-                context_window=_ctx_window,
-                context_reserve=_reserve,
-                after_first_answer=_consume_brief if _brief_sent else None,
-            )
+            # loop moves the hold when a switch lands between rounds. A loop that raises leaves
+            # no answer record, so the files chat_post_file copied for it are removed.
+            try:
+                response, usage, trace = await run_llm_loop(
+                    messages=messages,
+                    tools=self.tools,
+                    llm=self.llm,
+                    agent_root=self.agent_root,
+                    emit_progress=emit_progress or (lambda msg, tool=None, rnd=None, tool_calls=None, speed=None: None),
+                    task_id=conversation_id,
+                    budget_remaining_usd=None if self.config.billing_model == "subscription" else self.config.budget_usd,
+                    max_rounds=self.config.max_rounds,
+                    on_stream_chunk=on_stream_chunk,
+                    conversation_id=conversation_id,
+                    stop_event=stop_event,
+                    kill_event=kill_event,
+                    reasoning_effort=reasoning_effort,
+                    # The live strip carries the same pair this guard has just decided
+                    # on: the window every round is measured against, and the headroom
+                    # below which the next round is refused. Until now those two numbers
+                    # existed only in a DEBUG line nobody watching the agent can see.
+                    context_window=_ctx_window,
+                    context_reserve=_reserve,
+                    after_first_answer=_consume_brief if _brief_sent else None,
+                )
+            except BaseException:
+                from .tools.chat_files import remove_posted_copies
+                remove_posted_copies(ctx.posted_new_copies)
+                raise
 
         # Store last usage and trace for session state access by agent_manager
         self._last_usage = usage
@@ -906,6 +933,7 @@ class DpcAgent:
         # D40, D41): the agent manager takes them for _record_answer.
         if ctx.posted_attachments:
             self._posted_by_conversation()[conversation_id] = list(ctx.posted_attachments)
+            self._posted_copies_by_conversation()[conversation_id] = list(ctx.posted_new_copies)
 
         # Phase 3: Skill Write phase — record outcomes, optionally reflect
         used_skills = self.skill_reflector.record_outcome(trace, usage)

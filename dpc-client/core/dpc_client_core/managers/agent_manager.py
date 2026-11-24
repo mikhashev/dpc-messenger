@@ -1250,6 +1250,8 @@ class DpcAgentManager:
         # header when agent responds without tool calls).
         self._emit_progress("thinking", conversation_id)
 
+        agent = None
+        _posted_copies: List[str] = []
         try:
             # Process through agent with progress callback that includes conversation_id
             def emit_progress_with_context(msg: str, tool: str = None, round: int = None, tool_calls=None, speed=None,
@@ -1356,7 +1358,7 @@ class DpcAgentManager:
             _thinking, _streaming_raw = self._answer_extras(agent, response, _stream_chunks)
             # The files chat_post_file kept in this turn (ADR-051 D40/D41); a group
             # turn posts none (the tool refuses there).
-            _posted = self._take_posted_attachments(agent, conversation_id)
+            _posted, _posted_copies = self._take_posted_attachments_and_copies(agent, conversation_id)
             if not response and not (_thinking or _streaming_raw or _posted):
                 log.warning("Agent returned empty response after retries — sending toast notification")
                 await self.service.local_api.broadcast_event("error_toast", {
@@ -1367,6 +1369,7 @@ class DpcAgentManager:
             elif not is_group:
                 self._record_answer(monitor, conversation_id, agent, response, _stream_chunks,
                                     message_source=message_source, attachments=_posted)
+                _posted_copies = []  # the record on disk holds them now
                 if _posted:
                     # The reply the UI is sent carries the text alone: the record
                     # with its files reaches the open chat as its history.
@@ -1439,6 +1442,18 @@ class DpcAgentManager:
             return response
 
         except Exception as e:
+            # A failed turn writes no answer: the files it posted into the chat would stay in
+            # files/ with no record showing them (follow-up 12): those taken for a record that
+            # was not written, and those not taken yet.
+            try:
+                from ..dpc_agent.tools.chat_files import remove_posted_copies
+                remove_posted_copies(_posted_copies)
+                discard = getattr(agent, "discard_posted_attachments", None)
+                if discard is not None:
+                    discard(conversation_id)
+            except Exception:
+                log.warning("Posted files of the failed turn in %s not removed", conversation_id,
+                            exc_info=True)
             # Emit TASK_FAILED event
             await emitter.emit(EventType.TASK_FAILED, {
                 "task_id": task_id,
@@ -1559,6 +1574,22 @@ class DpcAgentManager:
         except Exception as e:  # an attachment is never worth losing the answer over
             log.warning("Posted attachments of %s not read: %s", conversation_id, e)
             return []
+
+    @staticmethod
+    def _take_posted_attachments_and_copies(agent: Any, conversation_id: str) -> tuple:
+        """(attachments, paths copied anew) of the agent's last turn in this chat: the copies are
+        removed again should the record not be written. ([], []) for an agent without them."""
+        take = getattr(agent, "take_posted_attachments", None)
+        if take is None:
+            return [], []
+        try:
+            attachments, copies = take(conversation_id, with_copies=True)
+            return list(attachments or []), list(copies or [])
+        except TypeError:  # a take without `with_copies` (a test double): no copies to remove
+            return DpcAgentManager._take_posted_attachments(agent, conversation_id), []
+        except Exception as e:  # an attachment is never worth losing the answer over
+            log.warning("Posted attachments of %s not read: %s", conversation_id, e)
+            return [], []
 
     async def _broadcast_text_chunk(self, chunk: str, conversation_id: str) -> None:
         """Broadcast one streamed text chunk to the UI (the agent_text_chunk event)."""
