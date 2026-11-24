@@ -2033,6 +2033,42 @@ resident, Forge read 8.3 GB of host RAM available at 86 % load (#15, 17:53), so 
 may close the twin in exactly this case; and how much a twin run slows the Strata turn is
 unmeasured (L12's pending rows).
 
+**The self-wait rule for a tool that queues a card job (2026-11-24; Zcode #51 correction 1,
+ADR-051 D51 and D42; decided, not built).** The music tools (`music_wait`, `music_check`,
+`music_propose_job`) queue a card job, a music engine run, from inside a turn. A tool in a
+turn that holds a live **card hold** on a **local alias** must not wait on a card job that is
+queued behind that hold: the job's holder would be this very turn, the same cycle as the
+transcription above. The tool:
+
+- **answers at once** with the job's real state, never waiting out the turn's own hold;
+- says **"queued, starts after this turn"** only when both are true: the turn holds a live
+  card hold on a local alias, **and** the job is `queued`. A job in `review`, `failed` or
+  `cancelled` is reported as that, not as queued;
+- reads the hold as a **local alias**, not as `current_card_hold()` being non-empty: that
+  returns a hold also in a cloud-alias turn (`alias=None`, nothing stands on the card) and in a
+  tool thread that outlived its turn (`llama_server_supervisor.py`), and `card_wait` is still
+  empty right after `propose` (the runner writes it), so the state comes from the job.
+
+The precedent is the glossary's **card hold** row: a request that would wait on a holder that
+is itself "is refused at once instead of waiting on itself". On a cloud alias the job starts
+inside the turn and unloads a resident Strata, so there is no self-wait and the rule does not
+apply.
+
+What the rule leaves for the owner to know (Zcode #51, not new facts of this ADR):
+
+- **A wake during the job queues on the card.** A `check_back` or a message that wakes the
+  agent while the music job runs takes its place in the card queue and waits up to
+  `swap_wait_s` (1800 s from acceptance on this machine), then `CardQueueRefusal`; the owner
+  sees `wait_reason = card_queue`.
+- **After the job the turn pays Strata's cold start**, about 23 s (23.5 s from spawn to smoke
+  passed, 24.6 s to the first answer, measured 2026-11-24 on backend `670141bb`, in
+  `ai-studio` `knowledge/adr052-gpu-card-lease.md`). The delay of a `check_back` is the job's
+  ETA plus this start (ADR-051 D49).
+- **Cancelling a running job does not stop the engine.** It stays on the card until its idle
+  stop, `yue2_idle_stop_s` (300 s). The takes already made stay in the library, and Keep and
+  Discard are refused for a `cancelled` job. Existing behaviour that agents will make common;
+  Stop on the turn cancels only the jobs still `queued` (ADR-051 D48).
+
 ### 4. What the UI and logs show
 
 **Logs, one INFO line per transition, no repeats while polling:**

@@ -627,6 +627,159 @@ consensus 2026-11-20)") and are not decisions.
   *Numbering: ADR D30-D39 mirror SPEC §12 decisions 31, 34, 35, 37, 38, 40, 41, 32, 33, 39 in
   that order; every SPEC decision from 30 to 41 now has an entry here (SPEC 36 is D29).*
 
+### Decided (Mike's calls, 2026-11-24, AI Studio group chat, the agent tools)
+
+**Decided, not built.** Nothing in this section is in the code: orbit and grep find no
+`music_*` tool and no `chat_post_file` at `a8a46197`. Sources: CC's plan #44 (12:31Z), Mike's
+answer "yes to everything, by the recommendations" relayed in #46 (13:17Z; questions A-I),
+Zcode's review #51 (14:01Z; seven corrections, all accepted), and Mike's later calls in
+#53-#57, which settled D (revised), J, K and L. The group's message-by-message mapping of
+#53-#57 to those letters is not recorded here; each decision below cites the range. Where a
+cap value is not chosen yet it says "value set at build, recorded here": no figure below is
+invented. The letters A-L are the plan's questions; each is placed under one decision id.
+
+| Letter | Subject | Decision |
+|---|---|---|
+| A | turn classes `other_node` and `stranger` refused | D43 |
+| B, L | owner sources `ui`, `external_agent`, `telegram_owner` | D43 |
+| C | a take goes into the chat only when the person asks | D50 |
+| D (revised) | a take by `take_id`, no directory access | D44 |
+| E | an agent cancels only its own jobs | D46 |
+| F | no LRCLIB for agents | D50 |
+| G | posting into groups later | D50 |
+| H | names, and a GLOSSARY row per name | D42 |
+| I | `check_back` through `schedule_task` | D49 |
+| J | `music_propose_job` asks the owner's approval | D47 |
+| K | Stop cancels the turn's queued jobs | D48 |
+
+- **D40. Q1's "`chat_post_file` is not needed" is reversed** (Mike #46, on CC's plan #44
+  section 3; Zcode #51 asked for the cancellation to be written down). Q1's call of
+  2026-11-19 07:59 said results go to a folder and `chat_post_file` is not needed by the music
+  flows. The plan brings it back for music: the agent posts a take into a 1:1 agent chat as an
+  `audio/*` file attachment (D19: no new attachment type), but **only when the person asks**
+  (D50). The call of 07:32 that names the tool `chat_post_file` stands (Q5). B1 (an agent
+  posting a file into its chat) is again a need of the music flows. `_record_answer` must carry
+  attachments and write an answer that has no text (Zcode #51 correction 4): today an answer
+  that is only a file is lost (`agent_manager.py`, `_record_answer`). **Decided, not built.**
+- **D41. `chat_post_file(path, caption?)` and its limits** (Mike #46; Zcode #51 corrections 4
+  and 5). The limits:
+  - **At most 4 files per turn.** The plan marks the figure [P]; it stands as accepted by #46.
+  - **The file-transfer size cap**, `file_transfer_cap_mb(rules)` (100 MB by default), checked
+    before the copy. The file is copied, never moved.
+  - **1:1 agent chats only** (`agent_*`). Groups, Telegram and Discord turns are refused with
+    a reason (posting into groups: D50).
+  - **The path is resolved like `read_file`**, through `_resolve_file_path`
+    (`tools/core.py`, around line 247), never through a bare `validate_extended_path`: the
+    first checks the "Extended path read" switch and the audience gate of the turn, the second
+    skips both.
+  - It is refused to every turn class that D43 refuses.
+
+  **Decided, not built.**
+- **D42. The `music_*` family: ten names, a timeout and a wait budget with each** (letter H,
+  Mike #46; Zcode #51 "names: no objection"; Q5 asks for the timeout and the wait budget to be
+  declared with the name). The names are `music_capabilities`, `music_propose_job`,
+  `music_check`, `music_wait`, `music_cancel_job`, `music_list_takes`, `music_list_library`,
+  `music_get_lyrics`, `music_playlist_add` and `chat_post_file`. `music_` stays reserved for
+  domain actions; `music_check` and `music_wait` mirror `comfyui_check` and `comfyui_wait`.
+  Every tool is off by default (`default_enabled=False`, as the ComfyUI tools). Each name gets
+  a GLOSSARY row sourced from this record.
+
+  | Tool | What it does | Timeout and wait budget |
+  |---|---|---|
+  | `music_capabilities` | wraps `get_music_capabilities` | value set at build, recorded here |
+  | `music_propose_job` | wraps `propose_music_job`; one job per call (D45); asks approval (D47) | value set at build, recorded here |
+  | `music_check` | wraps `get_music_job`: state and the `card_wait` holders | value set at build, recorded here |
+  | `music_wait` | polls `get_music_job`; checks Stop between polls; answers "queued" only by D51 | the plan's figures: poll every 2 s, `timeout` 600 s by default and 900 s at most, `timeout_sec = timeout + 15` (the per-call default of 120 s, `registry.py`, would cut it, so `timeout_sec` is mandatory). The per-turn wait budget: value set at build, recorded here |
+  | `music_cancel_job` | wraps `cancel_music_job`; own jobs only (D46) | value set at build, recorded here |
+  | `music_list_takes` | wraps `list_music_takes`; a take by `take_id`, with duration and loudness (D44) | value set at build, recorded here |
+  | `music_list_library`, `music_get_lyrics` | read-only | value set at build, recorded here |
+  | `music_playlist_add` | wraps `update_music_playlist` | value set at build, recorded here |
+  | `chat_post_file` | D41 | value set at build, recorded here |
+
+  Agents get no Keep, Discard or reject (Q1), no engine start or stop (the runner starts the
+  engines), no watched folders, no delete, no register_track and no export (out of scope of
+  the first cut). **Decided, not built.**
+- **D43. Only the owner's turns may use the family; the rule is declarative and written once**
+  (letters A, B and L: Mike #46 and #53-#57; Zcode #51 correction 6 and its note on A).
+  - **Refused:** turn classes `other_node` and `stranger`: a peer, or a group that has a
+    foreign node in it. A group of only the person's own nodes is owner class
+    (`dpc_agent/agent.py`, around lines 92-113). There is no per-tool switch.
+  - **Owner sources:** `ui`, `external_agent` and `telegram_owner`. The bridges count as the
+    owner (the rule of 2026-11-07, "Bridges count as the owner"), so a message from the CC or
+    Zcode bridge opens `music_*` and `chat_post_file` for the agent.
+  - **Where it is checked.** An `owner_only` field on the tool's `ToolEntry`, checked in
+    `registry.execute` and when the offered tool list is built (`_get_allowed_tools` reads no
+    turn class today). Each tool checks the class again as a second line. The ComfyUI tools
+    take the same field (a card is filed for them). With a refused turn no job file and no file
+    copy exist, and no `music_*` schema is offered.
+
+  **Decided, not built.**
+- **D44. The agent gets a take by `take_id`, resolved by core, and no directory access**
+  (letter D, **revised**: first decided in #46 as "the agent reads `~/.dpc/music/generated/`
+  without a `sandbox_extensions` entry"; revised by Mike in #53-#57 on Zcode #51). The
+  directory also holds every job's request JSON, with the prompts and lyrics of songs made from
+  the UI, and a read path outside the sandbox would be a third way round it that the
+  glossary's **sandbox** row does not know. Core resolves `take_id` to the take's file; this
+  also gives "only takes in `review`" a meaning (today `review` is a job state, not a take
+  state). The tools need no `sandbox_extensions` entry for `~/.dpc/music`; Q1's remark that the
+  agent needs write access there is dropped for them. **Decided, not built.**
+- **D45. Job limits** (Zcode #51 correction 2, accepted in #53-#57). Every new
+  `idempotency_key` makes a new job and the key is global, so an agent in a 200-round loop
+  could hold the card for hours. So:
+  - **one job per call** of `music_propose_job`;
+  - **a cap per turn** and **a cap per requester in the queue**: values set at build, recorded
+    here;
+  - **the default idempotency key derives from the turn id**, so a retry in the same turn
+    returns the same job.
+
+  **Decided, not built.**
+- **D46. `requested_by` on `mp.job/1`, and an agent cancels only its own jobs** (letter E, Mike
+  #46). `requested_by {kind, agent_id, conversation_id}` is added to the job schema; the schema
+  is closed to undeclared keys (`job_schemas.py`), so a store written before the field must
+  still open. `cancel_music_job` called by an agent for a job it did not propose is refused.
+  The person's own cancel in the UI is unchanged. **Decided, not built.**
+- **D47. `music_propose_job` asks the owner's approval, as `schedule_task` does** (letter J,
+  Mike #53-#57; Zcode #51 correction 7). A GPU job needs the person's consent, and the plan,
+  copying `comfyui_submit`, would have inherited "no question". The approval machinery of
+  `schedule_task` (`tools/core.py`) is reused, not rebuilt. A return to a job that already
+  runs asks nothing (D49). **Decided, not built.**
+- **D48. Stop cancels the turn's queued jobs** (letter K, Mike #53-#57; Zcode #51: Stop today
+  takes only the requests that hold the chat, and a waiting job holds nothing, so Mike's Stop
+  moves Strata off the card and the music engine starts). When the person stops a turn, the
+  jobs proposed in that turn that are still `queued` are cancelled. A job already running is
+  not stopped by this, and cancelling a running job does not stop the engine, which stays on
+  the card until its idle stop (`yue2_idle_stop_s`, 300 s; ADR-052 section 3.5).
+  **Decided, not built.**
+- **D49. `check_back` is the return path, through `schedule_task`** (letter I, Mike #46 and
+  #53-#57; Zcode #51 correction 3). The agent learns that a job is done by scheduling a
+  `check_back`. For agents that have music tools `schedule_task` must be enabled (it is off
+  by default, `tools/core.py`), and a return to an already running job asks no approval (the
+  default asks the person within 60 s; the chain is at most three). A wake from core is
+  later. The delay is computed from the job's ETA plus Strata's cold start of about 23 s after
+  the job (ADR-052 section 3.5). **Decided, not built.**
+- **D50. Three narrowings of the first cut** (Mike #46). **C:** the agent posts a take into
+  the chat only when the person asks. **F:** no LRCLIB lookups by agents (they send data off
+  the machine). **G:** posting into groups comes later, groups of own nodes first; it is
+  separate work, because in groups `_record_answer` is not called (`send_group_agent_message`
+  takes no attachment). **Decided, not built.**
+- **D51. `music_wait` and the self-wait rule** (Zcode #51 correction 1, accepted in #46 and
+  #53-#57; the rule itself is written in ADR-052 section 3.5). An agent turn on a local alias
+  holds the card for all its tool rounds (`card_held_for`). `music_wait` answers "queued,
+  starts after this turn" **only when** the turn holds a live card hold on a local alias
+  **and** the job is `queued`. Otherwise it reports the job's real state: a job in `review` or
+  `failed` is never reported as queued. The test is not `current_card_hold()` being non-empty:
+  that returns a hold also in a cloud-alias turn (`alias=None`) and in a tool thread that
+  outlived its turn. `card_wait` is empty right after `propose` (the runner writes it), so the
+  state is read from the job. Beside it: `music_wait` checks Stop between polls (Stop does not
+  interrupt a running tool, it is read before a call); no elapsed seconds in the output (they
+  reset the count of five identical calls, `guards.py`), a wait budget per turn instead (value
+  set at build, recorded here); `music_wait` and `music_check` go into
+  `guards._OUTPUT_KEYED_TOOLS`. **Decided, not built.**
+
+*Numbering: D40-D51 are the agent-tool decisions of 2026-11-24. They have no SPEC §12 number
+yet; SPEC §12 and the GLOSSARY rows (the names of D42, `chat_post_file`, `requested_by`, the
+self-wait rule, `owner_only`) take this section as their source.*
+
 ### Not decided
 
 Each item needs Mike's yes or a measurement. Where an item is built in practice, a dated
@@ -1306,6 +1459,10 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
     is therefore not needed by the music flows and B1 stops being a Phase 0 prerequisite; the
     generic mechanism stays a separate card for other file types. The agent needs write access
     to `~/.dpc/music` through its firewall profile's `sandbox_extensions`.
+  - *Amended 2026-11-24 (Mike #46, #53-#57; Zcode #51): `chat_post_file` is needed after
+    all, for the music flows: the agent posts a take into a 1:1 chat when the person asks
+    (D40, D41, D50). The agent gets a take by `take_id` and no directory access, so the
+    `sandbox_extensions` entry above is not needed by the tools (D44). Decided, not built.*
 - **Q2. Phase 0.** Go or no-go on the Phase 0 contents (N1), and whether the group-file
   fix (A-FILE-SENT-TO-A-GROUP-WITH-ONLY-AGENTS-VANISHES-AND-THE-UI-IS-TOLD-SUCCESS, the
   agents-only half of ADR-032 phase 3) joins Phase 0.
@@ -1388,6 +1545,9 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
   - each `music_*` tool's timeout and wait budget, declared with its name (Ark;
     Consequences).
   — @Mike
+  *2026-11-24: the tool names are chosen: ten, listed in D42 with the timeout and the wait
+  budget of each (the figures not yet chosen are marked "value set at build, recorded here");
+  `chat_post_file` is needed by the music flows after all (D40, D41). Decided, not built.*
   *2026-11-22: the button label is "MUSIC PLAYER" (`Sidebar.svelte:1002`), the folder
   `music/` and the package `music/` are in use; no tool exists, so no tool name was chosen
   beyond `chat_post_file` (not needed by the music flows, Q1); the domain words have no
