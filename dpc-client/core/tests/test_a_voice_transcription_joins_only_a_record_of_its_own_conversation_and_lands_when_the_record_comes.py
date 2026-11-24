@@ -222,6 +222,29 @@ async def test_a_record_that_comes_by_history_sync_lands_its_parked_transcriptio
 
 
 @pytest.mark.asyncio
+async def test_a_history_answer_lands_the_parked_transcription_and_tells_the_open_chat(node):
+    """Follow-up 11e: the sync's merge settled nothing; the text waited for the next read and the
+    live UI heard nothing. Goes through GroupHistoryResponseHandler with the real manager."""
+    from dpc_client_core.message_handlers.group_handler import GroupHistoryResponseHandler
+
+    await node.handler.handle(MEMBER, _said("ahead of the answer", group_id=node.group_id))
+    assert node.handler._parked
+    node.core._get_or_create_conversation_monitor = lambda gid: node.group
+    node.core.history_requests = SimpleNamespace(claim=lambda *a: True, claim_any=lambda *a: True)
+    record = {"id": "m-answer", "role": "assistant", "content": "Received voice message",
+              "sender_node_id": OTHER_MEMBER, "timestamp": "2026-11-24T10:00:00+00:00",
+              "attachments": [{"type": "voice", "filename": VOICE, "transfer_id": "t-x"}]}
+
+    await GroupHistoryResponseHandler(node.core).handle(
+        MEMBER, {"group_id": node.group_id, "history": [record], "request_id": "r-1"})
+
+    assert not node.handler._parked, "settled by the answer, not by a later read"
+    landed = node.events()
+    assert landed and landed[-1]["message_id"] == "m-answer", "the open chat is told, as for a live attach"
+    assert landed[-1]["conversation_id"] == node.group_id
+
+
+@pytest.mark.asyncio
 async def test_a_landed_transcription_leaves_the_bound_and_is_not_evicted_by_later_ones(node):
     """Ark #24 (3): 32 parked, the oldest's record comes, a 33rd arrives."""
     await node.handler.handle(MEMBER, _said("the oldest", group_id=node.group_id,

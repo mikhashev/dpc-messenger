@@ -23,6 +23,7 @@ from ..conversation_monitor import (
     parse_moment,
     same_moment,
 )
+from .voice_transcription_handler import settle_parked_transcriptions
 from .group_access import may_share_group, off_the_roster, refuse_group_access
 from ..firewall import is_blocked_by
 
@@ -1160,6 +1161,10 @@ class GroupHistoryResponseHandler(MessageHandler):
 
         if retry_votes is not None:
             await retry_votes(group_id, rejected=rejected, request_id=request_id)
+
+        # A voice record that came by this answer takes the transcription a member
+        # sent ahead of it, and the open chat is told as for a live attach.
+        await settle_parked_transcriptions(self.service, group_id)
 
         # Notify UI to refresh chat
         await self.service.local_api.broadcast_event("group_history_synced", {

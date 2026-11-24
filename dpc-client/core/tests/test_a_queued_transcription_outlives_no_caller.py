@@ -86,6 +86,11 @@ def test_the_words_say_the_estimate_when_it_is_known():
     assert card_wait_words({"known": True, "wait_s": 12.0, "behind": ["Whisper (turbo) (dictation)"]}) == \
         "transcription queued behind Whisper (turbo) (dictation), about 12 s"
     assert card_wait_words({"known": True, "wait_s": 360.0, "behind": ["yue2.cpp"]}).endswith("about 6 min")
+    assert card_wait_words({"known": True, "wait_s": 30.0, "behind": ["acestep.cpp"], "upper_bound": True}) == (
+        "transcription queued behind acestep.cpp, at most about 30 s")
+    assert card_wait_words({"known": True, "wait_s": 360.0, "behind": ["a"], "upper_bound": True}).endswith(
+        "at most about 6 min")
+    assert card_wait_words({"known": False, "behind": ["a"], "upper_bound": True}).endswith(", time unknown")
     assert card_wait_words(None) == "transcription queued behind another job on the card, time unknown"
 
 

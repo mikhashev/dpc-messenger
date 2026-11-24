@@ -420,6 +420,10 @@ def card_wait_words(estimate: Optional[Dict[str, Any]]) -> str:
         when = f"about {max(1, round(wait_s))} s"
     else:
         when = f"about {round(wait_s / 60)} min"
+    if wait_s is not None and estimate.get("upper_bound"):
+        # An engine's yield is bounded by its stop (never measured): say "at most", as the
+        # music engine line does.
+        when = f"at most {when}"
     return f"transcription queued behind {behind}, {when}"
 
 
