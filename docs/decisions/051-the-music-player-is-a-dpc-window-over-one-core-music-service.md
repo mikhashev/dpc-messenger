@@ -689,6 +689,14 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
     `track_id`; null while the take is not in the library). `path` and `take_id` are given one
     at a time; both, or neither, is refused. An unknown `take_id` is refused (`not_found`) and
     nothing is copied.
+  - **Follow-up 12 (Zcode #68 P2, P3):** a take is posted only when its job is done (`review`
+    or `accepted`), the take is not rejected and its library entry, when it has one, is not
+    hidden (`get_music_take` now says `library_hidden`); otherwise it is refused with the
+    state. A file that runs or opens something when clicked is never posted, by one constant
+    (`REFUSED_EXTENSIONS`: .exe .bat .cmd .com .lnk .ps1 .vbs .scr .msi .sh .app .dmg). A DPC
+    home that cannot be resolved refuses (fail closed). The files a turn copied anew are removed
+    again when its answer record is not written (the loop raised, or the record failed); a file
+    whose bytes were already in the chat is never removed. **Built at `e2cef2da`, not observed live.**
 
   **Built at `e3b0ea6c` (part 3), `take_id` at `64b793ac`; not observed live.**
 - **D42. The `music_*` family: ten names, a timeout and a wait budget with each** (letter H,
@@ -739,10 +747,13 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   live.**
 - **D44. The agent gets a take by `take_id`, resolved by core, and no directory access**
   (letter D, **revised**: first decided in #46 as "the agent reads `~/.dpc/music/generated/`
-  without a `sandbox_extensions` entry"; revised by Mike in #53-#57 on Zcode #51). The
-  directory also holds every job's request JSON, with the prompts and lyrics of songs made from
-  the UI, and a read path outside the sandbox would be a third way round it that the
-  glossary's **sandbox** row does not know. Core resolves `take_id` to the take's file; this
+  without a `sandbox_extensions` entry"; revised by Mike in #53-#57 on Zcode #51). A read path
+  outside the sandbox would be a third way round it that the glossary's **sandbox** row does
+  not know, and it would need a `sandbox_extensions` path (Q1). *Correction (Zcode #68): the
+  reason first written here, that `generated/` holds every job's request JSON with its prompts
+  and lyrics, is wrong. The request JSON lives in `music/jobs/<job>/job.json` and its
+  `payload/` folder (`music/jobs.py`); `generated/` holds the audio and its sidecars. Decision
+  D stands on the two grounds above.* Core resolves `take_id` to the take's file; this
   also gives "only takes in `review`" a meaning (today `review` is a job state, not a take
   state). The tools need no `sandbox_extensions` entry for `~/.dpc/music`; Q1's remark that the
   agent needs write access there is dropped for them. **Built at `8c5b51c4` (part 1:
@@ -759,13 +770,22 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
     returns the same job.
 
   **Built at `8c5b51c4` (part 1, the store's limits) and `29383864` (part 2: a repeat or a
-  reached cap is answered before the person is asked); not observed live.**
+  reached cap is answered before the person is asked); not observed live.** *Follow-up 12
+  (Zcode #68 P2):* everything core would refuse (variants out of range, an empty style, an
+  unknown engine) and a job core would make `unsupported` are answered before the person is
+  asked, by core's own checks with no job made (`check_music_job`, `MusicJobStore.check_job`).
+  An `unsupported` job that does exist (the runner refused a queued job) counts in the turn cap,
+  in the tool and in the store; the queue cap still counts `queued` and `running` only, since an
+  `unsupported` job holds no place in the queue. **Built at `98ceed3a`, not observed live.**
 - **D46. `requested_by` on `mp.job/1`, and an agent cancels only its own jobs** (letter E, Mike
-  #46). `requested_by {kind, agent_id, conversation_id}` is added to the job schema; the schema
-  is closed to undeclared keys (`job_schemas.py`), so a store written before the field must
-  still open. `cancel_music_job` called by an agent for a job it did not propose is refused.
-  The person's own cancel in the UI is unchanged. **Built at `8c5b51c4` (part 1; `turn_id` is
-  recorded beside `conversation_id`); not observed live.**
+  #46). `requested_by {kind, agent_id, conversation_id, turn_id}` is added to the job schema;
+  the schema is closed to undeclared keys (`job_schemas.py`), so a store written before the
+  field must still open. `cancel_music_job` called by an agent for a job it did not propose is
+  refused. The person's own cancel in the UI is unchanged. **Built at `8c5b51c4` (part 1;
+  `turn_id` is recorded beside `conversation_id`); not observed live.** *Follow-up 12 (Zcode
+  #68 P3):* an agent's cancel compares the agent **and** the conversation, so the same agent's
+  turn in another chat does not cancel the job (`not_your_job`). **Built at `98ceed3a`, not
+  observed live.**
 - **D47. `music_propose_job` asks the owner's approval, as `schedule_task` does** (letter J,
   Mike #53-#57; Zcode #51 correction 7). A GPU job needs the person's consent, and the plan,
   copying `comfyui_submit`, would have inherited "no question". The approval machinery of
@@ -776,6 +796,12 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   GPU: <type>, "<style>", <n> takes, instrumental or with lyrics, <engine>, about <ETA> s on the
   GPU"; `schedule_approval_request` carries `heading`, `approve_label`, `refuse_label` and
   `music {type, style, variants, instrumental, engine, eta_seconds}`. Not observed live.**
+  *Follow-up 12:* `music` also carries `duration_s`, `has_lyrics` and, only when the job has
+  lyrics, `lyrics_excerpt` (their first 120 characters); `about` says the length. The card is
+  put up only for a request core would accept (D45). A Stop on the turn while the card is up
+  withdraws it (`superseded`, "The turn was stopped; no music job was made."), so a "yes" after
+  the Stop makes no job. The approval log lines name what is asked (`music_job approval
+  requested`, not `check_back`). **Built at `98ceed3a`, not observed live.**
 - **D48. Stop cancels the turn's queued jobs** (letter K, Mike #53-#57; Zcode #51: Stop today
   takes only the requests that hold the chat, and a waiting job holds nothing, so Mike's Stop
   moves Strata off the card and the music engine starts). When the person stops a turn, the
@@ -794,6 +820,23 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   names this agent's own queued or running job asks nothing) and `64b793ac` (`_get_allowed_tools`
   adds `schedule_task` wherever a music tool is left after the owner_only filter, so an owner
   turn is offered it and an `other_node` turn is not); not observed live.**
+  - **Music-return-only (follow-up 12; Zcode #67 P1, Mike's answer M pending, Zcode
+    recommends the same).** A music tool does not open the whole `schedule_task`: Mike enabled
+    music tools, not `chat` tasks or reminders. When `schedule_task` is in a turn's tools only
+    because a music tool is (the firewall does not grant it), the turn's `schedule_task` is
+    music-return-only (`ToolContext.schedule_task_music_return_only`, set by
+    `DpcAgent.process`): it takes only task_type `check_back` whose task data names
+    `music_job_id` of a job this agent proposed that is still `queued` or `running`. Any other
+    task type, a foreign or finished job, or no job id is refused: "schedule_task is not enabled
+    for this agent; only a return to your own music job is". The tool's name and schema stay.
+  - **The approval-free return is bound to the job alone (Zcode #68 P2).** In both modes core
+    sets its delay (`check_back_delay_s(job)`: the job's ETA plus 25 s, or 180 s plus 25 s when
+    unknown) and composes its wake text (`music_return_text`: the job id and "call music_check /
+    music_list_takes"); a delay, text or other task data the agent gave is dropped, and the
+    answer says so. A `check_back` with the agent's own text and delay goes through the ordinary
+    approval, and only where the firewall grants `schedule_task`.
+
+  **Music-return-only and the bound return built at `94a6710b`, not observed live.**
 - **D50. Three narrowings of the first cut** (Mike #46). **C:** the agent posts a take into
   the chat only when the person asks. **F:** no LRCLIB lookups by agents (they send data off
   the machine). **G:** posting into groups comes later, groups of own nodes first; it is
@@ -819,8 +862,11 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
     `card_wait.holders` (named by alias, `holders_in_the_way`) can name this turn's own local
     alias. So when the turn holds a live hold on a local alias and the job's `card_wait`
     holders include that alias, `music_wait` answers at once "waits for the card behind this
-    turn; check back after it ends", whatever the job state. A `card_wait` naming another alias
-    is waited for as before.
+    turn; check back after it ends". *Corrected in follow-up 12 to match the code (Zcode #68):*
+    that holds for a job in `queued` or `running` only (`_waits_behind_this_turn`); a job in any
+    other state is reported as it is, whatever its `card_wait` says. A `card_wait` naming
+    another alias is waited for as before. A hold that is not live (its turn has ended) makes no
+    self-wait. Both gates, and `live`, are pinned by tests at `98ceed3a`.
 
   **Built at `29383864` (part 2), extended at `64b793ac`; not observed live.**
 
