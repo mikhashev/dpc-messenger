@@ -724,6 +724,28 @@ def _owner_lease_waiting() -> bool:
     return any(not for_a_peer for _arrival, _lease, for_a_peer in _LEASE_WAITERS())
 
 
+def why_a_peer_may_not_swap(holders: List[Tuple[Any, str]]) -> Optional[str]:
+    """Why a peer's request may not stop the idle `holders` (holder, state) in its way, or None when
+    it may (ADR-044, amendment 2026-11-06, Mike's call). The owner's conditions for a swap and no
+    wait: the switch is on, nothing is in the card queue and no owner's request waits in the lease
+    line, and no holder is busy by rule 1 (starting, a call in flight, an `accepted_request`, a caller
+    in its window) or already stopping. One rule for both lines: a peer's supervisor start
+    (`_why_a_peer_may_not_swap`) and a peer's lease in the lease line (ADR-052 L13, Mike
+    2026-11-24: a peer may have an idle engine swapped out). Claims and awaits nothing, so it is
+    asked in the stretch of the mark. Said in a peer's words, to a peer: no agent, chat or caller is
+    named."""
+    if holders and not swap_policy()[0]:
+        return "this node's owner has not turned on swapping local models for an idle holder"
+    if _CARD_QUEUE or _owner_lease_waiting():
+        return "a request on this node is waiting for the card, and a peer's request does not go ahead of it"
+    for holder, state in holders:
+        if state in ("stopping", "draining") or holder._draining:
+            return "it is already stopping"
+        if holder._busy_for_the_card(state):
+            return "it is busy, and a peer's request does not wait for a busy holder"
+    return None
+
+
 def card_holders() -> List[Dict[str, Any]]:
     """Each holder of the card, the supervisors first: alias, engine, state, port and `kind`
     ("inference" for a supervisor); a lease's row adds what ADR-052 L7 names."""
@@ -2849,23 +2871,9 @@ class LlamaServerSupervisor:
         return peer_being_served() is not None
 
     def _why_a_peer_may_not_swap(self) -> Optional[str]:
-        """Why a start for a peer may not stop what holds the card, or None when it may (ADR-044,
-        amendment 2026-11-06, Mike's call). The owner's conditions for a swap and no wait: the
-        switch is on, nothing is in the card queue, and no holder is busy by rule 1 (starting, a
-        call in flight, an `accepted_request`, a caller in its window) or already stopping. Claims
-        and awaits nothing, so `_free_the_card` asks it in the stretch of the mark. Said in a
-        peer's words, to a peer: no agent, chat or caller is named."""
-        holders = self._blocking_holders()
-        if holders and not swap_policy()[0]:
-            return "this node's owner has not turned on swapping local models for an idle holder"
-        if _CARD_QUEUE or _owner_lease_waiting():
-            return "a request on this node is waiting for the card, and a peer's request does not go ahead of it"
-        for holder, state in holders:
-            if state in ("stopping", "draining") or holder._draining:
-                return "it is already stopping"
-            if holder._busy_for_the_card(state):
-                return "it is busy, and a peer's request does not wait for a busy holder"
-        return None
+        """Why a start for a peer may not stop what holds the card, or None when it may: the owner's
+        terms (`why_a_peer_may_not_swap`) over the holders in this start's way."""
+        return why_a_peer_may_not_swap(self._blocking_holders())
 
     def _a_peer_cannot_swap_refusal(self, holder: Any, why: str) -> CardQueueRefusal:
         if _a_lease(holder):

@@ -1296,12 +1296,19 @@ def _ask_idle_holders(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optio
 
 
 def _swaps_engines(waiter: _LeaseWaiter) -> bool:
-    """Whether `waiter` swaps an idle supervisor out (section 2.2 item 12): an owner's request for a
-    lease that `waits_for_engines`, with the swap on (the owner-start rule, gated by the switch,
-    Mike #70). A peer never does (L13, "As built": evicting a supervisor is the owner's mechanism),
-    nor does any other lease."""
-    return (waiter.lease.waits_for_engines and not waiter.for_a_peer and not waiter.lease._granted
-            and _sup.swap_policy()[0])
+    """Whether `waiter` swaps an idle supervisor out (section 2.2 item 12): a request for a lease
+    that `waits_for_engines`, with the swap on (the owner-start rule, gated by the switch, Mike #70).
+    An owner's request does; a peer's only on the owner's terms (Mike, 2026-11-24; L13 "As built"):
+    the one predicate an inference peer's start reads, `why_a_peer_may_not_swap`, over the holders
+    on the card (no owner's request waiting in either line, no holder busy or stopping). No other
+    lease does."""
+    if not (waiter.lease.waits_for_engines and not waiter.lease._granted and _sup.swap_policy()[0]):
+        return False
+    if not waiter.for_a_peer:
+        return True
+    holders = ([(sup, state) for sup, state in _sup._live_claims()]
+               + [(other, other.state) for other in _granted_leases() if other is not waiter.lease])
+    return _sup.why_a_peer_may_not_swap(holders) is None
 
 
 def _swap_idle_engines(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optional[str]]]) -> None:

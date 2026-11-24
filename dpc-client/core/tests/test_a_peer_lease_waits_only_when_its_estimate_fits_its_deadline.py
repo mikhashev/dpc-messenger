@@ -4,8 +4,10 @@ L13 (Mike #70, #85, #11), on ADR-044's amendment of 2026-11-18: a request served
 (`serving_a_peer`) is granted at once when it can be; otherwise it takes a place only when its whole
 trip is known and fits: the wait estimate (L10) plus its own `expected_s` within the guest's 120 s
 (`PEER_TRIP_S`, L13 point 2) and within the bound its door gave, and is refused at once when the trip
-is over it or any part of it is unknown (its own work too). A supervisor holding the card, idle or
-busy, and any owner's place in the card queue leave the estimate unknown: refused at once. A waiting peer stands behind every owner's waiter, and an owner's
+is over it or any part of it is unknown (its own work too). A busy supervisor holding the card, an
+idle one that the owner's terms do not let a peer stop (Mike, 2026-11-24: swap off, no stop figure,
+a lease that swaps no engine out), and any owner's place in the card queue leave the estimate
+unknown: refused at once. A waiting peer stands behind every owner's waiter, and an owner's
 request that arrives later goes ahead of it. It asks an idle holder to let go only on the owner's
 terms: the swap on, nobody of the owner's waiting. Every refusal to a peer says "right now", gives
 the estimate when known, and names no alias, agent or conversation. Fake clients; the door (S3)
@@ -285,13 +287,8 @@ class TestAnEstimateOverItOrUnknownIsRefusedAtOnce:
         base_mod._CARD_CLAIMS[Supervisor()] = "claimed"
         _names_nothing(await _refused_at_once(_peer_whisper().lease, 60))
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
-    @pytest.mark.parametrize("swap_on", [True, False], ids=["swap on", "swap off"])
-    async def test_a_running_supervisor_idle_or_busy_refuses_a_peer_at_once(self, busy, swap_on):
-        # A supervisor's claim: a peer gets the card only when no claim stands on it (L13).
-        swap(swap_on)
-
+    @staticmethod
+    def _claim(busy: bool, stop_s=None):
         class Supervisor:
             alias, ENGINE, port = "flash", "strata", None
             _proc, props, _draining = type("Proc", (), {"returncode": None})(), {"total_slots": 1}, False
@@ -299,10 +296,35 @@ class TestAnEstimateOverItOrUnknownIsRefusedAtOnce:
             def _busy_for_the_card(self, state, but_for=None, before=None):
                 return busy
 
+            def _expected_stop_s(self):
+                return stop_s
+
         held = Supervisor()
         base_mod._CARD_CLAIMS[held] = "claimed"
         assert base_mod._live_claims() == [(held, "running")]
-        refusal = await _refused_at_once(_peer_whisper().lease, 60, expected_s=1)
+        return held
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("swap_on", [True, False], ids=["swap on", "swap off"])
+    async def test_a_busy_running_supervisor_refuses_a_peer_at_once(self, swap_on):
+        # A busy supervisor has no ETA (L10), and a peer waits for no busy holder (L13).
+        swap(swap_on)
+        self._claim(busy=True, stop_s=1.0)
+        refusal = await _refused_at_once(whisper("small", waits_for_engines=True).lease, 60, expected_s=1)
+        _names_nothing(refusal)
+        assert refusal.wait["known"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case", ["swap off", "no stop figure", "a lease that waits for no engine"])
+    async def test_an_idle_running_supervisor_refuses_a_peer_at_once_unless_it_may_be_stopped(self, case):
+        # Mike, 2026-11-24: a peer may have an idle engine stopped on the owner's terms, its stop
+        # figure counted in the trip (served: `test_a_peer_may_have_an_idle_engine_swapped_out_on_
+        # the_owners_terms.py`). Without the swap, without a figure, or for a lease that never swaps
+        # an engine out, nothing is stopped for it and its trip is unknown: refused at once.
+        swap(case != "swap off")
+        self._claim(busy=False, stop_s=None if case == "no stop figure" else 1.0)
+        lease = whisper("small", waits_for_engines=case != "a lease that waits for no engine").lease
+        refusal = await _refused_at_once(lease, 60, expected_s=1)
         _names_nothing(refusal)
         assert refusal.wait["known"] is False
 
