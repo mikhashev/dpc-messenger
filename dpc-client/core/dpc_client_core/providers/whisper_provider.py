@@ -126,7 +126,20 @@ DEFAULT_CPU_MAX_AUDIO_S = 300.0
 DEFAULT_CPU_CONTENTION_FACTOR = 1.0
 _CPU_ROUTE_KEYS = {"cpu_max_s": DEFAULT_CPU_MAX_S, "cpu_max_audio_s": DEFAULT_CPU_MAX_AUDIO_S,
                    "cpu_contention_factor": DEFAULT_CPU_CONTENTION_FACTOR}
+# The two caps whose 0 turns the CPU route off (Mike, 2026-11-24, Q3), as `idle_unload_s` 0 is never
+# and `queue_wait_s` 0 is do not wait. The factor is a multiplier, not a switch.
+_CPU_ROUTE_SWITCHES = ("cpu_max_s", "cpu_max_audio_s")
 _cpu_route_source: Optional[Callable[[], Dict[str, Any]]] = None
+# ADR-052 L12 point 3 (Mike, 2026-11-24, Q2): the local Whisper transcriptions running on the CPU now
+# (a CPU twin's, or any local Whisper whose model runs on the CPU), by call, holding the alias. Each
+# is CPU contention for the next choice.
+_CPU_RUNS: Dict[int, str] = {}
+
+
+def cpu_transcriptions_running() -> List[str]:
+    """The aliases of the local Whisper transcriptions running on the CPU now, one per call, in the
+    order they began (L12 point 3)."""
+    return list(_CPU_RUNS.values())
 
 
 def set_cpu_route_source(source: Optional[Callable[[], Dict[str, Any]]]) -> None:
@@ -138,7 +151,8 @@ def set_cpu_route_source(source: Optional[Callable[[], Dict[str, Any]]]) -> None
 
 def cpu_route_settings() -> Dict[str, float]:
     """L12's three numbers: the registered source's, each one that is not a figure above 0 replaced
-    by the code default (logged)."""
+    by the code default (logged). `cpu_max_s` or `cpu_max_audio_s` at 0 stays 0: the CPU route off
+    (Mike, 2026-11-24)."""
     values = dict(_CPU_ROUTE_KEYS)
     source = _cpu_route_source
     if source is None:
@@ -149,6 +163,9 @@ def cpu_route_settings() -> Dict[str, float]:
         logger.warning("Whisper: L12's settings are unreadable; using the defaults", exc_info=True)
         return values
     for key, default in _CPU_ROUTE_KEYS.items():
+        if key in _CPU_ROUTE_SWITCHES and _a_zero(read.get(key)):
+            values[key] = 0.0
+            continue
         figure = _a_positive(read.get(key))
         if figure is None:
             if key in read:
@@ -240,6 +257,16 @@ async def transcribe_with_route(provider: Any, audio_path: str, release_if_loade
         else:
             return {**(result or {}), "device": "cpu"}
     return await provider.transcribe(audio_path, **released, **kwargs, cpu_route=False)
+
+
+def _a_zero(value: Any) -> bool:
+    """Whether `value` is the number 0 (a figure or its text), never a bool."""
+    if isinstance(value, bool):
+        return False
+    try:
+        return float(value) == 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _a_positive(value: Any) -> Optional[float]:
@@ -1012,6 +1039,9 @@ class LocalWhisperProvider(AIProvider):
             return None
         settings = cpu_route_settings()
         cap = settings["cpu_max_audio_s"]
+        # 0 turns the CPU route off (Mike, 2026-11-24, Q3): every call L12 is asked about goes to the
+        # line, and inside an agent's own turn it is refused at once (3.5).
+        off = next((key for key in _CPU_ROUTE_SWITCHES if settings[key] == 0), None)
         if view["self_wait"] is not None:  # section 3.5: the cap and the RAM check, no comparison
             alias, engine = view["self_wait"]
 
@@ -1022,6 +1052,14 @@ class LocalWhisperProvider(AIProvider):
                 logger.info("card: %s refused: %s", what, refusal)
                 return refusal
 
+            if off is not None:
+                to("line", f"CPU route off: {off} is 0; inside its own turn on '{alias}': refused")
+                refusal = LeaseWouldWaitOnItself(
+                    f"Not transcribed: this turn runs on the local model '{alias}', which holds the "
+                    f"card, and the CPU route is off ([local_transcription] {off} is 0), so nothing "
+                    "was queued.", alias, engine)
+                logger.info("card: %s refused: %s", what, refusal)
+                raise refusal
             if length is None or length > cap:
                 too_long = (f"A file over {cap:g} s needs the card" if length is not None else
                             f"The length of this file cannot be read, and a file over {cap:g} s needs the card")
@@ -1039,6 +1077,9 @@ class LocalWhisperProvider(AIProvider):
                     raise refused(words)
             to("cpu", f"inside its own turn on '{alias}', {length:g} s of audio within {cap:g} s")
             return RoutedToCpu(twin, decision, if_it_fails=refused)
+        if off is not None:
+            to("line", f"CPU route off: {off} is 0")
+            return None
         peer = peer_being_served() is not None
         if peer and not self._lets_peers_use_the_twin():
             to("line", "a peer's call takes no CPU route (Mike #71)")
@@ -1049,7 +1090,13 @@ class LocalWhisperProvider(AIProvider):
         if length > cap:
             to("line", f"{length:g} s of audio is over cpu_max_audio_s {cap:g} s")
             return None
-        factor = settings["cpu_contention_factor"] if view["cpu_busy"] else 1.0  # point 3
+        # Point 3 (Mike, 2026-11-24, Q2): whatever computes on the CPU now, each named: a resident
+        # Strata or llama-server busy by its own test, a llama-server off the card with a call in
+        # flight (`route_view`), and a local Whisper transcription already running on the CPU.
+        contention = list(view["cpu_contention"])
+        contention += [f"a CPU transcription on '{alias}'" for alias in cpu_transcriptions_running()]
+        decision["contention"] = contention
+        factor = settings["cpu_contention_factor"] if contention else 1.0
         twin = self._the_cpu_twin()
         cpu_s = twin.expected_seconds(length)
         if cpu_s is None:
@@ -1068,12 +1115,12 @@ class LocalWhisperProvider(AIProvider):
             gpu_words = "not compared: its wait is not estimated behind a local engine on the card (item 1a)"
         else:
             gpu_words = "long (unknown)" if gpu_s is None else f"≈{gpu_s:.0f} s"
-        if not view["cpu_busy"]:
+        if not contention:
             busy = ""
         elif factor == 1.0:
-            busy = ", a busy Strata, cpu_contention_factor 1, no penalty"
+            busy = f", {' and '.join(contention)}, cpu_contention_factor 1, no penalty"
         else:
-            busy = f", x{factor:g} for a busy Strata"
+            busy = f", x{factor:g} for {' and '.join(contention)}"
         compared = f"CPU ≈{cpu_s:.0f} s ({'cold' if cold else 'warm'}{busy}) against the GPU {gpu_words}"
         if gpu_s is not None and cpu_s >= gpu_s:
             to("line", f"{compared}: the GPU is sooner")
@@ -1898,7 +1945,10 @@ class LocalWhisperProvider(AIProvider):
             counted._active_transcriptions += 1
             counted._drained.clear()
             counted._cancel_idle_task()
+        run = object()
         try:
+            if counted._device_in_use() == "cpu":
+                _CPU_RUNS[id(run)] = counted.alias  # L12 point 3: CPU contention while it runs
             overrides = {}
             if language is not None:
                 overrides["language"] = language
@@ -1908,6 +1958,7 @@ class LocalWhisperProvider(AIProvider):
                 overrides["audio_s"] = audio_s
             return await self._transcribe_loaded(audio_path, **overrides)
         finally:
+            _CPU_RUNS.pop(id(run), None)
             owner = counted._current_owner()
             if owner._active_transcriptions > 0:
                 owner._active_transcriptions -= 1

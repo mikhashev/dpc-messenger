@@ -74,12 +74,16 @@ _SEEDED_KEYS: Dict[tuple, tuple] = {
     ('local_transcription', 'queue_wait_s'): (
         '600', "How long a person's transcription may wait in line for the GPU; 0 = do not wait"),
     # ADR-052 L12 (S3d): item 9 (cpu_max_s, cpu_contention_factor) and Mike #71 (cpu_max_audio_s).
+    # 0 turns the CPU route off (Mike, 2026-11-24, Q3), as 0 means never for `idle_unload_s`.
     ('local_transcription', 'cpu_max_s'): (
-        '600', 'The CPU takes a transcription only when its estimate is within this many seconds'),
+        '600', 'The CPU takes a transcription only when its estimate is within this many seconds; '
+               '0 = never use the CPU'),
     ('local_transcription', 'cpu_max_audio_s'): (
-        '300', 'Audio longer than this many seconds never goes to the CPU; it waits for the GPU'),
+        '300', 'Audio longer than this many seconds never goes to the CPU; it waits for the GPU; '
+               '0 = never use the CPU'),
     ('local_transcription', 'cpu_contention_factor'): (
-        '1.0', "The CPU's estimate is multiplied by this while Strata computes a turn"),
+        '1.0', "The CPU's estimate is multiplied by this while the CPU computes something else "
+               "(a busy Strata or llama-server, another CPU transcription)"),
 }
 
 
@@ -456,9 +460,9 @@ class Settings:
             'lazy_loading': 'true',  # Load model on first use (faster startup)
             'idle_unload_s': _SEEDED_KEYS[('local_transcription', 'idle_unload_s')][0],  # Unload the model (frees VRAM) after this many idle seconds; 0 = never
             'queue_wait_s': _SEEDED_KEYS[('local_transcription', 'queue_wait_s')][0],  # How long a person's transcription may wait in line for the GPU; 0 = do not wait
-            'cpu_max_s': _SEEDED_KEYS[('local_transcription', 'cpu_max_s')][0],  # The CPU takes a transcription only when its estimate is within this many seconds
-            'cpu_max_audio_s': _SEEDED_KEYS[('local_transcription', 'cpu_max_audio_s')][0],  # Audio longer than this never goes to the CPU
-            'cpu_contention_factor': _SEEDED_KEYS[('local_transcription', 'cpu_contention_factor')][0]  # The CPU's estimate is multiplied by this while Strata computes a turn
+            'cpu_max_s': _SEEDED_KEYS[('local_transcription', 'cpu_max_s')][0],  # The CPU takes a transcription only when its estimate is within this many seconds; 0 = never use the CPU
+            'cpu_max_audio_s': _SEEDED_KEYS[('local_transcription', 'cpu_max_audio_s')][0],  # Audio longer than this never goes to the CPU; 0 = never use the CPU
+            'cpu_contention_factor': _SEEDED_KEYS[('local_transcription', 'cpu_contention_factor')][0]  # The CPU's estimate is multiplied by this while the CPU computes something else
         }
 
         self._config['vision'] = {
@@ -1407,9 +1411,11 @@ class Settings:
             return int(default)
         return value
 
-    def _local_transcription_figure(self, key: str) -> float:
+    def _local_transcription_figure(self, key: str, zero_is_off: bool = False) -> float:
         """A `[local_transcription]` figure above 0 that the seed table defaults (`_SEEDED_KEYS`): the
-        file's value first, the code default for one that is missing, unreadable or not above 0."""
+        file's value first, the code default for one that is missing, unreadable or not above 0. With
+        `zero_is_off`, 0 is read as 0 (the CPU route off, Mike 2026-11-24), never as the default; below
+        0 still reads as the default."""
         default = float(_SEEDED_KEYS[('local_transcription', key)][0])
         raw = None
         try:
@@ -1418,24 +1424,31 @@ class Settings:
         except (configparser.Error, TypeError, ValueError) as e:
             logger.warning("[local_transcription] %s is unreadable (%s); using %g", key, e, default)
             return default
+        if zero_is_off and value == 0:
+            return 0.0
         if not math.isfinite(value) or value <= 0:
-            logger.warning("[local_transcription] %s %r is not a figure above 0; using %g", key, raw, default)
+            logger.warning("[local_transcription] %s %r is not a figure above 0%s; using %g", key, raw,
+                           " (0 turns the CPU route off)" if zero_is_off else "", default)
             return default
         return value
 
     def get_local_transcription_cpu_max_s(self) -> float:
         """`[local_transcription] cpu_max_s`: ADR-052 L12, the CPU twin takes a transcription only when
-        its estimate is within this (600 s, item 9, decided 2026-11-23)."""
-        return self._local_transcription_figure('cpu_max_s')
+        its estimate is within this (600 s, item 9, decided 2026-11-23). 0 turns the CPU route off
+        (Mike, 2026-11-24)."""
+        return self._local_transcription_figure('cpu_max_s', zero_is_off=True)
 
     def get_local_transcription_cpu_max_audio_s(self) -> float:
         """`[local_transcription] cpu_max_audio_s`: ADR-052 L12 point 2, longer audio never goes to the
-        CPU twin (300 s, Mike #71); also the cap of an agent's transcription inside its own turn (3.5)."""
-        return self._local_transcription_figure('cpu_max_audio_s')
+        CPU twin (300 s, Mike #71); also the cap of an agent's transcription inside its own turn (3.5).
+        0 turns the CPU route off (Mike, 2026-11-24)."""
+        return self._local_transcription_figure('cpu_max_audio_s', zero_is_off=True)
 
     def get_local_transcription_cpu_contention_factor(self) -> float:
         """`[local_transcription] cpu_contention_factor`: ADR-052 L12 point 3, the CPU twin's estimate
-        times this while a resident Strata is busy (1.0, item 9, a start value tuned from operation)."""
+        times this while the CPU computes something else (L12 point 3: a busy resident Strata or
+        llama-server, another CPU transcription; Mike 2026-11-24) (1.0, item 9, a start value tuned
+        from operation). A multiplier, not a switch: 0 reads as the default."""
         return self._local_transcription_figure('cpu_contention_factor')
 
     def get_local_transcription_cpu_route(self) -> Dict[str, float]:

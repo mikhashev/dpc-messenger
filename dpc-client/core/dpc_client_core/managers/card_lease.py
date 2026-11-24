@@ -1183,12 +1183,30 @@ def _refusal_for_a_self_wait(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any
     ))
 
 
-def _a_cpu_engine_is_busy() -> bool:
-    """ADR-052 L12 point 3 (Zcode #69): a resident Strata child is busy by its own test,
-    `_busy_for_the_card` (a live `accepted_request` hold in `_CARD_HOLDS`, a call in flight, a child
-    starting), not by a guess from timing."""
-    return any(getattr(sup, "ENGINE", "") == "strata" and sup._busy_for_the_card(state)
-               for sup, state in _sup._live_claims())
+_ENGINE_NAMES = {"strata": "Strata"}
+
+
+def _cpu_contention() -> List[str]:
+    """ADR-052 L12 point 3, the engines computing on the CPU now, each named for the owner's log
+    ("a busy Strata 'flash'"). A resident child (a claim on the card), Strata or llama-server, counts
+    when it is busy by its own test, `_busy_for_the_card` (a live `accepted_request` hold in
+    `_CARD_HOLDS`, a call in flight, a child starting), not by a guess from timing (Zcode #69); an idle
+    one does not. A llama-server kept off the card (`--device none`) holds no claim and counts while
+    a call is in flight on it (Mike, 2026-11-24, Q2: "a running llama-server", read as one that
+    computes something now). The CPU transcriptions are the Whisper provider's to add."""
+    names: List[str] = []
+    claimed = set()
+    for sup, state in _sup._live_claims():
+        claimed.add(sup)
+        if sup._busy_for_the_card(state):
+            names.append(f"a busy {_ENGINE_NAMES.get(sup.ENGINE, sup.ENGINE)} '{sup.alias}'")
+    for sup in list(_sup._SUPERVISORS):
+        proc = getattr(sup, "_proc", None)
+        if (sup in claimed or sup.on_the_card() or proc is None or proc.returncode is not None
+                or getattr(sup, "_in_flight", 0) <= 0):
+            continue
+        names.append(f"a busy {_ENGINE_NAMES.get(sup.ENGINE, sup.ENGINE)} '{sup.alias}'")
+    return names
 
 
 @_sup.on_the_owner_loop
@@ -1205,11 +1223,12 @@ async def route_view(lease: CardLease, *, expected_s: Optional[float] = None,
     supervisor in the way that is not already going makes it None too (item 1a: an idle one would be
     swapped out at a cost no figure holds, its reload or Strata's parked conversations; a busy one
     has no ETA). `engine_stays` says so. `self_wait`: (alias, engine) of a holder the request itself
-    stands on (section 3.5), else None. `cpu_busy`: L12 point 3. `behind`: who is in the way."""
+    stands on (section 3.5), else None. `cpu_contention`: L12 point 3, the engines computing on the
+    CPU now (`_cpu_contention`). `behind`: who is in the way."""
     probe = _LeaseWaiter(lease, "L12", None, True, expected_s, vram_mib=vram_mib)
     blockers = _blockers(probe)
     view: Dict[str, Any] = {"free": not blockers, "wait_s": None, "known": False, "behind": [],
-                            "engine_stays": False, "self_wait": None, "cpu_busy": _a_cpu_engine_is_busy(),
+                            "engine_stays": False, "self_wait": None, "cpu_contention": _cpu_contention(),
                             "fit": None}
     if not blockers:
         return view

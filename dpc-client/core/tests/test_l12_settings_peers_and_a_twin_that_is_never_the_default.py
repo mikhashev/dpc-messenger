@@ -68,8 +68,11 @@ class TestTheSettings:
 
     def test_the_provider_reads_the_registered_source_and_falls_back(self, monkeypatch):
         assert cpu_route_settings() == KEYS, "no source: the code defaults"
-        l12_settings(monkeypatch, cpu_max_s=90, cpu_max_audio_s=0, cpu_contention_factor="x")
+        l12_settings(monkeypatch, cpu_max_s=90, cpu_max_audio_s=-1, cpu_contention_factor="x")
         assert cpu_route_settings() == {**KEYS, "cpu_max_s": 90.0}
+        # 0 is the CPU route off, not the default (Mike, 2026-11-24; `test_zero_turns_the_cpu_route_off.py`).
+        l12_settings(monkeypatch, cpu_max_s=90, cpu_max_audio_s=0)
+        assert cpu_route_settings() == {**KEYS, "cpu_max_s": 90.0, "cpu_max_audio_s": 0.0}
 
 
 @pytest.mark.usefixtures("fast")
