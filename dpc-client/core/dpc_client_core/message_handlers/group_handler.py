@@ -173,6 +173,15 @@ class GroupCreateHandler(MessageHandler):
         # version would ride in from any connected peer, member or not. A group
         # not held here goes on to apply_sync, which takes it only from the
         # creator it names.
+        #
+        # A held group with an empty `created_by` (a copy written before the
+        # field existed) has no creator, so no sender passes this test: nobody
+        # rewrites its roster, the same rule as `_creator_pin_holds`. The cost:
+        # a member that lost such a copy is not given it back. First sight of a
+        # no-creator group would be taken from any sender, but nothing sends it:
+        # GROUP_CREATE comes only from the creator, GROUP_SYNC and the history
+        # exchange refuse a group this node does not hold, and nobody may add a
+        # member to a group with no creator. No path in the code gives the copy back.
         held = self.service.group_manager.get_group(group_id)
         if held is not None and sender_node_id != held.created_by:
             self.logger.warning(
@@ -1211,6 +1220,14 @@ class GroupHistoryResponseHandler(MessageHandler):
             if not mentions_in(record.get("content")):
                 continue
             message_id = record.get("id")
+            # A record that names no author is merged (a legacy one carries none,
+            # and our own group voice send writes none) but wakes nobody: the roster
+            # check below skips an empty id, and an agent must not be started by
+            # words nobody is answerable for.
+            if not record.get("sender_node_id"):
+                self.logger.info("Synced mention %s in group %s wakes nobody: the record names no author",
+                                 str(message_id)[:8], group_id)
+                continue
             blocked = _is_blocked(self.service, record.get("sender_node_id"), record.get("agent_owner"))
             if blocked:
                 self.logger.info("Synced mention %s in group %s wakes nobody: by blocked node %s",
