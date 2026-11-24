@@ -16,6 +16,7 @@ import pathlib
 
 import pytest
 
+from dpc_client_core.dpc_agent.agent import OWNER_TURN
 from dpc_client_core.dpc_agent.tools.registry import (
     RESTRICTED_TOOL_NAMES,
     ToolContext,
@@ -47,8 +48,16 @@ def test_an_empty_whitelist_refuses_execution(registry, tmp_path):
 
 def test_no_whitelist_at_all_still_means_no_gate(registry, tmp_path):
     """`None` is the "no firewall answered" case and must not become a denial."""
-    registry.set_context(ToolContext(agent_root=tmp_path, tool_whitelist=None))
+    registry.set_context(ToolContext(agent_root=tmp_path, tool_whitelist=None, turn_class=OWNER_TURN))
     assert len(_names(registry)) == len(registry._entries)
+
+
+def test_no_whitelist_and_no_turn_class_hides_only_the_owner_only_tools(registry, tmp_path):
+    """owner_only fails closed on an unknown turn class; a `None` whitelist adds no other gate."""
+    registry.set_context(ToolContext(agent_root=tmp_path, tool_whitelist=None))
+    hidden = set(registry._entries) - _names(registry)
+    assert hidden == registry.owner_only_names()
+    assert hidden
 
 
 def test_a_named_whitelist_admits_exactly_what_it_names(registry, tmp_path):
