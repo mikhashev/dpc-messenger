@@ -19,7 +19,9 @@
   "Transcribe" is the chain's explicit step 4: the core runs DPC's speech-to-text on the
   track's file (transcribeMusicLyrics) and stores the lines with source "transcribe",
   shown as "transcribed", with the provider and model the record keeps
-  (`transcription: {provider, model}`) beside the badge. Opening a track never runs it. Over the person's own lyrics it
+  (`transcription: {provider, model}`) beside the badge. A collapsed note ("Filtered N lines") says
+  what the transcript filter dropped and how long segments were split, with the dropped lines when the
+  run's own answer is on screen (musicLyricsFilter.ts). Opening a track never runs it. Over the person's own lyrics it
   asks first (confirmAsync) before it sends overwrite_manual. A run can outlast the
   command's timeout; the panel then follows it through getMusicLyrics (runTranscribe).
 -->
@@ -29,6 +31,7 @@
   import { getMusicLyrics, saveMusicLyrics } from '$lib/coreService';
   import { lookupLyricsOnLrclib, seekTo, transcribeMusicLyrics } from '$lib/services/music';
   import { confirmAsync } from '$lib/utils/dialog';
+  import { filterNote, filterReportOf } from '$lib/utils/musicLyricsFilter';
   import {
     LRCLIB_EGRESS_TEXT,
     LYRICS_OVERWRITE_CONFIRM_TEXT,
@@ -313,6 +316,10 @@
     return t ? [t.provider, t.model].filter(Boolean).join(' · ') : '';
   });
 
+  // What the transcript filter did: the run's own report (it lists the dropped lines), else the counts
+  // stored on the lyrics. Null for lyrics that were not transcribed or ran no filter.
+  let filterView = $derived(filterNote(filterReportOf(transcribed, lyrics)));
+
   let emptyText = $derived(
     lrclib && lrclib.result !== 'synced' && lrclib.result !== 'plain'
       ? lrclibOutcomeText(lrclib)
@@ -361,6 +368,22 @@
   {#if entry && message && status !== 'error'}<p class="error small" role="alert">{message}</p>{/if}
   {#if entry && note}<p class="muted tiny" role="status">{note}</p>{/if}
   {#if entry && transcribed}<p class="muted tiny" role="status">{transcriptionText(transcribed)}</p>{/if}
+  {#if entry && filterView}
+    <details class="filter-note">
+      <summary class="muted tiny">{filterView.summary}</summary>
+      <ul class="tiny muted">
+        {#each filterView.facts as fact (fact)}<li>{fact}</li>{/each}
+      </ul>
+      {#if filterView.lines.length}
+        <ol class="tiny dropped">
+          {#each filterView.lines as dropped, i (i)}
+            <li><span class="t">{dropped.time}</span> <span class="x">{dropped.text}</span> <span class="muted">({dropped.reason})</span></li>
+          {/each}
+        </ol>
+        {#if filterView.more > 0}<p class="muted tiny">and {filterView.more} more.</p>{/if}
+      {/if}
+    </details>
+  {/if}
   {#if entry && busy !== 'transcribe' && transcribeRun?.state === 'running'}
     <p class="muted tiny" role="status">This track is being transcribed; Look again when it ends.</p>
   {/if}
@@ -474,6 +497,9 @@
   .head-actions { margin-left: auto; display: flex; gap: 4px; }
   .tag { font-size: 11px; padding: 1px 6px; border-radius: 5px; background: #1d2a3d; color: #b6d4ff; white-space: nowrap; }
   .tag.none { background: #31353d; color: #c9d1d9; }
+  .filter-note summary { cursor: pointer; }
+  .filter-note ul, .filter-note ol { margin: 4px 0 0; padding-left: 18px; }
+  .filter-note .dropped li { overflow-wrap: anywhere; }
   .transcribed-by { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .compact { display: flex; flex-direction: column; gap: 2px; text-align: center; }
