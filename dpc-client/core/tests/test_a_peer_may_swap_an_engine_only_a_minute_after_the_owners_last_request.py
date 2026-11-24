@@ -143,3 +143,70 @@ async def test_a_failed_turn_leaves_the_mark_too(tmp_path, clock):
     assert "served this node's owner" in base_mod.why_a_peer_may_not_swap([(holder, "running")])
     clock.now += 59
     assert base_mod.why_a_peer_may_not_swap([(holder, "running")]) is None
+
+
+async def _owner_turn_in_flight(alias, entered, leave):
+    """An owner's turn standing on `alias` until `leave` is set. Its own task, so the peer's request in the
+    test's task does not carry this hold (`_CARD_HOLD` follows the task that set it)."""
+    async with card_held_for(alias, "accepted_request", agent_id="agent", conversation_id="chat"):
+        entered.set()
+        await leave.wait()
+
+
+async def _while_the_owner_is_on(alias, peer_request):
+    """Run `peer_request` with an owner's turn in flight on `alias`; the turn ends after it."""
+    entered, leave = asyncio.Event(), asyncio.Event()
+    turn = asyncio.create_task(_owner_turn_in_flight(alias, entered, leave))
+    await asyncio.wait_for(entered.wait(), BOUND)
+    try:
+        return await peer_request()
+    finally:
+        leave.set()
+        await asyncio.wait_for(turn, BOUND)
+
+
+@pytest.mark.asyncio
+async def test_an_owner_turn_in_flight_keeps_a_peer_off_though_the_last_turn_ended_two_minutes_ago(tmp_path, clock):
+    """Ark #24-2: `_owner_request_ended_at` is written when a hold leaves, so during a live owner turn it
+    still says the previous turn's end. Stamp 120 s old, the next turn in flight: the peer is refused on
+    both lines by the hold itself (busy by rule 1), nothing is stopped, and the stamp is not what kept it."""
+    strata, events = await running_strata(tmp_path)
+    await owner_turn_on("flash")
+    clock.now += 120
+
+    async def lease_peer():
+        assert "busy" in base_mod.why_a_peer_may_not_swap([(strata, "running")]), "not the 120 s old stamp"
+        peer = whisper("small", waits_for_engines=True)
+        try:
+            with serving_a_peer(PEER):
+                await asyncio.wait_for(peer.lease.acquire("peer node-guest", wait_s=None, expected_s=30), BOUND)
+        except LeaseRefusedForPeer as refused:
+            return refused
+        return None
+
+    outcome = await _while_the_owner_is_on("flash", lease_peer)
+    assert isinstance(outcome, LeaseRefusedForPeer), "the peer was refused while the owner's turn ran"
+    assert events == [] and strata._proc is not None and holding() == ["flash"]
+    assert "served this node's owner" in base_mod.why_a_peer_may_not_swap([(strata, "running")]),         "the turn that just ended wrote a fresh stamp"
+    await nothing_left()
+
+
+@pytest.mark.asyncio
+async def test_an_owner_turn_in_flight_keeps_the_engine_line_from_swapping_for_a_peer(tmp_path, clock):
+    holder, new = await _running_pair(tmp_path, "strata")
+    await owner_turn_on(holder.alias)
+    clock.now += 120
+
+    async def engine_peer():
+        assert "busy" in base_mod.why_a_peer_may_not_swap([(holder, "running")])
+        try:
+            with serving_a_peer(PEER):
+                await asyncio.wait_for(new.ensure_running(), BOUND)
+        except CardQueueRefusal as refused:
+            return refused
+        return None
+
+    outcome = await _while_the_owner_is_on(holder.alias, engine_peer)
+    assert isinstance(outcome, CardQueueRefusal) and "busy" in str(outcome)
+    assert holder._proc is not None and new._proc is None and holder._draining is False
+    assert [h["alias"] for h in base_mod.card_holders()] == [holder.alias]

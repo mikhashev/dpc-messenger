@@ -404,6 +404,40 @@ def vram_reserve_of(config: Dict[str, Any], base_args: Optional[List[Any]]) -> T
                       "config could not be read")
 
 
+def declared_peak_of(total_mib: Optional[int], start_args: Optional[List[Any]]) -> Tuple[Optional[int], str]:
+    """(MiB or None, why): a Strata child's declared VRAM peak for ADR-052 L11, the card's total less
+    the `--vram-reserve-mib` its start args give the engine. The engine grows its expert cache until
+    only that reserve is free, so `total - reserve` bounds its use from above (it may over-state, never
+    under-state); the model files and the conversation cache (host RAM) do not size the card.
+
+    None when the total is unknown, or the start args carry no valid reserve (the launcher's or the
+    engine's own default then applies, which DPC does not know). A flag given twice takes the smallest
+    value: the larger peak, whichever one the engine keeps."""
+    if not isinstance(total_mib, int) or isinstance(total_mib, bool) or total_mib <= 0:
+        return None, "the card's total VRAM could not be read at the start"
+    tokens = [str(a) for a in (start_args or [])]
+    values: List[int] = []
+    for i, token in enumerate(tokens):
+        if token != "--vram-reserve-mib":
+            continue
+        raw = _number_or_raw(tokens[i + 1]) if i + 1 < len(tokens) else None
+        try:
+            bad = raw is None or budget_error("vram_reserve_mib", raw) is not None
+        except (ValueError, OverflowError):  # "nan", "inf"
+            bad = True
+        if bad:
+            return None, f"the start's --vram-reserve-mib is not a whole number from 0 ({raw!r})"
+        values.append(int(raw))
+    if not values:
+        return None, ("the start args give the engine no --vram-reserve-mib, so its reserve is the "
+                      "launcher's or the engine's own, which DPC does not know")
+    reserve = min(values)
+    peak = total_mib - reserve
+    if peak <= 0:
+        return None, f"the reserve {reserve} MiB is not below the card's {total_mib} MiB"
+    return peak, f"the card's {total_mib} MiB less --vram-reserve-mib {reserve}"
+
+
 def slot_save_path_error(value: Any) -> Optional[str]:
     """Why `value` cannot be the alias's `slot_save_path`, or None (None / "" is off).
 
@@ -1187,6 +1221,10 @@ class StrataSupervisor(LlamaServerSupervisor):
         self.vram_released: Optional[bool] = None
         self.last_stop_vram: Dict[str, Any] = {}
         self._vram_free_before: Optional[int] = None
+        # The engine flags of the last start config written, and the child's declared VRAM peak
+        # (`declared_peak_of`) the base's `_launch` records as `predicted_vram_mib`.
+        self._start_args: List[str] = []
+        self._declared_peak_at_launch: Optional[int] = None
         # The last GlobalMemoryStatusEx reading (commit_memory) with `at`
         # (monotonic): taken at the start and on every engine-watch poll, so a
         # death is explained with what was free just before it.
@@ -1635,6 +1673,7 @@ class StrataSupervisor(LlamaServerSupervisor):
         tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
         os.replace(tmp, path)
         self.start_config_used = path
+        self._start_args = [str(a) for a in cfg.get("args") or []]
         return path
 
     def _say_the_spill_inputs(self, cfg: Dict[str, Any]) -> None:
@@ -2007,6 +2046,7 @@ class StrataSupervisor(LlamaServerSupervisor):
                 self._vram_free_before = await asyncio.to_thread(_base._free_vram_mib)
             except Exception:
                 self._vram_free_before = None
+            await self._declare_the_peak()
             try:
                 props = await super()._launch(binary)
             except LlamaServerError as e:
@@ -2858,6 +2898,24 @@ class StrataSupervisor(LlamaServerSupervisor):
         except (LlamaServerError, ValueError, KeyError, TypeError):
             args = None
         return vram_reserve_of(self.config, args)
+
+    async def _declare_the_peak(self) -> None:
+        """Size this start for ADR-052 L11 from the start config just written (`declared_peak_of`)."""
+        try:
+            total = await asyncio.to_thread(_base._total_vram_mib)
+        except Exception:
+            total = None
+        self._declared_peak_at_launch, why = declared_peak_of(total, self._start_args)
+        if self._declared_peak_at_launch is None:
+            logger.info("strata[%s]: no declared VRAM peak for this start: %s", self.alias, why)
+        else:
+            logger.info("strata[%s]: declared VRAM peak %d MiB (%s)", self.alias,
+                        self._declared_peak_at_launch, why)
+
+    def _predicted_vram_at_launch(self, cache_type: Optional[str]) -> Optional[int]:
+        """The base records this as `predicted_vram_mib` once the child answers `/props`; Strata has no
+        KV ladder, so `cache_type` plays no part."""
+        return self._declared_peak_at_launch
 
     def _expected_stop_s(self) -> float:
         """The last stop of a loaded engine, which holds the VRAM release wait (inside

@@ -72,20 +72,30 @@ def test_the_module_reads_every_holder_on_the_card(monkeypatch):
     base_mod._CARD_CLAIMS.clear()
 
 
-def test_a_strata_child_as_a_resident_makes_it_unknown(tmp_path):
-    from tests.test_strata_supervisor import _install
+@pytest.mark.asyncio
+async def test_a_strata_child_as_a_resident_is_sized_and_nothing_fits_beside_it(tmp_path, monkeypatch):
+    """Forge #26 F1: a Strata child started through its own launch declares the card's total less the
+    `--vram-reserve-mib` it was given (1536 in the test base config), so the fit is no longer `unknown`.
+    With its reserve charged once beside it, `need` is the contender's peak above the total: the
+    declared check says `does_not_fit` before any live reading, as the card itself would."""
+    from tests.test_one_local_engine_holds_the_card import _strata
 
-    strata = StrataSupervisor("flash", {"strata_install_dir": str(_install(tmp_path)),
-                                        "strata_base_config": "strata-base.json",
-                                        "conversation_cache_mib": 10240})
-    _on_the_card(strata)
-    assert strata.predicted_vram_mib is None
+    monkeypatch.setattr(base_mod, "DPC_HOME", tmp_path / "dpc-home")
+    monkeypatch.setattr(base_mod, "resolve_binary", lambda config: tmp_path / "llama-server.exe")
+    monkeypatch.setattr(base_mod, "_total_vram_mib", lambda: TOTAL)
+    monkeypatch.setattr(base_mod, "_free_vram_mib", lambda **_: 30000)
+    strata = _strata(tmp_path)
+    await strata.ensure_running()
+    assert strata.predicted_vram_mib == TOTAL - 1536
     contender = whisper("turbo", vram_mib=4447)
     waiter = _LeaseWaiter(contender.lease, "dictation", None, True, None, vram_mib=4447)
+    monkeypatch.setattr(card_lease, "_READ_THE_CARD", lambda: (30000, TOTAL))
 
-    fit = _fit_now(waiter, READING)
+    fit = _fit_now(waiter, await card_lease._read_for_the_fit(waiter))
 
-    assert fit["outcome"] == "unknown" and "strata 'flash' has no declared peak" in fit["why"]
+    assert (fit["reserve"], fit["need"]) == (1536, 4447 + TOTAL), "the reserve counted once"
+    assert fit["outcome"] == "does_not_fit"
+    assert fit["why"] == f"{4447 + TOTAL} MiB declared against the card's {TOTAL} MiB"
     base_mod._CARD_CLAIMS.clear()
 
 

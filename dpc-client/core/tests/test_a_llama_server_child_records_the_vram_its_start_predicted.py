@@ -2,7 +2,8 @@
 with, `_predicted_total_mib(admission, cache_type)` (weights + KV for its `n_ctx` and KV type +
 overhead), recorded on the supervisor at launch as `predicted_vram_mib`. One attribute; no
 measurement (per-process VRAM reads `[N/A]` under WDDM). A start that could not size the model has
-none, and a Strata child has none: L11 reads both as unknown.
+none, which L11 reads as unknown. A Strata child's figure is the card less its own reserve
+(`test_a_strata_child_declares_its_vram_peak_from_its_reserve.py`).
 """
 
 import pytest
@@ -55,9 +56,11 @@ async def test_a_start_that_could_not_size_the_model_has_no_figure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_strata_child_has_no_figure(tmp_path, monkeypatch):
+async def test_a_strata_child_records_the_card_less_its_reserve_not_a_model_admission(tmp_path, monkeypatch):
+    """Forge #26 F1: Strata runs no admission; its figure is the card's total less the
+    `--vram-reserve-mib` of its start config (1536 in the test base config), `declared_peak_of`."""
     _sized(monkeypatch)
     sup = _strata(tmp_path)
     await sup.ensure_running()
-    assert sup.predicted_vram_mib is None
+    assert sup.predicted_vram_mib == 32623 - 1536
     await sup.stop()
