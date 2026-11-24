@@ -35,7 +35,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **B** — [background call](#background-call) · [`before_message_id`](#before_message_id) · [billing](#billing) · [Block / Unblock](#block--unblock) · [`block_peer` / `unblock_peer`](#block_peer--unblock_peer) · [`blocked_nodes`](#blocked_nodes) · [board / backlog](#board--backlog) · [bridge](#bridge) · [burst](#burst) · [bytes_per_second](#bytes_per_second)
 
-**C** — [caller_kind / route](#caller_kind--route) · [caller_window](#caller_window) · [cancel_knowledge_extraction](#cancel_knowledge_extraction) · [card ask](#card-ask) · [card hold](#card-hold) · [card lease](#card-lease) · [card queue](#card-queue) · [card-borrow](#card-borrow) · [CDN manifest](#cdn-manifest) · [CDN refusal](#cdn-refusal) · [CLI](#cli) · [closure line](#closure-line) · [collective](#collective) · [command job](#command-job) · [commit_mb](#commit_mb) · [common_part](#common_part) · [compaction](#compaction) · [composer / pending file](#composer--pending-file) · [compute.currency](#computecurrency) · [connection tier (1–6)](#connection-tier-16) · [consensus / devil's advocate](#consensus--devils-advocate) · [consent_required](#consent_required) · [constraint (C1–C10)](#constraint-c1c10) · [context window](#context-window) · [Control](#control) · [conversation_id / chat](#conversation_id--chat) · [conversation_spill_mib](#conversation_spill_mib) · [cost_amount](#cost_amount) · [cost_reference](#cost_reference) · [counts_source](#counts_source) · [creator](#creator) · [cut call](#cut-call)
+**C** — [caller_kind / route](#caller_kind--route) · [caller_window](#caller_window) · [cancel_knowledge_extraction](#cancel_knowledge_extraction) · [card ask](#card-ask) · [card hold](#card-hold) · [card lease](#card-lease) · [card queue](#card-queue) · [card-borrow](#card-borrow) · [CDN manifest](#cdn-manifest) · [CDN refusal](#cdn-refusal) · [chat_post_file](#chat_post_file) · [CLI](#cli) · [closure line](#closure-line) · [collective](#collective) · [command job](#command-job) · [commit_mb](#commit_mb) · [common_part](#common_part) · [compaction](#compaction) · [composer / pending file](#composer--pending-file) · [compute.currency](#computecurrency) · [connection tier (1–6)](#connection-tier-16) · [consensus / devil's advocate](#consensus--devils-advocate) · [consent_required](#consent_required) · [constraint (C1–C10)](#constraint-c1c10) · [context window](#context-window) · [Control](#control) · [conversation_id / chat](#conversation_id--chat) · [conversation_spill_mib](#conversation_spill_mib) · [cost_amount](#cost_amount) · [cost_reference](#cost_reference) · [counts_source](#counts_source) · [creator](#creator) · [cut call](#cut-call)
 
 **D** — [decision status](#decision-status) · [deferred](#deferred) · [DHT / seed nodes](#dht--seed-nodes) · [document pipeline](#document-pipeline) · [DPTP](#dptp)
 
@@ -53,21 +53,21 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **L** — [launcher / launcher_kind](#launcher--launcher_kind) · [`layer_audience`](#layer_audience) · [lease line](#lease-line) · [`limit` (local API)](#limit-local-api) · [`link_ping`](#link_ping) · [`LINK_PING`, `LINK_PONG`](#link_ping-link_pong) · [`link_silence_timeout`](#link_silence_timeout) · [`list_cached_peers`](#list_cached_peers) · [live-history boundary](#live-history-boundary) · [local engine swap](#local-engine-swap) · [`local_addresses`](#local_addresses)
 
-**M** — [`MAX_HELLO_FRAME_BYTES`](#max_hello_frame_bytes) · [max_output_tokens](#max_output_tokens) · [`max_proved_connections_per_ip`](#max_proved_connections_per_ip) · [memory layers (L1–L7)](#memory-layers-l1l7) · [memory limit per command](#memory-limit-per-command) · [memory system](#memory-system) · [mention](#mention) · [mention_depth](#mention_depth) · [menu row / menu](#menu-row--menu) · [message signing / preimage](#message-signing--preimage) · [message source](#message-source) · [model download consent](#model-download-consent) · [model files folder](#model-files-folder) · [month summary](#month-summary) · [morning brief](#morning-brief)
+**M** — [`MAX_HELLO_FRAME_BYTES`](#max_hello_frame_bytes) · [max_output_tokens](#max_output_tokens) · [`max_proved_connections_per_ip`](#max_proved_connections_per_ip) · [memory layers (L1–L7)](#memory-layers-l1l7) · [memory limit per command](#memory-limit-per-command) · [memory system](#memory-system) · [mention](#mention) · [mention_depth](#mention_depth) · [menu row / menu](#menu-row--menu) · [message signing / preimage](#message-signing--preimage) · [message source](#message-source) · [model download consent](#model-download-consent) · [model files folder](#model-files-folder) · [month summary](#month-summary) · [morning brief](#morning-brief) · [music job `variants`](#music-job-variants) · [music_* tools](#music_-tools)
 
 **N** — [network](#network) · [New Session](#new-session) · [no_answer](#no_answer) · [node](#node) · [node ledger](#node-ledger) · [node_id](#node_id) · [not_held / busy / not_the_requested_file](#not_held--busy--not_the_requested_file) · [not_offered / upload_limit](#not_offered--upload_limit)
 
-**O** — [observation debt](#observation-debt) · [observation shelf](#observation-shelf) · [Observed / Inferred](#observed--inferred) · [on_reasoning](#on_reasoning) · [origin](#origin) · [output limit](#output-limit) · [output_includes_thinking](#output_includes_thinking) · [own / burn](#own--burn) · [`own_node_group`](#own_node_group)
+**O** — [observation debt](#observation-debt) · [observation shelf](#observation-shelf) · [Observed / Inferred](#observed--inferred) · [on_reasoning](#on_reasoning) · [origin](#origin) · [output limit](#output-limit) · [output_includes_thinking](#output_includes_thinking) · [own / burn](#own--burn) · [owner_only](#owner_only) · [`own_node_group`](#own_node_group)
 
 **P** — [peer](#peer) · [peer cache](#peer-cache) · [peer_proved](#peer_proved) · [per-reader role derivation](#per-reader-role-derivation) · [pin](#pin) · [prefix_hashes, prefix_chars, call_chars](#prefix_hashes-prefix_chars-call_chars) · [process registry](#process-registry) · [processed message ids](#processed-message-ids) · [Protocol 13](#protocol-13) · [proved connection](#proved-connection) · [proven_on_this_machine](#proven_on_this_machine) · [provider alias](#provider-alias) · [provider_kind](#provider_kind) · [provider_row_facts](#provider_row_facts)
 
 **Q** — [quota block](#quota-block)
 
-**R** — [reach](#reach) · [reasoning effort](#reasoning-effort) · [refusal code](#refusal-code) · [remote inference](#remote-inference) · [`remote:?:<alias>`](#remotealias) · [request_attachment / file_request_status](#request_attachment--file_request_status) · [resident budget](#resident-budget) · [resolution](#resolution) · [`resolved_via`](#resolved_via) · [resource peaks](#resource-peaks) · [Review Agent](#review-agent) · [roster](#roster) · [round](#round) · [run gate](#run-gate) · [rung](#rung)
+**R** — [reach](#reach) · [reasoning effort](#reasoning-effort) · [refusal code](#refusal-code) · [remote inference](#remote-inference) · [`remote:?:<alias>`](#remotealias) · [request_attachment / file_request_status](#request_attachment--file_request_status) · [requested_by](#requested_by) · [resident budget](#resident-budget) · [resolution](#resolution) · [`resolved_via`](#resolved_via) · [resource peaks](#resource-peaks) · [Review Agent](#review-agent) · [roster](#roster) · [round](#round) · [run gate](#run-gate) · [rung](#rung)
 
-**S** — [sandbox](#sandbox) · [saved_locally / offline_members](#saved_locally--offline_members) · [seconds_left](#seconds_left) · [section / status](#section--status) · [send_without_asking](#send_without_asking) · [served_by](#served_by) · [served_effort](#served_effort) · [serves_images_with_tools](#serves_images_with_tools) · [serving lists](#serving-lists) · [session archive](#session-archive) · [session identifier](#session-identifier) · [session marker](#session-marker) · [shared_proposal_not_editable](#shared_proposal_not_editable) · [shell tier (0/1/2)](#shell-tier-012) · [shell-gate refusal](#shell-gate-refusal) · [skill](#skill) · [sleep consolidation](#sleep-consolidation) · [slot queue](#slot-queue) · [`slow_command`](#slow_command) · [spawn origin](#spawn-origin) · [speed_summary](#speed_summary) · [sprint log](#sprint-log) · [stale reference](#stale-reference) · [star topology](#star-topology) · [stretch](#stretch) · [successor](#successor) · [switch](#switch)
+**S** — [sandbox](#sandbox) · [saved_locally / offline_members](#saved_locally--offline_members) · [seconds_left](#seconds_left) · [section / status](#section--status) · [self-wait rule](#self-wait-rule) · [send_without_asking](#send_without_asking) · [served_by](#served_by) · [served_effort](#served_effort) · [serves_images_with_tools](#serves_images_with_tools) · [serving lists](#serving-lists) · [session archive](#session-archive) · [session identifier](#session-identifier) · [session marker](#session-marker) · [shared_proposal_not_editable](#shared_proposal_not_editable) · [shell tier (0/1/2)](#shell-tier-012) · [shell-gate refusal](#shell-gate-refusal) · [skill](#skill) · [sleep consolidation](#sleep-consolidation) · [slot queue](#slot-queue) · [`slow_command`](#slow_command) · [spawn origin](#spawn-origin) · [speed_summary](#speed_summary) · [sprint log](#sprint-log) · [stale reference](#stale-reference) · [star topology](#star-topology) · [stretch](#stretch) · [successor](#successor) · [switch](#switch)
 
-**T** — [tag](#tag) · [tariff](#tariff) · [task_type](#task_type) · [`telegram_chat_id`](#telegram_chat_id) · [`telegram_owner_user_id`](#telegram_owner_user_id) · [thinking_source](#thinking_source) · [tokens_paid_by](#tokens_paid_by) · [transcription send-to](#transcription-send-to) · [turn](#turn) · [turn command](#turn-command) · [turn_end](#turn_end) · [turn_id](#turn_id)
+**T** — [tag](#tag) · [take_id](#take_id) · [tariff](#tariff) · [task_type](#task_type) · [`telegram_chat_id`](#telegram_chat_id) · [`telegram_owner_user_id`](#telegram_owner_user_id) · [thinking_source](#thinking_source) · [tokens_paid_by](#tokens_paid_by) · [transcription send-to](#transcription-send-to) · [turn](#turn) · [turn command](#turn-command) · [turn_end](#turn_end) · [turn_id](#turn_id)
 
 **U** — [unit](#unit) · [unpriceable](#unpriceable) · [unpriced](#unpriced) · [unrated](#unrated) · [untariffed](#untariffed) · [usage row](#usage-row)
 
@@ -332,6 +332,43 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 - **Meaning:** One of the four places an agent's `config.json` names a **provider alias**: main (`provider_alias`), sleep (`sleep_provider_alias`), snapshot (`snapshot_summarize_provider`), compaction (`compaction_provider`). `list_agents` gives each agent `alias_roles` (role to alias) and `missing_aliases` (the roles whose alias is no longer in `providers.json`); the agents panel marks an agent "not available now" only when main is missing and names the other missing roles in the tooltip. Not the people roles of `protocol-13-public.md`.
 - **Defined in:** [provider_alias_refs.py](../dpc-client/core/dpc_client_core/provider_alias_refs.py)
 
+### music_* tools
+
+- **Term note:** (`music_capabilities`, `music_propose_job`, `music_check`, `music_wait`, `music_cancel_job`, `music_list_takes`, `music_list_library`, `music_get_lyrics`, `music_playlist_add`)
+- **Met in:** code, rules
+- **Meaning:** The agent tools over the music service, ten names with **chat_post_file**, each declared with a timeout and a wait budget, and each off by default (`default_enabled=False`, as the ComfyUI tools). `music_capabilities`, `music_check` (state and the `card_wait` holders), `music_list_takes`, `music_list_library`, `music_get_lyrics` and `music_playlist_add` wrap one service call each; `music_propose_job` makes one job per call and asks the owner's approval; `music_cancel_job` cancels only a job the agent proposed (**requested_by**); `music_wait` polls the job every 2 s with `timeout` 600 s by default and 900 s at most, `timeout_sec = timeout + 15` (mandatory, the per-call default of 120 s would cut it), and answers by the **self-wait rule**. The timeout and the wait budget of the other tools, and the per-turn wait budget, are "set at build, recorded" in ADR-051 D42. Only the owner's turns may use them (**owner_only**); a take is reached by **take_id**. Decided, not built.
+- **Defined in:** [decisions/051 — D42, the agent tools](decisions/051-the-music-player-is-a-dpc-window-over-one-core-music-service.md#decided-mikes-calls-2026-11-24-ai-studio-group-chat-the-agent-tools)
+
+### chat_post_file
+
+- **Met in:** code, rules
+- **Meaning:** `chat_post_file(path, caption?)`, the agent tool that posts a file into the agent's own chat; for music, a take as an `audio/*` attachment, only when the person asks. Limits: at most 4 files per turn; the file-transfer size cap `file_transfer_cap_mb(rules)` (100 MB by default) checked before the copy, and the file is copied, never moved; 1:1 agent chats only (`agent_*`), a group, Telegram or Discord turn is refused with a reason; the path goes through `_resolve_file_path` as `read_file` does, never a bare `validate_extended_path`; refused to every turn class that **owner_only** refuses. Decided, not built.
+- **Defined in:** [decisions/051 — D41, the agent tools](decisions/051-the-music-player-is-a-dpc-window-over-one-core-music-service.md#decided-mikes-calls-2026-11-24-ai-studio-group-chat-the-agent-tools)
+
+### requested_by
+
+- **Met in:** code, wire
+- **Meaning:** `requested_by {kind, agent_id, conversation_id}` on the `mp.job/1` record: who asked for the job. It is what lets `cancel_music_job` refuse an agent a job it did not propose; the person's own cancel in the UI is unchanged. A store written before the field must still open, since the schema is closed to undeclared keys. Decided, not built.
+- **Defined in:** [decisions/051 — D46, the agent tools](decisions/051-the-music-player-is-a-dpc-window-over-one-core-music-service.md#decided-mikes-calls-2026-11-24-ai-studio-group-chat-the-agent-tools)
+
+### owner_only
+
+- **Met in:** code, rules
+- **Meaning:** A field on a tool's `ToolEntry` that refuses the tool to every turn class but the owner's, written once and checked in `registry.execute` and when the offered tool list is built; each tool checks the class again as a second line. Refused: `other_node` and `stranger` (a peer, or a group with a foreign node in it); a group of only the person's own nodes is owner class. Owner sources: `ui`, `external_agent`, `telegram_owner`, so a bridge counts as the owner. There is no per-tool switch. With a refused turn no job file or file copy exists and no `music_*` schema is offered. Decided, not built.
+- **Defined in:** [decisions/051 — D43, the agent tools](decisions/051-the-music-player-is-a-dpc-window-over-one-core-music-service.md#decided-mikes-calls-2026-11-24-ai-studio-group-chat-the-agent-tools)
+
+### take_id
+
+- **Met in:** code, rules
+- **Meaning:** The handle by which an agent names a take, resolved to the take's file by core; the agent gets no directory access to `~/.dpc/music/generated/`, which also holds every job's request JSON with its prompts and lyrics, and the tools need no `sandbox_extensions` entry for it. It also gives "only takes in `review`" a meaning. Decided, not built.
+- **Defined in:** [decisions/051 — D44, the agent tools](decisions/051-the-music-player-is-a-dpc-window-over-one-core-music-service.md#decided-mikes-calls-2026-11-24-ai-studio-group-chat-the-agent-tools)
+
+### music job `variants`
+
+- **Met in:** code, screen
+- **Meaning:** `params.variants` of a music job: the number of takes one job makes, a whole number from 1 to 4, default 2 (`VARIANTS_MIN`, `VARIANTS_MAX`, `VARIANTS_DEFAULT`). Not the **variant** of a **menu row**, which is a build name.
+- **Defined in:** [music/job_schemas.py — Limits per engine](../dpc-client/core/dpc_client_core/music/job_schemas.py)
+
 ## Memory, knowledge, and sleep
 
 ### Active Recall
@@ -568,7 +605,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 - **Met in:** code, rules, screen
 - **Meaning:** The Kademlia table a node uses to find peers, entered only through the `[dht] seed_nodes` config line; empty by default.
-- **Defined in:** [CONFIGURATION.md `[dht]`](CONFIGURATION.md#dht)
+- **Defined in:** [CONFIGURATION.md, the dht section](CONFIGURATION.md#dht)
 
 ### Hub
 
@@ -1037,7 +1074,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 ### variant
 
 - **Met in:** code, screen, wire
-- **Meaning:** In a **menu row**'s `settings`, the build behind `model` where the host can read one — a GGUF file name, say. Absent is legal and reads "not stated by the host", never a default: the guest's panel prints the line either way, because a dial the host did not state is itself worth reading. ADR-041 D7's older word for the same field is *quantization*, which names one property of a build rather than the build, and is being reworded.
+- **Meaning:** In a **menu row**'s `settings`, the build behind `model` where the host can read one — a GGUF file name, say. Absent is legal and reads "not stated by the host", never a default: the guest's panel prints the line either way, because a dial the host did not state is itself worth reading. ADR-041 D7's older word for the same field is *quantization*, which names one property of a build rather than the build, and is being reworded. Not a music job's `variants`, the number of takes (**music job `variants`**).
 - **Defined in:** [specs/dptp_v1.md §3.5](../specs/dptp_v1.md#35-provider-discovery)
 
 ### refusal code
@@ -1459,6 +1496,12 @@ line under each agent in the sidebar; the open chat shows no line of its own (Mi
 - **Met in:** code, rules
 - **Meaning:** What a door to local Whisper passes with a transcription for the card: its `purpose` ("dictation", "music Transcribe", "agent tool", "peer <node>"), its `wait_s` by ADR-052 L4 (`min(caller's remaining - margin, bound)`, the margin `max(10 s, estimate)`) and `expected_s`, the provider's own estimate: the load when the model is not loaded plus the audio divided by the **cold** ratio (the first call after a load) or the **warm** one (every later call), per device, the last measured, else the ADR's start figures; unknown, never 0, when a part is missing. Not the **card hold**, which stands on a supervised alias, and not the lease itself: since S3b the Whisper **card lease** takes the ask (`CardLease.use`). Built in S3a, 2026-11-23.
 - **Defined in:** [decisions/052 — Review notes, S3a build](decisions/052-the-card-lease-lets-every-gpu-client-in-dpc-hold-wait-for-and-yield-the-one-card.md#review-notes)
+
+### self-wait rule
+
+- **Met in:** code, rules
+- **Meaning:** A tool in a turn that holds a live **card hold** on a local alias must not wait on a card job queued behind that hold, because the job's holder would be this very turn. It answers at once with the job's real state, and says "queued, starts after this turn" only when the turn holds a live card hold on a local alias and the job is `queued`; a job in `review`, `failed` or `cancelled` is reported as that. The hold is read as a local alias, not as `current_card_hold()` being non-empty. On a cloud alias there is no self-wait and the rule does not apply. The same refusal-instead-of-waiting-on-itself as the **card hold** term describes. Decided, not built.
+- **Defined in:** [decisions/052 — 3.5, the self-wait rule](decisions/052-the-card-lease-lets-every-gpu-client-in-dpc-hold-wait-for-and-yield-the-one-card.md#35-an-agents-own-turn-that-needs-a-transcription-ark-82-2-cc-84-mike-11)
 
 ## Groups
 

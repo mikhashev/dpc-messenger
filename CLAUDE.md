@@ -37,7 +37,7 @@ The project already has a vocabulary; the failure is not looking for it. Before 
 file, a function, a field, a backlog entry or a concept in a document:
 
 1. **Read the words that exist**, in this order: [docs/GLOSSARY.md](docs/GLOSSARY.md) (one
-   row per word, each pointing at the document that owns it); the document that owns the
+   term per word, each pointing at the document that owns it); the document that owns the
    area (`docs/BACKLOG_FORMAT.md` for the board, `protocol-13-public.md` for roles,
    `docs/GROUP_CHAT.md` for groups, `specs/dptp_v1.md` for the wire); then the neighbours in
    code — the handler, provider or tool beside the one being written.

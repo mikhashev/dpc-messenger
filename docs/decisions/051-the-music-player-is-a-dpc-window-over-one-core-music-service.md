@@ -633,8 +633,12 @@ consensus 2026-11-20)") and are not decisions.
 `music_*` tool and no `chat_post_file` at `a8a46197`. Sources: CC's plan #44 (12:31Z), Mike's
 answer "yes to everything, by the recommendations" relayed in #46 (13:17Z; questions A-I),
 Zcode's review #51 (14:01Z; seven corrections, all accepted), and Mike's later calls in
-#53-#57, which settled D (revised), J, K and L. The group's message-by-message mapping of
-#53-#57 to those letters is not recorded here; each decision below cites the range. Where a
+#53-#57, which settled D (revised), I, J, K and L, one message each: #53 is D (a take by
+`take_id`, D44), #54 is I (`check_back` through `schedule_task`, D49), #55 is J (the approval,
+D47), #56 is K (Stop cancels the queued jobs, D48), #57 is L (bridges count as the owner,
+D43). His earlier "yes to everything, by the recommendations" for A-I is group #46, as CC
+recorded it. The decisions below that cite "#53-#57" as a range rest on these single
+messages. Where a
 cap value is not chosen yet it says "value set at build, recorded here": no figure below is
 invented. The letters A-L are the plan's questions; each is placed under one decision id.
 

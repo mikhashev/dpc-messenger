@@ -357,12 +357,12 @@ them has a known false-positive shape, so they point rather than gate:
   the only signal that exists. It prints; it does not rebuild. A checker that quietly
   regenerated the board to silence its own warning would be exactly the thing the last
   paragraph of this section forbids.
-- **glossary** — `docs/GLOSSARY.md` is a table of words with a «Defined in» link each, and
+- **glossary** — `docs/GLOSSARY.md` is a list of terms, one heading each, with a «Defined in» link each, and
   the same pass resolves every link: a file that does not exist or a heading anchor the
-  file does not carry is a warning (content, not structure — the row still names a word),
-  and an axis token from §4a with no row is a warning too, because the board files work
+  file does not carry is a warning (content, not structure — the term still names a word),
+  and an axis token from §4a with no term is a warning too, because the board files work
   under a word nobody has written down where a reader would look. The glossary points at
-  its sources and never defines on its own; a row without a link is not a row. Added
+  its sources and never defines on its own; a term without a link is not a term. Added
   2026-09-05, on Mike's call that the project needs a glossary document. The walk itself
   is `tools/backlog/glossary_check.py`, and the client suite runs it too
   (`tests/test_the_glossary_points_at_headings_that_exist.py`): this check needs
