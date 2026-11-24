@@ -1056,7 +1056,11 @@ def is_path_in_sandbox(path: pathlib.Path, sandbox_root: pathlib.Path) -> bool:
     try:
         resolved_path = path.resolve()
         resolved_root = sandbox_root.resolve()
-        return str(resolved_path).startswith(str(resolved_root))
+        # By path components, not by string prefix: `<root>2` and `<root>-backup` are siblings,
+        # not inside (follow-up 12, Zcode #68 P2). The pathlib flavour of the platform decides
+        # the comparison (case-insensitive on Windows, case-sensitive on POSIX).
+        resolved_path.relative_to(resolved_root)
+        return True
     except Exception:
         return False
 
