@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -106,7 +107,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_POLL_INTERVAL_S = 60.0
 MIN_POLL_INTERVAL_S = 0.01
 DEFAULT_SAVE_DELAY_S = 2.0
+# `music_library_changed` goes out at most once per window: the first change opens it and
+# every change inside it joins the one event that closes it.
+DEFAULT_CHANGE_DELAY_S = 0.5
 MAX_FOLDERS = 32
+MAX_CHANGE_IDS = 200
 
 # Linux filesystem types that are a network mount (`/proc/self/mounts`, third column).
 # `9p` is left out: WSL mounts the Windows drives with it.
@@ -291,6 +296,8 @@ class MusicLibrary:
         save_delay_s: float = DEFAULT_SAVE_DELAY_S,
         on_added: Optional[Callable[[dict], None]] = None,
         on_merged: Optional[Callable[[str, str], None]] = None,
+        on_changed: Optional[Callable[[dict], None]] = None,
+        change_delay_s: float = DEFAULT_CHANGE_DELAY_S,
     ):
         self.dpc_home = Path(dpc_home_dir)
         self.root = music_dir_of(dpc_home_dir)
@@ -304,6 +311,14 @@ class MusicLibrary:
         # another (a duplicate or a missing twin): what is keyed by the entry id (the
         # comments) moves with the playlist positions. A failure is logged, never raised.
         self.on_merged = on_merged
+        # Called as `on_changed({version, reasons, track_ids})` on the loop, once per
+        # `change_delay_s` window however many changes it held; a failure is logged.
+        self.on_changed = on_changed
+        self.change_delay_s = max(float(change_delay_s), 0.0)
+        self.change_version = 0
+        self._change_handle: Optional[asyncio.TimerHandle] = None
+        self._change_reasons: Set[str] = set()
+        self._change_ids: Set[str] = set()
         self._entries: Dict[str, dict] = {}
         self._folders: Dict[str, dict] = {}
         self._playlists: Dict[str, dict] = {}
@@ -540,6 +555,9 @@ class MusicLibrary:
                     pass
         self._poller = self._worker = self._save_task = None
         self._background.clear()
+        if self._change_handle is not None:
+            self._change_handle.cancel()
+            self._change_handle = None
         if self._loaded and self._dirty:
             try:
                 await self.flush()
@@ -563,6 +581,47 @@ class MusicLibrary:
         task = asyncio.get_running_loop().create_task(coro)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+
+    # -- change events -----------------------------------------------------------
+
+    def notify_changed(self, reason: str, track_ids: Iterable[str] = ()) -> None:
+        """Record that what the library lists changed (`reason`: scan, hash, folder, track,
+        playlist, take, export). Changes inside one window share the `on_changed` event that
+        closes it; with no running loop the event goes out at once."""
+        self._change_reasons.add(reason)
+        self._change_ids.update(i for i in track_ids if isinstance(i, str))
+        if self.on_changed is None or self._change_handle is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._emit_change()
+            return
+        self._change_handle = loop.call_later(self.change_delay_s, self._emit_change)
+
+    def _emit_change(self) -> None:
+        self._change_handle = None
+        reasons, ids = sorted(self._change_reasons), sorted(self._change_ids)
+        self._change_reasons, self._change_ids = set(), set()
+        if self.on_changed is None or not reasons:
+            return
+        self.change_version += 1
+        payload = {"version": self.change_version, "reasons": reasons,
+                   "track_ids": ids[:MAX_CHANGE_IDS], "track_ids_truncated": len(ids) > MAX_CHANGE_IDS}
+        try:
+            self.on_changed(payload)
+        except Exception:
+            logger.exception("music: the on_changed listener failed")
+
+    def _signature(self) -> str:
+        """A digest of what the library lists, to tell a poll that found nothing from one
+        that changed something; `last_scan_at` moves on every poll and is left out."""
+        h = hashlib.blake2b(digest_size=16)
+        h.update(json.dumps(list(self._entries.values()), default=str).encode("utf-8"))
+        h.update(json.dumps([{**f, "last_scan_at": None} for f in self._folders.values()],
+                            default=str).encode("utf-8"))
+        h.update(json.dumps(list(self._playlists.values()), default=str).encode("utf-8"))
+        return h.hexdigest()
 
     # -- the hash index ----------------------------------------------------------
 
@@ -752,6 +811,7 @@ class MusicLibrary:
                     if current is not None and current.get("hash_state") == "pending":
                         current["hash_state"] = "error"
                         self._mark_dirty()
+                        self.notify_changed("hash", [track_id])
                     self._verify.pop(track_id, None)
                     continue
                 except Exception:
@@ -781,6 +841,7 @@ class MusicLibrary:
         self._verify.pop(track_id, None)
         self._delete_entry(track_id)
         self._mark_dirty()
+        self.notify_changed("scan", [track_id])
 
     def _without_exports(self, found: List[Tuple[str, int, int]]) -> List[Tuple[str, int, int]]:
         """The walked files minus the ones already known as exports and the ones the export
@@ -822,6 +883,7 @@ class MusicLibrary:
             changed = True
         if changed:
             self._mark_dirty()
+            self.notify_changed("hash", [e["id"]])
 
     async def wait_hashed(self, timeout: float = 60.0) -> None:
         """Wait until the hash queue is empty (tests, and a caller that needs ids final)."""
@@ -846,6 +908,7 @@ class MusicLibrary:
                 self._set_path(e, hashed_path, None, stat)
                 self._apply_metadata(e, ident)
                 self._mark_dirty()
+                self.notify_changed("hash", [track_id])
                 return
             # New audio at this path: the old track's bytes are no longer here.
             logger.info("music: %s holds new audio; %s keeps its state and the path becomes a new entry",
@@ -859,6 +922,7 @@ class MusicLibrary:
             e = self._new_folder_entry(hashed_path, folder_id, *stat)
         self._resolve(e, ident, stat)
         self._mark_dirty()
+        self.notify_changed("hash", [track_id, e["id"]])
 
     def _same_audio(self, e: dict, key: Tuple[str, str]) -> Tuple[List[dict], List[dict]]:
         """The other entries with this hash, (present, missing), each in a fixed order.
@@ -986,6 +1050,7 @@ class MusicLibrary:
         }
         schemas.validate_music_folder(folder)
         self._folders[folder["id"]] = folder
+        self.notify_changed("folder")
         await self.flush()
         if scan:
             self._spawn(self.rescan_folder(folder["id"]))
@@ -1017,6 +1082,7 @@ class MusicLibrary:
             self._delete_entry(e["id"])
             removed += 1
         self._apply_folder_limit()
+        self.notify_changed("folder")
         await self.flush()
         return removed
 
@@ -1048,18 +1114,24 @@ class MusicLibrary:
                 (found, failed), alt_stats = await asyncio.to_thread(check_and_walk)
             except MusicLibraryError as exc:
                 if folder_id in self._folders:
+                    was = (folder.get("watch_state"), folder.get("state_reason"))
                     folder["watch_state"] = "unavailable"
                     folder["state_reason"] = (
                         f"refused on rescan ({exc.code}), so it was not scanned and no track "
                         f"was marked missing: {exc.message}"
                     )
                     self._mark_dirty()
+                    if was != (folder["watch_state"], folder["state_reason"]):
+                        self.notify_changed("folder")
                 return copy.deepcopy(folder)
             except FolderUnavailable as exc:
                 if folder_id in self._folders:
+                    was = (folder.get("watch_state"), folder.get("state_reason"))
                     folder["watch_state"] = "unavailable"
                     folder["state_reason"] = f"cannot read the folder: {exc}"
                     self._mark_dirty()
+                    if was != (folder["watch_state"], folder["state_reason"]):
+                        self.notify_changed("folder")
                 return copy.deepcopy(folder)
             if folder_id not in self._folders:
                 raise MusicLibraryError("unknown_folder", f"no watched folder {folder_id}")
@@ -1067,8 +1139,11 @@ class MusicLibrary:
             if any(self._wants_reprobe(e) for e in self._entries.values() if e.get("folder_id") == folder_id):
                 tools = self._tools or await asyncio.to_thread(MediaTools.discover)
                 reprobe = bool(tools.ffprobe)  # only when ffprobe can answer now
+            before = self._signature() if self.on_changed is not None else None
             self._apply_scan(folder, found, alt_stats, failed=failed, reprobe=reprobe)
             self._mark_dirty()
+            if before is not None and before != self._signature():
+                self.notify_changed("scan")
             return copy.deepcopy(folder)
 
     async def rescan_all(self) -> List[dict]:
@@ -1278,6 +1353,7 @@ class MusicLibrary:
         else:
             result = self._entries[other["id"]]
         snapshot = copy.deepcopy(result)
+        self.notify_changed("take", [result["id"]])
         await self.flush()
         return snapshot
 
@@ -1347,6 +1423,7 @@ class MusicLibrary:
             raise MusicLibraryError("unknown_track", f"no track {track_id}")
         if bool(e.get("hidden")) != hidden:
             e["hidden"] = hidden
+            self.notify_changed("track", [track_id])
             await self.flush()
         return copy.deepcopy(e)
 
@@ -1366,6 +1443,7 @@ class MusicLibrary:
         for i in ids:
             self._delete_entry(i)
         if ids:
+            self.notify_changed("track", ids)
             await self.flush()
         return ids
 
@@ -1415,6 +1493,7 @@ class MusicLibrary:
             raise MusicLibraryError("delete_failed", f"could not delete {target.name}: {exc}")
         title = e.get("title")
         self._delete_entry(track_id)
+        self.notify_changed("track", [track_id])
         await self.flush()
         return {"id": track_id, "title": title, "deleted": deleted}
 
@@ -1455,6 +1534,7 @@ class MusicLibrary:
         }
         schemas.validate_playlist(playlist)
         self._playlists[playlist["id"]] = playlist
+        self.notify_changed("playlist")
         await self.flush()
         return copy.deepcopy(playlist)
 
@@ -1475,6 +1555,7 @@ class MusicLibrary:
         new_name = self._check_name(name) if name is not None else pl["name"]
         new_ids = self._check_track_ids(track_ids) if track_ids is not None else pl["track_ids"]
         pl["name"], pl["track_ids"], pl["updated_at"] = new_name, new_ids, _now()
+        self.notify_changed("playlist")
         await self.flush()
         return copy.deepcopy(pl)
 
@@ -1482,4 +1563,5 @@ class MusicLibrary:
         """Delete a playlist; its tracks stay in the library."""
         self._user_playlist(playlist_id)
         del self._playlists[playlist_id]
+        self.notify_changed("playlist")
         await self.flush()

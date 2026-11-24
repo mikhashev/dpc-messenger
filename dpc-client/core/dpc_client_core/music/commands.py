@@ -76,12 +76,14 @@ same way, so a second window sees them.
 
 **MP3 export** (`music/export.py`, Mike #210; the design is CC's proposal [P]):
 `export_music_track {track_id, preset?}`, `export_music_playlist {playlist_id, preset?}` and
-`get_music_export_info {track_id?}`. The source file is always the library's own path for the
+`get_music_export_info {track_id?}` and `delete_music_export {export_id | path}`. The source file is always the library's own path for the
 track id; the UI never sends a path. The root is `[music] export_dir`
 (`DPC_MUSIC_EXPORT_DIR`), by default `<DPC home>/exports/music`, outside every watched folder;
 `get_music_export_info` says when a chosen root is inside one. A finished single export is
 broadcast as `music_export_done {track_id, path}`, a playlist as `{playlist_id, path}` (the
-folder). The take's measured true peak (`loudness.true_peak_dbtp`) decides whether the -1 dBTP
+folder). Every change to what the library lists is also broadcast, coalesced to at most one
+per `DEFAULT_CHANGE_DELAY_S` window, as `music_library_changed {version, reasons, track_ids,
+track_ids_truncated}`; the UI re-reads on it instead of polling. The take's measured true peak (`loudness.true_peak_dbtp`) decides whether the -1 dBTP
 limiter runs; its sidecar and stored lyrics go into the MP3's tags.
 "Stop X" on a job waiting for the card is the existing `stop_local_engine` command with the
 holder's alias from `job.card_wait.holders`; nothing here stops another engine.
@@ -210,6 +212,7 @@ class MusicCommandsMixin:
             comments = MusicComments(self.settings.dpc_home_dir, self._music_library_instance)
             self._music_comments_instance = comments
             self._music_library_instance.on_merged = comments.merge
+            self._music_library_instance.on_changed = self._music_library_changed
             # The scan skips the files the MP3 export index lists (export.py).
             self._music_library_instance.exclude_path = self._music_export_excluded
         await self._music_library_instance.start()
@@ -563,6 +566,9 @@ class MusicCommandsMixin:
             pass  # no running loop: nobody to tell
         except Exception:
             logger.exception("music: broadcasting %s failed", event)
+
+    def _music_library_changed(self, payload: Dict[str, Any]) -> None:
+        self._music_broadcast("music_library_changed", payload)
 
     def _music_engine_changed(self, status: EngineStatus) -> None:
         self._music_broadcast("music_engine_status", {"engine": status.as_dict()})
@@ -1149,6 +1155,7 @@ class MusicCommandsMixin:
             return _error(exc)
         if not answer["already_exported"] or answer["relinked"]:
             self._music_broadcast("music_export_done", {"track_id": tid, "path": answer["path"]})
+            library.notify_changed("export", [tid])
         return {"status": "ok", **answer}
 
     @slow_command
@@ -1189,6 +1196,7 @@ class MusicCommandsMixin:
         for single in done:
             if not single["already_exported"] or single["relinked"]:
                 self._music_broadcast("music_export_done", {"track_id": single["track_id"], "path": single["path"]})
+                library.notify_changed("export", [single["track_id"]])
         self._music_broadcast("music_export_done", {"playlist_id": pid, "path": answer["folder"]})
         return {"status": "ok", "playlist_id": pid, **answer}
 
@@ -1197,7 +1205,8 @@ class MusicCommandsMixin:
         """Where exports go and what exists: `{export_root, default_root, inside_watched_folder,
         watched_folder, presets, default_preset, exports: {track_id: [{preset, path, name,
         exported_at, limited_db, true_peak_out_dbtp}]}}`, for one track with `track_id`, else
-        for every track. Only exports whose file is there now are listed."""
+        for every track. Only exports whose file is there now are listed; each carries `export_id`
+        (what `delete_music_export` takes) and `size_bytes`."""
         try:
             tid = _opt_str(track_id, "track_id", "invalid_params")
             library = await self._music()
@@ -1216,6 +1225,23 @@ class MusicCommandsMixin:
                     "default_preset": DEFAULT_PRESET, "exports": exports}
         except Exception as exc:
             return _error(exc)
+
+    async def delete_music_export(self, export_id: Any = None, path: Any = None) -> Dict[str, Any]:
+        """Delete one single MP3 export's file and its index entry: `export_id` (from
+        `get_music_export_info`) or `path`, exactly one. Only a file the export index lists and
+        that lies inside the export root can go. `{status, export_id, path, name, preset, format,
+        deleted, file_missing}`. Errors: `invalid_params`, `unknown_export`,
+        `outside_export_root`, `file_in_use` (Windows), `permission_denied`, `delete_failed`."""
+        try:
+            eid = _opt_str(export_id, "export_id", "invalid_params")
+            raw_path = _opt_str(path, "path", "invalid_params")
+            exporter = self._music_exporter()
+            answer = await asyncio.to_thread(exporter.delete_export, export_id=eid or None, path=raw_path or None)
+            library = await self._music()
+        except Exception as exc:
+            return _error(exc)
+        library.notify_changed("export", [answer["track_id"]] if answer.get("track_id") else [])
+        return {"status": "ok", **answer}
 
 
 MUSIC_COMMANDS = (
@@ -1261,4 +1287,5 @@ MUSIC_COMMANDS = (
     "export_music_track",
     "export_music_playlist",
     "get_music_export_info",
+    "delete_music_export",
 )

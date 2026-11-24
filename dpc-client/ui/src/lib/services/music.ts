@@ -101,6 +101,8 @@ export const musicLibrary = writable<MusicLibraryState>(EMPTY_LIBRARY);
 export const musicEntriesById = derived(musicLibrary, ($l) => new Map($l.entries.map(e => [e.id, e])));
 
 let loading = false;
+/** Whether the window is open and showing the library: only then does an event re-read it. */
+let watching = false;
 /** A read was asked for while one was under way: it may have started before the change
  *  the asker wants to see (a take hidden by Discard), so one more quiet read follows. */
 let readAgain = false;
@@ -144,6 +146,19 @@ export async function loadMusicLibrary(quiet = false): Promise<void> {
             void loadMusicLibrary(true);
         }
     }
+}
+
+/** The window tells whether it is open and showing the library. It reads once when it opens
+ *  (its own call); after that the core's `music_library_changed` is the only trigger. */
+export function setMusicLibraryWatch(on: boolean): void {
+    watching = on;
+}
+
+/** A `music_library_changed` event from the core: read the library again, once, when the
+ *  window shows a library that has been read. A closed window reads nothing; it reads on open. */
+export function noteMusicLibraryChanged(_payload?: unknown): void {
+    if (!watching || get(musicLibrary).status !== 'ready') return;
+    void loadMusicLibrary(true);
 }
 
 /** The library refresh never touches the audio element, `currentTime`, the queue or

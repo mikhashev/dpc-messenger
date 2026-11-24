@@ -3,7 +3,11 @@ import {
     DEFAULT_EXPORT_PRESET,
     EXPORT_PRESETS,
     exportChip,
+    exportCopyDetail,
+    exportDateText,
     exportFolderWarning,
+    exportSizeText,
+    exportToggleLabel,
     fileNameOf,
     limiterNote,
     playlistExportLine,
@@ -15,8 +19,8 @@ import {
 import player from '../components/music/MusicPlayer.svelte?raw';
 import core from '../coreService.ts?raw';
 
-const v0: MusicExportRecord = { preset: 'mp3-v0', format: 'mp3', path: 'C:\\Users\\m\\.dpc\\exports\\music\\Band - Song.mp3', name: 'Band - Song.mp3', limited_db: -1 };
-const cbr: MusicExportRecord = { preset: 'mp3-320', format: 'mp3', path: '/home/m/.dpc/exports/music/Band - Song (320 kbps).mp3', name: 'Band - Song (320 kbps).mp3', limited_db: null };
+const v0: MusicExportRecord = { export_id: 'e0', preset: 'mp3-v0', format: 'mp3', path: 'C:\\Users\\m\\.dpc\\exports\\music\\Band - Song.mp3', name: 'Band - Song.mp3', limited_db: -1 };
+const cbr: MusicExportRecord = { export_id: 'e1', preset: 'mp3-320', format: 'mp3', path: '/home/m/.dpc/exports/music/Band - Song (320 kbps).mp3', name: 'Band - Song (320 kbps).mp3', limited_db: null };
 
 describe('names and presets', () => {
     it('takes the last part of a Windows or POSIX path', () => {
@@ -102,9 +106,9 @@ describe('the window wiring', () => {
         expect(player).toContain('>Export playlist as MP3</button>');
     });
 
-    it('reveals the file through the existing helper and shows the chip beside the origin badge', () => {
+    it('reveals the file through the existing helper; a row has the copies toggle and the card the chip', () => {
         expect(player).toContain('await revealInFolder(path, revealItemInDir)');
-        expect(player).toContain('{@render originBadge(row.entry)}{@render exportChipTag(row.entry)}');
+        expect(player).toContain('{@render originBadge(row.entry)}{@render exportToggle(row.entry)}');
         expect(player).toContain('{@render exportChipTag(cur)}');
     });
 
@@ -113,5 +117,47 @@ describe('the window wiring', () => {
         expect(core).toContain("callMusic(sendCommand, 'export_music_playlist'");
         expect(core).toContain('message.event === "music_export_done"');
         expect(core).toContain("command === 'export_music_track'");
+    });
+});
+
+describe('the exported copies under a track row', () => {
+    const copy = { ...v0, size_bytes: 4_404_019, exported_at: '2026-11-24T10:00:00Z' };
+
+    it('writes sizes and dates the way the rows do', () => {
+        expect(exportSizeText(512)).toBe('512 B');
+        expect(exportSizeText(812 * 1024)).toBe('812 KB');
+        expect(exportSizeText(4_404_019)).toBe('4.2 MB');
+        expect(exportSizeText(null)).toBe('');
+        expect(exportSizeText(-1)).toBe('');
+        expect(exportDateText('2026-11-24T10:00:00Z')).toBe('2026-11-24');
+        expect(exportDateText(undefined)).toBe('');
+        expect(exportDateText('yesterday')).toBe('');
+    });
+
+    it('shows preset, size, date and the limiter on one line, leaving out what is not known', () => {
+        expect(exportCopyDetail(copy)).toBe('MP3 V0 · 4.2 MB · 2026-11-24 · limited to −1 dBTP');
+        expect(exportCopyDetail(cbr)).toBe('MP3 320');
+    });
+
+    it('labels the toggle with the count when a track has more than one copy', () => {
+        expect(exportToggleLabel([v0])).toBe('mp3');
+        expect(exportToggleLabel([v0, cbr])).toBe('mp3 ×2');
+        expect(exportToggleLabel([])).toBe('');
+        expect(exportToggleLabel(undefined)).toBe('');
+    });
+
+    it('lists each copy under its row with Show in folder and a confirmed Delete', () => {
+        expect(player).toContain('{@render exportTree(row.entry)}');
+        expect(player).toContain('>Show in folder</button>');
+        expect(player).toContain('onclick={() => revealPath(copy.path)}');
+        expect(player).toContain("title: 'Delete exported copy'");
+        expect(player).toContain('deleteExportedCopy(copy.export_id)');
+    });
+
+    it('the core door sends the export id, and the library change event reaches both services', () => {
+        expect(core).toContain("callMusic(sendCommand, 'delete_music_export', { export_id: exportId })");
+        expect(core).toContain('message.event === "music_library_changed"');
+        expect(core).toContain('noteMusicLibraryChanged(message.payload)');
+        expect(core).toContain('noteMusicExportsChanged(message.payload)');
     });
 });

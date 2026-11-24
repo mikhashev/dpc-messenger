@@ -89,6 +89,7 @@ import logging
 import os
 import re
 import shutil
+import stat as stat_module
 import subprocess
 import threading
 import unicodedata
@@ -223,6 +224,11 @@ def track_stem(artist: Optional[str], title: Optional[str], preset: str = DEFAUL
     a = sanitize_component(artist, room, fallback="") if artist and str(artist).strip() else ""
     base = f"{a} - {t}" if a else t
     return sanitize_component(base, room) + suffix
+
+
+def export_id_of(source_hash: str, fmt: str, preset: str) -> str:
+    """The stable id of an export: its identity (source content hash, format, preset)."""
+    return hashlib.sha256(f"{source_hash}|{fmt}|{preset}".encode("utf-8")).hexdigest()[:20]
 
 
 def hash_digest(content_hash: str) -> str:
@@ -1127,7 +1133,11 @@ class MusicExporter:
 
     def exports_for(self, hashes: Dict[str, List[str]]) -> Dict[str, List[Dict[str, Any]]]:
         """`{track_id: [export, ...]}` for the single exports whose file is there now, for
-        the track ids `hashes` maps each content hash to."""
+        the track ids `hashes` maps each content hash to. The index is checked against the
+        disk on every call: a file deleted by hand is left out of the answer (its index
+        entry stays, so a later export of the same source finds the name free again and
+        encodes it anew); `size_bytes` is the file's size now, `export_id` is what
+        `delete_export` takes."""
         with self._lock:
             out: Dict[str, List[Dict[str, Any]]] = {}
             for e in self._load().exports:
@@ -1135,16 +1145,100 @@ class MusicExporter:
                 if not ids:
                     continue
                 path = self._abs(e["path"])
-                if not path.is_file():
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                if not stat_module.S_ISREG(st.st_mode):
                     continue
                 limiter = e.get("limiter") or {}
-                item = {"preset": e["preset"], "format": e["format"], "path": str(path), "name": path.name,
-                        "exported_at": e.get("exported_at"),
+                item = {"export_id": export_id_of(e["source_hash"], e["format"], e["preset"]),
+                        "preset": e["preset"], "format": e["format"], "path": str(path), "name": path.name,
+                        "size_bytes": st.st_size, "exported_at": e.get("exported_at"),
                         "limited_db": limiter.get("ceiling_dbtp") if limiter.get("applied") else None,
                         "true_peak_out_dbtp": e.get("true_peak_out_dbtp")}
                 for tid in ids:
                     out.setdefault(tid, []).append(dict(item))
             return out
+
+    # -- delete one export ---------------------------------------------------------------------
+
+    def _within_root(self, real: Path) -> bool:
+        """Whether the already-resolved `real` lies strictly inside the resolved root."""
+        root_real = Path(os.path.realpath(self.root))
+        return real != root_real and root_real in real.parents
+
+    def _safe_target(self, path: Path) -> Path:
+        """The place to unlink for an index path: its directory resolved (symlinks and `..`
+        followed) must be inside the resolved root, and the file name must be one plain
+        component. The name itself is not resolved, so a symlink standing there is removed
+        as a link and its target is never touched."""
+        name = path.name
+        if name in ("", ".", "..") or "/" in name or "\\" in name:
+            raise ExportError("outside_export_root", f"not a file name inside the export folder: {path}")
+        parent_real = Path(os.path.realpath(path.parent))
+        root_real = Path(os.path.realpath(self.root))
+        if parent_real != root_real and root_real not in parent_real.parents:
+            raise ExportError("outside_export_root", f"{path} is outside the export folder {self.root}; it is not deleted")
+        return parent_real / name
+
+    def _record_by_id_or_path(self, export_id: Optional[str], path: Optional[str]) -> Dict[str, Any]:
+        index = self._load()
+        if export_id:
+            for e in index.exports:
+                if export_id_of(e["source_hash"], e["format"], e["preset"]) == export_id:
+                    return e
+            raise ExportError("unknown_export", f"no export {export_id}")
+        raw = Path(str(path))
+        if not raw.is_absolute():
+            raw = self.root / raw
+        real = Path(os.path.realpath(raw))
+        if not self._within_root(real):
+            raise ExportError("outside_export_root",
+                              f"{path} is outside the export folder {self.root}; it is not deleted")
+        key = _path_key(real)
+        for e in index.exports:
+            if _path_key(Path(os.path.realpath(self._abs(e["path"])))) == key:
+                return e
+        raise ExportError("unknown_export", f"{real.name} is not a single export DPC lists; it is not deleted")
+
+    def delete_export(self, *, export_id: Optional[str] = None, path: Optional[str] = None) -> Dict[str, Any]:
+        """Delete one single export's file and its index entry. Exactly one of `export_id`
+        (from `exports_for`) or `path` (absolute, or relative to the root). Only a file the
+        index lists can go, and only inside the resolved export root: a traversal, a symlinked
+        folder that leads out, or a path the index does not list is refused
+        (`outside_export_root`, `unknown_export`). A file already gone drops the entry
+        (`file_missing`). A file another program holds open (Windows) or that cannot be
+        removed leaves the entry and raises `file_in_use` / `permission_denied` /
+        `delete_failed`. Playlist copies are not touched: a playlist run owns them."""
+        if bool(export_id) == bool(path):
+            raise ExportError("invalid_params", "give export_id or path, exactly one of them")
+        with self._lock:
+            record = self._record_by_id_or_path(export_id, path)
+            target = self._safe_target(self._abs(record["path"]))
+            name = target.name
+            deleted = False
+            if os.path.isdir(target) and not os.path.islink(target):
+                raise ExportError("delete_failed", f"{name} is a folder, not an export file; it is not deleted")
+            try:
+                os.unlink(target)
+                deleted = True
+            except FileNotFoundError:
+                pass
+            except PermissionError as exc:
+                if os.name == "nt":
+                    raise ExportError("file_in_use", f"could not delete {name}: Windows refused (a player may have it "
+                                                     f"open, or it is read-only). Close it and try again.") from exc
+                raise ExportError("permission_denied", f"could not delete {name}: {exc.strerror or exc}") from exc
+            except OSError as exc:
+                raise ExportError("delete_failed", f"could not delete {name}: {exc.strerror or exc}") from exc
+            index = self._load()
+            if record in index.exports:
+                index.exports.remove(record)
+            self._save()
+            return {"export_id": export_id_of(record["source_hash"], record["format"], record["preset"]),
+                    "path": str(target), "name": name, "preset": record["preset"], "format": record["format"],
+                    "track_id": record.get("track_id"), "deleted": deleted, "file_missing": not deleted}
 
 
 @dataclass

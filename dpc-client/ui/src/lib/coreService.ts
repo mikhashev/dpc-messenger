@@ -149,7 +149,7 @@ import { historyRestored, newSessionProposal, newSessionResult, conversationRese
 import type { MusicComment } from './utils/musicComments';
 import { callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
 import type { DiscardReason, MusicCapabilities, MusicEngine, MusicJob, MusicTake } from './utils/musicCreate';
-import type { MusicExportInfo, PlaylistExportAnswer, TrackExportAnswer } from './utils/musicExport';
+import type { DeleteExportAnswer, MusicExportInfo, PlaylistExportAnswer, TrackExportAnswer } from './utils/musicExport';
 
 // ADR-052 L4: a dictation may wait in line for the GPU up to the dictation bound
 // (`[local_transcription] queue_wait_s`, 600 s by default) and then transcribe; the margin is
@@ -950,6 +950,14 @@ export async function connectToCoreService() {
                 else if (message.event === "music_export_done") {
                     const { noteMusicExportDone } = await import("$lib/services/musicExports");
                     noteMusicExportDone(message.payload);
+                }
+                // What the library lists changed (scan, hide, delete, take kept, export, ...):
+                // the open window re-reads once; nothing polls (music/library.py notify_changed).
+                else if (message.event === "music_library_changed") {
+                    const { noteMusicLibraryChanged } = await import("$lib/services/music");
+                    noteMusicLibraryChanged(message.payload);
+                    const { noteMusicExportsChanged } = await import("$lib/services/musicExports");
+                    noteMusicExportsChanged(message.payload);
                 }
                 // Another window changed a track's comments (music/comments.py).
                 else if (message.event === "music_comments_updated") {
@@ -2153,6 +2161,11 @@ export function exportMusicTrack(trackId: string, preset?: string): Promise<Musi
 /** Export a playlist into one folder of numbered MP3s; tracks already exported are linked, not encoded again. */
 export function exportMusicPlaylist(playlistId: string, preset?: string): Promise<MusicAnswer<PlaylistExportAnswer>> {
     return callMusic(sendCommand, 'export_music_playlist', preset ? { playlist_id: playlistId, preset } : { playlist_id: playlistId });
+}
+
+/** Delete one single export's file and its index entry; the core refuses anything outside the export folder. */
+export function deleteMusicExport(exportId: string): Promise<MusicAnswer<DeleteExportAnswer>> {
+    return callMusic(sendCommand, 'delete_music_export', { export_id: exportId });
 }
 
 /** Where exports go, the presets, and the exports that exist (for one track, or every track). */

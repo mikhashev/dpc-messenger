@@ -26,13 +26,26 @@ export function presetShortLabel(id: string): string {
 
 /** One existing export of a track (`get_music_export_info`). */
 export interface MusicExportRecord {
+    export_id: string;
     preset: string;
     format: string;
     path: string;
     name: string;
+    size_bytes?: number | null;
     exported_at?: string | null;
     limited_db?: number | null;
     true_peak_out_dbtp?: number | null;
+}
+
+/** `delete_music_export`'s answer. */
+export interface DeleteExportAnswer {
+    export_id: string;
+    path: string;
+    name: string;
+    preset: string;
+    format: string;
+    deleted: boolean;
+    file_missing: boolean;
 }
 
 export interface MusicExportInfo {
@@ -91,6 +104,35 @@ export function fileNameOf(path: string | null | undefined): string {
 export function limiterNote(limitedDb: number | null | undefined): string {
     if (typeof limitedDb !== 'number') return '';
     return `limited to ${limitedDb < 0 ? '−' : ''}${Math.abs(limitedDb)} dBTP`;
+}
+
+/** "4.2 MB", "812 KB", or '' when the size is not known. */
+export function exportSizeText(bytes: number | null | undefined): string {
+    if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** The date of an export as "2026-11-24", or '' when the core gave none. */
+export function exportDateText(exportedAt: string | null | undefined): string {
+    const m = /^(\d{4}-\d{2}-\d{2})/.exec(exportedAt ?? '');
+    return m ? m[1] : '';
+}
+
+/** The facts under a file name in the exports tree: "MP3 V0 · 4.2 MB · 2026-11-24". */
+export function exportCopyDetail(r: MusicExportRecord): string {
+    const limit = limiterNote(r.limited_db);
+    return [presetShortLabel(r.preset), exportSizeText(r.size_bytes), exportDateText(r.exported_at), limit]
+        .filter(Boolean)
+        .join(' · ');
+}
+
+/** The label of the toggle that opens a track's exports: "mp3" or "mp3 ×2". */
+export function exportToggleLabel(records: MusicExportRecord[] | null | undefined): string {
+    if (!records || !records.length) return '';
+    const fmt = records[0].format || 'mp3';
+    return records.length > 1 ? `${fmt} ×${records.length}` : fmt;
 }
 
 /** The chip of a track that has an export: the default preset's file first. */

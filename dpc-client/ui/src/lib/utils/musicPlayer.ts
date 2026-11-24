@@ -65,10 +65,6 @@ export interface Playlist {
 /** The core's id of the smart list of every track (`library.py` SMART_ALL_ID). */
 export const SMART_ALL_ID = 'pl_smart_all';
 
-/** The open, expanded window re-reads the library this often, so a watched folder's
- *  changes show without a button; a closed or minimised window reads nothing. */
-export const LIBRARY_POLL_MS = 10_000;
-
 /** Rows a long list shows before "Show more". */
 export const TRACK_ROWS_STEP = 300;
 

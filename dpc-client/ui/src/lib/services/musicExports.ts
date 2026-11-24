@@ -6,7 +6,7 @@
 // list is read again then.
 
 import { writable, get } from 'svelte/store';
-import { exportMusicPlaylist, exportMusicTrack, getMusicExportInfo } from '$lib/coreService';
+import { deleteMusicExport, exportMusicPlaylist, exportMusicTrack, getMusicExportInfo } from '$lib/coreService';
 import {
     DEFAULT_EXPORT_PRESET,
     playlistExportLine,
@@ -30,6 +30,9 @@ export const musicExportStatus = writable<Record<string, ExportStatus>>({});
 export const musicExportPreset = writable<string>(DEFAULT_EXPORT_PRESET);
 
 let loading: Promise<void> | null = null;
+/** A read was asked for while one was under way: that one may predate the change the asker
+ *  wants to see (a copy just deleted), so one more read follows it. */
+let readAgain = false;
 
 function setStatus(id: string, status: ExportStatus): void {
     musicExportStatus.update(m => ({ ...m, [id]: status }));
@@ -47,16 +50,37 @@ export function clearExportStatus(id: string): void {
 /** Read the export folder and the existing exports of every track. A backend without the
  *  export commands leaves the store empty: the chips and the warning do not show. */
 export function loadMusicExports(): Promise<void> {
-    if (loading) return loading;
+    if (loading) {
+        readAgain = true;
+        return loading;
+    }
     loading = (async () => {
         try {
             const a = await getMusicExportInfo();
             if (a.ok) musicExportInfo.set(a.data);
         } finally {
             loading = null;
+            if (readAgain) {
+                readAgain = false;
+                void loadMusicExports();
+            }
         }
     })();
     return loading;
+}
+
+/** Delete one exported copy (the core deletes the file and its entry); null on success, else
+ *  the line to show. The list is read again either way. */
+export async function deleteExportedCopy(exportId: string): Promise<string | null> {
+    const a = await deleteMusicExport(exportId);
+    await loadMusicExports();
+    if (a.ok) return null;
+    return a.unavailable ? 'Deleting an export is not available on this backend yet.' : a.message;
+}
+
+/** A `music_library_changed` event: only an export change moves the copies list. */
+export function noteMusicExportsChanged(payload: { reasons?: string[] } | null | undefined): void {
+    if (payload?.reasons?.includes('export')) void loadMusicExports();
 }
 
 /** Export one track; the line says "Exported", "Already exported" or the core's error. */

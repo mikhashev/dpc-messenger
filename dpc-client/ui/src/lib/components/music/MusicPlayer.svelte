@@ -22,7 +22,8 @@
   MP3 export (Mike #210; core music/export.py, services/musicExports.ts): "Export MP3" in a
   row's ⋯ menu and on the now-playing card, "Export playlist as MP3" on a playlist. The
   core names the file, keeps one export per track and preset, and answers "Already
-  exported" for a repeat; a track with an export shows an "mp3" chip that reveals the file.
+  exported" for a repeat; a track with an export shows an "mp3" toggle that lists its copies
+  under the row (Show in folder, Delete), and an "mp3" chip on the card that reveals the file.
 
   Under Now playing sits the Lyrics area (MusicLyrics.svelte): the lyrics chain of
   the core (.lrc sidecar, file tags, LRCLIB, manual edit) for the current track.
@@ -51,6 +52,7 @@
   import { ensureComments, musicComments } from '$lib/services/musicComments';
   import {
     clearExportStatus,
+    deleteExportedCopy,
     exportPlaylistMp3,
     exportTrackMp3,
     loadMusicExports,
@@ -58,7 +60,15 @@
     musicExportPreset,
     musicExportStatus,
   } from '$lib/services/musicExports';
-  import { EXPORT_PRESETS, exportChip, exportFolderWarning, presetShortLabel } from '$lib/utils/musicExport';
+  import {
+    EXPORT_PRESETS,
+    exportChip,
+    exportCopyDetail,
+    exportFolderWarning,
+    exportToggleLabel,
+    presetShortLabel,
+    type MusicExportRecord,
+  } from '$lib/utils/musicExport';
   import {
     HEADER_HEIGHT,
     isClick,
@@ -70,7 +80,6 @@
     type WindowState,
   } from '$lib/utils/windowGeometry';
   import {
-    LIBRARY_POLL_MS,
     MUSIC_PLAYER_WINDOW,
     SMART_ALL_ID,
     TRACK_ROWS_STEP,
@@ -123,6 +132,7 @@
     playList,
     playQueueAt,
     playbackEnv,
+    setMusicLibraryWatch,
     prevTrack,
     queueTrack,
     removeFolder,
@@ -276,16 +286,15 @@
 
   // -- the library -----------------------------------------------------------------
 
-  // Reading: open and not minimised. Read now, then on the interval while the core
-  // answers; a backend without the music commands is not asked again until "Try again".
+  // Reading: open and not minimised. Read once now; after that the core's
+  // `music_library_changed` event re-reads (services/music.ts), and nothing polls. A backend
+  // without the music commands is not asked again until "Try again".
   let active = $derived(open && !minimised);
   $effect(() => {
     if (!active) return;
     untrack(() => loadMusicLibrary($musicLibrary.status === 'ready'));
-    const poll = setInterval(() => {
-      if ($musicLibrary.status === 'ready') loadMusicLibrary(true);
-    }, LIBRARY_POLL_MS);
-    return () => clearInterval(poll);
+    setMusicLibraryWatch(true);
+    return () => setMusicLibraryWatch(false);
   });
 
   // A reconnected backend: read again.
@@ -365,6 +374,27 @@
   async function revealPath(path: string | null | undefined) {
     const failure = await revealInFolder(path, revealItemInDir);
     if (failure) fail(failure);
+  }
+  // The copies under a row: opened by the row's "mp3" toggle, one line per exported file.
+  let exportsOpen = $state<Record<string, boolean>>({});
+  let deletingExport = $state<string | null>(null);
+  function exportsOf(id: string): MusicExportRecord[] {
+    return exportInfo?.exports?.[id] ?? [];
+  }
+  function toggleExports(id: string) {
+    exportsOpen = { ...exportsOpen, [id]: !exportsOpen[id] };
+  }
+  async function deleteCopy(entry: LibraryEntry, copy: MusicExportRecord) {
+    const yes = await confirmAsync(
+      `Delete the exported file "${copy.name}" from disk? This cannot be undone. "${entry.title}" stays in the library.`,
+      { title: 'Delete exported copy', kind: 'warning' },
+    );
+    if (!yes) return;
+    deletingExport = copy.export_id;
+    const failure = await deleteExportedCopy(copy.export_id);
+    deletingExport = null;
+    if (failure) fail(failure);
+    else musicNotice(`Deleted "${copy.name}".`);
   }
   function exportRow(entry: LibraryEntry) {
     menuId = null;
@@ -757,6 +787,36 @@
   {/if}
 {/snippet}
 
+{#snippet exportToggle(entry: LibraryEntry)}
+  {@const copies = exportsOf(entry.id)}
+  {#if copies.length}
+    <button type="button" class="tag link mp3" aria-expanded={!!exportsOpen[entry.id]}
+      title="The MP3 copies exported from this track: click to list them" onclick={() => toggleExports(entry.id)}
+    >{exportToggleLabel(copies)} {exportsOpen[entry.id] ? '▾' : '▸'}</button>
+  {/if}
+{/snippet}
+
+{#snippet exportTree(entry: LibraryEntry)}
+  {@const copies = exportsOf(entry.id)}
+  {#if exportsOpen[entry.id] && copies.length}
+    <li class="row-note">
+      <ul class="export-tree" aria-label="MP3 copies of {entry.title}">
+        {#each copies as copy (copy.export_id)}
+          <li class="export-copy">
+            <span class="export-name" title={copy.path}>{copy.name}</span>
+            <span class="muted tiny">{exportCopyDetail(copy)}</span>
+            <span class="row-actions">
+              <button type="button" class="small-btn" onclick={() => revealPath(copy.path)}>Show in folder</button>
+              <button type="button" class="small-btn danger" disabled={deletingExport === copy.export_id}
+                onclick={() => deleteCopy(entry, copy)}>Delete</button>
+            </span>
+          </li>
+        {/each}
+      </ul>
+    </li>
+  {/if}
+{/snippet}
+
 {#snippet exportLine(id: string | null | undefined)}
   {@const st = id ? $musicExportStatus[id] : undefined}
   {#if id && st}
@@ -1091,7 +1151,7 @@
                       {#if row.entry && trackSubtitle(row.entry)}<span class="muted tiny">{trackSubtitle(row.entry)}</span>{/if}
                     </button>
                     <span class="tags">
-                      {#if row.entry}{@render originBadge(row.entry)}{@render exportChipTag(row.entry)}{/if}
+                      {#if row.entry}{@render originBadge(row.entry)}{@render exportToggle(row.entry)}{/if}
                       {#if problem}<span class="tag warn" title={problem.reason}>{problem.problem === 'missing' ? 'missing' : 'not playable yet'}</span>{/if}
                     </span>
                     <span class="time">{formatTime(row.entry?.duration_s ?? null)}</span>
@@ -1129,6 +1189,7 @@
                       {/if}
                     </span>
                   </li>
+                  {#if row.entry}{@render exportTree(row.entry)}{/if}
                   {#if $musicExportStatus[row.id]}
                     <li class="row-note">{@render exportLine(row.id)}</li>
                   {/if}
@@ -1498,6 +1559,9 @@
   @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
   .row-note { padding: 0 8px 4px 32px; }
   button.tag.mp3 { background: #22382a; color: #9fd8a8; }
+  .export-tree { list-style: none; margin: 0; padding: 0 0 0 12px; display: flex; flex-direction: column; gap: 4px; border-left: 2px solid #22382a; }
+  .export-copy { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; min-width: 0; }
+  .export-name { min-width: 0; overflow-wrap: anywhere; color: #c9d1d9; }
   .warn-line { color: #f0c674; margin: 0; }
 
   .rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
