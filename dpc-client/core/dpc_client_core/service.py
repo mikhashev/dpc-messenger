@@ -5711,6 +5711,9 @@ class CoreService(MusicCommandsMixin):
                     "is_restricted": is_restricted,
                     # Canonical default from ToolEntry.default_enabled (single source of truth).
                     "default_enabled": entry.default_enabled,
+                    # Offered and run only on the owner's own turns (ToolEntry.owner_only,
+                    # ADR-051 D43); the panel's "owner-only" badge reads it.
+                    "owner_only": bool(entry.owner_only),
                 })
             tools.sort(key=lambda t: t["name"])
             # A tool module that fails to import removes its tools from this
