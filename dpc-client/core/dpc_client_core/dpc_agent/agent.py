@@ -372,6 +372,10 @@ class DpcAgent:
         self._last_usage: Optional[Dict[str, Any]] = None
         # Track last full context estimate (from build_llm_messages cap_info)
         self._last_cap_info: Optional[Dict[str, Any]] = None
+        # What chat_post_file kept in each conversation's last turn, until the agent
+        # manager takes it for the answer record (take_posted_attachments). Keyed by
+        # conversation: two chats' turns may finish on one agent at once.
+        self._posted_attachments: Dict[str, List[Dict[str, Any]]] = {}
 
         log.info(f"DpcAgent initialized with storage at {self.agent_root}")
         self._log_own_nodes()
@@ -509,6 +513,19 @@ class DpcAgent:
         except Exception:
             return False
 
+    def take_posted_attachments(self, conversation_id: str) -> List[Dict[str, Any]]:
+        """The attachments chat_post_file kept in this conversation's last turn, handed
+        over once: a second call returns []."""
+        return self._posted_by_conversation().pop(conversation_id, None) or []
+
+    def _posted_by_conversation(self) -> Dict[str, List[Dict[str, Any]]]:
+        """The per-conversation store of posted attachments, made on first use for an
+        agent built without __init__ (tests do)."""
+        store = self.__dict__.get("_posted_attachments")
+        if store is None:
+            store = self.__dict__.setdefault("_posted_attachments", {})
+        return store
+
     async def process(
         self,
         message: str,
@@ -570,6 +587,8 @@ class DpcAgent:
         # to the daily quota a second time) and its trace (saved on this record).
         self._last_usage = {}
         self._last_trace = {}
+        # Nor the last turn's posted files, should nobody have taken them.
+        self._posted_by_conversation().pop(conversation_id, None)
 
         task = {
             "id": conversation_id,
@@ -696,6 +715,8 @@ class DpcAgent:
             max_recall_results=max_recall,
             recall_results=recall_results,
             open_layers=layers_open,
+            owner_only_withheld=(getattr(self.tools, "owner_only_names", set)()
+                                 if audience_class != OWNER_TURN else None),
         )
 
         # Remember the tail exactly as it went out, keyed by the message it went out
@@ -869,6 +890,10 @@ class DpcAgent:
         # Store last usage and trace for session state access by agent_manager
         self._last_usage = usage
         self._last_trace = trace
+        # The files chat_post_file kept in this turn ride on its answer record (ADR-051
+        # D40, D41): the agent manager takes them for _record_answer.
+        if ctx.posted_attachments:
+            self._posted_by_conversation()[conversation_id] = list(ctx.posted_attachments)
 
         # Phase 3: Skill Write phase — record outcomes, optionally reflect
         used_skills = self.skill_reflector.record_outcome(trace, usage)

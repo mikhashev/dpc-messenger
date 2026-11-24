@@ -577,11 +577,56 @@ def _recording_seconds(declared: Any, measure, path: Path, max_voice_seconds: fl
     return seconds
 
 
+# The MIME type of an audio file kept in an agent chat, by its suffix, the names
+# the UI's own table gives them (ui/src/lib/utils/pendingAttachment.ts). Set here
+# rather than guessed: `mimetypes` reads the Windows registry, which names `.flac`
+# `audio/x-flac` and `.m4a` `audio/x-m4a`, so one file got two types by platform.
+_AUDIO_MIME_BY_SUFFIX = {
+    ".flac": "audio/flac", ".wav": "audio/wav", ".mp3": "audio/mpeg",
+    ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/opus",
+    ".m4a": "audio/mp4", ".aac": "audio/aac",
+}
+
+
+def file_sha256(path: Path) -> str:
+    """The hex SHA-256 of a file's bytes, read in 1 MiB pieces. Blocking."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for piece in iter(lambda: f.read(1 << 20), b""):
+            h.update(piece)
+    return h.hexdigest()
+
+
+def _kept_copy_with_digest(files_dir: Path, size_bytes: int, digest: str) -> Optional[Path]:
+    """A regular file directly in `files_dir` whose bytes hash to `digest`, or None.
+
+    Only files of the same size are hashed. A link is never reused: what it
+    points at can change after the record names it."""
+    try:
+        candidates = sorted(files_dir.iterdir())
+    except OSError:
+        return None
+    for candidate in candidates:
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            if candidate.stat().st_size != size_bytes:
+                continue
+            if file_sha256(candidate) == digest:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 def keep_agent_chat_attachment(
     files_dir: Path, attachment: Dict[str, Any], *,
     voice_mime_types: List[str], max_voice_seconds: float, temp_dir: Path,
     max_file_mb: float = AGENT_CHAT_FILE_DEFAULT_MAX_MB,
     measure_seconds=measure_recording_seconds,
+    reuse_same_bytes: bool = False,
 ) -> Dict[str, Any]:
     """Keep what the person attached in an agent chat in that chat's `files/`.
 
@@ -591,9 +636,18 @@ def keep_agent_chat_attachment(
     folder" beside it (ADR-051 D19) and the agent reads the file's marker
     (`file_attachment_markers`). Blocking; run it in a thread.
 
-    `kind` "file": the picked file is copied under a free name, its MIME type
-    guessed from the name as `send_group_file` does, when it is within
-    `max_file_mb` (the rules' `file_transfer.max_size_mb`). `kind` "voice": a
+    `kind` "file": the picked file is copied, never moved, under a free name,
+    when it is within `max_file_mb` (the rules' `file_transfer.max_size_mb`).
+    Its MIME type comes from `_AUDIO_MIME_BY_SUFFIX` for the audio formats
+    (`mimetypes` names `.flac` `audio/x-flac` on Windows), else it is guessed
+    from the name as `send_group_file` does. The record also carries the kept
+    bytes' `sha256` and, for an audio/* file, `duration_seconds` as ffprobe
+    measures it (`measure_seconds`; 0 without ffprobe or when it reads none).
+    With `reuse_same_bytes` (chat_post_file, ADR-051 D41) a file whose bytes
+    are already in `files_dir` is not copied again: the record names the copy
+    that is there. Such a record must not be undone with
+    `release_agent_chat_attachment`, which would remove that older copy.
+    `kind` "voice": a
     recording, given as the recorder's `file_path` or as `audio_base64` with its
     `mime_type`; the format must be one `voice_messages.mime_types` lists, the
     bytes must be the container that type names (`sniff_audio_container`), and
@@ -631,8 +685,20 @@ def keep_agent_chat_attachment(
         if refusal:
             raise ValueError(refusal)
         files_dir.mkdir(parents=True, exist_ok=True)
-        kept = keep_copy_under_a_free_name(source, files_dir, source.name)
-        mime_type = mimetypes.guess_type(str(kept))[0] or "application/octet-stream"
+        kept = None
+        if reuse_same_bytes:
+            digest = file_sha256(source)
+            kept = _kept_copy_with_digest(files_dir, source.stat().st_size, digest)
+        if kept is None:
+            kept = keep_copy_under_a_free_name(source, files_dir, source.name)
+            # The kept bytes, not the source's: the source may change after the copy.
+            digest = file_sha256(kept)
+        mime_type = (_AUDIO_MIME_BY_SUFFIX.get(kept.suffix.lower())
+                     or mimetypes.guess_type(str(kept))[0] or "application/octet-stream")
+        extra["sha256"] = digest
+        if mime_type.startswith("audio/"):
+            measured = measure_seconds(kept) if measure_seconds else None
+            extra["duration_seconds"] = _declared_seconds(measured) or 0
     else:
         mime_type = str(attachment.get("mime_type") or "").split(";")[0].strip().lower()
         if mime_type not in voice_mime_types:

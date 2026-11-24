@@ -695,8 +695,13 @@ def _build_capabilities_section(
     all_tools: Optional[Dict[str, bool]] = None,
     sandbox_read_only: Optional[List[str]] = None,
     sandbox_read_write: Optional[List[str]] = None,
+    owner_only_withheld: Optional[set] = None,
 ) -> str:
     """Build the capabilities section from firewall data.
+
+    `owner_only_withheld`, on a turn that is not the owner's, names the owner_only
+    tools: they are listed as owner-only, not as disabled by the firewall, since no
+    setting enables them on such a turn.
 
     Enabled tools are already visible to the agent via tool schemas passed to the LLM.
     This section adds: the sandbox root, where the extended paths are listed, and
@@ -728,7 +733,10 @@ def _build_capabilities_section(
         return "\n".join(lines)
 
     allowed = allowed_tools or set()
-    disabled = [t for t, v in all_tools.items() if isinstance(v, bool) and t not in allowed]
+    withheld = set(owner_only_withheld or ())
+    owner_only = [t for t, v in all_tools.items() if isinstance(v, bool) and t in withheld]
+    disabled = [t for t, v in all_tools.items()
+                if isinstance(v, bool) and t not in allowed and t not in withheld]
 
     lines.append("")
     lines.append(f"You have **{len(allowed)} enabled tools** (see tool schemas for details).")
@@ -737,6 +745,13 @@ def _build_capabilities_section(
         lines.append("")
         lines.append(f"**Disabled by firewall ({len(disabled)} tools):** {', '.join(disabled)}")
         lines.append("These exist but are blocked. Ask Mike to enable in privacy_rules.json if needed.")
+
+    if owner_only:
+        lines.append("")
+        lines.append(f"**Owner-only, not available in this turn ({len(owner_only)} tools):** "
+                     f"{', '.join(owner_only)}")
+        lines.append("These run only on the owner's own turns, and this turn is not the owner's. "
+                     "No setting enables them here.")
 
     return "\n".join(lines)
 
@@ -1031,6 +1046,9 @@ def file_attachment_markers(record: Dict[str, Any]) -> List[str]:
             details.append(f"{size_mb} MB")
         voice_metadata = att.get("voice_metadata")
         duration = voice_metadata.get("duration_seconds") if isinstance(voice_metadata, dict) else None
+        if duration is None:
+            # A kept audio file's own length (keep_agent_chat_attachment); 0 is unmeasured.
+            duration = att.get("duration_seconds") or None
         if isinstance(duration, (int, float)) and not isinstance(duration, bool):
             details.append(f"{duration:g} s")
         described = f"{name}, {', '.join(details)}"
@@ -1071,6 +1089,7 @@ def build_llm_messages(
     max_recall_results: int = 3,
     recall_results: Optional[list] = None,
     open_layers: Optional[frozenset] = None,
+    owner_only_withheld: Optional[set] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -1120,6 +1139,10 @@ def build_llm_messages(
                      the brief is not consumed; without EXT no extended path is
                      named; recall rows and replayed hint tails of closed layers are
                      dropped. None is every layer (callers before the marks).
+        owner_only_withheld: On a turn that is not the owner's, the owner_only tools,
+                     named in the capabilities section as owner-only and not available
+                     in this turn rather than as disabled by the firewall. None on the
+                     owner's turns.
         sent_annotations: message id -> the turn-context tail that was appended to
                           that user message when it was the current one. Replayed
                           byte-identically behind the message so the prompt stays a
@@ -1222,6 +1245,7 @@ def build_llm_messages(
     # Tools & capabilities (generated from firewall — transparency)
     capabilities_section = _build_capabilities_section(
         agent_root, allowed_tools, all_tools, sandbox_read_only, sandbox_read_write,
+        owner_only_withheld=owner_only_withheld,
     )
     if capabilities_section:
         semi_stable_parts.append(capabilities_section)
@@ -1294,7 +1318,9 @@ def build_llm_messages(
         is_group = str(task.get("id") or "").startswith("group-")
         for hist_msg in conversation_history:
             content = hist_msg.get("content", "")
-            if not content:
+            # An answer that is only a posted file (chat_post_file) has no text and is
+            # replayed as its marker; any other record with no text stays out, as before.
+            if not content and not file_attachment_markers(hist_msg):
                 continue
             if reader_identity is not None:
                 role = derive_history_role(hist_msg, reader_identity, is_group)

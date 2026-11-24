@@ -1354,7 +1354,10 @@ class DpcAgentManager:
                     self._daily_tokens_used += last_usage.get("total_tokens", 0)
 
             _thinking, _streaming_raw = self._answer_extras(agent, response, _stream_chunks)
-            if not response and not (_thinking or _streaming_raw):
+            # The files chat_post_file kept in this turn (ADR-051 D40/D41); a group
+            # turn posts none (the tool refuses there).
+            _posted = self._take_posted_attachments(agent, conversation_id)
+            if not response and not (_thinking or _streaming_raw or _posted):
                 log.warning("Agent returned empty response after retries — sending toast notification")
                 await self.service.local_api.broadcast_event("error_toast", {
                     "title": "Empty Response",
@@ -1363,7 +1366,11 @@ class DpcAgentManager:
                 })
             elif not is_group:
                 self._record_answer(monitor, conversation_id, agent, response, _stream_chunks,
-                                    message_source=message_source)
+                                    message_source=message_source, attachments=_posted)
+                if _posted:
+                    # The reply the UI is sent carries the text alone: the record
+                    # with its files reaches the open chat as its history.
+                    await self._broadcast_history_to_ui(conversation_id)
 
             # Store full context measurement from this request so next request's session_state
             # can expose it. One request stale, but accurate — context grows incrementally.
@@ -1499,19 +1506,23 @@ class DpcAgentManager:
 
     def _record_answer(self, monitor: ConversationMonitor, conversation_id: str, agent: Any,
                        response: Optional[str], stream_chunks: List[str],
-                       message_source: Optional[str] = None) -> None:
+                       message_source: Optional[str] = None,
+                       attachments: Optional[List[Dict[str, Any]]] = None) -> None:
         """The assistant record of a finished run, with its trace, saved at once.
 
-        Kept when there is text, thinking or streamed output: the UI shows the
-        last two too. A run that ended without an answer is kept with why
-        (`turn_end`, named by the loop's exit branch, never read from the
-        text), or the prompt stood alone and the next one held two user turns.
+        Kept when there is text, thinking, streamed output or an attachment: the UI
+        shows the last three too. `attachments` are the files the run posted into
+        this chat (chat_post_file, ADR-051 D40/D41); an answer that is only a file
+        is kept with an empty text (Zcode #51 correction 4). A run that ended
+        without an answer is kept with why (`turn_end`, named by the loop's exit
+        branch, never read from the text), or the prompt stood alone and the next
+        one held two user turns.
         """
         # Taken first: a run kept no record of leaves none behind for the next turn.
         stop_notes = self.take_stop_notes(conversation_id)
         thinking, streaming_raw = self._answer_extras(agent, response, stream_chunks)
         has_content = response and response.strip() != _THINKING_FALLBACK
-        if not (has_content or thinking or streaming_raw):
+        if not (has_content or thinking or streaming_raw or attachments):
             return
         trace = getattr(agent, '_last_trace', None) or {}
         turn_end = trace.get("turn_end")
@@ -1532,8 +1543,22 @@ class DpcAgentManager:
             message_source=message_source,
             speed_summary=trace.get("speed_summary"),
             stop_notes=stop_notes or None,
+            attachments=list(attachments) if attachments else None,
         )
         monitor.save_history()
+
+    @staticmethod
+    def _take_posted_attachments(agent: Any, conversation_id: str) -> List[Dict[str, Any]]:
+        """The files the agent's last turn in this chat posted (DpcAgent.take_posted_attachments);
+        [] for an agent that has no such method."""
+        take = getattr(agent, "take_posted_attachments", None)
+        if take is None:
+            return []
+        try:
+            return list(take(conversation_id) or [])
+        except Exception as e:  # an attachment is never worth losing the answer over
+            log.warning("Posted attachments of %s not read: %s", conversation_id, e)
+            return []
 
     async def _broadcast_text_chunk(self, chunk: str, conversation_id: str) -> None:
         """Broadcast one streamed text chunk to the UI (the agent_text_chunk event)."""
@@ -1607,7 +1632,8 @@ class DpcAgentManager:
             if monitor is not None and "answer" in run and self._agent is not None:
                 try:
                     self._record_answer(monitor, conversation_id, self._agent, run["answer"], streamed,
-                                        message_source=run.get("message_source"))
+                                        message_source=run.get("message_source"),
+                                        attachments=self._take_posted_attachments(self._agent, conversation_id))
                 except Exception as e:
                     log.warning("Task run in %s: answer not recorded: %s", conversation_id, e)
                 await self._broadcast_history_to_ui(conversation_id)

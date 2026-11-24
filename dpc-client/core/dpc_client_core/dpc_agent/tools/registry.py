@@ -349,6 +349,11 @@ class ToolContext:
     tool_output_turn: Optional[str] = None
     tool_output_name: Optional[str] = None
 
+    # The attachments chat_post_file kept in this turn's chat (ADR-051 D41), in the
+    # order they were posted. DpcAgent.process hands them to the agent manager, which
+    # writes them on the turn's answer record. One list per turn: the context is.
+    posted_attachments: List[Dict[str, Any]] = field(default_factory=list)
+
     # -----------------------------------------------------------------------
     # Path helpers (all sandboxed to agent_root)
     # -----------------------------------------------------------------------
