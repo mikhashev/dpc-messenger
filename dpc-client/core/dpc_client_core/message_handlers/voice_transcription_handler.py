@@ -1,12 +1,27 @@
 """Handler for VOICE_TRANSCRIPTION command - distributed voice message transcription."""
 
+import time
 from typing import Dict, Any, Optional
 from . import MessageHandler
 from .group_access import off_the_roster, refuse_group_access
 
+# A member's transcription can arrive before the voice record it names: the sender
+# transcribes after the first FILE_COMPLETE, or a star relay forwards it, while a
+# member is still downloading the file. It waits in `_voice_transcriptions` (the
+# history view merges it by transfer id or file name once the record is there), but
+# the wait is bounded so a member cannot grow this node's memory without limit.
+PARKED_PER_GROUP = 32
+PARKED_MAX_AGE_SECONDS = 6 * 3600
+
 
 class VoiceTranscriptionHandler(MessageHandler):
     """Handles VOICE_TRANSCRIPTION messages (peer sharing transcription result)."""
+
+    def __init__(self, service):
+        super().__init__(service)
+        # group_id -> {transfer_id: (parked_at, the registry entry, file name)}, oldest first.
+        self._parked: Dict[str, Dict[str, Any]] = {}
+        self._clock = time.monotonic
 
     @property
     def command_name(self) -> str:
@@ -39,6 +54,8 @@ class VoiceTranscriptionHandler(MessageHandler):
 
         if group_id and not await self._may_annotate_group_voice(sender_node_id, payload):
             return None
+        if group_id:
+            self._release_parked(group_id)
 
         # 1.5. Validate transcription is not empty (v0.13.3+ - prevent empty/malicious transcriptions)
         transcription_text = transcription_text.strip()
@@ -89,6 +106,7 @@ class VoiceTranscriptionHandler(MessageHandler):
         # For group voice messages, key on group_id not sender_node_id
         monitor_key = group_id if group_id else sender_node_id
         conversation_monitor = self.service.conversation_monitors.get(monitor_key)
+        attached = False
         if conversation_monitor:
             # A. Update message_history attachments (existing code)
             for message in conversation_monitor.message_history:
@@ -98,6 +116,7 @@ class VoiceTranscriptionHandler(MessageHandler):
                         # Add transcription to attachment
                         attachment["transcription"] = transcription_data
                         self.logger.debug(f"Attached transcription to voice message in conversation history")
+                        attached = True
                         break
 
             # B. Also update Message objects in extraction buffers (v0.14.0 fix)
@@ -112,6 +131,11 @@ class VoiceTranscriptionHandler(MessageHandler):
                             msg_obj.text = f"Voice message: {transcription_text}"
                             self.logger.debug(f"Updated Message object text with transcription: {transfer_id}")
                             break
+
+        # A member's transcription ahead of its voice record stays in the registry
+        # (the history view merges it when the record arrives), within a bound.
+        if group_id and not attached:
+            self._park(group_id, transfer_id, transcription_data)
 
         # 4. Broadcast to UI
         await self.service.local_api.broadcast_event("voice_transcription_received", {
@@ -143,14 +167,63 @@ class VoiceTranscriptionHandler(MessageHandler):
         return bool((transfer_id and attachment.get("transfer_id") == transfer_id)
                     or (filename and attachment.get("filename") == filename))
 
+    def _holds_voice(self, group_id: str, transfer_id, filename) -> bool:
+        monitor = self.service.conversation_monitors.get(group_id)
+        return any(
+            self._names_voice(attachment, transfer_id, filename)
+            for message in (getattr(monitor, "message_history", None) or ())
+            for attachment in (message.get("attachments") or ())
+        )
+
+    def _forget(self, group_id: str, transfer_id, evict: bool) -> None:
+        """Stop tracking a parked transcription; `evict` also removes it from the registry,
+        unless a later transcription (ours, or a replacement) took the slot."""
+        _, entry, _ = self._parked[group_id].pop(transfer_id)
+        if evict and self.service._voice_transcriptions.get(transfer_id) is entry:
+            del self.service._voice_transcriptions[transfer_id]
+        if not self._parked[group_id]:
+            del self._parked[group_id]
+
+    def _release_parked(self, group_id: str) -> None:
+        """A parked transcription leaves the bound when its voice record has arrived (it is
+        then merged into the view like any other) and is dropped when it outlives the age limit."""
+        now = self._clock()
+        for transfer_id, (parked_at, _, filename) in list(self._parked.get(group_id, {}).items()):
+            if self._holds_voice(group_id, transfer_id, filename):
+                self._forget(group_id, transfer_id, evict=False)
+            elif now - parked_at > PARKED_MAX_AGE_SECONDS:
+                self.logger.info(
+                    "Dropped parked VOICE_TRANSCRIPTION %s in group %s: no voice record arrived "
+                    "within %d s", str(transfer_id)[:12], group_id, PARKED_MAX_AGE_SECONDS,
+                )
+                self._forget(group_id, transfer_id, evict=True)
+
+    def _park(self, group_id: str, transfer_id, entry: Dict[str, Any]) -> None:
+        parked = self._parked.setdefault(group_id, {})
+        parked.pop(transfer_id, None)  # a replacement restarts the wait
+        while len(parked) >= PARKED_PER_GROUP:
+            oldest = next(iter(parked))
+            self.logger.warning(
+                "Dropped the oldest parked VOICE_TRANSCRIPTION %s in group %s: %d are waiting for "
+                "their voice records", str(oldest)[:12], group_id, PARKED_PER_GROUP,
+            )
+            self._forget(group_id, oldest, evict=True)
+            parked = self._parked.setdefault(group_id, {})
+        parked[transfer_id] = (self._clock(), entry, entry.get("filename"))
+        self.logger.info(
+            "Parked VOICE_TRANSCRIPTION %s in group %s: its voice record is not here yet",
+            str(transfer_id)[:12], group_id,
+        )
+
     async def _may_annotate_group_voice(self, sender_node_id: str, payload: Dict[str, Any]) -> bool:
         """Whether a group transcription may be stored, shown and relayed.
 
         A transcription is text put into a group, so it is a member's
         (`group_access.off_the_roster`): the node handing it over and the
         transcriber it names must both be on our roster. Any member that holds
-        the voice message may transcribe it (specs/dptp_v1.md 3.12), and only a
-        voice message this group's history holds can be annotated.
+        the voice message may transcribe it (specs/dptp_v1.md 3.12). The voice
+        record need not be here yet: the transcription is parked until it is
+        (`_park`). It must name a transfer, which is the key it is kept under.
         """
         group_id = payload.get("group_id")
         transfer_id = payload.get("transfer_id")
@@ -174,20 +247,10 @@ class VoiceTranscriptionHandler(MessageHandler):
                 "not a member", str(transfer_id)[:12], group_id, sender_node_id[:20], outsider[:20],
             )
             return False
-        monitor = self.service.conversation_monitors.get(group_id)
-        if monitor is None and hasattr(self.service, "_get_or_create_conversation_monitor"):
-            monitor = self.service._get_or_create_conversation_monitor(group_id)
-        filename = payload.get("filename")
-        held = any(
-            self._names_voice(attachment, transfer_id, filename)
-            for message in (getattr(monitor, "message_history", None) or ())
-            for attachment in (message.get("attachments") or ())
-        )
-        if not held:
+        if not isinstance(transfer_id, str) or not transfer_id:
             self.logger.warning(
-                "Dropped VOICE_TRANSCRIPTION %s in group %s from %s: this node holds no voice "
-                "message with that transfer id or file name (%s)",
-                str(transfer_id)[:12], group_id, sender_node_id[:20], filename,
+                "Dropped VOICE_TRANSCRIPTION in group %s from %s: it names no transfer id",
+                group_id, sender_node_id[:20],
             )
             return False
         return True

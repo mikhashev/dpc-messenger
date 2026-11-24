@@ -121,14 +121,141 @@ async def test_a_member_relaying_a_transcription_by_a_node_off_the_roster_is_dro
     assert not service.sent("GROUP_ACCESS_DENIED"), "the relaying member is not the one refused"
 
 
+def _service_with_a_real_monitor(monkeypatch):
+    """`_VoiceService` whose group history is a real monitor that holds no voice record yet,
+    and a CoreService that renders that history the way the UI reloads it."""
+    from dpc_client_core.conversation_monitor import ConversationMonitor
+    from dpc_client_core.service import CoreService
+
+    monkeypatch.setattr(ConversationMonitor, "persist_history", property(lambda self: False))
+    service = _VoiceService()
+    monitor = ConversationMonitor(
+        conversation_id=VOICE_GROUP,
+        participants=[{"node_id": ME, "name": "Mike", "context": "local"}],
+        llm_manager=None,
+    )
+    service.conversation_monitors[VOICE_GROUP] = monitor
+    core = CoreService.__new__(CoreService)
+    core.conversation_monitors = service.conversation_monitors
+    core._group_agent_context = {}
+    core._voice_transcriptions = service._voice_transcriptions
+
+    async def shown():
+        result = await CoreService.get_conversation_history(core, VOICE_GROUP)
+        return [a.get("transcription") for m in result["messages"] for a in m.get("attachments", [])]
+
+    def record_arrives(**attachment):
+        monitor.add_message("user", "Sent voice message", attachments=[
+            {"type": "voice", "filename": VOICE, "transfer_id": "our-own-transfer", **attachment}])
+
+    return service, monitor, shown, record_arrives
+
+
 @pytest.mark.asyncio
-async def test_a_transcription_for_a_voice_message_the_group_does_not_hold_stores_nothing():
+async def test_a_members_transcription_ahead_of_its_voice_record_is_parked_and_lands_with_the_record(
+        monkeypatch):
+    """The sender transcribes after the first FILE_COMPLETE (or a star relay forwards it), so a
+    member still downloading the voice file gets the text first. Dropping it left a node without
+    Whisper with a wordless voice message for good."""
+    service, monitor, shown, record_arrives = _service_with_a_real_monitor(monkeypatch)
+    handler = VoiceTranscriptionHandler(service)
+
+    await handler.handle(MEMBER, _transcription(MEMBER))
+
+    assert service._voice_transcriptions[TRANSFER]["text"] == "text nobody said"
+    assert service.local_api.broadcast_event.await_count == 1
+    assert [to for to, _ in service.sent("VOICE_TRANSCRIPTION")] == [OTHER_MEMBER], "still relayed"
+    assert not monitor.message_history
+
+    record_arrives()
+
+    [transcription] = await shown()
+    assert transcription["text"] == "text nobody said"
+    assert transcription["transcriber_node_id"] == MEMBER
+
+
+@pytest.mark.asyncio
+async def test_a_transcription_from_off_the_roster_ahead_of_the_voice_record_never_lands(monkeypatch):
+    """The refusal does not depend on the record: parking is for a member's text only."""
+    service, monitor, shown, record_arrives = _service_with_a_real_monitor(monkeypatch)
+    handler = VoiceTranscriptionHandler(service)
+
+    await handler.handle(REMOVED, _transcription(REMOVED))
+    await handler.handle(MEMBER, _transcription(REMOVED))
+
+    record_arrives()
+
+    assert not service._voice_transcriptions
+    assert await shown() == [None]
+    assert service.local_api.broadcast_event.await_count == 0
+    assert not service.sent("VOICE_TRANSCRIPTION")
+    assert [to for to, _ in service.sent("GROUP_ACCESS_DENIED")] == [REMOVED]
+
+
+@pytest.mark.asyncio
+async def test_parked_transcriptions_are_capped_per_group_and_the_oldest_goes_first():
+    from dpc_client_core.message_handlers import voice_transcription_handler as vth
+
+    service = _VoiceService()
+    service.monitor.message_history.clear()
+    handler = VoiceTranscriptionHandler(service)
+    await handler.handle(MEMBER, _transcription(MEMBER, transfer_id="t-0", filename="v-0.webm"))
+    assert "t-0" in service._voice_transcriptions
+    service._voice_transcriptions["ours"] = {"text": "a local one", "success": True}
+
+    cap = vth.PARKED_PER_GROUP
+    for n in range(1, cap + 5):
+        await handler.handle(MEMBER, _transcription(MEMBER, transfer_id=f"t-{n}", filename=f"v-{n}.webm"))
+
+    parked = sorted(k for k in service._voice_transcriptions if k.startswith("t-"))
+    assert len(parked) == cap
+    assert "t-0" not in parked and f"t-{cap + 4}" in parked
+    assert service._voice_transcriptions["ours"]["text"] == "a local one", "not a parked entry"
+
+
+@pytest.mark.asyncio
+async def test_a_parked_transcription_is_dropped_after_the_age_limit_unless_its_record_came():
+    from dpc_client_core.message_handlers import voice_transcription_handler as vth
+
+    service = _VoiceService()
+    service.monitor.message_history.clear()
+    now = [1000.0]
+    handler = VoiceTranscriptionHandler(service)
+    handler._clock = lambda: now[0]
+    await handler.handle(MEMBER, _transcription(MEMBER, transfer_id="t-late", filename="v-late.webm"))
+    await handler.handle(MEMBER, _transcription(MEMBER, transfer_id="t-came", filename="v-came.webm"))
+    assert {"t-late", "t-came"} <= set(service._voice_transcriptions)
+    service.monitor.message_history.append({"id": "v-2", "attachments": [
+        {"type": "voice", "filename": "v-came.webm"}]})
+
+    now[0] += vth.PARKED_MAX_AGE_SECONDS + 1
+    await handler.handle(MEMBER, _transcription(MEMBER, transfer_id="t-new", filename="v-new.webm"))
+
+    assert "t-late" not in service._voice_transcriptions
+    assert "t-came" in service._voice_transcriptions, "its record arrived: it is history, not parked"
+    assert "t-new" in service._voice_transcriptions
+
+
+@pytest.mark.asyncio
+async def test_a_group_transcription_naming_no_transfer_is_dropped_whatever_it_names_otherwise():
     service = _VoiceService()
 
     await VoiceTranscriptionHandler(service).handle(
-        MEMBER, _transcription(MEMBER, transfer_id="made-up", filename="voice_made_up.webm"))
+        MEMBER, _transcription(MEMBER, transfer_id=None, filename="voice_made_up.webm"))
 
     assert service.stored_nothing()
+
+
+def test_an_absent_key_names_no_voice_attachment():
+    """An absent transfer id or file name must not match every attachment that lacks one."""
+    names = VoiceTranscriptionHandler._names_voice
+    lacking = {"type": "voice", "filename": VOICE}
+
+    assert not names(lacking, None, "voice_other.webm")
+    assert not names({"type": "voice"}, "t", None)
+    assert not names({"type": "voice"}, None, None)
+    assert names(lacking, None, VOICE)
+    assert not names({"type": "image", "filename": VOICE}, None, VOICE)
 
 
 @pytest.mark.asyncio

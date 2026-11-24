@@ -1992,10 +1992,17 @@ Broadcasts transcription result to all participants in a voice message conversat
 - In a group (`group_id` present) the transcription is text put into the group, so it is a
   member's. The group must be held; the transport sender and the `transcriber_node_id` it
   names must both be on the receiver's `members` (any member holding the voice message may
-  transcribe it); and the group's history must hold a voice record with that `transfer_id`
-  or `filename`. A sender off the roster is answered `GROUP_ACCESS_DENIED` `not_a_member`;
-  a relayed copy naming a transcriber off the roster, an unheld group and an unknown voice
-  record are dropped with a WARNING. Nothing is stored, shown or relayed in any of these.
+  transcribe it); and it must name a `transfer_id`. A sender off the roster is answered
+  `GROUP_ACCESS_DENIED` `not_a_member`; a relayed copy naming a transcriber off the roster,
+  an unheld group and a transcription naming no `transfer_id` are dropped with a WARNING.
+  Nothing is stored, shown or relayed in any of these. The voice record need not be held
+  yet: the sender transcribes after the first `FILE_COMPLETE`, or a star relay forwards it,
+  while a member is still downloading the file. A member's transcription whose voice record
+  (matched by `transfer_id`, or by `filename` for the sender's own record) is not in the
+  group's history is parked: kept in the registry, relayed and announced as usual, and merged
+  into the view when the record arrives. At most 32 are parked per group (the oldest is
+  dropped for a new one) and one is dropped after 6 hours with no record; one whose record
+  has arrived is no longer parked. An absent `transfer_id` or `filename` matches no record.
 - Receiver checks for duplicate (via `transfer_id` in registry)
 - If duplicate: ignores message (transcription already stored)
 - If new: stores transcription data in registry
