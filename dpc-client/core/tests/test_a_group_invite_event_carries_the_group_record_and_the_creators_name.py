@@ -82,7 +82,11 @@ async def test_after_a_restart_the_creator_is_named_from_the_peer_cache(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_the_name_is_the_creators_not_the_senders(tmp_path):
+async def test_the_name_is_the_creators_and_another_nodes_invite_announces_nothing(tmp_path):
+    """Only the creator sends GROUP_CREATE, so for a group held here another
+    node's record is not applied and announces nothing (follow-up 10a); this
+    test used to apply exactly such a record to show the name was the creator's.
+    The creator's own later record still names the creator."""
     manager = GroupManager(dpc_home=tmp_path, node_id=SELF)
     service = _with_peer_name(manager, peer_metadata={}, cached={
         MEMBER: "Mike (linux)", OTHER: "someone else"})
@@ -90,12 +94,13 @@ async def test_the_name_is_the_creators_not_the_senders(tmp_path):
     await GroupCreateHandler(service).handle(MEMBER, _create(gid, 22))
     service.local_api.events.clear()
 
-    # A later record of the same group, relayed by another node, still names its creator.
     await GroupCreateHandler(service).handle(OTHER, _create(gid, 23))
+    assert not [p for name, p in service.local_api.events if name == "group_invite_received"]
+    assert manager.get_group(gid).version == 22
 
+    await GroupCreateHandler(service).handle(MEMBER, _create(gid, 23))
     invites = [p for name, p in service.local_api.events if name == "group_invite_received"]
-    assert invites, "the relayed record was not applied, so this test proves nothing"
-    assert all(p["creator_name"] == "Mike (linux)" for p in invites)
+    assert invites and all(p["creator_name"] == "Mike (linux)" for p in invites)
 
 
 @pytest.mark.asyncio

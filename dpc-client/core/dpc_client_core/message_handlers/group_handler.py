@@ -23,7 +23,7 @@ from ..conversation_monitor import (
     parse_moment,
     same_moment,
 )
-from .group_access import may_share_group, refuse_group_access
+from .group_access import may_share_group, off_the_roster, refuse_group_access
 from ..firewall import is_blocked_by
 
 
@@ -164,6 +164,21 @@ class GroupCreateHandler(MessageHandler):
                 "Refusing GROUP_CREATE from %s for group %s: it is in this node's "
                 "deleted-groups registry",
                 sender_node_id[:20], group_id,
+            )
+            return None
+
+        # Only the creator sends GROUP_CREATE (create_group_chat, add_group_member).
+        # For a group held here any other sender is ignored whole: apply_sync
+        # keeps only the roster from a non-creator, so `topic`, `agents` and the
+        # version would ride in from any connected peer, member or not. A group
+        # not held here goes on to apply_sync, which takes it only from the
+        # creator it names.
+        held = self.service.group_manager.get_group(group_id)
+        if held is not None and sender_node_id != held.created_by:
+            self.logger.warning(
+                "Ignoring GROUP_CREATE for %s from %s: this node holds the group, and only "
+                "its creator %s sends GROUP_CREATE",
+                group_id, sender_node_id[:20], held.created_by or "(none)",
             )
             return None
 
@@ -1105,6 +1120,12 @@ class GroupHistoryResponseHandler(MessageHandler):
             return None
 
         monitor = self.service._get_or_create_conversation_monitor(group_id)
+        known = set(getattr(monitor, "message_ids", None) or ())
+        history = self._withhold_records_off_the_roster(group_id, sender_node_id, history, known)
+        if not history:
+            if retry_votes is not None:
+                await retry_votes(group_id, rejected=[], request_id=request_id)
+            return None
 
         # v0.20.0: Use merge_history instead of import_history
         # This handles duplicates and saves to disk
@@ -1114,7 +1135,6 @@ class GroupHistoryResponseHandler(MessageHandler):
             # merge_history returns a count; which records it added is read off
             # the ids, with no await between the two reads, so a second answer
             # arriving a few ms later finds them present and adds nothing.
-            known = set(getattr(monitor, "message_ids", None) or ())
             added = monitor.merge_history(history)
             if added:
                 incoming = {m.get("id") for m in history if isinstance(m, dict)}
@@ -1144,6 +1164,33 @@ class GroupHistoryResponseHandler(MessageHandler):
 
         return None
 
+    def _withhold_records_off_the_roster(self, group_id: str, sender_node_id: str,
+                                         history: list, held_ids: set) -> list:
+        """The records of this answer that may be merged as new.
+
+        A record by an author off our CURRENT roster is not merged as new and
+        so wakes nobody; records already held, and records naming no author,
+        stay. Trade-off: with no removal time, a post made while a member looks
+        like one made after removal, so a former member's old post this node
+        never got is withheld too; the other way a stale member hands a removed
+        node's post to the creator. Full fix: card
+        A-FORMER-MEMBERS-OLD-POST-IS-WITHHELD-FROM-HISTORY-SYNC-WHILE-THE-ROSTER-KEEPS-NO-REMOVAL-TIME.
+        """
+        group = self.service.group_manager.get_group(group_id)
+        kept, withheld = [], []
+        for record in history:
+            author = record.get("sender_node_id") if isinstance(record, dict) else None
+            already_held = isinstance(record, dict) and record.get("id") in held_ids
+            (withheld if not already_held and off_the_roster(group, author) else kept).append(record)
+        if withheld:
+            self.logger.warning(
+                "Withheld %d record(s) of group %s from %s's history answer: author(s) %s not on "
+                "this node's current roster (a former member's post is not merged as new)",
+                len(withheld), group_id, sender_node_id[:20],
+                ", ".join(sorted({str(r.get("sender_node_id"))[:20] for r in withheld})),
+            )
+        return kept
+
     async def _wake_merged_mentions(self, group_id: str, merged: list) -> None:
         """Route the mentions in records this merge added, once, as live.
 
@@ -1168,6 +1215,13 @@ class GroupHistoryResponseHandler(MessageHandler):
             if blocked:
                 self.logger.info("Synced mention %s in group %s wakes nobody: by blocked node %s",
                                  str(message_id)[:8], group_id, blocked)
+                continue
+            # Merged as a member's; the roster may have moved during the awaits since.
+            outsider = off_the_roster(self.service.group_manager.get_group(group_id),
+                                      record.get("sender_node_id"))
+            if outsider:
+                self.logger.info("Synced mention %s in group %s wakes nobody: %s is not a member",
+                                 str(message_id)[:8], group_id, outsider[:20])
                 continue
             moment = parse_moment(record.get("timestamp"))
             # A timestamp ahead of our clock by no more than the clock skew
@@ -1317,6 +1371,19 @@ class GroupHistoryStatusHandler(MessageHandler):
             if not differing:
                 self.logger.debug("Group %s: histories agree (%d messages)", group_id, local_count)
                 return None
+            # Not asked for: the answer would be withheld anyway
+            # (GroupHistoryResponseHandler._withhold_records_off_the_roster), and
+            # asking would repeat at every status for as long as the two differ.
+            group = self.service.group_manager.get_group(group_id)
+            former = [a for a in differing if off_the_roster(group, a)]
+            if former:
+                differing = [a for a in differing if a not in former]
+                self.logger.info(
+                    "Group %s: not asking %s for %d author(s) off the current roster",
+                    group_id, sender_node_id[:20], len(former),
+                )
+                if not differing:
+                    return None
             self.logger.info(
                 "Requesting history sync for group %s: differs for %d author(s) since %s",
                 group_id, len(differing), window,

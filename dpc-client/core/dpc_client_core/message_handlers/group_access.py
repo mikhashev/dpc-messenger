@@ -41,6 +41,19 @@ def may_share_group(group_manager, group_id: Optional[str], sender_node_id: str)
     return sender_node_id in getattr(group, "members", ())
 
 
+def off_the_roster(group, *node_ids) -> Optional[str]:
+    """The first of `node_ids` that is not on `group`'s `members`, else None.
+
+    The receive side of the rule `posting_refusal` states for sending: what a
+    node puts into a group (a post, a file, a transcription, a record handed
+    over by history sync) is a member's, judged against our CURRENT roster.
+    An empty id names nobody and is skipped: a record that names no author
+    cannot be judged by the roster, and is left to the checks that judge it.
+    """
+    members = getattr(group, "members", None) or ()
+    return next((n for n in node_ids if n and n not in members), None)
+
+
 def posting_refusal(group, node_id: str, refused_by=()) -> Optional[str]:
     """Why `node_id` may not post into `group`, or None when it may.
 

@@ -1989,6 +1989,13 @@ Broadcasts transcription result to all participants in a voice message conversat
 **Response:** None (broadcast message, no acknowledgment required)
 
 **Behavior:**
+- In a group (`group_id` present) the transcription is text put into the group, so it is a
+  member's. The group must be held; the transport sender and the `transcriber_node_id` it
+  names must both be on the receiver's `members` (any member holding the voice message may
+  transcribe it); and the group's history must hold a voice record with that `transfer_id`
+  or `filename`. A sender off the roster is answered `GROUP_ACCESS_DENIED` `not_a_member`;
+  a relayed copy naming a transcriber off the roster, an unheld group and an unknown voice
+  record are dropped with a WARNING. Nothing is stored, shown or relayed in any of these.
 - Receiver checks for duplicate (via `transfer_id` in registry)
 - If duplicate: ignores message (transcription already stored)
 - If new: stores transcription data in registry
@@ -2920,12 +2927,17 @@ the on-connect exchange does not send `GROUP_CREATE`.
    Nothing is created, announced or stored, and no `GROUP_HISTORY_STATUS` is sent. The
    registry only grows, so a deleted id stays refused; a group is never re-created under
    its old id.
-3. The record is accepted by the procedure above. A group that was not held is created,
+3. **Held group, not its creator.** For a group the receiver holds, a sender other than
+   the pinned `created_by` is ignored whole, with a WARNING: nothing is applied, announced
+   or stored, and no `GROUP_HISTORY_STATUS` is sent. The procedure keeps only `members`
+   from a non-creator, so without this `topic`, `agents`, `agent_names` and the `version`
+   would move at a higher version from any connected node, member or not.
+4. The record is accepted by the procedure above. A group that was not held is created,
    stored and listed in the UI at once (`group_invite_received`); the UI event announces
    the group, it does not wait for an answer.
-4. When the record was kept or refused instead, nothing is announced.
-5. In both cases the receiver then sends a `GROUP_HISTORY_STATUS` for the group to the
-   sender, provided that after step 3 this node and the sender are both on the roster.
+5. When the record was kept or refused instead, nothing is announced.
+6. In both cases the receiver then sends a `GROUP_HISTORY_STATUS` for the group to the
+   sender, provided that after step 4 this node and the sender are both on the roster.
    That is what lets a re-added member that kept its history compare and merge it.
 
 **Reply:** none, apart from that `GROUP_HISTORY_STATUS`.
@@ -2938,10 +2950,10 @@ an older version that let a non-creator add members could still send one; it is 
 **Not yet:** for a group the receiver does not hold, nothing checks that the receiver is
 among the record's `members`, and a record with an empty `created_by` is accepted from any
 connected, unblocked node (it creates a group with no creator, whose roster nobody can
-change). For a group the receiver holds, the pin and the roster
-rule of the procedure apply, but the membership gate `GROUP_SYNC` has does not: a node that
-is not on the roster can still move `topic`, `name`, `agents` and `agent_names` with a
-higher `version`. Invitation and joining are still one act
+change). For a group the receiver holds, only the creator's `GROUP_CREATE` is applied
+(step 3); a member's `GROUP_SYNC` still moves `topic`, `name`, `agents` and `agent_names`
+with a higher `version` (ADR-038 part 2, see *The group record*). Invitation and joining
+are still one act
 (GROUP-CREATE-FABRICATES-GROUP-ROSTER-AND-HISTORY).
 
 **Source:** `message_handlers/group_handler.py:104-166`; sender `service.py:6784-6787`,
@@ -3246,9 +3258,10 @@ A message in a group: a human's, or an agent's.
 **Not yet:** the roster the member test reads is unsigned (ADR-037 P1, membership as
 signed state, which ADR-038 answers and has not built), so a member whose copy is stale
 still stores and relays a removed node's post until the creator's roster reaches it. The
-history exchange (`GROUP_HISTORY_RESPONSE`) merges records by authors who are no longer
-members, because a former member's posts from before its removal are history; with no
-removal time on the roster it cannot tell those from a post made after.
+history exchange (`GROUP_HISTORY_RESPONSE`, step 5) does not merge as new a record whose
+author is off the receiver's roster: with no removal time on the roster it cannot tell a
+former member's post from before its removal from one made after, so both are withheld,
+and records already held are kept.
 
 **Source:** `message_handlers/group_handler.py:169-437`; senders `service.py:6914-6996`
 (human), `7323-7476` (agent; `tool_calls` and `speed_summary` are removed from the copy
@@ -3331,8 +3344,11 @@ member by a node whose group history was just repaired from a split store
    as the window; if not, nothing is compared and the exchange ends here, DEBUG logged.
 5. **Differences.** With a digest on both sides, the authors whose `{count, digest}` differ
    (an author present on one side only differs) are collected. None: the histories agree
-   and the exchange ends. Some: a `GROUP_HISTORY_REQUEST` naming those authors, with
-   `since` the window when there is one. With a digest missing on either side, the
+   and the exchange ends. Authors off the receiver's roster are left out, INFO logged,
+   since their records would be withheld on arrival (`GROUP_HISTORY_RESPONSE` step 5) and
+   the request would repeat at every status; none left ends the exchange. Some: a
+   `GROUP_HISTORY_REQUEST` naming those authors, with `since` the window when there is
+   one. With a digest missing on either side, the
    `history_hash` values are compared instead and a difference sends a request with no
    `authors`.
 6. A request to the same peer for the same group over the same window that covers the same
@@ -3453,7 +3469,14 @@ The records a `GROUP_HISTORY_REQUEST` asked for.
 3. A deferred knowledge-commit vote waiting on records of this group is re-tried after every
    answer that passes step 2, including an empty one.
 4. An empty `history` stops here.
-5. **Merge** (`merge_history`, `conversation_monitor.py:4072-4160`), record by record:
+5. **Authors off the roster.** A record whose `sender_node_id` is not on the receiver's
+   current `members`, and whose `id` the receiver does not already hold, is withheld: not
+   merged, not shown, never woken, one WARNING per answer naming the authors. Records
+   already held stay; a record naming no author is left to the merge. This also withholds
+   a former member's legitimate post from before its removal that the receiver never got,
+   because the roster records no removal time (ADR-037 P1). If nothing is left, the
+   exchange stops here.
+6. **Merge** (`merge_history`, `conversation_monitor.py:4072-4160`), record by record:
    - A record with all three of `content_hash`, `signature`, `signer_node_id` and a known
      `preimage_version` is checked: the hash is recomputed over the **receiver's own** name
      for the group, never one read from the record; `signer_node_id` must equal
@@ -3468,9 +3491,10 @@ The records a `GROUP_HISTORY_REQUEST` asked for.
    - A record that matches a note the receiver wrote about the same file replaces the note.
    - Added records are re-chained for this node and the history is put back into time
      order.
-6. The UI is told (`group_history_synced`).
-7. Each added record that names an agent is routed as a live mention would be (§4.3), once,
-   and only within one hour of the record's own timestamp.
+7. The UI is told (`group_history_synced`).
+8. Each added record that names an agent is routed as a live mention would be (§4.3), once,
+   and only within one hour of the record's own timestamp, and only while its author is on
+   the roster.
 
 **Reply:** none.
 

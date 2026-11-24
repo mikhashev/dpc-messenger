@@ -2,6 +2,7 @@
 
 from typing import Dict, Any, Optional
 from . import MessageHandler
+from .group_access import off_the_roster, refuse_group_access
 
 
 class VoiceTranscriptionHandler(MessageHandler):
@@ -35,6 +36,9 @@ class VoiceTranscriptionHandler(MessageHandler):
         timestamp = payload.get("timestamp")
         remote_provider_node_id = payload.get("remote_provider_node_id")  # Optional
         group_id = payload.get("group_id")  # Present for group voice messages (v0.21.0+)
+
+        if group_id and not await self._may_annotate_group_voice(sender_node_id, payload):
+            return None
 
         # 1.5. Validate transcription is not empty (v0.13.3+ - prevent empty/malicious transcriptions)
         transcription_text = transcription_text.strip()
@@ -90,14 +94,7 @@ class VoiceTranscriptionHandler(MessageHandler):
             for message in conversation_monitor.message_history:
                 attachments = message.get("attachments", [])
                 for attachment in attachments:
-                    # The sender's own group record carries no transfer id: one
-                    # message becomes one transfer per recipient. The file name
-                    # is minted once and travels with the offer.
-                    name = transcription_data.get("filename")
-                    if attachment.get("type") == "voice" and (
-                        attachment.get("transfer_id") == transfer_id
-                        or (name and attachment.get("filename") == name)
-                    ):
+                    if self._names_voice(attachment, transfer_id, transcription_data.get("filename")):
                         # Add transcription to attachment
                         attachment["transcription"] = transcription_data
                         self.logger.debug(f"Attached transcription to voice message in conversation history")
@@ -132,3 +129,65 @@ class VoiceTranscriptionHandler(MessageHandler):
 
         self.logger.debug(f"Processed VOICE_TRANSCRIPTION for {transfer_id}")
         return None
+
+    @staticmethod
+    def _names_voice(attachment: Dict[str, Any], transfer_id, filename) -> bool:
+        """Whether this attachment is the voice message a transcription names.
+
+        The sender's own group record carries no transfer id: one message
+        becomes one transfer per recipient. The file name is minted once and
+        travels with the offer. An absent key matches nothing.
+        """
+        if not isinstance(attachment, dict) or attachment.get("type") != "voice":
+            return False
+        return bool((transfer_id and attachment.get("transfer_id") == transfer_id)
+                    or (filename and attachment.get("filename") == filename))
+
+    async def _may_annotate_group_voice(self, sender_node_id: str, payload: Dict[str, Any]) -> bool:
+        """Whether a group transcription may be stored, shown and relayed.
+
+        A transcription is text put into a group, so it is a member's
+        (`group_access.off_the_roster`): the node handing it over and the
+        transcriber it names must both be on our roster. Any member that holds
+        the voice message may transcribe it (specs/dptp_v1.md 3.12), and only a
+        voice message this group's history holds can be annotated.
+        """
+        group_id = payload.get("group_id")
+        transfer_id = payload.get("transfer_id")
+        group = self.service.group_manager.get_group(group_id)
+        if group is None:
+            self.logger.warning(
+                "Dropped VOICE_TRANSCRIPTION %s from %s: this node does not hold group %s",
+                str(transfer_id)[:12], sender_node_id[:20], str(group_id)[:20],
+            )
+            return False
+        transcriber = payload.get("transcriber_node_id") or sender_node_id
+        outsider = off_the_roster(group, sender_node_id, transcriber)
+        if outsider == sender_node_id:
+            await refuse_group_access(
+                self.service.p2p_manager, sender_node_id, group_id, "VOICE_TRANSCRIPTION", self.logger,
+            )
+            return False
+        if outsider:
+            self.logger.warning(
+                "Dropped VOICE_TRANSCRIPTION %s in group %s relayed by %s: its transcriber %s is "
+                "not a member", str(transfer_id)[:12], group_id, sender_node_id[:20], outsider[:20],
+            )
+            return False
+        monitor = self.service.conversation_monitors.get(group_id)
+        if monitor is None and hasattr(self.service, "_get_or_create_conversation_monitor"):
+            monitor = self.service._get_or_create_conversation_monitor(group_id)
+        filename = payload.get("filename")
+        held = any(
+            self._names_voice(attachment, transfer_id, filename)
+            for message in (getattr(monitor, "message_history", None) or ())
+            for attachment in (message.get("attachments") or ())
+        )
+        if not held:
+            self.logger.warning(
+                "Dropped VOICE_TRANSCRIPTION %s in group %s from %s: this node holds no voice "
+                "message with that transfer id or file name (%s)",
+                str(transfer_id)[:12], group_id, sender_node_id[:20], filename,
+            )
+            return False
+        return True

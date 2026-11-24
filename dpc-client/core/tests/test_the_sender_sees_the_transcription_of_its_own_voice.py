@@ -47,6 +47,9 @@ def _handler(monitor):
         _voice_transcriptions={},
         local_api=SimpleNamespace(broadcast_event=_broadcast),
         p2p_manager=SimpleNamespace(node_id="dpc-node-" + "a" * 32),
+        # The transcriber is a member: a group transcription is a member's.
+        group_manager=SimpleNamespace(get_group=lambda gid: SimpleNamespace(
+            group_id=GROUP, members=["dpc-node-" + "a" * 32, PEER]) if gid == GROUP else None),
         # The relay to the rest of the group is a different concern; this file
         # is about the join between a transcription and the message it belongs to.
         _processed_message_ids={"vt:transfer-for-the-other-node"},

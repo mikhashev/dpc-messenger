@@ -120,7 +120,7 @@ class FileOfferHandler(MessageHandler):
         # one word, `not_a_member`, for both cases (group_access.py), here as a
         # FILE_CANCEL, so the sender frees its upload instead of waiting out an
         # offer nobody answers (found in review by Ark, 2026-11-20).
-        from .group_access import REASON as NOT_A_MEMBER_REASON, may_share_group
+        from .group_access import REASON as NOT_A_MEMBER_REASON, may_share_group, off_the_roster
         if group_id and not may_share_group(self.service.group_manager, group_id, sender_node_id):
             self.logger.warning(
                 f"Refused offer {transfer_id} from {sender_node_id} for group {group_id}: "
@@ -161,10 +161,9 @@ class FileOfferHandler(MessageHandler):
         # already holds, so a former member's old file still comes.
         if group_id and open_request is None:
             described = payload.get("file_description")
-            authors = {author_node_id,
-                       described.get("sender_node_id") if isinstance(described, dict) else None}
-            members = self.service.group_manager.get_group(group_id).members
-            outsider = next((a for a in authors if a and a not in members), None)
+            outsider = off_the_roster(
+                self.service.group_manager.get_group(group_id), author_node_id,
+                described.get("sender_node_id") if isinstance(described, dict) else None)
             if outsider:
                 self.logger.warning(
                     f"Refused offer {transfer_id} from {sender_node_id} for group {group_id}: "
