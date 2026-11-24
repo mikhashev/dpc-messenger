@@ -816,6 +816,16 @@ class LocalWhisperProvider(AIProvider):
             return self._detected_device
         return None if self.device == "auto" else self.device
 
+    def _loads_on_the_cpu(self, device: Optional[str]) -> bool:
+        """Whether a load about to run is known to run on the CPU, without detecting anything: the
+        route's device when it is given, else the twin or an alias configured `cpu`. An `auto` alias with
+        no route is not known (detecting it may import torch) and counts once the model is up."""
+        if self.pipeline == "mlx":
+            return False
+        if device is not None:
+            return device == "cpu"
+        return self.is_cpu_twin or self.device == "cpu"
+
     def _route_device(self, remember: bool = True) -> str:
         """The device a call would run on now: the loaded model's, else the configured one; `auto`
         is detected once (it may import torch: call from a thread when that matters).
@@ -1932,30 +1942,41 @@ class LocalWhisperProvider(AIProvider):
         the route's, for a load under the lease."""
         # The lock is taken even when the model is loaded, so the use is counted
         # atomically with the load and an unload in progress is waited for.
-        async with self._load_lock:
-            self._refuse_if_retired()
-            loaded_here = not self.model_loaded
-            if loaded_here:
-                _, error, cancelled = await self._load_under_the_lease(lease, device)
-                if error is not None:
-                    if self.is_cpu_twin and not isinstance(error, ModelNotCachedError):
-                        raise TwinDidNotLoad(str(error) or type(error).__name__) from error
-                    raise error
-                if cancelled:
-                    self._settle_finished_load()
-                    raise asyncio.CancelledError
-            # A reload may have replaced this object while it waited or loaded: count on
-            # the replacement, which holds the shared model state.
-            counted = self._current_owner()
-            if counted is not self:
-                self._copy_state_to(counted)
-            counted._active_transcriptions += 1
-            counted._drained.clear()
-            counted._cancel_idle_task()
         run = object()
         try:
+            async with self._load_lock:
+                self._refuse_if_retired()
+                loaded_here = not self.model_loaded
+                if loaded_here:
+                    if self._loads_on_the_cpu(device):
+                        # L12 point 3: a load on the CPU is CPU contention too, counted from before it
+                        # starts (Zcode #85, minor), under the lock: a call that waits for it is not.
+                        _CPU_RUNS[id(run)] = self.alias
+                    _, error, cancelled = await self._load_under_the_lease(lease, device)
+                    if error is not None:
+                        if self.is_cpu_twin and not isinstance(error, ModelNotCachedError):
+                            raise TwinDidNotLoad(str(error) or type(error).__name__) from error
+                        raise error
+                    if cancelled:
+                        self._settle_finished_load()
+                        raise asyncio.CancelledError
+                # A reload may have replaced this object while it waited or loaded: count on
+                # the replacement, which holds the shared model state.
+                counted = self._current_owner()
+                if counted is not self:
+                    self._copy_state_to(counted)
+                counted._active_transcriptions += 1
+                counted._drained.clear()
+                counted._cancel_idle_task()
+        except BaseException:
+            _CPU_RUNS.pop(id(run), None)  # a load that failed, was cancelled or was refused counts no more
+            raise
+        try:
+            # The device the model ended up on decides, whatever the load was expected to run on.
             if counted._device_in_use() == "cpu":
                 _CPU_RUNS[id(run)] = counted.alias  # L12 point 3: CPU contention while it runs
+            else:
+                _CPU_RUNS.pop(id(run), None)
             overrides = {}
             if language is not None:
                 overrides["language"] = language

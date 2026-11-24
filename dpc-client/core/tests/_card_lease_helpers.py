@@ -16,6 +16,7 @@ import pytest
 from dpc_client_core.managers import card_lease
 from dpc_client_core.managers import llama_server_supervisor as base_mod
 from dpc_client_core.managers.card_lease import CardLease
+from dpc_client_core.music.yue2 import Yue2Server
 
 # Every await in these tests is bounded by this (ADR-052, Confirmation).
 BOUND = 5
@@ -57,7 +58,7 @@ def whisper(alias: str = "turbo", **kw: Any) -> FakeClient:
 
 def music(key: str = "yue2", **kw: Any) -> FakeClient:
     return FakeClient(f"music:{key}", kind="music", engine=f"{key}.cpp", display=f"{key}.cpp",
-                      yield_cost="engine", vram_mib=5600, **kw)
+                      yield_cost="engine", vram_mib=Yue2Server.VRAM_ESTIMATE_MIB, **kw)
 
 
 def embedder(**kw: Any) -> FakeClient:

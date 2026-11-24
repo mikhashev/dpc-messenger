@@ -22,6 +22,8 @@ from dpc_client_core.managers import card_lease
 from dpc_client_core.managers import llama_server_supervisor as base_mod
 from dpc_client_core.managers.card_lease import LeaseWaitedTooLong
 
+from dpc_client_core.music.yue2 import Yue2Server
+
 from tests._acestep_helpers import wait_until
 from tests._card_lease_helpers import BOUND, fast, holding, until, waiting  # noqa: F401
 from tests._whisper_lease_helpers import gpu_whisper, lease_of
@@ -31,6 +33,7 @@ pytestmark = pytest.mark.usefixtures("fast")
 
 DONE = ("review", "failed", "cancelled")
 WHISPER = "Whisper (whisper-large-v3-turbo)"
+YUE2_PEAK = Yue2Server.VRAM_ESTIMATE_MIB
 
 
 def reading(monkeypatch, free, total=32623):
@@ -114,9 +117,10 @@ async def test_when_it_fits_the_dictation_is_granted_beside_the_busy_job(home, m
         rows = {r["alias"]: r for r in base_mod.card_holders()}
         assert set(rows) == {"music:yue2", "whisper:turbo"}
         assert rows["whisper:turbo"]["beside"] == "music:yue2" and rows["music:yue2"]["busy"] is True
-        assert rows["music:yue2"]["vram_mib"] == 5600 and rows["music:yue2"]["eta_s"] is None
-        # need = 4447 (turbo, unknown length: the worst band) + 5600 (yue2) + 2048 (no engine on the card)
-        assert any(m.startswith(f"card: {WHISPER} loaded beside yue2.cpp (fits: 12095 of 32623 MiB declared, "
+        assert rows["music:yue2"]["vram_mib"] == YUE2_PEAK and rows["music:yue2"]["eta_s"] is None
+        # need = 4447 (turbo, unknown length: the worst band) + yue2's peak + 2048 (no engine on the card)
+        need = 4447 + YUE2_PEAK + 2048
+        assert any(m.startswith(f"card: {WHISPER} loaded beside yue2.cpp (fits: {need} of 32623 MiB declared, "
                                 "30000 MiB free") for m in messages(caplog))
         assert rig.yue2.alive() and rig.store.get_job(job_id)["state"] == "running", "the job is untouched"
         rig.store.cancel_job(job_id)

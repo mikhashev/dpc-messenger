@@ -21,6 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from .. import cpu_work as _cpu_work
 from .index_keys import l5_key, l6_key
 
 
@@ -1688,7 +1689,9 @@ class KnowledgeGraph:
             if not text or len(text) < 20:
                 continue
             try:
-                entities = model.predict_entities(text[:GLINER_MAX_TEXT_LEN], entity_types, threshold=GLINER_THRESHOLD)
+                with _cpu_work.computing_on_the_cpu("GLiNER on the CPU", on_cpu=_GLINER_DEVICE == "cpu"):
+                    entities = model.predict_entities(text[:GLINER_MAX_TEXT_LEN], entity_types,
+                                                      threshold=GLINER_THRESHOLD)
             except Exception as e:
                 log.debug("GLiNER extraction failed for %s: %s", source_id, e)
                 continue

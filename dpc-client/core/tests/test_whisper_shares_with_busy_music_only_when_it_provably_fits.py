@@ -19,6 +19,7 @@ from dpc_client_core.managers import card_lease
 from dpc_client_core.managers import llama_server_supervisor as base_mod
 from dpc_client_core.managers.card_lease import LeaseRefusedForPeer, LeaseSkipped, LeaseWaitedTooLong
 from dpc_client_core.managers.llama_server_supervisor import LlamaServerSupervisor, serving_a_peer
+from dpc_client_core.music.yue2 import Yue2Server
 
 from tests._card_lease_helpers import (  # noqa: F401
     BOUND, embedder, fast, hold_open, holding, music, nothing_left, until, waiting, whisper,
@@ -28,6 +29,7 @@ from tests.test_strata_supervisor import _FakeProc
 pytestmark = pytest.mark.usefixtures("fast")
 
 TOTAL = 32623  # this machine's card
+YUE2_PEAK = Yue2Server.VRAM_ESTIMATE_MIB
 PEAK = 4447  # Whisper turbo's worst band: 1547 weights + 2900 (derived, not measured)
 
 
@@ -78,8 +80,8 @@ async def test_fits_is_granted_beside_at_once_with_both_rows_and_one_line(monkey
             assert rows()["music:yue2"]["beside"] is None
             assert waiting() == []
     lines = [r.getMessage() for r in caplog.records if "loaded beside" in r.getMessage()]
-    # need = 4447 + 5600 (yue2) + 2048 (no engine on the card: the desktop reserve)
-    assert lines == ["card: Whisper (turbo) loaded beside yue2.cpp (fits: 12095 of 32623 MiB declared, "
+    # need = 4447 + yue2's peak + 2048 (no engine on the card: the desktop reserve)
+    assert lines == [f"card: Whisper (turbo) loaded beside yue2.cpp (fits: {4447 + YUE2_PEAK + 2048} of 32623 MiB declared, "
                      "30000 MiB free; reserve 2048 MiB, the 2048 MiB desktop reserve: no local engine "
                      "on the card)"]
     assert m.yields == [], "the busy music job is never asked"
@@ -93,14 +95,16 @@ async def test_fits_is_granted_beside_at_once_with_both_rows_and_one_line(monkey
 
 @pytest.mark.asyncio
 async def test_a_declared_sum_over_total_waits_and_a_live_reading_never_turns_it_into_yes(monkeypatch, caplog):
-    card(monkeypatch, free=32000, total=12000)  # free says room; the declared 12095 > 12000 says no
+    # free says room; the declared 4447 + yue2's peak + 2048 > 12000 says no
+    card(monkeypatch, free=32000, total=12000)
+    assert PEAK + YUE2_PEAK + 2048 > 12000
     m = music()
     over, task = await busy(m)
     w = sharing_whisper()
     with caplog.at_level(logging.INFO, logger=card_lease.__name__):
         with pytest.raises(LeaseWaitedTooLong):
             await asyncio.wait_for(w.lease.acquire("dictation", wait_s=0.1), BOUND)
-    assert any("L11 says does_not_fit" in r.getMessage() and "12095 MiB declared against the card's 12000"
+    assert any("L11 says does_not_fit" in r.getMessage() and f"{PEAK + YUE2_PEAK + 2048} MiB declared against the card's 12000"
                in r.getMessage() for r in caplog.records)
     assert not w.lease.granted
     await done(over, task)
@@ -109,14 +113,14 @@ async def test_a_declared_sum_over_total_waits_and_a_live_reading_never_turns_it
 
 @pytest.mark.asyncio
 async def test_the_live_veto_counts_the_music_peak_whole(monkeypatch, caplog):
-    card(monkeypatch, free=PEAK + 5600 - 1)  # one MiB short of its own peak and the job's whole peak
+    card(monkeypatch, free=PEAK + YUE2_PEAK - 1)  # one MiB short of its own peak and the job's whole peak
     m = music()
     over, task = await busy(m)
     w = sharing_whisper()
     with caplog.at_level(logging.INFO, logger=card_lease.__name__):
         with pytest.raises(LeaseWaitedTooLong):
             await asyncio.wait_for(w.lease.acquire("dictation", wait_s=0.1), BOUND)
-    assert any("10046 MiB free, 10047 MiB needed now" in r.getMessage() for r in caplog.records)
+    assert any(f"{PEAK + YUE2_PEAK - 1} MiB free, {PEAK + YUE2_PEAK} MiB needed now" in r.getMessage() for r in caplog.records)
     await done(over, task)
     await nothing_left()
 
@@ -245,7 +249,7 @@ async def test_a_larger_band_on_a_grant_made_beside_is_fitted_again(monkeypatch)
         pass
     async with w.lease.use("a 90 s one", wait_s=BOUND, vram_mib=PEAK):
         assert w.lease._beside_peak == PEAK
-    reading["free"] = 9000  # 4447 + 5600 > 9000 now
+    reading["free"] = PEAK + YUE2_PEAK - 1  # one MiB short of 4447 + yue2's peak now
     w.lease._beside_peak = 3147
     use = asyncio.create_task(hold_open(w.lease, "another 90 s one", asyncio.Event(), vram_mib=PEAK))
     await until(lambda: waiting() == ["whisper:turbo"])

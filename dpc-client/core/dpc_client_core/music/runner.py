@@ -912,7 +912,9 @@ class MusicJobRunner:
         identity = await asyncio.to_thread(lambda: engine.identity(backbone=backbone,
                                                                    adapters=params.get("adapters") or []))
         slug = slug_of(params.get("style") or "")
-        # About 3.5x real time on the trial card: a 360 s cap must not hit the default limit.
+        # A deliberately generous safety net, not an estimate: six seconds per audio second plus five
+        # minutes, far above what the trial card measured, so it only ever catches a stuck engine. It is
+        # independent of the ETA the queue shows (`job_schemas.yue2_wall_s`); do not tighten it to that.
         timeout_s = max(self.engine_job_timeout_s, float(params["duration_s"]) * 6 + 300)
         for index in range(variants):
             variant = index + 1

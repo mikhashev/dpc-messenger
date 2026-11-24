@@ -90,6 +90,18 @@ class MusicEngines:
                 return e
         return None
 
+    def refuse_while_switching(self, key: str) -> None:
+        """Refuse (`engine_busy`) a start of `key` by hand while another music engine runs a job or is
+        starting, or a switch holds the lock. Stops nothing: a start that asks for the card after this
+        check lets the card lease yield an idle other engine, so a refusal leaves everything as it was."""
+        engine = self.get(key)
+        other = self.busy_other(key)
+        if self._the_lock().locked() or other is not None:
+            who = other.DISPLAY if other is not None else "another music engine start"
+            raise MusicEngineError(
+                "engine_busy", f"{who} holds the card or is switching engines; only one music engine runs at "
+                               f"a time, so {engine.DISPLAY} cannot start now")
+
     def _the_lock(self) -> asyncio.Lock:
         if self._lock is None:
             self._lock = asyncio.Lock()
@@ -102,14 +114,7 @@ class MusicEngines:
         lock while the caller starts it (see the module docstring). Yields the supervisor."""
         engine = self.get(key)
         if not wait:
-            # A start by hand never queues behind the runner's switch (which may be waiting
-            # for a job on the other engine): it is refused at once.
-            other = self.busy_other(key)
-            if self._the_lock().locked() or other is not None:
-                who = other.DISPLAY if other is not None else "another music engine start"
-                raise MusicEngineError(
-                    "engine_busy", f"{who} holds the card or is switching engines; only one music engine runs at "
-                                   f"a time, so {engine.DISPLAY} cannot start now")
+            self.refuse_while_switching(key)
         async with self._the_lock():
             told = None
             while True:

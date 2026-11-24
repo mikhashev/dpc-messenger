@@ -19,10 +19,13 @@ from dpc_client_core.managers.llama_server_supervisor import LlamaServerSupervis
 from dpc_client_core.managers.strata_supervisor import StrataSupervisor
 from dpc_client_core.providers.whisper_provider import whisper_vram_mib
 
+from dpc_client_core.music.yue2 import Yue2Server
+
 from tests._card_lease_helpers import music, whisper
 from tests.test_strata_supervisor import _FakeProc
 
 TOTAL = 32623
+YUE2_PEAK = Yue2Server.VRAM_ESTIMATE_MIB
 READING = {"free": 30000, "total": TOTAL, "reserve": 2048, "reserve_source": "the desktop reserve"}
 
 
@@ -37,14 +40,14 @@ def test_whisper_alone_needs_6495_mib_in_mib_not_bytes():
 
 
 def test_three_residents_are_all_summed_and_the_yield_list_would_have_said_fits():
-    residents = [("llama-server 'qwen27'", 20000, False), ("yue2.cpp", 5600, True),
+    residents = [("llama-server 'qwen27'", 20000, False), ("yue2.cpp", YUE2_PEAK, True),
                  ("Whisper (small)", 4447, True)]
     fit = l11_arithmetic(4447, residents, reserve_mib=2048, free_mib=31000, total_mib=TOTAL)
-    assert fit["need"] == 4447 + 20000 + 5600 + 4447 + 2048 == 36542
+    assert fit["need"] == 4447 + 20000 + YUE2_PEAK + 4447 + 2048
     assert fit["outcome"] == "does_not_fit"
-    in_the_way_only = 4447 + 5600 + 2048
+    in_the_way_only = 4447 + YUE2_PEAK + 2048
     assert in_the_way_only <= TOTAL, "a sum of the yield list alone would have said fits"
-    assert fit["growth_left"] == 5600 + 4447, "a supervisor allocates at its start and does not grow"
+    assert fit["growth_left"] == YUE2_PEAK + 4447, "a supervisor allocates at its start and does not grow"
 
 
 def _on_the_card(holder, state="claimed"):
@@ -103,15 +106,16 @@ def test_the_reserve_is_the_resident_engines_own_and_never_a_sum(tmp_path):
 
 @pytest.mark.parametrize("free, total", [(None, TOTAL), (30000, None), (None, None)])
 def test_no_reading_is_unknown_never_fits(free, total):
-    fit = l11_arithmetic(4447, [("yue2.cpp", 5600, True)], reserve_mib=2048, free_mib=free, total_mib=total)
+    fit = l11_arithmetic(4447, [("yue2.cpp", YUE2_PEAK, True)], reserve_mib=2048, free_mib=free, total_mib=total)
     assert fit["outcome"] == "unknown"
 
 
 def test_a_need_above_a_known_total_does_not_fit_even_with_free_unread():
     """Zcode #88-6: the declared check needs only the total; an unread `free` cannot rescue a `need`
     the card is too small for, so the answer is `does_not_fit`, not `unknown`."""
-    fit = l11_arithmetic(4447, [("yue2.cpp", 5600, True)], reserve_mib=2048, free_mib=None, total_mib=8192)
-    assert fit["need"] == 4447 + 5600 + 2048 == 12095
-    assert fit["outcome"] == "does_not_fit" and fit["why"] == "12095 MiB declared against the card's 8192 MiB"
-    unread_total = l11_arithmetic(4447, [("yue2.cpp", 5600, True)], reserve_mib=2048, free_mib=None, total_mib=None)
+    fit = l11_arithmetic(4447, [("yue2.cpp", YUE2_PEAK, True)], reserve_mib=2048, free_mib=None, total_mib=8192)
+    need = 4447 + YUE2_PEAK + 2048
+    assert fit["need"] == need
+    assert fit["outcome"] == "does_not_fit" and fit["why"] == f"{need} MiB declared against the card's 8192 MiB"
+    unread_total = l11_arithmetic(4447, [("yue2.cpp", YUE2_PEAK, True)], reserve_mib=2048, free_mib=None, total_mib=None)
     assert unread_total["outcome"] == "unknown", "without the total nothing is decided"

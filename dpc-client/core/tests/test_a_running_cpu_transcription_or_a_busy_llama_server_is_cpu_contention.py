@@ -1,13 +1,16 @@
-"""ADR-052 L12 point 3, Mike's decision of 2026-11-24 (Q2; Ark #58-3, #61-2): CPU contention is
-anything that computes on this machine's CPU now, not only a busy Strata.
+"""ADR-052 L12 point 3, Mike's decisions of 2026-11-24 (Q2; Ark #58-3, #61-2; narrowed the same day,
+Zcode's review of follow-up 8, point 2): CPU contention is the small work that computes on this
+machine's CPU now, not only a busy Strata.
 
 - A resident llama-server busy by its own test (`_busy_for_the_card`: a call in flight, a turn
   standing on it, a child starting) counts, as a busy Strata does; an idle resident one does not.
-- A llama-server kept off the card (`--device none`) holds no claim; it counts while a call is in
-  flight on it.
+- A llama-server kept off the card (`--device none`) is NOT counted, a call in flight or not: it is
+  heavy, and nobody would run a transcription beside it (follow-up 9b, Mike's call).
 - A Whisper transcription already running on the CPU (a CPU twin's, or any local Whisper whose model
-  runs on the CPU) counts; a twin that is loaded and idle does not.
+  runs on the CPU) counts, its model load included; a twin that is loaded and idle does not.
+- The embedding model and GLiNER count while they compute on the CPU (the next test file).
 - The INFO line names each contention it counted, and at a factor of 1 still says "no penalty".
+- The factor is applied once, whatever the number of contenders.
 
 Real supervisors faked at their seams (`test_one_local_engine_holds_the_card.py`), a real Whisper
 provider on a fake GPU and its real twin with a faked model.
@@ -18,6 +21,7 @@ import logging
 
 import pytest
 
+from dpc_client_core.managers import card_lease
 from dpc_client_core.managers import llama_server_supervisor as base_mod
 from dpc_client_core.providers import whisper_provider
 from dpc_client_core.providers.whisper_provider import transcribe_with_route
@@ -82,7 +86,7 @@ async def test_an_idle_resident_llama_server_is_no_contention(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_llama_server_off_the_card_counts_while_a_call_is_in_flight(tmp_path, monkeypatch):
+async def test_a_llama_server_off_the_card_is_no_contention_even_with_a_call_in_flight(tmp_path, monkeypatch):
     host_ram(monkeypatch, 64_000)
     l12_settings(monkeypatch, cpu_contention_factor=3.0)
     strata, _events = await running_strata(tmp_path)  # in the card's way, idle: no contention itself
@@ -91,16 +95,14 @@ async def test_a_llama_server_off_the_card_counts_while_a_call_is_in_flight(tmp_
     assert not off_card.on_the_card() and off_card._proc is not None
     p = gpu_whisper(monkeypatch)
     cpu_twin(monkeypatch, p)
-    result = await asyncio.wait_for(transcribe_with_route(p, "f", **ask(p, 30.0)), BOUND)
-    assert result["device"] == "cpu" and p.last_route["contention"] == []
     off_card._in_flight = 1
     try:
         result = await asyncio.wait_for(transcribe_with_route(p, "g", **ask(p, 30.0)), BOUND)
     finally:
         off_card._in_flight = 0
     assert result["device"] == "cpu"
-    assert p.last_route["contention"] == ["a busy llama-server 'cpu-qwen'"]
-    assert p.last_route["factor"] == 3.0
+    assert p.last_route["contention"] == [] and p.last_route["factor"] == 1.0
+    assert card_lease._cpu_contention() == []
     await off_card.stop()
     await nothing_left()
 
@@ -183,3 +185,67 @@ async def test_a_busy_strata_and_a_running_twin_are_both_named_at_factor_1(tmp_p
     gate.set()
     await asyncio.wait_for(asyncio.gather(first, second), BOUND)
     await nothing_left()
+
+
+@pytest.mark.asyncio
+async def test_the_factor_is_applied_once_for_two_contenders_not_once_per_contender(tmp_path, monkeypatch):
+    # With a factor of 1 "once" and "per contender" read the same (Zcode #85-3): a factor of 2 and two
+    # contenders (a busy Strata and a running twin) tell them apart, 2x and not 4x.
+    host_ram(monkeypatch, 64_000)
+    l12_settings(monkeypatch, cpu_contention_factor=2.0)
+    strata, _events = await running_strata(tmp_path)
+    p = gpu_whisper(monkeypatch)
+    gate = asyncio.Event()
+    twin = cpu_twin(monkeypatch, p, gate=gate)
+    first = asyncio.create_task(transcribe_with_route(p, "first", **ask(p, 60.0)))
+    await until(lambda: twin.ran)
+    plain = twin.expected_seconds(60.0)  # warm: the twin is loaded now, as the second call finds it
+    strata._in_flight = 1
+    try:
+        second = asyncio.create_task(transcribe_with_route(p, "second", **ask(p, 60.0)))
+        await until(lambda: len(twin.ran) == 2)
+    finally:
+        strata._in_flight = 0
+    route = p.last_route
+    assert route["contention"] == ["a busy Strata 'flash'", "a CPU transcription on 'turbo@cpu'"]
+    assert route["factor"] == 2.0, "the factor, once"
+    assert route["cpu_s"] == pytest.approx(2.0 * plain) and route["cpu_s"] != pytest.approx(4.0 * plain)
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(first, second), BOUND)
+    await nothing_left()
+
+
+@pytest.mark.asyncio
+async def test_a_model_load_on_the_cpu_counts_from_before_the_load_and_a_failed_one_leaves_nothing(monkeypatch):
+    p = gpu_whisper(monkeypatch, device="cpu")
+    seen = []
+    load = p._load_model
+
+    def loading():
+        seen.append(whisper_provider.cpu_transcriptions_running())
+        return load()
+
+    monkeypatch.setattr(p, "_load_model", loading)
+    await asyncio.wait_for(p.transcribe("f"), BOUND)
+    assert seen == [["turbo"]], "counted while the model loaded, before the transcription began"
+    assert whisper_provider.cpu_transcriptions_running() == []
+
+    failing = gpu_whisper(monkeypatch, "broken", device="cpu", load_fails=True)
+    with pytest.raises(Exception):
+        await asyncio.wait_for(failing.transcribe("f"), BOUND)
+    assert whisper_provider.cpu_transcriptions_running() == [], "a load that failed counts no more"
+
+
+@pytest.mark.asyncio
+async def test_a_model_load_on_the_gpu_is_no_cpu_contention(monkeypatch):
+    p = gpu_whisper(monkeypatch, device="cuda")
+    seen = []
+    load = p._load_model
+
+    def loading():
+        seen.append(whisper_provider.cpu_transcriptions_running())
+        return load()
+
+    monkeypatch.setattr(p, "_load_model", loading)
+    await asyncio.wait_for(p.transcribe("f"), BOUND)
+    assert seen == [[]] and whisper_provider.cpu_transcriptions_running() == []

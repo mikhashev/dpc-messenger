@@ -16,6 +16,7 @@ import asyncio
 import pytest
 
 from dpc_client_core.managers import card_lease
+from dpc_client_core.music.yue2 import Yue2Server
 from dpc_client_core.providers.whisper_provider import (
     _WHISPER_OVERHEAD_BY_BAND_MIB, _WHISPER_OVERHEAD_MIB, transcribe_with_route, whisper_vram_mib,
 )
@@ -65,7 +66,7 @@ async def _busy_music():
 
 @pytest.mark.asyncio
 async def test_the_band_decides_the_fit_beside_a_busy_music_job(monkeypatch):
-    """9000 MiB free beside a busy YuE2 (5600 declared): a 10 s dictation (3147) fits, a 90 s one (4447)
+    """9000 MiB free beside a busy YuE2 (its declared peak): a 10 s dictation (3147) fits, a 90 s one (4447)
     does not, by the live veto `free >= peak + growth_left`."""
     monkeypatch.setattr(card_lease, "_READ_THE_CARD", lambda: (9000, 32623))
     host_ram(monkeypatch, None)  # no CPU route: a call that does not fit goes to the line
@@ -84,7 +85,7 @@ async def test_the_band_decides_the_fit_beside_a_busy_music_job(monkeypatch):
                                                      expected_s=p.expected_seconds(90.0)))
     await until(lambda: waiting() == ["whisper:turbo"])
     assert p.last_route["route"] == "line" and p.last_route["l11"] == "does_not_fit"
-    assert "9000 MiB free, 10047 MiB needed now" in p.last_route["why"]
+    assert f"9000 MiB free, {4447 + Yue2Server.VRAM_ESTIMATE_MIB} MiB needed now" in p.last_route["why"]
     over.set()
     await asyncio.wait_for(task, BOUND)
     m.lease.release("test")

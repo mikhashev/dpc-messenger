@@ -24,7 +24,8 @@ models, a job is a `POST` that answers `{"id": ...}`, `GET /job?id=N` polls it,
   kind `music`, its declared peak `VRAM_ESTIMATE_MIB`, an `engine` yield cost, and
   `waits_for_engines` (Mike #70: an idle local LLM engine is swapped out by the owner-start rule,
   with the swap on). The lease first, then `_the_lock`: a start asks for the card before the lock
-  and never waits for it (`wait_s=0`: refused at once naming the holder, `card_busy`); the runner's
+  and never waits for it (`wait_s=0`: refused at once naming the holder, `card_busy`; a start by hand
+  alone lets idle holders with no queue go first, `_card_for_a_start(yields_idle=True)`); the runner's
   job has its grant already, from `in_use`, which is the job's one lease use and counts `_busy` in
   the same place (the lease's busy is the card's authority). `starting` while the child boots
   (busy: never asked to let go), `running` once it answers. The grant is let go however the child
@@ -480,14 +481,16 @@ class SupervisedEngine:
         await self._card_for_a_start()
         await self._start_child()
 
-    async def _card_for_a_start(self, what: Optional[str] = None) -> None:
+    async def _card_for_a_start(self, what: Optional[str] = None, *, yields_idle: bool = False) -> None:
         """The grant a start needs, asked for with `wait_s=0` when this engine holds none: granted at
-        once on a free card, else `MusicEngineError("card_busy")` naming what holds it. Never under a
-        client lock: callers run it before `_the_lock` (yue2.cpp before its own start lock too)."""
+        once on a free card, else `MusicEngineError("card_busy")` naming what holds it. With
+        `yields_idle` (a start by hand) idle holders with no queue behind them are let go of first,
+        on the terms a queued job gets, and waited for (`CardLease.acquire`). Never under a client
+        lock: callers run it before `_the_lock` (yue2.cpp before its own start lock too)."""
         if self.card_lease.granted:
             return
         try:
-            await self.card_lease.acquire(what or f"start of {self.DISPLAY}", wait_s=0)
+            await self.card_lease.acquire(what or f"start of {self.DISPLAY}", wait_s=0, yields_idle=yields_idle)
         except LeaseRefusal as exc:
             raise MusicEngineError("card_busy", f"{self.DISPLAY} cannot start now: {exc}") from None
 

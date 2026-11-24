@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .. import cpu_work as _cpu_work
 from .utils import (
     utc_now_iso, read_text, write_text, append_jsonl, short,
     get_agent_root, ensure_agent_dirs, auto_commit_agent_change
@@ -721,6 +722,12 @@ class EmbeddingProvider:
             return None
         return dim if isinstance(dim, int) and not isinstance(dim, bool) and dim > 0 else None
 
+    def _counted_on_the_cpu(self):
+        """The compute call as CPU work for the card lease's contention reading (ADR-052 L12 point 3):
+        counted while it runs, and only when the model is on the CPU."""
+        return _cpu_work.computing_on_the_cpu(f"the embedding model ({self.model_name}) on the CPU",
+                                              on_cpu=self.device == "cpu")
+
     def embed(self, text: str) -> List[float]:
         import numpy as np
         self._load_model()
@@ -730,7 +737,7 @@ class EmbeddingProvider:
         cached = cache.get(text, self.model_name, window, self._loaded_dimensions())
         if cached is not None:
             return cached.tolist()
-        with self._gpu_semaphore:
+        with self._gpu_semaphore, self._counted_on_the_cpu():
             vector = np.asarray(self._model.encode(text, normalize_embeddings=True), dtype=np.float32)
         cache.put(text, self.model_name, window, vector)
         return vector.tolist()
@@ -775,7 +782,7 @@ class EmbeddingProvider:
                 misses.append((i, text))
         if misses:
             miss_texts = [t for _, t in misses]
-            with self._gpu_semaphore:
+            with self._gpu_semaphore, self._counted_on_the_cpu():
                 vectors = self._encode_within_memory(miss_texts)
             for (idx, text), vec in zip(misses, vectors):
                 # Rounded to float32 here as in the cache, so hit and miss agree.

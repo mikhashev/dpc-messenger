@@ -729,7 +729,8 @@ def why_a_peer_may_not_swap(holders: List[Tuple[Any, str]]) -> Optional[str]:
     it may (ADR-044, amendment 2026-11-06, Mike's call). The owner's conditions for a swap and no
     wait: the switch is on, nothing is in the card queue and no owner's request waits in the lease
     line, and no holder is busy by rule 1 (starting, a call in flight, an `accepted_request`, a caller
-    in its window) or already stopping. One rule for both lines: a peer's supervisor start
+    in its window) or already stopping, and none served the owner's own request within the last
+    `PEER_SWAP_IDLE_S` seconds (`_owner_request_ended_at`; a holder that never served one is idle). One rule for both lines: a peer's supervisor start
     (`_why_a_peer_may_not_swap`) and a peer's lease in the lease line (ADR-052 L13, Mike
     2026-11-24: a peer may have an idle engine swapped out). Claims and awaits nothing, so it is
     asked in the stretch of the mark. Said in a peer's words, to a peer: no agent, chat or caller is
@@ -738,11 +739,16 @@ def why_a_peer_may_not_swap(holders: List[Tuple[Any, str]]) -> Optional[str]:
         return "this node's owner has not turned on swapping local models for an idle holder"
     if _CARD_QUEUE or _owner_lease_waiting():
         return "a request on this node is waiting for the card, and a peer's request does not go ahead of it"
+    now = _swap_clock()
     for holder, state in holders:
         if state in ("stopping", "draining") or holder._draining:
             return "it is already stopping"
         if holder._busy_for_the_card(state):
             return "it is busy, and a peer's request does not wait for a busy holder"
+        ended = _owner_request_ended_at.get(holder.alias)
+        if ended is not None and now - ended < PEER_SWAP_IDLE_S:
+            return ("it served this node's owner a moment ago, and a peer's request does not take it away "
+                    "so soon")
     return None
 
 
@@ -844,12 +850,27 @@ def _now_on_the_owner_loop(fn: Callable[..., None], *args: Any) -> None:
         fn(*args)
 
 
+# How long an engine must have been idle since the owner's last request before a peer's request may
+# stop it for the card (Mike's call, 2026-11-24, ADR-052 L13): the owner's next message should not meet a
+# cold start because a guest asked 2 s after the owner's turn ended. Said once, read where
+# `why_a_peer_may_not_swap` tests it; the gateway's and a peer's own windows (`caller_idle_s`) are other
+# rules and do not cover the owner.
+PEER_SWAP_IDLE_S = 60.0
+# When the owner's last request on an alias ended (`_swap_clock`): a chat turn, an agent turn or a gateway
+# call, success or failure. By alias, as `_CARD_HOLDS` is; an alias that never served the owner has no entry
+# and counts as idle. Written only on the owner loop, by `_off_the_alias`.
+_owner_request_ended_at: Dict[str, float] = {}
+
+
 def _off_the_alias(hold: _CardHold, alias: Optional[str], why: Optional[str] = None) -> None:
     holds = _CARD_HOLDS.get(alias, [])
     if hold in holds:
         holds.remove(hold)
         if not holds:
             del _CARD_HOLDS[alias]
+        # Every hold is an owner's request (a peer's call holds no card: `card_held_for` is the chat,
+        # the agent and the gateway only), so its leaving is the end of an owner's request there.
+        _owner_request_ended_at[alias] = _swap_clock()
     # The slot queue's hold leaves with it (ADR-044, amendment 2026-11-17, the slot queue, point 4).
     _slot_hold_left(hold, alias, why)
 

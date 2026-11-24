@@ -191,6 +191,7 @@ def _no_card_claims_cross_tests():
         llama_server_supervisor._CARD_CLAIMS.clear()
         llama_server_supervisor._CARD_HOLDS.clear()
         llama_server_supervisor._last_caller_call_at.clear()
+        llama_server_supervisor._owner_request_ended_at.clear()
         llama_server_supervisor._CARD_QUEUE.clear()
         llama_server_supervisor._SLOT_QUEUE.clear()
         llama_server_supervisor._LAST_SWAP = None

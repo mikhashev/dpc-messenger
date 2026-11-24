@@ -45,6 +45,7 @@ import math
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
+from .. import cpu_work as _cpu_work
 from . import commit_memory as _commit_memory
 from . import llama_server_supervisor as _sup
 from .llama_server_supervisor import CardQueueRefusal
@@ -71,6 +72,10 @@ _CHEAP_YIELD_S = 1.0
 # refused at once, whatever bound its door passes. A rule, not only arithmetic (Mike #17, 2026-11-23):
 # a peer's long audio that only the CPU would take in time is refused too.
 PEER_TRIP_S = 120.0
+# How long a start by hand (`acquire(..., yields_idle=True)`) waits for the idle holders it asked to let
+# go, when the owner's `swap_wait_s` is not longer (Mike, 2026-11-24: anything idle with no queue may be
+# unloaded for a start by hand). A Whisper model goes in about a second, a local LLM engine in its stop.
+BY_HAND_YIELD_S = 30.0
 
 # Every lease, by holder name, granted or not. Registered when built.
 _CARD_LEASES: Dict[str, "CardLease"] = {}
@@ -534,7 +539,8 @@ class CardLease:
     async def acquire(self, what: str, *, wait_s: Optional[float], background: bool = False,
                       check: Optional[Callable[[], Awaitable[None]]] = None,
                       on_wait: Optional[Callable[[Dict[str, Any]], None]] = None,
-                      expected_s: Optional[float] = None, vram_mib: Optional[int] = None) -> None:
+                      expected_s: Optional[float] = None, vram_mib: Optional[int] = None,
+                      yields_idle: bool = False) -> None:
         """Hold the card: at once when nothing excludes this lease and nobody earlier waits (L1,
         L5a), else in `_LEASE_LINE` up to `wait_s` seconds from now (None: until `check` raises or
         the caller is cancelled). A granted lease is granted again at once. `background` never
@@ -544,9 +550,13 @@ class CardLease:
         waits for changes; `expected_s` is how long this request will hold the card once granted,
         which the estimate of a later waiter counts. `vram_mib` is this request's own declared peak
         (Whisper's by the call's length band, S3e), which L11's fit reads instead of the lease's
-        `vram_mib` (None: the lease's)."""
+        `vram_mib` (None: the lease's). `yields_idle` is a start by hand (`wait_s=0`): refused at once
+        as ever while a holder is busy or has a queue behind it, but when every holder in the way is
+        idle and the lease may ask or swap it (`_may_ask`, `_swaps_engines`) the request goes into the
+        line for those holders only, for `swap_wait_s` (at least `BY_HAND_YIELD_S`), and takes the
+        same ask and swap path a queued request takes."""
         await _enter(self, what, wait_s=wait_s, background=background, check=check, on_wait=on_wait,
-                     expected_s=expected_s, vram_mib=vram_mib, opens_a_use=False)
+                     expected_s=expected_s, vram_mib=vram_mib, opens_a_use=False, yields_idle=yields_idle)
 
     @_sup.on_the_owner_loop
     async def _open_a_use(self, what: str, ticket: "_Ticket", **acquire_kw: Any) -> None:
@@ -937,21 +947,27 @@ def _supervisor_stop_estimate(sup: Any) -> Optional[float]:
         return None
 
 
-def _why_it_waits(waiter: _LeaseWaiter, kind: str, what: Any, state: Optional[str]) -> Tuple[str, str]:
-    """(who, why) of the first thing in the way, in the owner's words."""
+def _why_it_waits(waiter: _LeaseWaiter, kind: str, what: Any, state: Optional[str],
+                  queued: bool = True) -> Tuple[str, str]:
+    """(who, why) of the first thing in the way, in the owner's words. `queued` is whether the request
+    is in the line, where an idle holder is asked to let go or swapped out; a refusal at once (a start
+    that does not wait, a background call) asked nobody, and says so."""
     if kind == "holder" and _a_lease(what):
         if what._draining:
             return what.display, "yielding"
         if what._busy_for_the_card(state, before=None if waiter.for_a_peer else waiter.arrival):
             return what.display, f"busy: {what.who_uses()}"
         if _may_ask(waiter):
+            if not queued:
+                return what.display, "idle, not asked to let go: this request is not queued for the card"
             return what.display, "idle, asking it to let go"
         return what.display, "idle; a peer does not ask it to let go"
     if kind == "holder":
         if state == "running" and _swaps_engines(waiter) and not what._draining:
             busy = what._busy_for_the_card(state)
-            return f"{what.ENGINE} '{what.alias}'", ("a local engine on the card, busy" if busy else
-                                                    "a local engine on the card, idle; swapping it out")
+            idle = ("a local engine on the card, idle; swapping it out" if queued else
+                    "a local engine on the card, idle; not swapped out: this request is not queued for the card")
+            return f"{what.ENGINE} '{what.alias}'", "a local engine on the card, busy" if busy else idle
         return f"{what.ENGINE} '{what.alias}'", f"a local engine on the card, {state}"
     if kind == "draining":
         return what.display, f"letting go for {what._swap_for}"
@@ -1188,25 +1204,19 @@ _ENGINE_NAMES = {"strata": "Strata"}
 
 
 def _cpu_contention() -> List[str]:
-    """ADR-052 L12 point 3, the engines computing on the CPU now, each named for the owner's log
-    ("a busy Strata 'flash'"). A resident child (a claim on the card), Strata or llama-server, counts
-    when it is busy by its own test, `_busy_for_the_card` (a live `accepted_request` hold in
-    `_CARD_HOLDS`, a call in flight, a child starting), not by a guess from timing (Zcode #69); an idle
-    one does not. A llama-server kept off the card (`--device none`) holds no claim and counts while
-    a call is in flight on it (Mike, 2026-11-24, Q2: "a running llama-server", read as one that
-    computes something now). The CPU transcriptions are the Whisper provider's to add."""
+    """ADR-052 L12 point 3, what computes on the CPU now, each named for the owner's log ("a busy
+    Strata 'flash'"). Only small CPU work counts (Mike, 2026-11-24): a resident child (a claim on the
+    card), Strata or llama-server, counts when it is busy by its own test, `_busy_for_the_card` (a live
+    `accepted_request` hold in `_CARD_HOLDS`, a call in flight, a child starting), not by a guess from
+    timing (Zcode #69); an idle one does not. The embedding model and GLiNER count while they compute
+    on the CPU (`cpu_work`). A llama-server kept off the card (`--device none`) is not counted, though
+    it computes on the CPU: it is heavy, and nobody would run a transcription beside it. The CPU
+    transcriptions are the Whisper provider's to add."""
     names: List[str] = []
-    claimed = set()
     for sup, state in _sup._live_claims():
-        claimed.add(sup)
         if sup._busy_for_the_card(state):
             names.append(f"a busy {_ENGINE_NAMES.get(sup.ENGINE, sup.ENGINE)} '{sup.alias}'")
-    for sup in list(_sup._SUPERVISORS):
-        proc = getattr(sup, "_proc", None)
-        if (sup in claimed or sup.on_the_card() or proc is None or proc.returncode is not None
-                or getattr(sup, "_in_flight", 0) <= 0):
-            continue
-        names.append(f"a busy {_ENGINE_NAMES.get(sup.ENGINE, sup.ENGINE)} '{sup.alias}'")
+    names.extend(_cpu_work.computing_now())
     return names
 
 
@@ -1258,7 +1268,8 @@ def _refusal_at_the_deadline(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any
             wait=estimate,
         ))
     kind, what, state = blockers[0]
-    who, why = _why_it_waits(waiter, kind, what, state)
+    who, why = _why_it_waits(waiter, kind, what, state,
+                             queued=waiter.wait_s is None or waiter.wait_s > 0)
     alias, engine = _holder_of(kind, what)
     hint = getattr(what, "stop_hint", "") if kind == "holder" else ""
     # `wait_s` None has no deadline of its own (an owner's deadline can come from elsewhere in S2).
@@ -1294,6 +1305,24 @@ def _ask_idle_holders(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optio
             continue
         waiter.asks[holder] = (asks + 1, now + _sup._LEASE_ASK_AGAIN_S)
         holder._ask_to_let_go(waiter.lease.alias)
+
+
+def _idle_holders_may_be_let_go(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optional[str]]]) -> bool:
+    """Whether everything in `waiter`'s way is idle, with no queue, and the ask (`_ask_idle_holders`) or
+    the swap (`_swap_idle_engines`) the line would make of it is allowed: the one test that lets a start
+    by hand wait for them instead of being refused at once. Only lease holders, or only supervisors, as
+    those two functions require; a holder already draining for another request, a holder busy for the
+    card (to this waiter) and any place or waiter ahead of it refuse."""
+    if waiter.lease._granted or not blockers or any(kind != "holder" for kind, _what, _state in blockers):
+        return False
+    if all(_a_lease(what) for _kind, what, _state in blockers):
+        before = None if waiter.for_a_peer else waiter.arrival
+        return _may_ask(waiter) and not any(
+            what._draining or what._busy_for_the_card(state, before=before) for _kind, what, state in blockers)
+    if any(_a_lease(what) for _kind, what, _state in blockers) or not _swaps_engines(waiter):
+        return False
+    return all(state == "running" and not what._draining and not what._busy_for_the_card(state)
+               for _kind, what, state in blockers)
 
 
 def _swaps_engines(waiter: _LeaseWaiter) -> bool:
@@ -1354,7 +1383,8 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
                  check: Optional[Callable[[], Awaitable[None]]] = None,
                  on_wait: Optional[Callable[[Dict[str, Any]], None]] = None,
                  expected_s: Optional[float] = None, opens_a_use: bool,
-                 ticket: Optional[_Ticket] = None, vram_mib: Optional[int] = None) -> Optional[_Use]:
+                 ticket: Optional[_Ticket] = None, vram_mib: Optional[int] = None,
+                 yields_idle: bool = False) -> Optional[_Use]:
     """The one way to the card for a lease, run on the owner loop. The check that nothing is in the
     way and the grant are one synchronous stretch (L1), here and in `_settle`."""
     if _CLOSED is not None:
@@ -1403,7 +1433,7 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
             raise refusal
     if background:
         kind, thing, state = blockers[0]
-        who, why = _why_it_waits(waiter, kind, thing, state)
+        who, why = _why_it_waits(waiter, kind, thing, state, queued=False)
         alias, engine = _holder_of(kind, thing)
         raise _refuse(waiter, LeaseSkipped(
             f"{lease.display} skipped ({what}): the card is not free right now, {who} ({why})",
@@ -1419,7 +1449,11 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
                 wait=estimate,
             ))
     elif waiter.give_up_at <= _clock():
-        raise _refusal_at_the_deadline(waiter, blockers)
+        if not (yields_idle and _idle_holders_may_be_let_go(waiter, blockers)):
+            raise _refusal_at_the_deadline(waiter, blockers)
+        # A start by hand over idle holders only: it waits for them to go, as a queued request would.
+        waiter.wait_s = max(float(_sup.swap_policy()[1]), BY_HAND_YIELD_S)
+        waiter.give_up_at = _clock() + waiter.wait_s
     waiter.event = asyncio.Event()
     _LEASE_LINE.append(waiter)
     try:

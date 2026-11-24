@@ -17,6 +17,9 @@ import pytest
 
 from dpc_client_core.managers import card_lease
 
+from dpc_client_core.music.acestep import AceStepServer
+from dpc_client_core.music.yue2 import Yue2Server
+
 from tests._acestep_helpers import free_env, install_fake_engine, make_engine, wait_until
 from tests._card_lease_helpers import BOUND, holding, nothing_left, whisper
 from tests._yue2_helpers import install_fake_yue2, make_yue2, yue2_env
@@ -39,7 +42,8 @@ def test_each_engine_has_one_music_lease_with_its_declared_peak(tmp_path):
     yue2, ace = make_yue2(home), make_engine(home)
     assert card_lease.lease_named("music:yue2") is yue2.card_lease
     assert card_lease.lease_named("music:acestep") is ace.card_lease
-    for engine, peak, display in ((yue2, 5600, "yue2.cpp"), (ace, 9300, "acestep.cpp")):
+    for engine, peak, display in ((yue2, Yue2Server.VRAM_ESTIMATE_MIB, "yue2.cpp"),
+                                  (ace, AceStepServer.VRAM_ESTIMATE_MIB, "acestep.cpp")):
         lease = engine.card_lease
         assert (lease.kind, lease.ENGINE, lease.display, lease.vram_mib) == ("music", engine.ENGINE, display, peak)
         assert lease.yield_cost == "engine" and lease.waits_for_engines is True and lease.shares_with is None
