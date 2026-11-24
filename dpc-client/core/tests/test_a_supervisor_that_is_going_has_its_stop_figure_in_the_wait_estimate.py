@@ -5,9 +5,15 @@ refused even where the supervisor was already going. A supervisor that is going 
 or an idle one this very waiter swaps out) now counts the supervisor's own `_expected_stop_s()`: the
 last stop it measured, else its grace default. What does not change (L13, "As built", Mike's option
 (a)): a supervisor that is not going has no ETA. A busy one is waited for with no figure (L10), and
-an idle one that nobody stops for this waiter is too: a peer never swaps a supervisor out and a
-lease that does not `waits_for_engines` waits until it goes by itself, so a peer is still refused
-at once behind a running supervisor, idle or busy (`test_a_peer_lease_waits_only_when_...`).
+an idle one that nobody stops for this waiter is too. Since Mike's call of 2026-11-24 a peer may have an
+idle supervisor swapped out, but only a lease that `waits_for_engines` and only on the owner's terms
+(`llama_server_supervisor.why_a_peer_may_not_swap`: the swap on, an empty queue, nothing busy, and the
+engine idle for `PEER_SWAP_IDLE_S` after the owner's last request); a lease that does not
+`waits_for_engines` waits until the supervisor goes by itself, so it is refused at once behind a running
+one, idle or busy. The peer cases below use such a lease (the helper's `whisper()` has
+`waits_for_engines=False`); the swap itself is pinned in
+`test_a_peer_may_have_an_idle_engine_swapped_out_on_the_owners_terms.py` and
+`test_a_peer_may_swap_an_engine_only_a_minute_after_the_owners_last_request.py`.
 
 Fake supervisors, fake lease clients; no GPU.
 """
@@ -126,6 +132,9 @@ class TestASupervisorThatIsNotGoingHasNone:
 
     @pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
     def test_a_running_one_for_a_peer(self, busy):
+        # The idle case is unknown only because the helper's lease has `waits_for_engines=False`, which
+        # swaps nothing out for a peer (L13); with `waits_for_engines=True` and the owner's terms met, an
+        # idle engine is swapped out and counts its stop (see the two files named in the docstring).
         swap(True)
         _claim(Supervisor(busy=busy))
         assert _estimate_for(whisper("small").lease, peer=True)["known"] is False

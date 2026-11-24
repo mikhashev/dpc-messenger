@@ -184,7 +184,10 @@ async def test_a_lease_that_waits_for_no_engine_never_stops_one_for_a_peer(tmp_p
 
 @pytest.mark.asyncio
 async def test_the_owners_terms_are_one_predicate_for_both_lines(tmp_path):
-    """The inference peer's start (`_why_a_peer_may_not_swap`) and the lease line read one rule."""
+    """The module predicate `why_a_peer_may_not_swap` answers each of the owner's terms. This pins the
+    predicate only: it calls neither `_why_a_peer_may_not_swap` nor `_swaps_engines`, so it would pass if
+    one of the two lines stopped reading it. That both lines read it is pinned, with a real peer request
+    through each, in `test_a_peer_may_swap_an_engine_only_a_minute_after_the_owners_last_request.py`."""
     strata, _events = await running_strata(tmp_path)
     holders = [(strata, "running")]
     assert base_mod.why_a_peer_may_not_swap(holders) is None

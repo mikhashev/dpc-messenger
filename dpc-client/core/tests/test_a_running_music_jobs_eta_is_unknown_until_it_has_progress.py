@@ -1,8 +1,8 @@
 """ADR-052, Confirmation test 34 (Ark #64 §5; L10 "Music"; slice S4 records YuE2's factor by length).
 
 A music job that has not started yet is counted by the waiters behind it with its text estimate:
-`estimate_yue2_seconds` per variant (audio seconds, never more than the job's duration cap), times
-YuE2's factor for that length, times the variants, marked as an estimate. The factor is wall seconds
+`estimate_yue2_seconds` per variant (audio seconds, never more than the job's duration cap), divided by
+YuE2's factor for that length, times the variants, marked as an estimate. The factor is
 AUDIO seconds per wall second (faster than real time), from the trial card: 3.5 for a 30 s song, 3.0 for
 a 4-minute one, straight between, and the end value beyond either end; wall time is length / factor. The
 expectations below are literal numbers, worked out by hand from the trial card (240 s took 80.5 s, 30 s

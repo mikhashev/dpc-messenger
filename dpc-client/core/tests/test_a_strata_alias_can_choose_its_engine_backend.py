@@ -539,7 +539,11 @@ def test_the_llama_pin_says_about_never_up_to_with_an_alias_config(tmp_path, mon
     assert not hasattr(llama, "size_source") and not hasattr(llama, "SIZE_SOURCE")
 
 
-# --- a peer never waits for the card and never swaps ------------------------------------
+# --- a peer's request for an alias whose pin is not installed is refused before the card ---
+# What this pins is the install gate: a peer's request does not fetch Strata, so it is refused as
+# unavailable whatever holds the card. Whether a peer may have an idle holder swapped out is another
+# rule (ADR-044, amendment of 2026-11-06, and the 60 s idle minimum of 2026-11-24, ADR-052 L13), pinned in
+# test_a_peer_may_swap_an_engine_only_a_minute_after_the_owners_last_request.py.
 
 
 def test_a_peer_call_that_needs_a_swap_is_refused_as_unavailable_before_the_card(two_aliases, monkeypatch):

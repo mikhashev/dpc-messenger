@@ -560,7 +560,7 @@ A start of a local alias that an excluding card holder blocks (the check of poin
    aliases traded the card. It goes back on once the card queue (busy for a whole loop, FIFO)
    is live-checked — Mike's call and the reviewer's, team chat 2026-11-02. With no settings bound (tests, a script that runs no service) there
    is no swap either.
-2. **A peer never swaps.** A call served to a peer (`peer_being_served()`), and the start
+2. **A peer never swaps.** *(Replaced on 2026-11-06: a peer may have an idle holder swapped out on the owner's terms, and since 2026-11-24 only once the holder has been idle for 60 s after the owner's last request on it; see the amendment of 2026-11-06 and its 2026-11-24 note.)* A call served to a peer (`peer_being_served()`), and the start
    begun for a peer's request (`start_for_peer`, `_STARTED_FOR_PEER`), meet today's
    `CardHeldError` even when the holder is idle: an engine of the owner's is not stopped for
    someone else's request. The policy of point 9 still asks `_card_held_error` first, so a
@@ -698,7 +698,7 @@ One call in flight is too short a measure of busy, and two aliases trade the car
    start happened in there and a hold outside would have had the start waiting for a client
    waiting for the same semaphore. A call of a client's open window is not new (rule 4): the hold
    says so at acceptance, by the caller's name, and a peer's is asked by name at `ensure_running`.
-7. **Peers and the gateway.** A peer never swaps and never takes a place. A new peer while a
+7. **Peers and the gateway.** A peer never swaps *(replaced on 2026-11-06, see rule 2)* and never takes a place. A new peer while a
    place waits is refused `provider_unavailable`, with no `retry_after_sec`; the **refusal
    code** row's "retryable later but not by a short wait" stays true, and so does DPTP §3.4. A
    gateway client is the owner's own user and queues like any owner start.
@@ -887,7 +887,7 @@ position with no position field, as on **waiting**), and the holder is named by 
   net; in the last paragraph, a later round of a running request is served instead of meeting the
   refusal at the slot, and a stopped alias's next owner call queues instead of swapping.
 - **Stands:** rule 1 (the setting off, and the default until the live check); rule 2 (a peer never
-  swaps), which rule 7 here extends; rule 5 (a swap is said once, `last_swap`); the stop by
+  swaps; replaced on 2026-11-06, a peer may swap on the owner's terms), which rule 7 here extends; rule 5 (a swap is said once, `last_swap`); the stop by
   `stop_by_hand`; and what a swap does not do.
 
 **What the rules left open, decided** (Mike's call, team chat 2026-11-02).
@@ -1206,7 +1206,7 @@ Nothing below has been run live: acceptance is a live start with no budget, shor
 
 *(Mike's call, 2026-11-06. The case: a guest on another node asked for a stopped Strata alias while an idle `llama-server` alias held the card, `swap_when_idle` was on and nothing was queued, and the peer was refused with the blanket "a peer's request does not start it now". This replaces rule 2 of the idle-swap amendment of 2026-11-02 ("A peer never swaps") and the first half of the first sentence of point 7 of the card-queue amendment ("A peer never swaps and never takes a place"). Everything else in both stands, "never takes a place" included.)*
 
-1. **The rule.** If there is no queue, a peer may swap the same way as the node's owner, if the owner has that option on. With `swap_when_idle` on, a peer's request for a local alias that is not on the card (a call served to a peer, or the start `start_for_peer` begins for one) stops the holder through the owner's path (`_free_the_card`, `stop_by_hand`, registry `stop_kind` `swap`, one notice with the parked-conversations words) when, and only when, the owner's own conditions hold: `_CARD_QUEUE` is empty, and no holder is busy by rule 1 of the card queue (a child starting, a call in flight, an `accepted_request`, a caller in its `caller_window`) or already stopping. `_why_a_peer_may_not_swap` is that test.
+1. **The rule.** If there is no queue, a peer may swap the same way as the node's owner, if the owner has that option on. With `swap_when_idle` on, a peer's request for a local alias that is not on the card (a call served to a peer, or the start `start_for_peer` begins for one) stops the holder through the owner's path (`_free_the_card`, `stop_by_hand`, registry `stop_kind` `swap`, one notice with the parked-conversations words) when, and only when, the owner's own conditions hold: `_CARD_QUEUE` is empty, and no holder is busy by rule 1 of the card queue (a child starting, a call in flight, an `accepted_request`, a caller in its `caller_window`) or already stopping. The test is the module predicate `why_a_peer_may_not_swap(holders)` in `llama_server_supervisor.py` (the supervisor's `_why_a_peer_may_not_swap` calls it, and so does the card lease line of ADR-052 L13). **Added 2026-11-24 (Mike, ADR-052 L13):** the predicate also refuses while a holder served the owner's own request within the last 60 s (`PEER_SWAP_IDLE_S`; the mark is `_owner_request_ended_at`, set when a card hold leaves its alias, success or failure; an alias that never served the owner counts as idle), so the owner's next message does not meet a cold start because a guest asked seconds after the owner's turn. `caller_idle_s` covers a gateway client and a peer, not the owner. Pinned through both lines in `test_a_peer_may_swap_an_engine_only_a_minute_after_the_owners_last_request.py`.
 2. **Same stretch.** The test is asked again inside `_free_the_card`, in the synchronous stretch of the drain mark, with no `await` between the last look and the mark. The peer policy's look beforehand (`StrataProvider._peer_start_refusal`) only decides whether to begin the start. No new lock.
 3. **No wait, no place.** The swap's request (`_a_peers_request`) has no time to wait, so a busy holder is refused at once, and it is in no line: its place is never put in `_CARD_QUEUE`. An owner request that arrives during the peer's stop takes the first place of an empty line and the card; the peer's claim then meets the place that waits and its start is refused. The peer is never ahead of an owner request, and an owner request is never made to wait behind a peer's place.
 4. **What the peer is answered.** For a Strata alias nothing changes on the wire: the policy begins the background start and answers `provider_loading` ("loading", DPTP §3.4) while the swap and the start run, one start at a time, and a guest agent waits on that code. The free-VRAM bar of point 9 is not read for a start that swaps, because the holder is what takes the VRAM; the owner's own swap reads none either. A call served to a peer on a `llama-server` alias starts in-line as it always did, and its swap is part of that wait.

@@ -1,7 +1,7 @@
 ---
 adr: 052
 title: "The card lease lets every GPU client in DPC hold, wait for and yield the one card"
-status: proposed
+status: "implemented in part: S1 to S4 built, S5 to S8 and S10 pending, operation not yet observed; the ADR as a whole has no recorded acceptance by Mike"
 date: 2026-11-21
 axis: network
 deciders: [Mike]
@@ -15,7 +15,15 @@ session: "AI Studio group chat (group-60aff6110f02), 2026-11-21 — Whisper plan
 
 # ADR-052 — The card lease
 
-> **Proposed 2026-11-21. Nothing here is built.** The design was produced read-only by an
+> **Proposed 2026-11-21. S1 to S4 are built since (2026-11-22 to 2026-11-24); S5 to S8 and S10 are
+> not.** Built means: S1 `53a2eaf5`, S2 `1e57932f`, S3a to S3e (`a5b52f79` through `ac9307d5`, with
+> `5984876e`), S4 `b67b3cc0`, then follow-up 8 (`bf11758b`), 9a (`4ad35c86`) and 9b (`05bcce1d`); Zcode
+> accepted S3e and S4 in review (#87, #88 of 2026-11-24). It has not run long enough to say how the
+> figures behave in operation, and the record holds no acceptance of the ADR as a whole by Mike, only
+> the decisions listed under **Decided by Mike**; so the front matter says what is built and does not
+> say `accepted`. The sections below were written as a design and are corrected where the build or a
+> later decision changed them; **Implementation Status** and **Review notes** say where. The design
+> was produced read-only by an
 > agent for CC and checked against `dev` HEAD `b9725990`. **Revised the same day** to answer
 > two independent reviews in the AI Studio group chat: Zcode (#41) and Ark (#44, #45), and
 > then their second reviews of decision 6 (Zcode #52, Ark #53). Every reviewer claim was
@@ -288,7 +296,10 @@ ctranslate2 and mlx).
   (1814) is its twin for physical memory.
 - `_DESKTOP_RESERVE_MIB = 2048` (1779) is the desktop's share of the card in the admission
   arithmetic: `strata_provider.py:451` admits a peer start only when `free >= total -
-  _DESKTOP_RESERVE_MIB`. It is not a CUDA-context figure (Ark #44): Whisper's own overhead
+  _DESKTOP_RESERVE_MIB`. **Since S3e** the gate reads the alias's own reserve instead (`vram_reserve()`,
+  `strata_provider.py:457-465`): `free >= total - reserve`, with 2048 only as the last fallback (L11,
+  "One reserve per engine"); `_DESKTOP_RESERVE_MIB` is now at `llama_server_supervisor.py:1989`. It is not a
+  CUDA-context figure (Ark #44): Whisper's own overhead
   needs its own constant (L11, `_WHISPER_OVERHEAD_MIB`).
 
 **The frontend already reads the card keys** (Zcode #41; this closes Q4). Twelve files under
@@ -654,10 +665,14 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
   - **Orientations, stated once.** The Whisper **ratio** is audio seconds per wall second
     (`_realtime_ratio`, `whisper_provider.py:816-822`, `duration / elapsed`; the speech table
     prints 15.9–43×), so `eta = duration / ratio` (ratio 20×, 30 s of audio: 1.5 s; a product
-    would say 600 s). The YuE2 **factor** is wall seconds per audio second ("about 3.5x real
-    time", `runner.py:94`, and the job limit `duration_s * 6 + 300`, `:856-857`), and
-    `estimate_yue2_seconds` returns **audio** seconds: the form compares it with the duration
-    cap (`ui/src/lib/utils/musicCreate.ts:353-358`), so wall time = estimate × factor. S4 records the factor by song length: `trial.md` (`ai-studio/experiments/music-player/engine/yue2-cpp/trial.md:40-41`) saw about 3.5× for a 30 s song and about 3× for 4-minute ones, and its 6-line text came back as 71–144 s songs, so the 10 s per line constant understates a song's length (a concern for the UI's warning, not for the lease). **Built in S4** as `job_schemas.YUE2_FACTOR_BY_LENGTH` ((30 s, 3.5), (240 s, 3.0), straight between, the end value beyond) in this orientation; **the orientation is open for Mike** (see "S4 build"): the same trial table reads the other way (a 240 s song in 80.5 s of wall time, a 30 s one in 8.9 s, the model's load included), which would make the factor audio seconds per wall second.
+    would say 600 s). The YuE2 **factor** is **audio seconds per wall second**, as the trial card's "about 3.5x real
+    time" reads (faster than real time). Mike flipped the orientation on 2026-11-24 (group chat), built in
+    follow-up 9b; the record had first written it as wall seconds per audio second, which made a 240 s song
+    read about 12 minutes where the trial measured about 80 s. `estimate_yue2_seconds` returns **audio**
+    seconds: the form compares it with the duration cap (`shortCapWarning` in
+    `ui/src/lib/utils/musicCreate.ts`), so wall time = estimate ÷ factor (`job_schemas.yue2_wall_s`,
+    `job_schemas.py:303`). The job's own timeout, `duration_s * 6 + 300` (`runner.py:918`), is a
+    deliberately generous safety net and does not read the factor. S4 records the factor by song length: `trial.md` (`ai-studio/experiments/music-player/engine/yue2-cpp/trial.md:40-41`) saw about 3.5× for a 30 s song and about 3× for 4-minute ones, and its 6-line text came back as 71–144 s songs, so the 10 s per line constant understates a song's length (a concern for the UI's warning, not for the lease). **Built in S4** as `job_schemas.YUE2_FACTOR_BY_LENGTH` ((30 s, 3.5), (240 s, 3.0), straight between, the end value beyond), the table unchanged by the flip; **the orientation was open for Mike and is decided** (2026-11-24, group chat: yes): the trial table reads this way (a 240 s song in 80.5 s of wall time, a 30 s one in 8.9 s, the model's load included), so the factor is audio seconds per wall second.
   - Whisper: the load when the model is not loaded (`load_first_s` before this model has loaded on
     that device in this process, `load_reload_s` after; S3 follow-up 4, Forge #42-4; per device
     since S3 follow-up 6, Forge #48-1, Ark #49-1; per device and model since S3 follow-up 7, Ark
@@ -678,8 +693,9 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
     unknown (Johnny E, Forge #21-6); it had no caller and was removed in S3 follow-up 4 (Ark
     #40-3), and `audio_seconds`, the one probe, reads 0 as unknown.
   - Music, **a job that has not started:** the text estimate (`estimate_yue2_seconds`
-    per variant, `music/job_schemas.py:271-279`, audio seconds) times the YuE2 factor (3.5 as
-    a start value until S4 records one) times the variants, marked as an estimate; it may route (L12), never refuse.
+    per variant, `music/job_schemas.py:271-279`, audio seconds) divided by the YuE2 factor for that
+    length (audio seconds per wall second, `YUE2_FACTOR_BY_LENGTH`: 3.5 at 30 s to 3.0 at 240 s) and
+    times the variants, marked as an estimate; it may route (L12), never refuse.
   - Music, **a running job** (Ark #64 §5): the remaining time must come from the job's own
     progress, not from the text estimate, which counts sung lines only and gives an
     instrumental its intro alone. **Today there is no usable progress signal:** the YuE2
@@ -689,8 +705,8 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
     "about 3.5x real time" figure is a comment from the trial card (`runner.py:94, 856`),
     not a measurement this machine keeps. So in v1 **a running music job's ETA is unknown,
     and L12 treats it as long.** S4 may add the signal: the start time of each variant and
-    a per-machine YuE2 factor recorded from finished variants (wall time over the take's
-    audio length); then `eta = variants left × duration_s × factor − elapsed in the current
+    a per-machine YuE2 factor recorded from finished variants (the take's audio length
+    over wall time); then `eta = variants left × duration_s ÷ factor − elapsed in the current
     variant`, floored at 0 and marked as an estimate. Acestep's progress is as coarse
     (`runner.py:734-784`).
   - Supervisors: None: a supervisor has no ETA. **One that is going** (stopping, draining, or an
@@ -748,7 +764,8 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
        batch**: at batch 8 (clips of 60–120 s) activations reach ≈2.1 GiB (3650 MiB allocated,
        3948 reserved; see "GPU figures"). The declared overhead is the worst case, torch
        reserved peak 3948 + context 485 ≈ 4433, less the 1547 of weights, rounded up:
-       **2900**. `whisper_peak` ≈ 1547 + 2900 = 4447 MiB (the driver view peaked at 4240), against 3362 with the former 1740. That
+       **2900**. `whisper_peak` ≈ 1547 + 2900 = 4447 MiB (the driver view peaked at 4240), against 3362 with the former 1740. (4447 is the worst band's figure: since S3e it applies to 61 to 180 s and the
+       other bands are 3147, next bullet.) That
        ~1.5–1.7 GiB was the **backend's own residency** (`bge-m3`, GLiNER; `040-…md:78`), not
        a Whisper context, and on top of the weights it counted the model twice (Ark #18-4,
        Johnny A, Forge #20-6, Zcode #22-2). A start value, tuned from operation.
@@ -764,7 +781,8 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
        four), over 180 s 1600 (en_300 at batch 2, 2660). For turbo that is 3147 / 4447 / 4447 / 3147
        MiB, **derived, not measured beside strata.exe** (Forge's live run measures each band). An
        unknown length takes the worst band, as does the lease's own `vram_mib` (its `card_holders`
-       row); test 28 keeps the worst band's 6495.
+       row); test 28 pins 6495 (the 61 to 120 s band's 4447, at a 90 s length, plus the 2048 reserve; a fixed length, not the
+       unknown-length case).
      - **S3 calls `model_size_bytes` at a new call site, without a revision**: the provider calls
        it only for an uncached model (`whisper_provider.py:264-266`), and the row fallback works
        only for `revision is None` (`model_sizes.py:86-91`). Test 28's fake row is revision-less.
@@ -801,7 +819,8 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
      - the desktop is counted **once, as `_DESKTOP_RESERVE_MIB`**. A measured `dwm.exe`
        figure is never added: `dwm` is not a resident (it is on S8's ignore list), so the
        declared check cannot pay for the desktop twice (Ark #60 §5.2).
-  2. **Declared check:** `need <= _total_vram_mib()` (supervisor 1814).
+  2. **Declared check:** `need <= _total_vram_mib()` (supervisor 1814). A `need` above a known total is `does_not_fit`
+     whether or not `free` could be read (Zcode #88-6, follow-up 9a); `unknown` is for a missing size or a missing total.
   3. **Live veto:** `_free_vram_mib()` (1793) `>= whisper_peak + growth_left`, where
      `growth_left` is the music peak less what the music child is measured to hold now
      (per-process reader, S8), or the whole peak while it cannot be measured. **In v1 it is
@@ -888,18 +907,20 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
       (`llama_server_supervisor.py:1943`, used by `_admission`) stays the only number;
       `LlamaServerSupervisor.vram_reserve()` answers it, so L11 reads every engine's reserve
       through one method.
-    - **Why this was needed.** Today the two numbers do not add up anywhere in code: 2048 is a
-      pre-start check only, and 1152 is what the engine leaves untouched. The gate therefore
-      assumes Strata takes up to total − 2048 = 30575 MiB (derived, not measured; to be re-measured on v0.2.20 before it becomes a test constant (Forge #12, Zcode #22-5)), while the engine takes up to
-      total − 1152 = 31471 MiB, 896 MiB more.
+    - **Why this was needed (written before S3e; the state it describes is gone).** The two numbers did
+      not add up anywhere in code: 2048 was a pre-start check only, and 1152 is what the engine leaves
+      untouched. The gate therefore assumed Strata takes up to total − 2048 = 30575 MiB (derived, not measured; to be re-measured on v0.2.20 before it becomes a test constant (Forge #12, Zcode #22-5)), while the engine takes up to
+      total − 1152 = 31471 MiB, 896 MiB more. Since S3e the gate reads the alias's own reserve, so for an alias that
+      leaves 1152 the bar is total − 1152 = 31471 MiB.
     - **The Strata peak 30575** in L11's arithmetic and test 28 was derived from the gate line
       (total − 2048), not measured. It is to be re-measured on Strata v0.2.20 before it becomes
-      a test constant (Forge #12, 2026-11-23; Zcode #22-5).
+      a test constant (Forge #12, 2026-11-23; Zcode #22-5). Read it as the figure of the 2048 fallback only: with an
+      alias's own reserve the gate's bar is total less that reserve (31471 MiB with 1152).
   - **By platform**:
 
     | Platform | `total` / `free` | Result in L11 |
     |---|---|---|
-    | Windows, NVIDIA | read at device level by nvidia-smi; only the per-process query is `[N/A]` under WDDM (`eval/gaia/campaign.py:128-130`). Two pairs, both real. A local engine resident: `free` ≈1100 MiB (Forge #15, #33: 1100 and 1108 with Strata) → the live veto refuses (1100 < 4447), as Mike #68 requires. No engine: `free` ≈30 000 MiB (`dpc-client.log`, 2026-11-18 15:06:42: "32298 MiB of VRAM free"; Strata's own demand there was `total` 32623 less `_DESKTOP_RESERVE_MIB` 2048 = 30575, `strata_provider.py:446-455`) → the veto passes | fit arithmetic runs |
+    | Windows, NVIDIA | read at device level by nvidia-smi; only the per-process query is `[N/A]` under WDDM (`eval/gaia/campaign.py:128-130`). Two pairs, both real. A local engine resident: `free` ≈1100 MiB (Forge #15, #33: 1100 and 1108 with Strata; readings, about what the engine's own reserve of 1152 leaves free, not a constant the code uses) → the live veto refuses (1100 is below every band's peak, 3147 or 4447), as Mike #68 requires. No engine: `free` ≈30 000 MiB (`dpc-client.log`, 2026-11-18 15:06:42: "32298 MiB of VRAM free"; Strata's own demand there was `total` 32623 less the 2048 fallback reserve = 30575, as the gate computed it before S3e; it now subtracts the alias's reserve, `strata_provider.py:457-465`) → the veto passes | fit arithmetic runs |
     | Windows, AMD or Intel | `shutil.which("nvidia-smi")` is None → `(None, None)` | `unknown` → L12 |
     | Linux, NVIDIA | the same two queries | fit arithmetic runs |
     | Linux, AMD or Intel | no nvidia-smi → `(None, None)` | `unknown` → L12 |
@@ -967,21 +988,33 @@ choice). Before a transcription takes a place in the line, in this order:
    not finite still reads as the default. `cpu_contention_factor` is a multiplier, not a switch: 0
    there reads as the default. The seeded `config.ini` line of each cap says "0 = never use the CPU".
 3. **Is the CPU computing something else now?** The signal is explicit (Zcode #69), each
-   engine's own test, not a guess from timing. **Mike 2026-11-24 (Q2; Ark #58-3, #61-2):** a
-   running twin or llama-server counts too, read as "computes something now":
+   engine's own test, not a guess from timing. **Mike 2026-11-24 (Q2; Ark #58-3, #61-2), narrowed the
+   same day (#84 of the new count; built in follow-up 9b):** only small CPU work counts, "whisper, embedder,
+   gliner"; a heavy engine kept off the card is not counted, nobody would run it there. What counts, each read
+   as "computes something now":
    - a resident Strata **or llama-server** child (a claim on the card) busy by its own
      `_busy_for_the_card`: a live `accepted_request` hold in `_CARD_HOLDS` (the registry the
      `_CARD_HOLD` contextvar's holds are entered into, 693–701), a call in flight
      (`_in_flight > 0`), a caller in its window, or a child starting. An idle resident one is
      not contention (llama-server serves on the GPU, but a busy one takes CPU threads for its own
      work; an idle one computes nothing);
-   - a llama-server kept off the card (`--device none`) holds no claim and so has no card state:
-     it counts while a call is in flight on it;
+   - **not** a llama-server kept off the card (`--device none`): it holds no claim and computes on the CPU,
+     but it is heavy and nobody would run a transcription beside it (follow-up 8 counted it while a call was
+     in flight; follow-up 9b removed it);
+   - the embedding model and GLiNER while they compute on the CPU: each wraps its compute call in
+     `cpu_work.computing_on_the_cpu` (`dpc_client_core/cpu_work.py`; the embedder only when its device is
+     `cpu`, GLiNER only when `_GLINER_DEVICE` is `cpu`, a call on a GPU counts nothing), and
+     `_cpu_contention` reads `cpu_work.computing_now()`. They have no busy signal of their own, and the
+     two are not card leases until S6 and S7;
    - a local Whisper transcription already running on the CPU: a CPU twin's, or any local Whisper
      whose model runs on the CPU (an alias set to `device: cpu`, a GPU load that fell back), one per
-     call in flight (`whisper_provider._CPU_RUNS`, `cpu_transcriptions_running()`). A loaded twin
-     that is idle is not.
-   `card_lease.route_view` answers the engines (`cpu_contention`, `_cpu_contention`), the provider
+     call (`whisper_provider._CPU_RUNS`, `cpu_transcriptions_running()`), counted from before the model's
+     load when the load is known to run on the CPU (the twin, an alias set to `device: cpu`, or a route's
+     `cpu` device: `_loads_on_the_cpu`, `whisper_provider.py:819`), else once the model is up on the CPU (an
+     `auto` alias, a GPU load that fell back); a call that waits behind another's load on `_load_lock` is not
+     counted. A loaded twin that is idle is not.
+   `card_lease.route_view` answers the engines and `cpu_work`'s calls (`cpu_contention`, `_cpu_contention`,
+   `card_lease.py:1206`), the provider
    adds its CPU transcriptions, and the INFO line names each one it counted ("x2 for a busy
    llama-server 'qwen27' and a CPU transcription on 'turbo@cpu'"; at a factor of 1, "…,
    cpu_contention_factor 1, no penalty"); `last_route["contention"]` keeps the list. When any is
@@ -1078,8 +1111,9 @@ Around the rule:
   numbers ship as start values and are tuned from operation (Mike #11); the in-turn path of
   3.5 does not depend on them. **What it reads** (S3 follow-up 7, Ark #58-3 and #61-2, Johnny
   #59-2; widened by Mike 2026-11-24, Q2, S3/S4 follow-up 8): point 3's signal, each contender named:
-  a busy resident Strata or llama-server, a llama-server off the card with a call in flight, a
-  local Whisper transcription already running on the CPU. Before follow-up 8 only a busy Strata
+  a busy resident Strata or llama-server, the embedding model or GLiNER computing on the CPU, a
+  local Whisper transcription already running on the CPU (a llama-server off the card was counted by follow-up 8
+  and is not since 9b, Mike's narrowing of 2026-11-24). Before follow-up 8 only a busy Strata
   raised it, and two CPU routes at once were each estimated as if alone. At 1.0 it applies no
   penalty, and the INFO line says "cpu_contention_factor 1, no penalty", not "x1". The
   measurement names its threads: `torch.get_num_threads()` was 16 on this machine (Forge #60).
@@ -1196,8 +1230,9 @@ already decided, from the card queue to the lease line.
 - **The words.** A refusal to a peer names no agent, chat or caller (044 point 7) and says
   "right now" (L3).
 - **The owner's terms.** A peer makes an idle holder yield only when the owner's own conditions
-  hold: swap on, nothing queued, nothing busy (ADR-044's amendment of 2026-11-06,
-  `_why_a_peer_may_not_swap`, 2632-2651). With `swap_when_idle` off, the peer keeps today's
+  hold: swap on, nothing queued, nothing busy, and the holder idle for 60 s since the owner's last request
+  (`PEER_SWAP_IDLE_S`, Mike 2026-11-24) (ADR-044's amendment of 2026-11-06, the module predicate
+  `why_a_peer_may_not_swap`, `llama_server_supervisor.py:727`). With `swap_when_idle` off, the peer keeps today's
   refusal (044 point 9 and Known limits 1 of the 2026-11-18 amendment).
 - **Inference peers meeting a lease.** S2 item 1 makes `_blocking_holders()` return leases, so
   a peer's inference place, once the amendment is built, waits behind a busy lease the way it
@@ -1242,7 +1277,7 @@ already decided, from the card queue to the lease line.
    music job and a busy supervisor have unknown ETAs, and the backend itself has never loaded
    Whisper on the GPU, so the per-device recorded ratio is empty (the seed figures of "GPU
    figures on speech" stand in, Q7), so a peer is in practice served when the card is free or
-   Whisper is warm and refused at once otherwise; since Mike's decision of 2026-11-24 it may have an idle Strata or llama-server swapped out on the owner's terms when that stop plus its own work fits ("As built" below). The line opens to
+   Whisper is warm and refused at once otherwise; since Mike's decision of 2026-11-24 it may have an idle Strata or llama-server swapped out on the owner's terms (which include 60 s idle since the owner's last request) when that stop plus its own work fits ("As built" below). The line opens to
    peers as figures accrue. **Known limit (Ark #13):** the guest tries its candidates in turn
    (`service.py:10157-10172`, `continue` after a failure), so a person on the guest's side may
    wait candidates × 120 s. Not changed here. **Decided in S3c, from the code** (read on
@@ -1259,8 +1294,9 @@ already decided, from the card queue to the lease line.
    twin included: at the CPU ratio of 1.1–1.5×, 300 s of audio takes about 200–270 s, so it is
    refused. Before #17 the refusal followed from the arithmetic; now it is stated.
    **As built in the lease line (S2 follow-up; Mike's option (a), by consensus, review #75–#91).**
-   A supervisor's claim: a peer gets the card only when no claim stands on it; the card queue and
-   the eviction of a supervisor are the owner's mechanism. In the code: a peer's lease request is
+   A supervisor's claim: a peer gets the card only when no claim stands on it, or when the owner's terms below
+   let it have an idle one stopped (2026-11-24); the card queue and the eviction of a supervisor are otherwise
+   the owner's mechanism, and a peer reaches the eviction only on those terms. In the code: a peer's lease request is
    granted at once when nothing is in its way, and is refused at once whenever a supervisor holds
    the card and is not going (starting or busy, swap on or off: a supervisor has no ETA; idle, unless
    the owner's terms below let the peer have it stopped) or any owner's place stands in the card
@@ -1273,7 +1309,12 @@ already decided, from the card queue to the lease line.
    lines: `llama_server_supervisor.why_a_peer_may_not_swap(holders)` (the supervisor's
    `_why_a_peer_may_not_swap` calls it with its `_blocking_holders()`, `card_lease._swaps_engines`
    with the holders on the card): the swap switch on, nothing in the card queue and no owner's
-   request waiting in the lease line, no holder busy by rule 1 or already stopping. When it holds,
+   request waiting in the lease line, no holder busy by rule 1 or already stopping, **and no holder that served the owner's own request within the
+   last 60 s** (`PEER_SWAP_IDLE_S`, `llama_server_supervisor.py:858`; follow-up 9b, Mike's call of 2026-11-24 on
+   Zcode #85-1): `_owner_request_ended_at[alias]` is stamped when a card hold leaves its alias
+   (`_off_the_alias`: a chat turn, an agent turn or a gateway call, success or failure; a peer's call holds no card
+   hold), and an alias that never served the owner counts as idle. `caller_idle_s` is another rule: it covers a
+   gateway client and a peer, not the owner. When it holds,
    for a lease that `waits_for_engines` (the real Whisper lease, since S3b), the idle resident
    Strata or llama-server counts its own stop figure, `_expected_stop_s()`, in the peer's estimate,
    and the whole trip (that stop, plus the peer's `expected_s`, which holds Whisper's load when cold
@@ -1287,7 +1328,8 @@ already decided, from the card queue to the lease line.
    generic `LeaseRefusedForPeer` ones and name no alias, engine, agent, chat or holder (L3, 044 point
    7; the leak Zcode #22 (iv) fixed in S3e stays fixed). L12's view for a peer is unchanged
    (`route_view`'s `engine_stays`, item 1a): with `let_peers_use_cpu_twin` on, a short file still
-   takes the twin first. Tests: `test_a_peer_may_have_an_idle_engine_swapped_out_on_the_owners_terms.py`;
+   takes the twin first. Tests: `test_a_peer_may_have_an_idle_engine_swapped_out_on_the_owners_terms.py` and, through both lines with
+   an injected clock, `test_a_peer_may_swap_an_engine_only_a_minute_after_the_owners_last_request.py`;
    `test_a_peer_lease_waits_only_when_its_estimate_fits_its_deadline.py` re-pinned (the busy half
    stays, the idle half is refused only when the owner's terms or a figure are missing). Behind lease
    holders and lease waiters only, it may wait: each part of the estimate is known (a busy lease's
@@ -1769,9 +1811,21 @@ lease, nor with `swap_when_idle` off, when nothing is stopped.
   under `_the_lock`) unreachable for a yield while a start held the lock. Now:
   - the runner acquires through `use()` before it calls `start()`, so `start()` finds the
     lease already granted and never waits under `_the_lock`;
-  - `start_music_engine` by hand calls `acquire("start by hand", wait_s=0)` **before**
-    `start()`, so it is refused naming the holder, as `exclusive(wait=False)` refuses today;
-  - `start()` itself asserts the lease is granted and never acquires.
+  - `start_music_engine` by hand asks the card **before** `start()` and before any lock, through
+    `_card_for_a_start("start by hand", yields_idle=True)` (`acquire(..., wait_s=0, yields_idle=True)`,
+    `music/engine_base.py:484`). It is refused at once, naming the holder (`card_busy`), when a holder is busy
+    or has a queue behind it. When every holder in the way is idle with no queue, and the lease may ask or
+    swap it (an idle Whisper model, the other music engine, a local LLM engine with `swap_when_idle` on), the
+    request waits in the lease line for those holders only and takes the same ask and swap path a queued
+    job takes, bounded by the owner's `swap_wait_s` and at least `BY_HAND_YIELD_S` (30 s). Mike, 2026-11-24
+    (group chat): anything idle with no queue may be unloaded for a start by hand. The other music engine is
+    checked first (`MusicEngines.refuse_while_switching`: a busy one refuses with `engine_busy`) but is stopped
+    only after the card is granted, so a refused start stops nothing;
+  - `start()` itself **acquires, and never waits**: when the engine holds no grant it asks with `wait_s=0`
+    (`_card_for_a_start()`, `engine_base.py:473-482`), before `_the_lock`, so a direct start (the engine
+    tests, a caller that forgot) is refused at once naming the holder (`card_busy`) instead of loading beside
+    it; with a grant already held (a job's, from `in_use`) it asks nothing. `_start_child()`, under the lock,
+    acquires nothing. Only the start by hand passes `yields_idle`: `start()` alone never asks a holder to let go.
 - **`_yield_card(why) -> YieldOutcome`:** child not alive → `nothing_to_give`; `_the_lock`
   held (a start or a stop is under way) or `self.busy` → `refused`, without calling
   `stop()`; else `await self.stop("swap")` → `let_go`. A start in progress is also busy for
@@ -2058,9 +2112,10 @@ must be checked against what those files assume:
       never foreign holders. The backlog (7366) measured dwm at **2,709 MiB**, so the
       Ruach "a foreign process over 2 GiB closes the card" rule would trip permanently on
       Windows without it. The ignore list subtracts nothing from any arithmetic.
-    - *Does a load fit?* `_DESKTOP_RESERVE_MIB` decides, and only it, and only in
-      arithmetic against **total** memory: `strata_provider.py:451`, and L11's declared
-      check. L11's live veto compares **measured free** memory, which already excludes the
+    - *Does a load fit?* A reserve decides, and only it, and only in arithmetic against **total**
+      memory: since S3e the engine's own (`vram_reserve()`; `_DESKTOP_RESERVE_MIB` = 2048 is
+      llama-server's and the last fallback), in the Strata peer gate (`strata_provider.py:465`) and
+      in L11's declared check. L11's live veto compares **measured free** memory, which already excludes the
       desktop's current use, with Whisper's peak and the music growth left, and adds no
       reserve. Nobody subtracts both the desktop's measured use and the reserve.
   - **A foreign process over 2048 MiB** becomes a synthetic holder: `engine "foreign"`,
@@ -2501,7 +2556,7 @@ New test files:
     a card refusal skips further GPU aliases and still reaches the twin or a cloud alias.
 34. `test_a_running_music_jobs_eta_is_unknown_until_it_has_progress.py` (Ark #64 §5): a
     running YuE2 job with only per-variant progress → ETA unknown (long); a queued job →
-    the text estimate, marked as an estimate; an instrumental never reads as "almost done"; 80 audio seconds at factor 3.5 read 280 s.
+    the text estimate, marked as an estimate; an instrumental never reads as "almost done"; the factor is audio seconds per wall second (follow-up 9b), so 80 audio seconds at factor 3.5 read about 22.9 s, and the trial card's 240 s and 30 s songs read their measured 80.5 s and 8.9 s within 5 %.
 35. `test_music_swaps_out_an_idle_supervisor_when_nothing_waits.py` (Mike #70): swap on,
     an idle Strata, empty lines → the music lease marks it, the live conversation is saved
     before the stop, the swap note says the parked conversations are dropped, the job
@@ -2586,7 +2641,9 @@ Compliance checks beyond tests:
 
 ## Implementation Status
 
-Nothing is built. Recommended order (Mike #68 made S2 part of the first slice): S0, then
+S1 to S4 are built (S3 and S4 meet the Whisper card's Done-when, S2 keeps Whisper off a local LLM's
+card), with follow-ups 1 to 9 on `dev`; S5 to S8 and S10 are pending and S9 is folded. The order that
+was recommended and followed (Mike #68 made S2 part of the first slice): S0, then
 S1, then S2, S3 and S4 together (they meet the Whisper card's Done-when and keep Whisper
 off a local LLM's card), then S5–S8 and S10. S2 changes the 5,555-line file, so it is
 coordinated with the agents editing it rather than postponed.
@@ -2595,8 +2652,8 @@ coordinated with the agents editing it rather than postponed.
 |---|---|---|---|---|
 | S0 | docs: this ADR (the design proposed an ADR-044 amendment; this record carries the matrix, L1–L12 and the decisions instead), revised after reviews #41–#89, the new count's #10–#15, and Mike #68–#71 and #11 | `docs/decisions/052-…md` | — | This commit |
 | S1 | feat(card-lease): lease registry, lease line, one order across both lines (L5a), refusals, wait estimate; `card_holders`/`card_queue` include lease rows through the hook (supervisor rows first, `until_cancelled`); `card_holder()` stays supervisor-only | new `managers/card_lease.py`; `llama_server_supervisor.py` (`_LEASE_HOLDERS`, `_LEASE_WAITERS`, `_live_holders`, `card_holders`, `card_queue`); `tests/conftest.py` | tests 1–3, 6–8, 14 with fake clients only | Built at 53a2eaf5 (2026-11-22); **S1 follow-up (review #54–#57)** in the commit after it (`for_a_peer` in the waiter hook, lease rows in the UI readers, `seconds_from_ratio`, `let_go_by_hand` answers False at its bound, pins; see Review notes, "S1 follow-up"), reviewed and accepted as the base for S2; S1-level parts of tests 3 (b) and 8 only, the rest of 3 (b) and 3 (c) are S2, the 120 s door of test 8 is S3; a third hook `_LEASE_QUEUE_ROWS` added (one lease, several waiters) |
-| S3 | feat(whisper): the local model holds a card lease, yields by unloading when idle (`yield_card`, releasing only when the unload ran), loads beside busy music only in the one shared cell when it provably fits (L11), otherwise chooses the CPU twin when its estimate beats the GPU wait (L12, Mike #62, Ark #64) or queues before `_load_lock`; the CPU twin is a separate `local_whisper` provider with `device: cpu` and no lease, selected by `transcribe_with_route`; doors pass `purpose` and their bounds; every caller gets a deadline and the queue's is shorter; a card refusal ends the provider cascade; the peer check runs again after a wait; a peer's transcription waits only when its whole trip fits the guest's 120 s, else is refused at once (L13); a load that fell back to the CPU releases the lease; an agent's transcription inside its own turn on a local alias goes to the twin up to 300 s or is refused at once (3.5); the provider records the real-time ratio per device, the carrier L10's Whisper estimate needs (S3, not S1); the twin starts from L12's table; llama-server children record `predicted_vram_mib`; L11 reads `free` and `total` through `read_vram_mib` and never per-process figures | `providers/whisper_provider.py`; `service.py` (`transcribe_audio`'s bound, the received-voice cascade in `_maybe_transcribe_voice_message`, the peer check), `music/commands.py` (`_music_transcribe_with_whisper`), `tools/transcribe.py` (`transcribe_audio_file`: `purpose`, `on_wait`); `p2p_coordinator.py` (`handle_transcription_request`, `serving_a_peer`); Telegram needs no edit of its own, it reaches the provider through `service.transcribe_audio` (four doors, Forge #20-7); `settings.py` (`queue_wait_s`, `cpu_max_s`, `cpu_max_audio_s`, `cpu_contention_factor`); `ui/src/lib/coreService.ts` (the `transcribe_audio` command's timeout); `llama_server_supervisor.py` (`predicted_vram_mib`, one attribute set at launch); `managers/commit_memory.py` (a function that clears `at` and `free` of the 30 s VRAM reading, never `total`) | 9, 10, 18–24, 26–28, 30–34, 36–38, 40 | **S3a built** (2026-11-23, branch `feat/card-lease-s3-s4`): the producer of `expected_s` (per device: warm ratio by length band, first-call `penalty_s` in seconds and load time since follow-up 2; start figures from L12 and "GPU figures on speech"), the four doors' ask (`purpose`, bound, `expected_s`) carried to `transcribe`, a going supervisor's stop figure in `_estimate`, `queue_wait_s` and item 7's carrier; see Review notes, "S3a build". **S3b built** (2026-11-23, same branch): the local Whisper model holds a card lease on a GPU device (taken before `_load_lock`, the door's ask consumed, `waits_for_engines` by item 1a), yields by unloading, lets go on every unload that ran and on a CPU fallback, the preload as a background call, each door's `on_wait`, the peer's re-check at the grant, the UI's `transcribe_audio` timeout 840 s; until S4 the music runner's old card wait asks an idle Whisper to let go; tests 10, 19 (part), 20 (part), 24, 26, 27, 37 (part); see Review notes, "S3b build". **S3c built** (2026-11-23, same branch): a card refusal (`CardQueueRefusal`, which every `Lease*` refusal is) ends the received-voice walk over GPU aliases, told from an ordinary failure by the field `card_refusal` of `transcribe_audio`'s error answer; a cloud, `remote:` or `device: cpu` alias later in the list is still tried; at the dictation door a refusal takes the owner's OpenAI-then-peer chain as a failure does; the received-voice `check` (queueing condition 3) ends a wait when the sender's transcript arrives; the guest's walk over peers is unchanged (each peer is another card); tests 22, 23; see Review notes, "S3c build". **S3d built** (2026-11-23, same branch): L12 at the seam before the lease is asked (item 1a: L12 first), the CPU twin `<alias>@cpu` (a `local_whisper` object on `device: cpu`, no lease, its own 60 s idle unload, built by its GPU alias and carried by the providers reload, never in the providers list), `RoutedToCpu` and `transcribe_with_route` at the four doors, the RAM check (also for a GPU load that fell back to the CPU), `cpu_max_s`, `cpu_max_audio_s` and `cpu_contention_factor` seeded into `config.ini`, an agent's transcription inside its own turn on a local alias to the twin up to `cpu_max_audio_s` or refused at once (3.5), peers on the twin only with the owner's `let_peers_use_cpu_twin` and within 120 s, the cascade question that writes nothing (Ark #44-2); tests 30, 31, 32, 33, 40 (each in part where noted); see Review notes, "S3d build". **S3e built** (2026-11-24, branch `dev`): one reserve per engine (`5984876e`: Strata's peer gate reads the alias's `vram_reserve_mib`, then its base config, 2048 the fallback; llama-server keeps 2048), L11's one shared cell and live veto at L12's point 1 and at the grant, `vram_mib` by length band (L11 its consumer), `predicted_vram_mib` on llama-server children, the VRAM cache clear, a CPU twin that does not load sends the call to the line (Johnny #63-5), Zcode (iii) and (iv), the UI timeout's carrier pinned; tests 18, 28 and five more; see Review notes, "S3e build". The cell is dormant until S4. First slice |
-| S4 | feat(music): music engines hold the card lease (acquired before `_the_lock`); the runner waits through it and names lease holders; a `running` job may wait for the card (both gates: `jobs.py` and the runner's wait loop) | `music/engine_base.py`, `music/runner.py`, `music/commands.py` (start by hand), `music/jobs.py`, `music/acestep.py`/`yue2.py`, test helpers, `ui/src/lib/utils/musicCreate.ts` | **4 (Done-when)**, 11, 13, 15, 17, 29 | **S4 built** (2026-11-24, branch `dev`): each music engine holds `music:<key>` (kind `music`, declared peak 5600 / 9300 MiB, `engine` yield, `waits_for_engines`), the lease first and `_the_lock` second (a start asks with `wait_s=0` before the lock, `card_busy` naming the holder), let go on every end of the child, kept across a yue2.cpp restart for boot options; the runner's job holds it through `in_use` (one use, from before `start_job`), waits queued with `card_wait` naming the holders, until cancelled; a running job whose child ended asks again and waits `running` (both gates); the S3b interim card wait is gone; L11's shared cell has its production pair; the queued job's expected time with YuE2's factor by length; the start by hand; the UI shows a running job's wait. Tests 4, 11, 13, 15, 17, 21, 29, 34; see Review notes, "S4 build". First slice |
+| S3 | feat(whisper): the local model holds a card lease, yields by unloading when idle (`yield_card`, releasing only when the unload ran), loads beside busy music only in the one shared cell when it provably fits (L11), otherwise chooses the CPU twin when its estimate beats the GPU wait (L12, Mike #62, Ark #64) or queues before `_load_lock`; the CPU twin is a separate `local_whisper` provider with `device: cpu` and no lease, selected by `transcribe_with_route`; doors pass `purpose` and their bounds; every caller gets a deadline and the queue's is shorter; a card refusal ends the provider cascade; the peer check runs again after a wait; a peer's transcription waits only when its whole trip fits the guest's 120 s, else is refused at once (L13); a load that fell back to the CPU releases the lease; an agent's transcription inside its own turn on a local alias goes to the twin up to 300 s or is refused at once (3.5); the provider records the real-time ratio per device, the carrier L10's Whisper estimate needs (S3, not S1); the twin starts from L12's table; llama-server children record `predicted_vram_mib`; L11 reads `free` and `total` through `read_vram_mib` and never per-process figures | `providers/whisper_provider.py`; `service.py` (`transcribe_audio`'s bound, the received-voice cascade in `_maybe_transcribe_voice_message`, the peer check), `music/commands.py` (`_music_transcribe_with_whisper`), `tools/transcribe.py` (`transcribe_audio_file`: `purpose`, `on_wait`); `p2p_coordinator.py` (`handle_transcription_request`, `serving_a_peer`); Telegram needs no edit of its own, it reaches the provider through `service.transcribe_audio` (four doors, Forge #20-7); `settings.py` (`queue_wait_s`, `cpu_max_s`, `cpu_max_audio_s`, `cpu_contention_factor`); `ui/src/lib/coreService.ts` (the `transcribe_audio` command's timeout); `llama_server_supervisor.py` (`predicted_vram_mib`, one attribute set at launch); `managers/commit_memory.py` (a function that clears `at` and `free` of the 30 s VRAM reading, never `total`) | 9, 10, 18–24, 26–28, 30–34, 36–38, 40 | **S3a built** (2026-11-23, branch `feat/card-lease-s3-s4`): the producer of `expected_s` (per device: warm ratio by length band, first-call `penalty_s` in seconds and load time since follow-up 2; start figures from L12 and "GPU figures on speech"), the four doors' ask (`purpose`, bound, `expected_s`) carried to `transcribe`, a going supervisor's stop figure in `_estimate`, `queue_wait_s` and item 7's carrier; see Review notes, "S3a build". **S3b built** (2026-11-23, same branch): the local Whisper model holds a card lease on a GPU device (taken before `_load_lock`, the door's ask consumed, `waits_for_engines` by item 1a), yields by unloading, lets go on every unload that ran and on a CPU fallback, the preload as a background call, each door's `on_wait`, the peer's re-check at the grant, the UI's `transcribe_audio` timeout 840 s; until S4 the music runner's old card wait asks an idle Whisper to let go; tests 10, 19 (part), 20 (part), 24, 26, 27, 37 (part); see Review notes, "S3b build". **S3c built** (2026-11-23, same branch): a card refusal (`CardQueueRefusal`, which every `Lease*` refusal is) ends the received-voice walk over GPU aliases, told from an ordinary failure by the field `card_refusal` of `transcribe_audio`'s error answer; a cloud, `remote:` or `device: cpu` alias later in the list is still tried; at the dictation door a refusal takes the owner's OpenAI-then-peer chain as a failure does; the received-voice `check` (queueing condition 3) ends a wait when the sender's transcript arrives; the guest's walk over peers is unchanged (each peer is another card); tests 22, 23; see Review notes, "S3c build". **S3d built** (2026-11-23, same branch): L12 at the seam before the lease is asked (item 1a: L12 first), the CPU twin `<alias>@cpu` (a `local_whisper` object on `device: cpu`, no lease, its own 60 s idle unload, built by its GPU alias and carried by the providers reload, never in the providers list), `RoutedToCpu` and `transcribe_with_route` at the four doors, the RAM check (also for a GPU load that fell back to the CPU), `cpu_max_s`, `cpu_max_audio_s` and `cpu_contention_factor` seeded into `config.ini`, an agent's transcription inside its own turn on a local alias to the twin up to `cpu_max_audio_s` or refused at once (3.5), peers on the twin only with the owner's `let_peers_use_cpu_twin` and within 120 s, the cascade question that writes nothing (Ark #44-2); tests 30, 31, 32, 33, 40 (each in part where noted); see Review notes, "S3d build". **S3e built** (2026-11-24, branch `dev`): one reserve per engine (`5984876e`: Strata's peer gate reads the alias's `vram_reserve_mib`, then its base config, 2048 the fallback; llama-server keeps 2048), L11's one shared cell and live veto at L12's point 1 and at the grant, `vram_mib` by length band (L11 its consumer), `predicted_vram_mib` on llama-server children, the VRAM cache clear, a CPU twin that does not load sends the call to the line (Johnny #63-5), Zcode (iii) and (iv), the UI timeout's carrier pinned; tests 18, 28 and five more; see Review notes, "S3e build". The cell was dormant until S4 and is live since: S4 gave it its production pair, 5600 MiB for YuE2 and 9300 for ACE-Step. First slice |
+| S4 | feat(music): music engines hold the card lease (acquired before `_the_lock`); the runner waits through it and names lease holders; a `running` job may wait for the card (both gates: `jobs.py` and the runner's wait loop) | `music/engine_base.py`, `music/runner.py`, `music/commands.py` (start by hand), `music/jobs.py`, `music/acestep.py`/`yue2.py`, test helpers, `ui/src/lib/utils/musicCreate.ts` | **4 (Done-when)**, 11, 13, 15, 17, 29 | **S4 built** (2026-11-24, branch `dev`): each music engine holds `music:<key>` (kind `music`, declared peak 5600 / 9300 MiB, `engine` yield, `waits_for_engines`), the lease first and `_the_lock` second (a start asks with `wait_s=0` before the lock, `card_busy` naming the holder), let go on every end of the child, kept across a yue2.cpp restart for boot options; the runner's job holds it through `in_use` (one use, from before `start_job`), waits queued with `card_wait` naming the holders, until cancelled; a running job whose child ended asks again and waits `running` (both gates); the S3b interim card wait is gone; L11's shared cell has its production pair; the queued job's expected time with YuE2's factor by length (audio seconds per wall second, so wall time is the estimate divided by it, since follow-up 9b); the start by hand (refused by any other holder in S4; since follow-up 9b it may unload an idle holder that has no queue, and the other music engine is stopped only after the card is granted); the UI shows a running job's wait. Tests 4, 11, 13, 15, 17, 21, 29, 34; see Review notes, "S4 build". First slice |
 | S2 | feat(card): llama-server and Strata wait for a busy lease and unload an idle one, with the swap on or off; a lease contender swaps an idle supervisor on the owner-start path, reading the parked count first (2.4); one order across both lines; an inference peer waits behind a lease only once ADR-044's amendment of 2026-11-18 is built (L13) | `llama_server_supervisor.py` (2.2 items 3–13), `providers/llamacpp_server_provider.py` (`stop_local_engine`, then `card_holder` may return lease rows) | 5, 16, 35, 39, and the full list of existing card tests green | Built at 1e57932f (2026-11-22), in review; also the supervisor side of tests 3 (b) and 3 (c), test 6 extended to every new S2 path with no lease registered, and `strata_provider.py`'s peer refusal worded without a lease's name. ADR-044's amendment of 2026-11-18 is still not built, so an inference peer keeps today's refusal while a lease is busy (L13). `card_holder()` stays supervisor-only (the Stop engine button is unchanged; S5). Readings of this record taken in the build: see Review notes, "S2 build". **S2 follow-up (review #75–#91)** in the commit after it: see Review notes, "S2 follow-up" |
 | S5 | feat(ui): lease rows and lease waiters in the existing holder and queue lines, "until cancelled", unknown ETA as "—"; whether the block shows without a local LLM provider; the optional "let peers use the CPU twin" setting beside the device selector of a Whisper provider (Mike #71) | `ProvidersEditor.svelte`, `cardQueue.ts`, `cardQueue.test.ts`, `MusicCreate.svelte`; the status payload | 25 and manual | Pending |
 | S6 | feat(memory): the embedder joins the lease (GPU for rebuilds, CPU when skipped), with a real unload | `dpc_agent/memory.py`, `managers/agent_manager.py`, `settings.py` | fake-thread client tests | Pending |
@@ -2751,13 +2808,23 @@ Recorded as decided; each line names the message.
   - **Q1, no:** item 1a stays: behind an idle Strata a long file's wait reads as long; no
     swap-cost pricing.
   - **Q2, yes:** a CPU twin already running a transcription, or a running llama-server, counts as
-    CPU contention (L12 point 3, read as "computes something now").
+    CPU contention (L12 point 3, read as "computes something now"); **narrowed later that day, see the
+    entry below.**
   - **Q3, yes:** `cpu_max_s` or `cpu_max_audio_s` at 0 turns the CPU route off (L12 point 2).
   - **Q4 and Q5, yes, already built:** the three L12 keys are seeded into an existing
     `config.ini`; the base config's `--vram-reserve-mib` is a reserve layer.
   - **Q6:** L11 decided; built in S3e, live since S4.
   - **A peer may stop an idle engine:** on ADR-044's owner terms of 2026-11-06, one predicate for
     both lines, the stop figure counted in the peer's 120 s (L13, "As built").
+- **2026-11-24, later in the same chat (#84 of the new count; built in follow-up 9b):**
+  - **YuE2's factor is flipped:** audio seconds per wall second, wall time = the song's length divided by
+    it (L10); the job's timeout is left as it is.
+  - **A start by hand may unload anything idle that has no queue:** an idle Whisper and, with the swap on,
+    an idle Strata or llama-server (3.2).
+  - **A peer may stop an idle engine only after 60 s of idleness since the owner's last request on it**
+    (L13, "As built").
+  - **Only small CPU work is contention:** Whisper on the CPU, the embedder and GLiNER; a llama-server kept
+    off the card is not counted (L12 point 3).
 - **2026-11-22, N11: in scope, and CC writes S10, the ComfyUI client half included.** The yield
   verb for ComfyUI is its own `POST /free {"unload_models": true, "free_memory": true}` plus
   `POST /interrupt` (Forge verified it live, 24.9 → 1.8 GB). Order: after S1.
@@ -3032,8 +3099,9 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   the twin RAM constant, the revision-less call site, the `gguf_path` check, the live run's log
   fields, the split `[unverified]`, the 43× row, Forge's ComfyUI facts. **Did not hold:**
   Johnny #32-3, that `× factor` counts YuE2 twice: `estimate_yue2_seconds` is **audio**
-  seconds (the form compares it with the duration cap, `musicCreate.ts:353-358`; the test pins
-  80 for six lines), so the product stands; kept from Johnny: no code records the factor yet
+  seconds (the form compares it with the duration cap, `shortCapWarning` in `musicCreate.ts`; the test pins
+  80 for six lines), so the product stood **[superseded 2026-11-24: the factor is audio seconds per wall second
+  and wall time is the estimate divided by it (L10); that the estimate is audio seconds stands]**; kept from Johnny: no code records the factor yet
   (3.5 is a start value; S4 records it).
 - **The first draft's own errors** found on the way: `_CARD_CLAIMS` is pruned in four
   places, not two; `_free_vram_mib` is in the supervisor; `p2p_coordinator.py:1397` is now
@@ -3195,7 +3263,8 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   - **For Mike:** L11's heading still reads "proposed, pending Mike's OK"; the S3 row asked for it and it is built, dormant until S4. **Decided by Mike, 2026-11-24 (Q6):** the heading reads decided, built in S3e and live since S4.
 - **S4 build (CC, 2026-11-24, branch `dev`, on `ac9307d5`): music holds the card lease; where this record was read one way, and why.** For review.
   - **One use per job: `in_use` is the runner's use** (3.2: "`in_use()` enters `card_lease.use(what)` and counts `_busy` in the same place" and "the runner … `card_lease.use(…)` around `start_job`, `in_use` and the production steps"). **Read as one use, not two nested ones:** a second use opened by `in_use` after the runner's grant would, by L5, wait behind a contender that arrived in between and waits for the first use, so the job would wait on itself until cancelled. So `SupervisedEngine.in_use(what, **acquire_kw)` is `card_lease.use(...)` with `_busy` counted inside it, and the runner calls it with `wait_s=None`, its `check`, its `on_wait` and its `expected_s`, from before `start_job` to the end of the job.
-  - **A start never waits for the card, and asks before the lock** (3.2: "`start()` itself asserts the lease is granted and never acquires"). **Read as:** `start()` = `_card_for_a_start()` (a grant with `wait_s=0` when the engine holds none, before `_the_lock`; refused at once, `MusicEngineError("card_busy")`, naming the holder) then `_start_child()` (under the lock, which acquires nothing and refuses with `card_busy` if the grant was let go in between). The lock order Ark #44 asked for holds, no path can load without a grant, and a direct start (the engine tests, a caller that forgot) gets the by-hand behaviour instead of an assertion. The start by hand asks the same way, labelled "start by hand", after `MusicEngines.exclusive(wait=False)` has stopped an idle other music engine as before; so the lease is never asked under the switch lock either. A by-hand start that brought no child up keeps no grant (`release_when_empty`).
+  - **A start never waits for the card, and asks before the lock** (3.2 as first written: "`start()` itself asserts the lease is granted and never acquires"; 3.2 now states what is
+    built, follow-up 9c). **Read as:** `start()` = `_card_for_a_start()` (a grant with `wait_s=0` when the engine holds none, before `_the_lock`; refused at once, `MusicEngineError("card_busy")`, naming the holder) then `_start_child()` (under the lock, which acquires nothing and refuses with `card_busy` if the grant was let go in between). The lock order Ark #44 asked for holds, no path can load without a grant, and a direct start (the engine tests, a caller that forgot) gets the by-hand behaviour instead of an assertion. The start by hand asks the same way, labelled "start by hand"; as built in S4 it came after `MusicEngines.exclusive(wait=False)` had stopped an idle other music engine, which follow-up 9b reversed (the card first, the other engine stopped only once the card is granted); the lease is never asked under the switch lock either. A by-hand start that brought no child up keeps no grant (`release_when_empty`).
   - **A yue2.cpp restart for boot options keeps the card** (not in the record). `Yue2Server.start` stops a child that runs another backbone or lacks an adapter split (`stop("swap")`) and starts a new one inside one call. L8 releases on every stop, and the start would then fail its own grant check, or hand the card to a waiter for the seconds between the two children. **Read as:** one start, two children: `stop(keep_the_card=True)`, the lease marked `starting` first (busy: never asked to let go), let go only if the new child does not come up.
   - **Released on every end of the child** (3.2, L8): `stop()` in all its words, `_watch` ("exited on its own"), a start that ends with no child alive ("failed_start", also a refusal before the spawn), `shutdown()`. `starting` from just before the spawn, `running` once `/props` answers. `_yield_card`: not alive → `nothing_to_give`; `_the_lock` held or busy → `refused`; else `stop("swap")` → `let_go` (`could_not_let_go` if the child is somehow still alive). After a job's use closes, a grant with no engine running goes back (`release_when_empty`, `holds=engine.alive`), so a job cancelled before its engine came up leaves no warm grant with nothing on the card.
   - **The other music engine.** Every lease excludes every other, so a yue2.cpp job's use waits for `music:acestep` (an idle one is asked to let go, which stops it; a busy one is waited for). The job therefore waits **queued**, its `card_wait` naming `music:acestep`, where before S4 it waited **running** inside `MusicEngines.exclusive`. `exclusive` stays and agrees (3.2). `test_only_one_music_engine_is_on_the_card_at_a_time.py` follows (listed in 2.3 as changed on purpose).
@@ -3203,20 +3272,27 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   - **What `card_wait` names.** `card_lease.holders_in_the_way(lease)`: `{alias, engine}` of the holders in the way of the lease's earliest waiter, else of the waiters and card-queue places ahead of it; read in the lease's `on_wait` (one INFO line and one call per change of who it waits for), written by one task at a time so the last change wins, cleared at the grant. The record keeps `alias` and `engine` only (S2 item 8 note: "S4 owns that record"): the Stop X button reaches a lease by its holder name since S2 item 8, so it needs no more.
   - **The job's cancel ends its wait.** `check` reads the job every `card_poll_s` (3 s) and at once after every `wake()` (a cancel wakes the runner), not on each 0.1 s round of the line; `_Cancelled` takes the waiter out (`_leaves`). Zcode #54's known debt (1) is closed for music: every music wait goes through `use()`; the two bare `acquire` calls are a start's `wait_s=0` (no line, so no cancel can race a grant) and the running re-acquire under the job's open use (`_leaves` keeps a grant while a use is open).
   - **The declared peaks** (L11: "a music holder's peak is its declared `vram_mib`"): yue2.cpp 5600 MiB (trial table: 5222–5570 MiB whole-card peaks, already MiB; "the larger figure"), acestep.cpp 9300 (its trial's "about 9.3 GB", read as MiB, the larger reading). Neither grows past its peak in v1 (`growth_left` is the whole peak, L11 point 3).
-  - **Expected time and ETA** (L10). A job that has not started carries `expected_s = min(estimate_yue2_seconds(lyrics), duration_s) × yue2_factor(that) × variants` (`job_schemas.music_expected_s`): capped by the duration because a YuE2 song ends by itself and never runs past its cap (record silent). acestep.cpp: unknown (no measured factor). A running job: unknown, as v1 decides; the progress signal L10 says S4 "may" add (variant start times, a recorded per-machine factor) is not built.
-  - **The start by hand is refused by any other holder** (3.2: `acquire("start by hand", wait_s=0)`, "refused naming the holder"). Before S4 a start by hand looked at no holder but the other music engine, so it loaded beside a local LLM or a warm Whisper; now it is refused (`card_busy`) with the holder's name, and the person stops that holder first. Built as written; it changes what the Start button does with Strata resident.
+  - **Expected time and ETA** (L10). A job that has not started carries `expected_s = min(estimate_yue2_seconds(lyrics), duration_s) × yue2_factor(that) × variants` (`job_schemas.music_expected_s`; **as S4 built it, the product; flipped in follow-up 9b to a division by the factor, audio seconds per wall second, L10**): capped by the duration because a YuE2 song ends by itself and never runs past its cap (record silent). acestep.cpp: unknown (no measured factor). A running job: unknown, as v1 decides; the progress signal L10 says S4 "may" add (variant start times, a recorded per-machine factor) is not built.
+  - **The start by hand is refused by any other holder** (**superseded in part by follow-up 9b:** an idle holder with no queue is let go of for it; a busy one, or one with a queue, still refuses) (3.2: `acquire("start by hand", wait_s=0)`, "refused naming the holder"). Before S4 a start by hand looked at no holder but the other music engine, so it loaded beside a local LLM or a warm Whisper; now it is refused (`card_busy`) with the holder's name, and the person stops that holder first. Built as written; it changes what the Start button does with Strata resident.
   - **Events and UI.** No new event: the job's wait goes out as `music_job_updated` with `card_wait`, as before. `musicCreate.ts` shows the holders and "Waiting for the GPU: X holds it" for a `running` job with a `card_wait` too (3.2, section 4), and `stopCardHolder` asks such a job again after a Stop; `musicCreate.test.ts` pins it. The rest of the UI is S5's.
   - **Not built here:** a running job's ETA from progress (L10 "may"); S5's holder and queue lines; the SPEC's decision-32 amendment (the SPEC file is outside this repository, 3.2); Q7's music engine boot and reload time (unmeasured).
-  - **For Forge's live run** (music; nothing here can be measured): a live L11 `fits` with the local engine stopped and a YuE2 job running (log `need`, `total`, `free` and the real `nvidia-smi used`; Q6: whether `free` falls by the child's real use under WDDM); the YuE2 peak beside Whisper against the declared 5600; the wall time of one YuE2 variant against its received length (the factor's orientation, below); an idle engine's stop-and-reload cost when a dictation asks it to let go (Q7); the `card_busy` words of a start by hand with Strata resident; a job waiting queued behind a busy dictation, then running.
-  - **For Mike (yes/no):** (1) YuE2's factor: flip L10's orientation to audio seconds per wall second (a 240 s song took 80.5 s and a 30 s one 8.9 s in the trial table, load included), so a queued job's estimate is about a tenth of what it reads now? Built as the record orients it (test 34 pins "80 audio seconds at factor 3.5 read 280 s"); the estimate only routes and informs, and a long one routes a dictation to the CPU twin and refuses a peer, the cautious side. (2) The start by hand refused by a warm idle Whisper (`wait_s=0` asks no idle holder to let go): keep, or let it ask an idle cheap lease (one unload, about a second) before refusing?
+  - **For Forge's live run** (music; nothing here can be measured): a live L11 `fits` with the local engine stopped and a YuE2 job running (log `need`, `total`, `free` and the real `nvidia-smi used`; Q6: whether `free` falls by the child's real use under WDDM); the YuE2 peak beside Whisper against the declared 5600; the wall time of one YuE2 variant against its received length (the factor's orientation is decided, 2026-11-24; this checks its figures); an idle engine's stop-and-reload cost when a dictation asks it to let go (Q7); the `card_busy` words of a start by hand with Strata resident; a job waiting queued behind a busy dictation, then running.
+  - **For Mike (yes/no):** (1) YuE2's factor: flip L10's orientation to audio seconds per wall second (a 240 s song took 80.5 s and a 30 s one 8.9 s in the trial table, load included), so a queued job's estimate is about a tenth of what it reads now? Built as the record oriented it then (test 34 pinned "80 audio seconds at factor 3.5 read 280 s"; since follow-up 9b it pins about 22.9 s); the estimate only routes and informs, and a long one routes a dictation to the CPU twin and refuses a peer, the cautious side. (2) The start by hand refused by a warm idle Whisper (`wait_s=0` asks no idle holder to let go): keep, or let it ask an idle cheap lease (one unload, about a second) before refusing? **Answered by Mike, 2026-11-24 (group chat, #84 of the new count): (1) yes, flip it; (2) yes, let it ask an idle Whisper and, with the swap on, an idle Strata or llama-server (CC's options a and b: "anything idle with no queue may be unloaded"). Built in follow-up 9b.**
   - **Tests.** New: 4 `test_a_transcription_during_a_running_yue2_job_waits_and_names_the_holder.py` (the Done-when, its deadline refusal, L11 `fits` live, and the reverse: an idle warm Whisper let go, a busy one waited for queued and named), 11 `test_a_music_engine_lets_go_of_the_card_however_it_stops.py`, 15 `test_a_music_engine_start_never_waits_for_the_card_under_its_own_lock.py`, 17 `test_a_music_job_that_waits_while_running_shows_its_holder.py`, 21 `test_a_third_contender_asks_only_holders_in_its_way_cheap_idle_first.py`, 29 `test_a_running_job_waiting_for_the_card_does_not_start_its_engine.py`, 34 `test_a_running_music_jobs_eta_is_unknown_until_it_has_progress.py`. Changed: 13 in `test_a_generate_from_text_job_runs_end_to_end_on_the_supervised_engine.py` (a fake supervisor claim in `_CARD_CLAIMS`, "nothing is stopped" and the exact `state_reason` kept), `test_only_one_music_engine_is_on_the_card_at_a_time.py`, `test_a_music_job_moves_only_along_the_spec_state_machine.py`, the rigs (`_acestep_helpers.Rig`, `_yue2_helpers.DualRig`: no `holders`) and `test_the_music_engine_commands_report_start_and_stop_the_acestep_server.py` (no `card_holders` reader); removed `test_until_s4_a_music_job_asks_an_idle_whisper_to_let_go.py`; UI `musicCreate.test.ts`.
 
 - **S3/S4 follow-up 8 (CC, 2026-11-24, branch `dev`, on `b67b3cc0`): Mike's answers of 2026-11-24 built.** For review.
-  - **CPU contention (Q2), read as "computes something now".** Mike: "a running twin, or llama-server, should count as CPU contention". **Read as:** a llama-server serves on the GPU but takes CPU threads for its own work while it computes, so a resident one counts when it is busy by the same test as Strata (`_busy_for_the_card`: a call in flight, a turn standing on it, a caller in its window, a child starting), not merely because it is resident; an idle resident one is no contention. A llama-server off the card (`--device none`) has no claim and no card state, so it counts only while a call is in flight on it (`_in_flight > 0`). "A running twin" is read as any local Whisper transcription in flight on the CPU, a twin's or an alias's whose model runs on the CPU (one CPU, one load), counted per call around `_transcribe_loaded` (`_CPU_RUNS`), not a loaded twin. The factor is applied once, however many contend; the INFO line and `last_route["contention"]` name each. `card_lease._a_cpu_engine_is_busy` became `_cpu_contention` (a list), and `route_view`'s `cpu_busy` became `cpu_contention`. Tests: `test_a_running_cpu_transcription_or_a_busy_llama_server_is_cpu_contention.py`.
+  - **CPU contention (Q2), read as "computes something now"** (as built in follow-up 8; **narrowed in follow-up 9b**: a llama-server kept off the card no longer counts, and the embedder and GLiNER do, L12 point 3). Mike: "a running twin, or llama-server, should count as CPU contention". **Read as:** a llama-server serves on the GPU but takes CPU threads for its own work while it computes, so a resident one counts when it is busy by the same test as Strata (`_busy_for_the_card`: a call in flight, a turn standing on it, a caller in its window, a child starting), not merely because it is resident; an idle resident one is no contention. A llama-server off the card (`--device none`) has no claim and no card state, so it counts only while a call is in flight on it (`_in_flight > 0`). "A running twin" is read as any local Whisper transcription in flight on the CPU, a twin's or an alias's whose model runs on the CPU (one CPU, one load), counted per call around `_transcribe_loaded` (`_CPU_RUNS`), not a loaded twin. The factor is applied once, however many contend; the INFO line and `last_route["contention"]` name each. `card_lease._a_cpu_engine_is_busy` became `_cpu_contention` (a list), and `route_view`'s `cpu_busy` became `cpu_contention`. Tests: `test_a_running_cpu_transcription_or_a_busy_llama_server_is_cpu_contention.py`.
   - **0 turns the CPU route off (Q3).** `settings._local_transcription_figure(..., zero_is_off=True)` for the two caps and `whisper_provider.cpu_route_settings` (`_CPU_ROUTE_SWITCHES`, `_a_zero`) read 0 as 0; below 0, unreadable or not finite still reads as the default (as before); the factor keeps its reading. In `_choose_route` the switch is read right after point 1, so a free card and L11's `fits` still give the GPU; inside an agent's own turn (3.5) it is refused at once before the cap or the twin is read (the twin is not built); a peer allowed onto the twin goes to the line. The seeded lines say "0 = never use the CPU"; an existing `config.ini` keeps its old comment (the seed writes a key only when it is missing). Tests: `test_zero_turns_the_cpu_route_off.py`; `test_l12_settings_peers_and_a_twin_that_is_never_the_default.py::test_the_provider_reads_the_registered_source_and_falls_back` re-pinned (its `cpu_max_audio_s=0` read as the default; now `-1` does, and 0 is off).
   - **A peer may stop an idle engine (Mike, 2026-11-24).** L13 "As built". The predicate moved out of the supervisor method, unchanged, to `why_a_peer_may_not_swap(holders)`; the method and `card_lease._swaps_engines` both call it. **Read as:** "the same owner terms" includes "no holder already stopping": a peer behind a supervisor that is already going keeps S3a's reading (its stop counted, no new mark), and one behind a going supervisor and an idle one together is refused, as the inference peer is. Tests: `test_a_peer_may_have_an_idle_engine_swapped_out_on_the_owners_terms.py` (swap off, an owner's waiter, an owner's card-queue place, a busy engine, no figure, stop plus work over 120 s: refused at once and nothing stopped; idle, swap on, fits: stopped and served; one predicate for both lines); `test_a_peer_lease_waits_only_when_its_estimate_fits_its_deadline.py` re-pinned (busy half kept, idle half split by cause).
   - **Q1 (no), Q4, Q5, Q6:** text only, see "Decided by Mike" and the notes above.
   - **For Forge's live run:** a busy llama-server or a running twin raising the factor in the INFO line on this machine; a peer's transcription behind an idle Strata on a second node (the stop, the swap note, the answer within 120 s); `cpu_max_s = 0` in `config.ini` sending a dictation behind a busy Strata to the line.
+
+- **S3/S4 follow-up 9 (CC, 2026-11-24, branch `dev`, on `bf11758b`): Mike's answers built, and the findings of Zcode's three reviews (#85, #87, #88).** For review. 9a is `4ad35c86`, 9b `05bcce1d`, 9c this text.
+  - **9a, code from the reviews.** `commit_memory.forget_vram_reading()` never waits for an `nvidia-smi` probe: the lock covers the cached figures only, a separate probe lock keeps one probe at a time, and a reading begun before a forget answers its own caller and is not cached (`total` is kept either way); the owner loop calls it on every grant, release and `mark_running` (Zcode #88-1). L11 with a known total, an unread `free` and `need > total` is `does_not_fit`, not `unknown` (#88-6). A music engine lets the card go however a stop is cut short: `_stop_proc` kills the child and drops it on a second cancel or a failed wait, `_kill` logs an `OSError` other than `ProcessLookupError`, and `shutdown()` kills what its stop did not end and releases in a `finally` (#87-4). `transcribe_with_route` treats the door's `wait_s` as a deadline from the call's start: a call whose CPU twin did not load goes to the line with what is left of it, 0 at the least, `None` staying `None` (#88-4). Test 28 pins that the fit reads through `read_vram_mib` (#88-2).
+  - **9b, Mike's answers.** The YuE2 factor flipped (L10, test 34 now pins numbers worked out from `trial.md`); a start by hand unloads what is idle and has no queue, through `acquire(yields_idle=True)` and the same ask and swap path, and stops the other music engine only after the card is granted (3.2); a refusal at once no longer says an idle holder was asked to let go; CPU contention narrowed (L12 point 3); a peer waits 60 s after the owner's last request on an engine (L13), pinned through both lines by `test_a_peer_may_swap_an_engine_only_a_minute_after_the_owners_last_request.py`, and the factor applied once for two contenders. Three ADR-044 sentences that still said "a peer never swaps" are marked replaced.
+  - **9c, text only.** The status and banner of this ADR say what is built; the Whisper peak by band, the reserve in the Strata gate and the 30575 figure carry their S3e notes; 3.2 states what `start()` does (it acquires with `wait_s=0` and never waits; Zcode #87-2); the stale sentences of ADR-044, the glossary and three test docstrings follow the code.
+  - **Tests of 9a and 9b.** New: `test_a_music_engine_lets_go_of_the_card_when_its_stop_is_cut_short.py`, `test_a_peer_may_swap_an_engine_only_a_minute_after_the_owners_last_request.py`, `test_a_start_by_hand_unloads_what_is_idle_and_has_no_queue.py`, `test_the_embedder_and_gliner_count_as_cpu_contention_while_they_compute.py`. Re-pinned: test 34 (literal numbers from `trial.md`), `test_a_running_cpu_transcription_or_a_busy_llama_server_is_cpu_contention.py` (a llama-server off the card no longer counts; the factor once for two contenders), the L11 tests of 28 and 18 (the VRAM peaks 5600 and 9300 imported from the engines, not repeated), `test_a_cpu_twin_that_does_not_load_sends_the_call_to_the_card_line.py` (the retry gets what is left of the door's bound).
+  - **Not verified in code, left as written:** the Strata peak 30575 and 31471 stay derived; the band of 121 to 180 s keeps its estimated 2900; the live behaviour of any of this in operation.
 
 ## Review history
 
@@ -3408,12 +3484,17 @@ was done instead. The underlying concern is kept wherever it stands on its own.
   (queued, named, until cancelled) and again `running` when its child ended (both gates); the S3b
   interim card wait removed; L11's cell live; a queued job's expected time with YuE2's factor by
   length; the start by hand refused by any holder. Tests 4, 11, 13, 15, 17, 21, 29, 34. Two questions
-  for Mike (the factor's orientation, a by-hand start beside an idle Whisper). See Review notes, "S4
-  build".
+  for Mike (the factor's orientation, a by-hand start beside an idle Whisper), both answered on 2026-11-24 and built in follow-up 9. See Review notes, "S4
+  build" and "S3/S4 follow-up 9".
 - **S3/S4 follow-up 8 (CC, 2026-11-24).** Mike 2026-11-24: Q2 (a running twin or llama-server is CPU
   contention), Q3 (0 turns the CPU route off), a peer may stop an idle engine on the owner's terms
   (supersedes option (a)'s "a peer stops none"); Q1 (no swap pricing behind an idle engine), Q4, Q5
   and Q6 recorded as decided. See Review notes, "S3/S4 follow-up 8".
+- **S3/S4 follow-up 9 (CC, 2026-11-24).** Zcode #85, #87, #88 and Mike's answers of #84: the YuE2 factor
+  flipped, a start by hand unloads what is idle, a peer waits 60 s after the owner's last request, CPU
+  contention narrowed to small work, the VRAM forget off the probe's lock, grants released when a stop is cut
+  short, the twin-failed retry bounded by the door's deadline; this record's status, 3.2 and stale sentences
+  corrected. See Review notes, "S3/S4 follow-up 9".
 
 ## Authors
 
