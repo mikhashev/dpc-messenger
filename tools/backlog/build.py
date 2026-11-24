@@ -1906,21 +1906,27 @@ if "--check" in sys.argv:
                 _adr("no `## Decision` section — Context + Decision is the minimum an ADR "
                      "has to carry (TEMPLATE.md, RFC 3)")
 
-    # The glossary points, it does not define (docs/GLOSSARY.md, 2026-09-05): every row
-    # carries a «Defined in» link, and a link that resolves to nothing is the same defect
-    # as a stale reference one document up. Content, not structure — it warns, never
-    # refuses. The second check is the one that made the file exist: an axis token that
-    # has no row is a word the board files work under and nobody has written down.
+    # The glossary points, it does not define (docs/GLOSSARY.md, 2026-09-05): every term
+    # carries a «Defined in» line, and a link that resolves to nothing is the same defect
+    # as a stale reference one document up. Content, not structure — it warns. The layout
+    # itself is structure and refuses (2026-11-24): a glossary in a shape the walk does not
+    # read would report no terms and no defect. The second check is the one that made the
+    # file exist: an axis token that has no term is a word the board files work under and
+    # nobody has written down.
     # The walk itself lives in glossary_check.py so the client suite can run it without a
     # board — this script needs backlog.md, which no clone has, so CI never saw it here.
     GLOSSARY = SRC.parent / "docs" / "GLOSSARY.md"
     glossary_terms, glossary_links, glossary_bad = [], 0, 0
     if GLOSSARY.exists():
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from glossary_check import check_glossary
-        glossary_terms, glossary_links, _bad_links, _no_row = check_glossary(GLOSSARY, AXES)
-        glossary_bad = len(_bad_links)
-        warnings.extend(_bad_links + _no_row)
+        from glossary_check import GlossaryLayoutError, check_glossary
+        try:
+            glossary_terms, glossary_links, _bad_links, _no_row = check_glossary(GLOSSARY, AXES)
+        except GlossaryLayoutError as exc:
+            refusals.append(f"{GLOSSARY.name}  layout\n    {exc}")
+        else:
+            glossary_bad = len(_bad_links)
+            warnings.extend(_bad_links + _no_row)
 
     # И2's checkable half: the block is rendered, so a stale one is a claim that has
     # drifted from the two surfaces it was rendered from. Nothing here reads the prose —
