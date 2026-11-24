@@ -196,11 +196,34 @@ async def test_an_author_id_that_is_not_a_node_id_is_never_asked_about(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_a_wait_that_times_out_leaves_nothing_behind():
+async def test_a_wait_that_times_out_leaves_nothing_behind(monkeypatch):
+    """Not a race with the clock: the module's clock stands still, as it does for a timer that fires one
+    clock tick early (GetTickCount64 steps by 15.6 ms on Windows; follow-up 10 found the entry kept in 7
+    of 1000 waits of 10 ms there). The wait deletes its own entry however much time the clock says
+    has passed."""
+    monkeypatch.setattr(ftm, "_monotonic", lambda: 1000.0)
     manager = _manager([0.0])
 
     assert await manager.wait_for_certificate(A, 0.01) is False
     assert manager._certificate_arrivals == {}
+
+
+@pytest.mark.asyncio
+async def test_a_wait_that_times_out_keeps_an_entry_a_later_ask_refreshed(monkeypatch):
+    """An ask registers the event before its CERT_REQUEST leaves, so an answer that beats the next wait
+    still wakes it: the earlier wait's end must not delete what the ask stored after it."""
+    clock = [1000.0]
+    monkeypatch.setattr(ftm, "_monotonic", lambda: clock[0])
+    manager = _manager(clock)
+    waiting = asyncio.ensure_future(manager.wait_for_certificate(A, 0.05))
+    await asyncio.sleep(0.01)
+    clock[0] = 1005.0
+    await manager.ask_for_certificate(A, B)  # refreshes the entry the wait stamped
+    clock[0] = 1006.0  # long past the 0.05 s the wait was given, by the clock
+
+    assert await waiting is False
+    assert A in manager._certificate_arrivals, "the ask's entry survives the earlier wait"
+    manager.certificate_arrived(A)
 
 
 # --- (5) W2: a certificate that came before the wait is not waited for ---------------

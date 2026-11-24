@@ -115,8 +115,9 @@ class LeaseWouldWaitOnItself(LeaseRefusal):
 class LeaseSkipped(LeaseRefusal):
     """`background=True` (the glossary's **background call**, its lease carrier) and the card is not
     free right now: nothing waited, nothing yielded. What follows is the client's (ADR-052 L4): the
-    Whisper preload stays lazy, a background transcription takes the CPU twin when L12 passes it, the
-    embedder's steady-state query its CPU model. Music engines have no CPU twin and never ask with
+    Whisper preload stays lazy, a background transcription would take the CPU twin when L12 passes it (the
+    twin is built; no door sends a background transcription into L12 yet), the embedder's steady-state
+    query its CPU model. Music engines have no CPU twin and never ask with
     `background`: a job waits in the line."""
 
 

@@ -639,8 +639,11 @@ class MusicCommandsMixin:
         it may be unloaded for the start, on the terms a queued music job gets from the card
         lease (ADR-052 S4, Mike's call 2026-11-24): an idle Whisper model, an idle local LLM
         engine when swapping is on. A busy holder, or one with a queue, refuses it at once,
-        named (`card_busy`); the person stops that holder first. Nothing is stopped for a
-        start that is then refused. Slow: it waits for the holders to let go and for /health."""
+        named (`card_busy`); the person stops that holder first. A refusal before the grant
+        (`engine_busy` from the first check, `card_busy`) stops nothing; once the lease has let an
+        idle holder go, a later refusal (the switch lock taken, or the other engine made busy, in
+        the short window before `exclusive`) leaves that holder unloaded. Slow: it waits for the
+        holders to let go and for /health."""
         try:
             chosen = self._music_engine(engine)
             if backbone is not None and chosen.KEY != js.ENGINE_YUE2:
@@ -652,8 +655,9 @@ class MusicCommandsMixin:
                                                       f"{running_backbone} backbone; cancel it first")
             engines = self._music_engine_set()
             # The other music engine first, as a check only: a busy one refuses (`engine_busy`); an
-            # idle one is left running, and stopped below once the card is granted, so a refused
-            # start has stopped nothing.
+            # idle one is left running, and stopped below once the card is granted, so a start refused
+            # here or at the card step has stopped nothing. (A refusal from `exclusive` below, in the
+            # window after the grant, can follow an idle holder the lease already let go.)
             engines.refuse_while_switching(chosen.KEY)
             # Then the card (ADR-052 section 3.2): asked for before any lock. It is refused at once,
             # naming the holder (`card_busy`), when a holder is busy or has a queue behind it; when

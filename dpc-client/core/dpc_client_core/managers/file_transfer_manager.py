@@ -1445,6 +1445,7 @@ class FileTransferManager:
         now = _monotonic()
         self._prune_certificate_waits(now)
         event = self._certificate_event(node_id, now)
+        mine = self._certificate_arrivals.get(node_id)  # the entry this wait stamped
         self._prune_certificate_waits(now)  # the cap, with this wait counted
         try:
             await asyncio.wait_for(event.wait(), timeout_s)
@@ -1453,10 +1454,11 @@ class FileTransferManager:
             return False
         finally:
             entry = self._certificate_arrivals.get(node_id)
-            if entry is not None and entry[0] is event and not event.is_set():
-                # Nobody else refreshed it meanwhile: this wait was the last use
-                if _monotonic() - entry[1] >= timeout_s:
-                    del self._certificate_arrivals[node_id]
+            if entry is not None and entry is mine and not event.is_set():
+                # Nobody refreshed it meanwhile (a refresh stores a new entry): this wait was the last
+                # use. Not decided by the clock: a timer may fire up to one clock tick early (15.6 ms on
+                # Windows), and then "a whole timeout has passed" is false and the entry stays behind.
+                del self._certificate_arrivals[node_id]
 
     async def handle_file_accept(self, node_id: str, transfer_id: str):
         """

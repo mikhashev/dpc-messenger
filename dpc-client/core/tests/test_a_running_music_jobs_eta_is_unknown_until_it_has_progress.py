@@ -43,7 +43,7 @@ def test_the_factor_follows_the_songs_length(audio_s, factor):
     assert js.yue2_factor(audio_s) == pytest.approx(factor)
 
 
-def test_a_queued_jobs_estimate_is_the_text_estimate_times_the_factor_times_the_variants():
+def test_a_queued_jobs_estimate_is_the_text_estimate_divided_by_the_factor_times_the_variants():
     lyrics = "[verse]\n" + "\n".join(f"line {i}" for i in range(6)) + "\n"
     params = {"engine": "yue2", "lyrics": lyrics, "duration_s": 360, "variants": 2}
     # 20 s intro + 6 sung lines x 10 s = 80 s of song; the factor at 80 s is 3.5 - 0.5 x 50/210 = 3.381;

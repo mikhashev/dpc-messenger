@@ -146,6 +146,11 @@ async def test_the_line_gets_what_is_left_of_the_doors_bound_after_the_twins_loa
     assert ask["wait_s"] > 10.0 - BOUND
 
 
+# What each case pins (follow-up 10, Zcode #14: the cases must fail when the deadline logic regresses; the
+# pin of "the line gets what is left, not the whole bound again" is the test above, with a 10 s bound):
+# - None: no bound has no deadline; it stays None (a `float(None)` or a None turned into 0 fails it);
+# - 0.0 and 0.1: a bound the twin's 0.2 s load already spent reads 0.0, never the negative remainder
+#   (dropping the `max(0.0, ...)` clamp fails both). 0.0 is also the bound a door passes for "do not wait".
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bound", [None, 0.0, 0.1])
 async def test_no_bound_stays_none_and_a_spent_bound_is_zero_never_negative(bound):

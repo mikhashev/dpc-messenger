@@ -552,10 +552,14 @@ class SupervisedEngine:
             self._answered_by(proc, "/props")
             self._check_props(props)
         except BaseException as exc:
-            await self._stop_proc(proc, "failed_start")
-            message = exc.message if isinstance(exc, MusicEngineError) else f"{type(exc).__name__}: {exc}"
-            reason = self.with_log_tail(f"{self.DISPLAY} did not start: {message}")
-            self._set_state("error", reason)
+            try:
+                await self._stop_proc(proc, "failed_start")
+            finally:
+                # In a `finally`: a second cancel during the stop re-raises out of it, and the state
+                # must not stay `starting` for a child that is gone (Zcode #14, follow-up 10).
+                message = exc.message if isinstance(exc, MusicEngineError) else f"{type(exc).__name__}: {exc}"
+                reason = self.with_log_tail(f"{self.DISPLAY} did not start: {message}")
+                self._set_state("error", reason)
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
             raise MusicEngineError("start_failed", reason) from exc
@@ -761,7 +765,16 @@ class SupervisedEngine:
             if proc is not None and proc.returncode is None:
                 logger.warning("%s: the stop did not finish; killing pid %s", self.DISPLAY, getattr(proc, "pid", None))
                 self._kill(proc)
-            self._let_go_of_the_card("ui_stop")
+            if proc is None and self._the_lock().locked():
+                # A start (or a stop that keeps the card for one) owns the engine and has not spawned its
+                # child yet: the card is its grant, and it lets go on its own failure path
+                # (`_start_child`). Releasing it here would let that child come up with no lease, unseen by
+                # L11 (Zcode #14, follow-up 10). A child that exists is killed above and the card let go
+                # here; the start then finds it dead and releases again, which does nothing.
+                logger.info("%s: the stop did not finish while a start owns the engine; the start keeps "
+                            "the card", self.DISPLAY)
+            else:
+                self._let_go_of_the_card("ui_stop")
 
     # -- use and idle stop ----------------------------------------------------------
 

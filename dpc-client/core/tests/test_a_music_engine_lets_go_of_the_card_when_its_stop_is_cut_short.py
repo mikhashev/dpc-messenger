@@ -10,6 +10,11 @@ Three windows the review named, each closed here:
 - `shutdown()` caught only `Exception`, so a cancellation (for instance while the stop waited for
   `_the_lock`) skipped the release.
 
+Follow-up 10 (Zcode #14): a `shutdown()` cancelled while a start owns `_the_lock` and has not yet
+spawned its child must not release the card under that start (its child would come up with no lease,
+unseen by L11); and a failed start whose stop is cancelled a second time ends in the `error` state, not
+`starting`.
+
 The child is an in-process fake: it ignores the stop signal, and the test decides when (and whether)
 a kill ends it. A cancellation is never swallowed: it goes on after the release.
 """
@@ -60,6 +65,14 @@ class _Child:
         return self.returncode
 
 
+class _ObedientChild(_Child):
+    """A child that exits on its stop signal, as a healthy server does."""
+
+    def send_signal(self, sig):
+        super().send_signal(sig)
+        self._exit(0)
+
+
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
     free_env(monkeypatch)
@@ -76,9 +89,9 @@ async def _running(engine, child):
     engine._set_state("running")
 
 
-@pytest.mark.asyncio
-async def test_a_failed_start_cancelled_twice_kills_its_child_and_lets_go(engine, monkeypatch):
-    child = _Child()
+async def _a_start_cancelled_twice(engine, monkeypatch, child):
+    """A start that boots for ever, cancelled once (its own stop begins; `child` ignores the signal) and
+    then a second time inside that stop's wait. Returns after the second cancel has surfaced."""
     booting = asyncio.Event()
 
     async def spawn(cmd):
@@ -101,9 +114,24 @@ async def test_a_failed_start_cancelled_twice_kills_its_child_and_lets_go(engine
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(start, BOUND)
 
+
+@pytest.mark.asyncio
+async def test_a_failed_start_cancelled_twice_kills_its_child_and_lets_go(engine, monkeypatch):
+    child = _Child()
+    await _a_start_cancelled_twice(engine, monkeypatch, child)
+
     assert child.kills >= 1 and child.returncode is not None, "the child is killed, not left behind"
     assert not engine.alive()
     await until(lambda: not engine.card_lease.granted)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_start_cancelled_twice_ends_in_the_error_state_not_starting(engine, monkeypatch):
+    child = _Child()
+    await _a_start_cancelled_twice(engine, monkeypatch, child)
+
+    assert engine.state == "error", "the second cancel re-raised out of the stop; the state is still set"
+    assert "did not start" in engine.status().reason
 
 
 @pytest.mark.asyncio
@@ -151,4 +179,80 @@ async def test_a_shutdown_cancelled_before_its_stop_could_run_kills_the_child_an
         lock.release()
 
     assert child.kills == 1 and child.returncode is not None
+    await until(lambda: not engine.card_lease.granted)
+
+
+async def _a_start_that_has_not_spawned(engine, monkeypatch, child, *, healthy):
+    """A start under `_the_lock` with the card granted, held in `_spawn` (`_proc` still None). Returns the
+    start task and the event that lets the spawn go on; `healthy` decides how the boot then ends."""
+    in_spawn, go_on = asyncio.Event(), asyncio.Event()
+
+    async def spawn(cmd):
+        in_spawn.set()
+        await go_on.wait()
+        return child
+
+    async def wait_healthy(proc, port):
+        if not healthy:
+            raise engine_base.MusicEngineError("start_failed", "no healthy /health")
+
+    async def props(path):
+        return {"version": "test"}
+
+    monkeypatch.setattr(engine, "_spawn", spawn)
+    monkeypatch.setattr(engine, "_wait_healthy", wait_healthy)
+    monkeypatch.setattr(engine, "_get_json", props)
+    monkeypatch.setattr(engine, "_check_props", lambda p: None)
+    start = asyncio.create_task(engine.start())
+    await asyncio.wait_for(in_spawn.wait(), BOUND)
+    assert engine._proc is None and engine._the_lock().locked() and engine.card_lease.granted
+    return start, go_on
+
+
+async def _a_shutdown_cancelled_while_the_start_owns_the_engine(engine):
+    shutdown = asyncio.create_task(engine.shutdown())
+    await asyncio.sleep(0.01)  # its stop waits for the lock the start holds
+    assert not shutdown.done()
+    shutdown.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(shutdown, BOUND)
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_cancelled_before_the_spawn_leaves_the_card_to_the_start_that_owns_the_engine(
+        engine, monkeypatch):
+    child = _ObedientChild()
+    start, go_on = await _a_start_that_has_not_spawned(engine, monkeypatch, child, healthy=True)
+
+    await _a_shutdown_cancelled_while_the_start_owns_the_engine(engine)
+    assert engine.card_lease.granted, "the start's grant is not the shutdown's to release"
+
+    go_on.set()
+    await asyncio.wait_for(start, BOUND)
+    try:
+        assert engine.alive() and engine.state == "running"
+        assert engine.card_lease.granted, "the child that came up holds the lease, visible to L11"
+    finally:
+        await asyncio.wait_for(engine.shutdown(), BOUND)
+    await until(lambda: not engine.card_lease.granted)
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_cancelled_before_the_spawn_then_a_failed_start_lets_go_exactly_once(
+        engine, monkeypatch):
+    child = _ObedientChild()
+    start, go_on = await _a_start_that_has_not_spawned(engine, monkeypatch, child, healthy=False)
+    released = []
+    real = engine._let_go_of_the_card
+    monkeypatch.setattr(engine, "_let_go_of_the_card", lambda why: (released.append(why), real(why))[1])
+
+    await _a_shutdown_cancelled_while_the_start_owns_the_engine(engine)
+    assert released == [], "the shutdown leaves the card to the start"
+
+    go_on.set()
+    with pytest.raises(engine_base.MusicEngineError):
+        await asyncio.wait_for(start, BOUND)
+
+    assert released == ["failed_start"], "the start lets go once, on its own failure path"
+    assert not engine.alive() and child.returncode is not None
     await until(lambda: not engine.card_lease.granted)

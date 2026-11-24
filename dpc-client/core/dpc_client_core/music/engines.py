@@ -92,8 +92,10 @@ class MusicEngines:
 
     def refuse_while_switching(self, key: str) -> None:
         """Refuse (`engine_busy`) a start of `key` by hand while another music engine runs a job or is
-        starting, or a switch holds the lock. Stops nothing: a start that asks for the card after this
-        check lets the card lease yield an idle other engine, so a refusal leaves everything as it was."""
+        starting, or a switch holds the lock. This check stops nothing itself. The start that follows asks
+        the card lease for the card, which may let an idle holder (the other engine, a Whisper model)
+        go before `exclusive` checks again; a refusal from that second check, in the narrow window
+        between the grant and `exclusive`, leaves what the lease already let go unloaded."""
         engine = self.get(key)
         other = self.busy_other(key)
         if self._the_lock().locked() or other is not None:

@@ -11,6 +11,7 @@ asked through a real Whisper provider with its twin faked.
 """
 
 import asyncio
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -89,6 +90,32 @@ def test_an_embedder_on_a_gpu_counts_nothing(monkeypatch):
     provider.embed("one text")
     provider.embed_batch(["a", "b"])
     assert provider._model.during == [[], []]
+
+
+@pytest.mark.parametrize("cuda, mps, counted", [
+    (False, False, True),   # `auto` resolves to the CPU: counted, as Whisper and GLiNER count what they run on
+    (True, False, False),   # `auto` resolves to CUDA: not CPU work
+    (False, True, False),   # `auto` resolves to MPS (Apple silicon): not CPU work either
+])
+def test_an_embedder_on_device_auto_counts_the_device_it_resolved_to(monkeypatch, cuda, mps, counted):
+    """Follow-up 10 (Zcode #14): `[memory] embedding_device = auto` (and a profile's `auto`) reach the
+    provider as no device at all, and the provider resolves it (cuda, then mps, then cpu); what counts is
+    that resolved device, never the word the settings carried."""
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: cuda),
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps)))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(memory, "_singleton_providers", {})
+    monkeypatch.setattr(memory, "_node_embedding_device", None)
+    monkeypatch.setattr(memory, "_get_disk_cache", lambda: NoCache())
+    provider = memory.get_embedding_provider("bge-m3", device="auto")
+    provider._model = FakeEmbeddingModel()
+
+    provider.embed("one text")
+    provider.embed_batch(["a", "b"])
+
+    assert provider._model.during == ([[EMBEDDER], [EMBEDDER]] if counted else [[], []])
+    assert cpu_work.computing_now() == []
 
 
 def test_a_failing_encode_leaves_nothing_counted(monkeypatch):
