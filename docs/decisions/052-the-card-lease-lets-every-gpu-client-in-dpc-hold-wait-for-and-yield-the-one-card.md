@@ -682,7 +682,7 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
     read about 12 minutes where the trial measured about 80 s. `estimate_yue2_seconds` returns **audio**
     seconds: the form compares it with the duration cap (`shortCapWarning` in
     `ui/src/lib/utils/musicCreate.ts`), so wall time = estimate ÷ factor (`job_schemas.yue2_wall_s`,
-    `job_schemas.py:303`). The job's own timeout, `duration_s * 6 + 300` (`runner.py:918`), is a
+    `job_schemas.py:303`). The job's own timeout, `max(DEFAULT_ENGINE_JOB_TIMEOUT_S, duration_s * 6 + 300)` with the default at 1800 s (`runner.py:992`, `:147`; measured 2026-11-24 at 670141bb: the 1800 s floor rules every cap below 250 s), is a
     deliberately generous safety net and does not read the factor. S4 records the factor by song length: `trial.md` (`ai-studio/experiments/music-player/engine/yue2-cpp/trial.md:40-41`) saw about 3.5× for a 30 s song and about 3× for 4-minute ones, and its 6-line text came back as 71–144 s songs, so the 10 s per line constant understates a song's length (a concern for the UI's warning, not for the lease). **Built in S4** as `job_schemas.YUE2_FACTOR_BY_LENGTH` ((30 s, 3.5), (240 s, 3.0), straight between, the end value beyond), the table unchanged by the flip; **the orientation was open for Mike and is decided** (2026-11-24, group chat: yes): the trial table reads this way (a 240 s song in 80.5 s of wall time, a 30 s one in 8.9 s, the model's load included), so the factor is audio seconds per wall second.
   - Whisper: the load when the model is not loaded (`load_first_s` before this model has loaded on
     that device in this process, `load_reload_s` after; S3 follow-up 4, Forge #42-4; per device
