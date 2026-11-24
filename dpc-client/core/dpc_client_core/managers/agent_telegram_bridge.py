@@ -1119,13 +1119,18 @@ Send a voice message and it will be transcribed and processed\\.
         # this one writes its own outcome.
         self._pending_schedule.pop(request_id, None)
 
+        # What the request asked, read before the answer consumes it: a music job's outcome is
+        # worded for a music job (ADR-051 D47), not as a schedule.
+        from ..dpc_agent.tools.core import pending_schedule_task_type, schedule_approval_words
+        words = schedule_approval_words(pending_schedule_task_type(request_id))
+
         try:
             result = await service.resolve_schedule_approval(request_id, decision == "approve")
             # Two sibling APIs, two words for the same outcome: the shell
             # command answers "ok" and this one "success". Accept both rather
             # than change a shipped contract on the way past.
             if result.get("status") in ("ok", "success"):
-                label = "✅ Scheduled." if decision == "approve" else "❌ Not scheduled."
+                label = words["approved_outcome"] if decision == "approve" else words["refused_outcome"]
             else:
                 label = "⌛ This request is already closed."
             await query.edit_message_text(label)
@@ -1171,15 +1176,23 @@ Send a voice message and it will be transcribed and processed\\.
 
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        head = f"🕒 {agent_name or 'Agent'} wants to come back to this"
-        lines = [f"{head} {when}:" if when else f"{head}:", ""]
+        from ..dpc_agent.tools.core import schedule_approval_words
+
+        # A music job (task_type "music_job", ADR-051 D47) asks to run a job on the GPU now: its
+        # card says so and its buttons are Approve / Refuse. Anything else asks to come back later.
+        words = schedule_approval_words(task_type)
+        if task_type == "music_job":
+            lines = [f"🎵 {agent_name or 'Agent'} {words['heading']}:", ""]
+        else:
+            head = f"🕒 {agent_name or 'Agent'} wants to come back to this"
+            lines = [f"{head} {when}:" if when else f"{head}:", ""]
         lines.append(about or task_type or "(no description)")
         if timeout_seconds:
-            lines += ["", f"Expires in {timeout_seconds}s — after that it is not scheduled."]
+            lines += ["", f"Expires in {timeout_seconds}s — {words['expiry_note']}."]
 
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Schedule it", callback_data=f"schedule:{request_id}:approve"),
-            InlineKeyboardButton("❌ Not now", callback_data=f"schedule:{request_id}:reject"),
+            InlineKeyboardButton(f"✅ {words['approve_label']}", callback_data=f"schedule:{request_id}:approve"),
+            InlineKeyboardButton(f"❌ {words['refuse_label']}", callback_data=f"schedule:{request_id}:reject"),
         ]])
 
         try:

@@ -518,6 +518,14 @@ class DpcAgent:
         over once: a second call returns []."""
         return self._posted_by_conversation().pop(conversation_id, None) or []
 
+    def _owner_only_names_for_prompt(self) -> set:
+        """The owner_only tool names the capabilities section lists as withheld on a turn that
+        is not the owner's. An agent with no registry (built without __init__, as tests build
+        it; __init__ always sets one) has none to name: the prompt is built all the same, and
+        withholding stays with _get_allowed_tools and ToolRegistry.execute."""
+        names = getattr(getattr(self, "tools", None), "owner_only_names", None)
+        return set(names()) if callable(names) else set()
+
     def _posted_by_conversation(self) -> Dict[str, List[Dict[str, Any]]]:
         """The per-conversation store of posted attachments, made on first use for an
         agent built without __init__ (tests do)."""
@@ -715,7 +723,7 @@ class DpcAgent:
             max_recall_results=max_recall,
             recall_results=recall_results,
             open_layers=layers_open,
-            owner_only_withheld=(getattr(self.tools, "owner_only_names", set)()
+            owner_only_withheld=(self._owner_only_names_for_prompt()
                                  if audience_class != OWNER_TURN else None),
         )
 
@@ -1057,7 +1065,8 @@ class DpcAgent:
                            turn_class: Any = _CLASS_NOT_GIVEN) -> Optional[set]:
         """
         The firewall's tools (_firewall_allowed_tools) less every owner_only tool
-        on a turn that is not the owner's.
+        on a turn that is not the owner's, plus schedule_task wherever a music tool
+        is left (with_check_back, ADR-051 D49).
 
         `turn_class` is the class process() computed; not given, it is asked of
         turn_audience. A class that cannot be determined is not the owner's (fail
@@ -1078,7 +1087,11 @@ class DpcAgent:
                 allowed = allowed - owner_only
                 log.info("Turn class %r: %d owner_only tool(s) withheld: %s",
                          turn_class, len(owner_only), sorted(owner_only))
-        return allowed
+        # Wherever a music tool is still allowed, so is schedule_task: check_back is the way
+        # back to a job (ADR-051 D49). After the owner_only filter, so a turn that is not the
+        # owner's gets no music tool and so no schedule_task from this rule.
+        from .tools.music import with_check_back  # ADR-051 D49
+        return with_check_back(allowed)
 
     def _firewall_allowed_tools(self, message_source: Optional[str],
                                 conversation_id: Optional[str]) -> Optional[set]:

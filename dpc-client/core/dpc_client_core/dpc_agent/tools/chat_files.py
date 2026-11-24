@@ -18,6 +18,13 @@ Limits (D41):
 - the file-transfer size cap, `file_transfer_cap_mb(rules)`, before anything is copied;
 - at most MAX_FILES_PER_TURN files per turn;
 - a file whose bytes are already in the chat's `files/` is not copied again.
+
+A music take is posted by its `take_id` instead of a path (D41, D44): core resolves the id
+through `get_music_take` into the take's own file, so the agent needs no access to
+`~/.dpc/music/generated/` (which also holds each job's request, prompts and lyrics). The
+attachment then carries `music: {track_id, take_id, job_id}`, `track_id` being the music
+library entry id the player opens (the take's `library_track_id`; null while the take is not
+in the library). `path` and `take_id` are given one at a time.
 """
 
 from __future__ import annotations
@@ -122,10 +129,12 @@ def _rules(ctx: ToolContext) -> Dict[str, Any]:
     return rules if isinstance(rules, dict) else {}
 
 
-def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None) -> str:
+def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None,
+              music: Optional[Dict[str, Any]] = None) -> str:
     """Copy `source`, a path already resolved and admitted, into this turn's chat and
     collect its attachment on `ctx.posted_attachments`. The turn checks, the per-turn
-    count and the size cap are applied here."""
+    count and the size cap are applied here. `music`, for a take posted by its id, is
+    written on the attachment as it is."""
     from dpc_client_core import service as service_mod
 
     refusal = turn_refusal(ctx)
@@ -159,6 +168,8 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None) -> 
         reused = kept["filename"] in before
         if caption and caption.strip():
             kept["caption"] = " ".join(caption.split())[:MAX_CAPTION_CHARS]
+        if music:
+            kept["music"] = dict(music)
         if any(a.get("file_path") == kept["file_path"] for a in posted):
             return (f"{kept['filename']} is already attached to this answer; it is attached once. "
                     f"{len(posted)} of {MAX_FILES_PER_TURN} files this turn.")
@@ -176,10 +187,41 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None) -> 
             f"answer in this chat. {count} of {MAX_FILES_PER_TURN} files this turn.")
 
 
-def _chat_post_file(ctx: ToolContext, path: str, caption: Optional[str] = None) -> str:
+def _post_take(ctx: ToolContext, take_id: str, caption: Optional[str]) -> str:
+    """Post a music take by its id: core gives the take's own file (`get_music_take`, D44),
+    so neither `_resolve_file_path` nor the DPC-home rule applies to a path the agent never
+    named; every other limit does (post_file)."""
+    from .music import SERVICE_CALL_TIMEOUT_S, _service_call, _Unavailable
+    try:
+        answer = _service_call(ctx, "get_music_take", take_id=take_id)
+    except _Unavailable as e:
+        return _refusal(f"{e}.")
+    except TimeoutError:
+        return _refusal(f"the music service did not answer within {int(SERVICE_CALL_TIMEOUT_S)} s.")
+    if not isinstance(answer, dict) or answer.get("status") != "ok":
+        code = answer.get("code", "error") if isinstance(answer, dict) else "error"
+        return _refusal(f"take '{take_id}' could not be read ({code}).")
+    take = answer.get("take") or {}
+    if not take.get("path") or not take.get("file_exists"):
+        return _refusal(f"take '{take_id}' has no file on this computer.")
+    music = {"track_id": take.get("library_track_id") or None,
+             "take_id": take.get("take_id") or take_id, "job_id": take.get("job_id")}
+    return post_file(ctx, Path(take["path"]), caption, music=music)
+
+
+def _chat_post_file(ctx: ToolContext, path: Optional[str] = None, caption: Optional[str] = None,
+                    take_id: Optional[str] = None) -> str:
     refusal = turn_refusal(ctx)
     if refusal:
         return refusal
+    path = path.strip() if isinstance(path, str) else path
+    take_id = take_id.strip() if isinstance(take_id, str) else take_id
+    if path and take_id:
+        return _refusal("give either path or take_id, not both.")
+    if take_id:
+        return _post_take(ctx, take_id, caption)
+    if not path:
+        return _refusal("give path (a file) or take_id (a music take).")
     # As read_file resolves it: the extended-read switch, the extended paths and the
     # turn's audience gate. A PermissionError is the registry's SANDBOX_VIOLATION line.
     resolved = _resolve_file_path(ctx, path)
@@ -203,7 +245,8 @@ def get_tools() -> List[ToolEntry]:
                     "(file_transfer.max_size_mb, 100 MB by default); only in your 1:1 chat in "
                     "DPC (a group, Telegram or Discord turn is refused); the path is resolved as "
                     "read_file resolves it (relative to your sandbox, or an absolute path your "
-                    "extended read access reaches)."
+                    "extended read access reaches). A music take is posted by its take_id "
+                    "(from music_check or music_list_takes) instead of a path; give one of the two."
                 ),
                 "parameters": {
                     "type": "object",
@@ -211,14 +254,19 @@ def get_tools() -> List[ToolEntry]:
                         "path": {
                             "type": "string",
                             "description": "The file: relative to your sandbox, or an absolute "
-                                           "path within your extended read access.",
+                                           "path within your extended read access. Not with take_id.",
+                        },
+                        "take_id": {
+                            "type": "string",
+                            "description": "A music take's id, instead of path: core finds the "
+                                           "take's file, and the message can open it in the player.",
                         },
                         "caption": {
                             "type": "string",
                             "description": "Optional. A short line shown with the file.",
                         },
                     },
-                    "required": ["path"],
+                    "required": [],
                 },
             },
             handler=_chat_post_file,

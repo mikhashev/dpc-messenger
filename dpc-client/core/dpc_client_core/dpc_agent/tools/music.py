@@ -17,8 +17,10 @@ gives the take's own file and nothing of the job's request (D44).
   `schedule_task` (D47). A refusal makes no job. A repeat in the same turn returns the turn's
   job and asks nothing.
 - `music_wait` polls every `POLL_INTERVAL_S` and follows the self-wait rule (D51): when this
-  turn holds a live card hold on a local alias and the job is `queued`, it answers at once,
-  since the job cannot start before this turn ends. Otherwise it reports the job's real state.
+  turn holds a live card hold on a local alias and the job is `queued`, or the job's `card_wait`
+  names that alias among its holders (a running job whose engine ended and waits for the card
+  again), it answers at once, since the job cannot move before this turn ends. Otherwise it
+  reports the job's real state.
   It reads the turn's Stop and Kill between polls (`turn_stop_event`, `turn_kill_event`, set on
   the context by the loop), and a turn has `TURN_WAIT_BUDGET_S` of waiting in all.
 - No output carries elapsed seconds: they would make every poll look new to the loop guard
@@ -298,15 +300,43 @@ def music_capabilities(ctx: ToolContext) -> str:
     return json.dumps(view, ensure_ascii=False, default=str)
 
 
-def _approval_about(params: Dict[str, Any]) -> str:
-    style = str(params.get("style") or "").strip()
-    sung = "instrumental" if not params.get("lyrics") else "with lyrics"
+# The style as the approval card quotes it; the card's whole line stays short enough to read.
+APPROVAL_STYLE_CHARS = 80
+
+
+def _approval_about(job_type: str, params: Dict[str, Any]) -> str:
+    """What the approval card asks (D47), in the person's terms: run one job on the GPU, its type,
+    style, number of takes, sung or instrumental, engine, and about how long it takes on the card."""
+    style = " ".join(str(params.get("style") or "").split())
+    if len(style) > APPROVAL_STYLE_CHARS:
+        style = style[:APPROVAL_STYLE_CHARS - 1].rstrip() + "…"
     variants = params.get("variants") or js.VARIANTS_DEFAULT
-    engine = params.get("engine") or "the default engine"
-    eta = js.music_expected_s(params) if isinstance(params, dict) else None
-    on_card = f", about {int(round(eta))} s on the GPU" if eta else ""
-    return (f"Generate music on the GPU: {variants} variant(s), {sung}, {engine}{on_card}. "
-            f"Style: {style}")[:200]
+    takes = f"{variants} take" + ("" if variants == 1 else "s")
+    sung = "instrumental" if not params.get("lyrics") else "with lyrics"
+    engine = params.get("engine") or "default engine"
+    try:
+        eta = js.music_expected_s(params)
+    except Exception:
+        eta = None
+    on_card = f"about {int(round(eta))} s on the GPU" if eta else "time on the GPU not known"
+    return (f"Run a music job on the GPU: {job_type}, \"{style or '(no style)'}\", {takes}, {sung}, "
+            f"{engine}, {on_card}")
+
+
+def _approval_parts(job_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """The same request in parts, for the interface's card (`music` on schedule_approval_request)."""
+    try:
+        eta = js.music_expected_s(params)
+    except Exception:
+        eta = None
+    return {
+        "type": job_type,
+        "style": " ".join(str(params.get("style") or "").split()),
+        "variants": params.get("variants") or js.VARIANTS_DEFAULT,
+        "instrumental": not params.get("lyrics"),
+        "engine": params.get("engine") or None,
+        "eta_seconds": int(round(eta)) if eta else None,
+    }
 
 
 def _turn_jobs(jobs: List[Dict[str, Any]], agent_id: str, turn_id: str) -> List[Dict[str, Any]]:
@@ -394,7 +424,8 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     # The person's consent first, through schedule_task's machinery (D47).
     from .core import _await_schedule_approval
     approved, reason = _await_schedule_approval(
-        ctx, task_type="music_job", when="now (a music job on the GPU)", about=_approval_about(params))
+        ctx, task_type="music_job", when="now", about=_approval_about(type, params),
+        music=_approval_parts(type, params))
     if not approved:
         return f"⚠️ The music job was not proposed: {reason}. No job was made."
 
@@ -423,10 +454,33 @@ def music_check(ctx: ToolContext, job_id: str) -> str:
     return refused if refused else _job_report(ctx, job)
 
 
-def _queued_after_this_turn(job: Dict[str, Any], alias: str) -> str:
-    return (f"job {job.get('id')}: queued; it starts after this turn ends (this turn runs on the local "
-            f"model '{alias}' and holds the card). Use check_back in about {check_back_delay_s(job)} s "
-            f"(schedule_task, task_type check_back, task_data with \"music_job_id\": \"{job.get('id')}\").")
+def _waits_behind_this_turn(job: Dict[str, Any], alias: str) -> bool:
+    """Whether the job's `card_wait` names this turn's local alias among its holders: a running job
+    whose engine child ended waits for the card again (ADR-052 S4) behind the holder of `alias`,
+    which this turn holds until it ends. The runner names holders by alias (`holders_in_the_way`)."""
+    if job.get("state") not in _UNFINISHED:
+        return False
+    card_wait = job.get("card_wait")
+    holders = card_wait.get("holders") if isinstance(card_wait, dict) else None
+    return any(isinstance(h, dict) and h.get("alias") == alias for h in holders or ())
+
+
+def _self_wait_answer(job: Dict[str, Any], alias: Optional[str]) -> Optional[str]:
+    """The self-wait rule (D51, ADR-052 3.5): with a live hold on the local alias `alias`, a job that
+    cannot move before this turn ends is answered at once instead of waited for: a queued job, or
+    a job of any unfinished state whose `card_wait` names this turn's alias. Else None."""
+    if not alias:
+        return None
+    back = (f"Use check_back in about {check_back_delay_s(job)} s (schedule_task, task_type check_back, "
+            f"task_data with \"music_job_id\": \"{job.get('id')}\").")
+    if _waits_behind_this_turn(job, alias):
+        return (f"job {job.get('id')}: {job.get('state')}; it waits for the card behind this turn (this turn "
+                f"runs on the local model '{alias}' and holds the card), so check back after this turn "
+                f"ends. {back}")
+    if job.get("state") == js.QUEUED:
+        return (f"job {job.get('id')}: queued; it starts after this turn ends (this turn runs on the local "
+                f"model '{alias}' and holds the card). {back}")
+    return None
 
 
 def _sleep_watching(ctx: ToolContext, seconds: float) -> bool:
@@ -459,10 +513,11 @@ def music_wait(ctx: ToolContext, job_id: str, timeout: int = WAIT_DEFAULT_S) -> 
     job, refused = _get_job(ctx, job_id)
     if refused:
         return refused
-    # The self-wait rule (D51, ADR-052 3.5): a live hold on a local alias AND a queued job.
-    alias = _local_alias_held()
-    if alias and job.get("state") == js.QUEUED:
-        return _queued_after_this_turn(job, alias)
+    # The self-wait rule (D51, ADR-052 3.5): a live hold on a local alias AND a queued job, or a
+    # job whose card_wait names that alias, whatever its state.
+    answer = _self_wait_answer(job, _local_alias_held())
+    if answer:
+        return answer
 
     limit = min(timeout_s, left)
     started = time.monotonic()
@@ -480,9 +535,9 @@ def music_wait(ctx: ToolContext, job_id: str, timeout: int = WAIT_DEFAULT_S) -> 
             job, refused = _get_job(ctx, job_id)
             if refused:
                 return refused
-            alias = _local_alias_held()
-            if alias and job.get("state") == js.QUEUED:
-                return _queued_after_this_turn(job, alias)
+            answer = _self_wait_answer(job, _local_alias_held())
+            if answer:
+                return answer
     finally:
         spent[turn] = spent.get(turn, 0.0) + (time.monotonic() - started)
     lines = _job_lines(job)

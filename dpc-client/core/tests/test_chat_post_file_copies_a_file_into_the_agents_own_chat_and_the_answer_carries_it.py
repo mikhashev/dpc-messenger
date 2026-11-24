@@ -604,3 +604,79 @@ def test_the_paperclip_copy_is_not_deduplicated(tmp_path):
 def test_the_tool_is_owner_only_and_off_by_default():
     (entry,) = chat_files.get_tools()
     assert entry.name == "chat_post_file" and entry.owner_only and not entry.default_enabled
+
+
+# --- a music take by its id (D41, D44) ---------------------------------------------------------
+
+
+def _music_world(tmp_path, home, monkeypatch, rig):
+    """The chat world whose agent's service is the real music command mixin over `rig`."""
+    from tests.test_the_owners_agent_makes_music_through_the_music_tools_with_approval_limits_and_the_self_wait_rule import (
+        MusicService, Person,
+    )
+    w = _World(tmp_path, home, monkeypatch)
+    music = MusicService(home / ".dpc", rig, Person(True))
+    music.group_manager = GROUPS
+    music.p2p_manager = None
+    w.agent._service = music
+    return w
+
+
+async def _a_take_in_the_library(home, monkeypatch, rig):
+    from tests._acestep_helpers import from_text
+    job = rig.store.create_job("generate_from_text", from_text(variants=1))
+    job = await rig.wait_for(job["id"], ("review", "failed", "cancelled"))
+    assert job["state"] == "review", job.get("state_reason")
+    (take,) = rig.store.list_takes(job["id"])
+    assert take["library_track_id"], "the runner puts the take in the library"
+    return take
+
+
+@pytest.fixture
+def music_home(home, monkeypatch):
+    from tests._acestep_helpers import free_env, install_fake_engine
+    install_fake_engine(home / ".dpc")
+    free_env(monkeypatch)
+    return home
+
+
+@pytest.mark.asyncio
+async def test_a_take_posted_by_its_id_carries_the_music_block_on_the_record_on_disk(
+    tmp_path, music_home, monkeypatch,
+):
+    from tests._acestep_helpers import Rig
+    async with Rig(music_home / ".dpc") as rig:
+        take = await _a_take_in_the_library(music_home, monkeypatch, rig)
+        w = _music_world(tmp_path, music_home, monkeypatch, rig)
+        # The agent names the take by its id only, never its path under music/generated.
+        answer = await w.turn([{"take_id": take["id"], "caption": "the take"}])
+        entry = rig.library.get_entry(take["library_track_id"])
+
+    assert answer == "here it is"
+    (record,) = w.answers()
+    (att,) = record["attachments"]
+    assert att["music"] == {"track_id": take["library_track_id"], "take_id": take["id"],
+                            "job_id": take["job_id"]}
+    assert att["mime_type"] == "audio/flac" and att["caption"] == "the take"
+    assert Path(att["file_path"]).parent == w.conv_dir() / "files"
+    assert "Posted " in _tool_results(w)
+    # track_id is the id of the library entry the player opens (the take's library_track_id).
+    assert entry["id"] == att["music"]["track_id"]
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_take_id_is_refused_and_nothing_is_copied(tmp_path, music_home, monkeypatch):
+    from tests._acestep_helpers import Rig
+    async with Rig(music_home / ".dpc", start_runner=False) as rig:
+        w = _music_world(tmp_path, music_home, monkeypatch, rig)
+        await w.turn([{"take_id": "take_does_not_exist"}])
+    assert "chat_post_file refused: take 'take_does_not_exist' could not be read (not_found)" in _tool_results(w)
+    assert w.files() == [] and "attachments" not in w.answers()[0]
+
+
+@pytest.mark.asyncio
+async def test_path_and_take_id_together_are_refused(tmp_path, home, monkeypatch):
+    w = _World(tmp_path, home, monkeypatch)
+    await w.turn([{"path": str(_take(home)), "take_id": "take_x"}])
+    assert "give either path or take_id, not both" in _tool_results(w)
+    assert w.files() == []

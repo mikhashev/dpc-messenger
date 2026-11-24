@@ -1632,6 +1632,42 @@ _SCHEDULE_TURN_KILLED = "the turn was killed"
 # (`release_schedule_approvals_of_turn`), so neither overwrites the other.
 _schedule_decision_lock = threading.Lock()
 
+# What a schedule approval says, by what it asks. The machinery is schedule_task's, but a
+# music job (music_propose_job, ADR-051 D47) asks to run a job on the GPU now, not to come back
+# later, and its card says that. `heading` follows the agent's name; the outcomes are what the
+# surfaces show once it is answered, refused, expired or withdrawn by a Kill.
+_SCHEDULE_APPROVAL_WORDS = {
+    "": {
+        "heading": "wants to come back to this later",
+        "approve_label": "Schedule it",
+        "refuse_label": "Not now",
+        "approved_outcome": "✅ Scheduled.",
+        "refused_outcome": "❌ Not scheduled.",
+        "expiry_note": "after that it is not scheduled",
+        "killed_outcome": "⛔ The turn was killed; this was not scheduled.",
+    },
+    "music_job": {
+        "heading": "asks to run a music job on the GPU",
+        "approve_label": "Approve",
+        "refuse_label": "Refuse",
+        "approved_outcome": "✅ Approved: the music job is queued.",
+        "refused_outcome": "❌ Refused: no music job was made.",
+        "expiry_note": "after that no music job is made",
+        "killed_outcome": "⛔ The turn was killed; no music job was made.",
+    },
+}
+
+
+def schedule_approval_words(task_type: str) -> Dict[str, str]:
+    """The words of a schedule approval for `task_type`: a music job's own, else schedule_task's."""
+    return dict(_SCHEDULE_APPROVAL_WORDS.get(task_type or "", _SCHEDULE_APPROVAL_WORDS[""]))
+
+
+def pending_schedule_task_type(request_id: str) -> str:
+    """What a pending request asks (its task_type), read before the entry is consumed."""
+    entry = _pending_schedule_approvals.get(request_id)
+    return (entry or {}).get("task_type", "") or ""
+
 
 def _schedule_needs_approval(ctx) -> bool:
     """Whether this agent must ask before queueing a wake-up.
@@ -1664,12 +1700,17 @@ def _schedule_needs_approval(ctx) -> bool:
     return True if value is None else bool(value)
 
 
-def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> tuple:
+def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str,
+                             music: Optional[Dict[str, Any]] = None) -> tuple:
     """Ask the person before anything enters the queue.
 
     The point is not to guard execution — check_back runs the agent's own
     words — but to make sure a human sees what was planned and for when,
     before it is planned. Returns (approved, reason).
+
+    `music` is a music job's request in parts (music_propose_job, ADR-051 D47:
+    type, style, variants, eta_seconds), carried to the interface beside
+    `about` so the card can lay it out; given only for a music job.
     """
     import threading
     import uuid
@@ -1718,6 +1759,8 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
         # Which agent asked, so the surfaces it was offered on can be found
         # again when it is answered or expires.
         "agent_id": agent_id,
+        # What it asks, so the answer's outcome is worded for it (schedule_approval_words).
+        "task_type": task_type,
     }
     # After the entry is in the queue, so that a Kill is seen by one of the two: it
     # records the turn, then releases the queue, and this reads the record.
@@ -1741,6 +1784,7 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
         asyncio.run_coroutine_threadsafe(coro, main_loop)
         return True
 
+    extra = {"music": dict(music)} if music else {}
     try:
         offered = _on_main_loop(dpc_service.announce_schedule_approval_request(
             request_id=request_id,
@@ -1758,6 +1802,7 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
             telegram_chat_id=telegram_chat_id,
             conversation_id=_origin_id,
             conversation_title=_origin_title,
+            **extra,
         ))
         if not offered:
             _pending_schedule_approvals.pop(request_id, None)
@@ -1792,7 +1837,7 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str) -> t
             _on_main_loop(dpc_service.announce_schedule_approval_closed(
                 request_id=request_id,
                 agent_id=agent_id,
-                outcome="⛔ The turn was killed; this was not scheduled.",
+                outcome=schedule_approval_words(task_type)["killed_outcome"],
                 resolution="superseded",
             ))
         except Exception as e:

@@ -6205,16 +6205,21 @@ class CoreService(MusicCommandsMixin):
         The decision is taken before anything enters the queue, so the person
         sees what was planned and for when rather than discovering it later.
         """
-        from .dpc_agent.tools.core import resolve_schedule_approval as _resolve, pending_schedule_agent_id
+        from .dpc_agent.tools.core import (
+            pending_schedule_agent_id, pending_schedule_task_type,
+            resolve_schedule_approval as _resolve, schedule_approval_words,
+        )
 
         agent_id = pending_schedule_agent_id(request_id)
+        # A music job's approval is worded for what it asked (ADR-051 D47), not as a schedule.
+        words = schedule_approval_words(pending_schedule_task_type(request_id))
         if _resolve(request_id, approved):
             # The other surface is still showing a button that now resolves to
             # nothing — the same reason the shell path withdraws.
             await self.announce_schedule_approval_closed(
                 request_id=request_id,
                 agent_id=agent_id,
-                outcome="✅ Scheduled." if approved else "❌ Not scheduled.",
+                outcome=words["approved_outcome"] if approved else words["refused_outcome"],
                 resolution="approved" if approved else "rejected",
             )
             return {"status": "success", "request_id": request_id, "approved": bool(approved)}
@@ -6259,6 +6264,7 @@ class CoreService(MusicCommandsMixin):
         telegram_chat_id: str = "",
         conversation_id: str = "",
         conversation_title: str = "",
+        music: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Put a queue request in front of every surface that can answer it.
 
@@ -6271,12 +6277,24 @@ class CoreService(MusicCommandsMixin):
         """
         origin = conversation_title or self._conversation_display_name(conversation_id)
         if self.local_api:
+            from .dpc_agent.tools.core import schedule_approval_words
+
+            words = schedule_approval_words(task_type)
             await self.local_api.broadcast_event("schedule_approval_request", {
                 "request_id": request_id,
                 "task_type": task_type,
                 "when": when,
                 "about": about,
                 "agent_name": agent_name,
+                # What the card says, by what it asks: a music job (task_type "music_job",
+                # ADR-051 D47) asks to run a job on the GPU now, not to come back later.
+                # `heading` follows the agent's name; the labels are the two buttons'.
+                "heading": words["heading"],
+                "approve_label": words["approve_label"],
+                "refuse_label": words["refuse_label"],
+                # A music job's request in parts (type, style, variants, instrumental,
+                # engine, eta_seconds), so the card can lay it out; null for anything else.
+                "music": dict(music) if music else None,
                 # The task being scheduled — an id, not a chat. It used to
                 # arrive under `conversation_id`, which is why the card could
                 # never name the chat; both are carried now, each under its own
