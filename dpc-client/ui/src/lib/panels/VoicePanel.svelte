@@ -17,6 +17,7 @@
     setConversationTranscription,
     getConversationTranscription,
   } from '$lib/coreService';
+  import { withVoiceTranscription } from '$lib/utils/voiceTranscriptionAttach';
 
   // ---------------------------------------------------------------------------
   // Types
@@ -134,85 +135,26 @@
     }
   });
 
-  // Handle voice transcription complete (local transcription)
+  // Handle voice transcription complete (local transcription). The event names the
+  // conversation it belongs to; only that chat is touched (withVoiceTranscription).
   $effect(() => {
     if ($voiceTranscriptionComplete) {
-      const { transfer_id, text, transcriber_node_id, provider, confidence, language, timestamp, remote_provider_node_id, filename } = $voiceTranscriptionComplete;
-      console.log(`[VoiceTranscription] Received transcription for ${transfer_id}: "${text}"`);
-
-      chatHistories.update(histories => {
-        const updatedHistories = new Map();
-        for (const [chatId, messages] of histories) {
-          const updatedMessages = messages.map(message => {
-            if (message.attachments) {
-              const hasTargetVoice = message.attachments.some(
-                (att: any) => att.type === 'voice'
-                  && (att.transfer_id === transfer_id || (!!filename && att.filename === filename))
-              );
-              if (hasTargetVoice) {
-                return {
-                  ...message,
-                  attachments: message.attachments.map((attachment: any) => {
-                    if (attachment.type === 'voice'
-                        && (attachment.transfer_id === transfer_id || (!!filename && attachment.filename === filename))) {
-                      console.log(`[VoiceTranscription] Adding transcription to message in chat ${chatId}`);
-                      return {
-                        ...attachment,
-                        transcription: { text, provider, transcriber_node_id, confidence, language, timestamp, remote_provider_node_id }
-                      };
-                    }
-                    return attachment;
-                  })
-                };
-              }
-            }
-            return message;
-          });
-          updatedHistories.set(chatId, updatedMessages);
-        }
-        return updatedHistories;
-      });
+      const evt = $voiceTranscriptionComplete;
+      const { transfer_id, text, transcriber_node_id, provider, confidence, language, timestamp, remote_provider_node_id } = evt;
+      console.log(`[VoiceTranscription] Received transcription for ${transfer_id} in ${evt.conversation_id}`);
+      chatHistories.update(histories => withVoiceTranscription(histories, evt,
+        { text, provider, transcriber_node_id, confidence, language, timestamp, remote_provider_node_id }));
     }
   });
 
   // Handle voice transcription received from peer
   $effect(() => {
     if ($voiceTranscriptionReceived) {
-      const { transfer_id, text, transcriber_node_id, provider, confidence, language, timestamp, filename } = $voiceTranscriptionReceived;
-      console.log(`[VoiceTranscription] Received transcription from peer for ${transfer_id}: "${text}"`);
-
-      chatHistories.update(histories => {
-        const updatedHistories = new Map();
-        for (const [chatId, messages] of histories) {
-          const updatedMessages = messages.map(message => {
-            if (message.attachments) {
-              const hasTargetVoice = message.attachments.some(
-                (att: any) => att.type === 'voice'
-                  && (att.transfer_id === transfer_id || (!!filename && att.filename === filename))
-              );
-              if (hasTargetVoice) {
-                return {
-                  ...message,
-                  attachments: message.attachments.map((attachment: any) => {
-                    if (attachment.type === 'voice'
-                        && (attachment.transfer_id === transfer_id || (!!filename && attachment.filename === filename))) {
-                      console.log(`[VoiceTranscription] Adding peer transcription to message in chat ${chatId}`);
-                      return {
-                        ...attachment,
-                        transcription: { text, provider, transcriber_node_id, confidence, language, timestamp }
-                      };
-                    }
-                    return attachment;
-                  })
-                };
-              }
-            }
-            return message;
-          });
-          updatedHistories.set(chatId, updatedMessages);
-        }
-        return updatedHistories;
-      });
+      const evt = $voiceTranscriptionReceived;
+      const { transfer_id, text, transcriber_node_id, provider, confidence, language, timestamp } = evt;
+      console.log(`[VoiceTranscription] Received transcription from peer for ${transfer_id} in ${evt.conversation_id}`);
+      chatHistories.update(histories => withVoiceTranscription(histories, evt,
+        { text, provider, transcriber_node_id, confidence, language, timestamp }));
     }
   });
 </script>

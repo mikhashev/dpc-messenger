@@ -130,7 +130,12 @@ from .message_handlers.file_cancel_handler import FileCancelHandler
 from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
 from .message_handlers.file_request_handler import FileRequestHandler, FileRequestDeclinedHandler
 from .managers.file_request import mark_availability
-from .message_handlers.voice_transcription_handler import VoiceTranscriptionHandler  # v0.13.2+ auto-transcription
+from .message_handlers.voice_transcription_handler import (  # v0.13.2+ auto-transcription
+    VoiceTranscriptionHandler,
+    find_voice_record,
+    served_voice_attachment,
+    settle_parked_transcriptions,
+)
 from .message_handlers.chat_history_handlers import RequestChatHistoryHandler, ChatHistoryResponseHandler
 from .message_handlers.session_handler import (
     ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
@@ -1228,7 +1233,10 @@ class CoreService(MusicCommandsMixin):
         self.message_router.register_handler(FileRequestDeclinedHandler(self))
 
         # Voice transcription (v0.13.2+)
-        self.message_router.register_handler(VoiceTranscriptionHandler(self))
+        # Kept: a parked transcription lands when its voice record arrives
+        # (`settle_parked_transcriptions`), not only when the next one does.
+        self.voice_transcription_handler = VoiceTranscriptionHandler(self)
+        self.message_router.register_handler(self.voice_transcription_handler)
 
         # Chat history sync handlers (v0.11.2)
         self.message_router.register_handler(RequestChatHistoryHandler(self))
@@ -5186,6 +5194,12 @@ class CoreService(MusicCommandsMixin):
             is_sender: True if this node sent the voice message, False if received
             allow_model_load: If True, allow model loading even for receivers (for retroactive transcription)
         """
+        # 0. A group voice record has just arrived here (the receive path and the
+        # sender's FILE_COMPLETE both come through this call): a member's
+        # transcription parked ahead of it lands now, whatever the settings below.
+        if group_id:
+            await settle_parked_transcriptions(self, group_id)
+
         # 1. Check if auto-transcription is enabled globally
         if not self.settings.get_voice_transcription_enabled():
             logger.debug(f"Auto-transcription disabled globally, skipping transfer {transfer_id}")
@@ -5385,19 +5399,31 @@ class CoreService(MusicCommandsMixin):
                     "confidence": result.get("confidence", 0.0),
                     "language": result.get("language", "unknown"),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "success": True  # Mark as successful transcription
+                    "success": True,  # Mark as successful transcription
+                    # The conversation this transcription belongs to; the history view
+                    # joins it to that conversation's records only (follow-up 11a).
+                    "conversation_id": group_id or node_id,
+                    "transfer_id": transfer_id,
                 }
 
                 # Add remote provider credit if used (v0.13.2+ remote transcription)
                 if "remote_node_id" in result:
                     transcription_data["remote_provider_node_id"] = result["remote_node_id"]
 
-                self._voice_transcriptions[transfer_id] = transcription_data
-
                 # 11. Update conversation monitor with transcribed text (v0.15.1 fix)
                 # This ensures proposals include the actual transcription instead of placeholder
                 monitor_key = group_id if group_id else node_id
                 monitor = self._get_or_create_conversation_monitor(monitor_key)
+                if group_id and monitor:
+                    # The record's id is one for every member's copy: it names the
+                    # message on members that hold another transfer of it.
+                    found = find_voice_record(getattr(monitor, "message_history", None),
+                                              transfer_id, transcription_data["filename"], None)
+                    if isinstance(found, tuple) and found[0].get("id"):
+                        transcription_data["message_id"] = found[0]["id"]
+
+                self._voice_transcriptions[transfer_id] = transcription_data
+
                 if monitor:
                     # Find and update Message objects in buffer with transcription
                     for message_list in [monitor.message_buffer, monitor.full_conversation]:
@@ -5557,7 +5583,9 @@ class CoreService(MusicCommandsMixin):
         payload_data = {
             "transfer_id": transfer_id,
             "transcription_text": transcription_data.get("text", ""),
-            **transcription_data
+            # The binding is this node's: a receiver binds what it gets itself.
+            **{k: v for k, v in transcription_data.items()
+               if k not in ("conversation_id", "sender_node_id")},
         }
         if group_id:
             payload_data["group_id"] = group_id  # Needed for relay and monitor lookup
@@ -6784,6 +6812,9 @@ class CoreService(MusicCommandsMixin):
             return self._history_page_refused(conversation_id, e)
 
         try:
+            if conversation_id.startswith("group-"):
+                # A record that came by history sync lands its parked transcription too.
+                await settle_parked_transcriptions(self, conversation_id)
             monitor = self.conversation_monitors.get(conversation_id)
 
             # Agent conversations: always read from disk file (source of truth)
@@ -6913,7 +6944,9 @@ class CoreService(MusicCommandsMixin):
                             # the UI then offers to request it instead of a player.
                             if out.get("attachments"):
                                 out["attachments"] = [
-                                    mark_availability(dict(a)) if isinstance(a, dict) else a
+                                    served_voice_attachment(
+                                        self, conversation_id, msg, mark_availability(dict(a)))
+                                    if isinstance(a, dict) else a
                                     for a in out["attachments"]
                                 ]
                             return out
@@ -6983,31 +7016,8 @@ class CoreService(MusicCommandsMixin):
                     # Deep copy attachments to avoid mutating original
                     attachments = []
                     for attachment in msg["attachments"]:
-                        attachment_copy = attachment.copy()
-
-                        # Merge transcription data for voice messages
-                        if attachment_copy.get("type") == "voice":
-                            transfer_id = attachment_copy.get("transfer_id")
-                            transcription_data = self._voice_transcriptions.get(transfer_id) if transfer_id else None
-                            if transcription_data is None:
-                                # The sender's own group record carries no transfer
-                                # id — one message, one transfer per recipient.
-                                name = attachment_copy.get("filename")
-                                transcription_data = next(
-                                    (t for t in self._voice_transcriptions.values()
-                                     if name and t.get("filename") == name),
-                                    None,
-                                )
-                            if transcription_data:
-                                attachment_copy["transcription"] = {
-                                    "text": transcription_data.get("text", ""),
-                                    "provider": transcription_data.get("provider", ""),
-                                    "transcriber_node_id": transcription_data.get("transcriber_node_id", ""),
-                                    "confidence": transcription_data.get("confidence"),
-                                    "language": transcription_data.get("language", ""),
-                                    "timestamp": transcription_data.get("timestamp", "")
-                                }
-                                logger.debug(f"Merged transcription for transfer_id={transfer_id} into history")
+                        attachment_copy = served_voice_attachment(
+                            self, conversation_id, msg, attachment.copy())
 
                         # A one-to-one record whose file is not here can be requested
                         # from the peer; an AI chat has nobody to ask, so it is left as is.
@@ -9237,11 +9247,17 @@ class CoreService(MusicCommandsMixin):
                 self._processed_message_ids.add(ui_dedup_key)
                 msg_index = None
                 if _group_monitor:
+                    # Its author named, as the file and image sends do: without it the
+                    # record had no author, so it was signed by us but attributed to
+                    # nobody, and a transcription could not be bound to its sender.
                     _group_monitor.add_message(
                         "user",
                         f"Sent voice message: {final_filename} ({size_mb} MB)",
                         [attachment],
+                        sender_node_id=self.p2p_manager.node_id,
+                        sender_name=(self.p2p_manager.get_display_name() or "User"),
                         message_id=message_id,
+                        sender_type="human",
                     )
                     msg_index = _group_monitor.get_last_msg_index()
                 await self.local_api.broadcast_event("group_file_received", {

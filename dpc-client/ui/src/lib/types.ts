@@ -300,6 +300,10 @@ export interface VoiceTranscription {
     // One voice message becomes one transfer per recipient, so the sender's own
     // record carries no transfer id; the file name is minted once and joins them.
     filename?: string;
+    // The conversation the backend bound it to (a group id or the peer's node id);
+    // the chat window updates that chat only. The record's id, when known.
+    conversation_id?: string;
+    message_id?: string;
     text: string;
     provider: string;
     confidence?: number;

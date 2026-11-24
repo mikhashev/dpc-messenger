@@ -151,6 +151,9 @@ async def test_the_history_the_ui_reloads_carries_the_senders_own_text(monkeypat
         "transfer-for-a-recipient": {
             "text": "проверка связи", "filename": VOICE,
             "provider": "whisper", "transcriber_node_id": "us", "success": True,
+            # A transcription is bound to its conversation (follow-up 11a): a name
+            # alone joins nothing across conversations.
+            "conversation_id": GROUP,
         }
     }
 
