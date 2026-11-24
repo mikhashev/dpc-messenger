@@ -20,6 +20,7 @@ coordinator are real; only the wire and the UI socket are collected.
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -344,6 +345,9 @@ AUTHOR = "dpc-node-" + "c" * 32
 async def test_a_group_offer_put_to_the_user_names_the_author_beside_the_hop(clocks, tmp_path):
     """The dialog says "from X via Y": `node_id` is the hop, `sender_node_id` the unsigned author."""
     node = _Node(tmp_path, NO_ENTRIES)
+    # The roster holds the hop and the author: a post from outside it is refused.
+    node.service.group_manager = SimpleNamespace(
+        get_group=lambda g: SimpleNamespace(members=[PEER, AUTHOR]))
     payload = _offer(group_id="group-00000000000a")
     payload.update({"message_id": "m-1", "sender_node_id": AUTHOR})
 
