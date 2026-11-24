@@ -325,6 +325,7 @@ class MusicCommandsMixin:
         ask["on_wait"] = lambda estimate: show_card_wait({
             "text": card_wait_words(estimate), "behind": list(estimate.get("behind") or []),
             "wait_s": estimate.get("wait_s"), "known": bool(estimate.get("known"))})
+        ask["with_detail"] = True  # word timestamps and the backend's hallucination options; see lyrics_filter
         try:
             # A model this run loads is released when the run ends (decided under the
             # provider's lock); a warm one stays, and the idle timer frees it in time.

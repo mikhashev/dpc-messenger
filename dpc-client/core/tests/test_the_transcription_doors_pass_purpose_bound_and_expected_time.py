@@ -47,7 +47,8 @@ class RecordingWhisper:
         return True
 
     async def transcribe(self, path, release_if_loaded_here=False, language=None, task=None, *,
-                         purpose=None, wait_s=None, expected_s=None, on_wait=None, check=None):
+                         purpose=None, wait_s=None, expected_s=None, on_wait=None, check=None,
+                         with_detail=False):
         self.asks.append({"purpose": purpose, "wait_s": wait_s, "expected_s": expected_s})
         self.extras.append({"on_wait": on_wait, "check": check})
         self.peer_seen.append(base_mod.peer_being_served())

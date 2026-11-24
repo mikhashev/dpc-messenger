@@ -15,7 +15,7 @@ import json
 import httpx
 import pytest
 
-from dpc_client_core.music import commands
+from dpc_client_core.music import commands, lyrics_filter
 from dpc_client_core.music.commands import MUSIC_COMMANDS, MusicCommandsMixin
 from dpc_client_core.music.identity import MediaTools
 from dpc_client_core.music.library import MusicLibraryError
@@ -142,7 +142,9 @@ async def test_timestamps_become_lrc_lines_stored_as_transcribe(tmp_path, audio)
         "[00:15.00] Second line <00:18.25>",
         "[00:20.00] no end",
     ]
-    assert answer["transcription"] == {
+    info = dict(answer["transcription"])
+    assert info.pop("filter")["version"] == lyrics_filter.FILTER_VERSION
+    assert info == {
         "provider": "local_whisper", "model": "openai/whisper-large-v3-turbo", "language": "en",
         "duration_s": 215.0, "segments": 3, "synced": True}
     on_disk = json.loads(stored_file(tmp_path).read_text(encoding="utf-8"))
@@ -526,8 +528,9 @@ async def test_the_command_round_trips_over_a_real_library(tmp_path, monkeypatch
 async def test_the_stored_record_keeps_the_provider_and_model(tmp_path, audio):
     svc = make(tmp_path, FakeLibrary(audio), FakeTranscriber())
     answer = await svc.transcribe(TRACK_ID)
-    assert answer["lyrics"]["transcription"] == {"provider": "local_whisper",
-                                                 "model": "openai/whisper-large-v3-turbo"}
+    stored = dict(answer["lyrics"]["transcription"])
+    assert stored.pop("filter")["version"] == lyrics_filter.FILTER_VERSION
+    assert stored == {"provider": "local_whisper", "model": "openai/whisper-large-v3-turbo"}
     on_disk = json.loads(stored_file(tmp_path).read_text(encoding="utf-8"))
     assert on_disk["transcription"] == answer["lyrics"]["transcription"]
     # Read back through a fresh instance: the record validates and round-trips.
@@ -539,7 +542,9 @@ async def test_the_stored_record_keeps_the_provider_and_model(tmp_path, audio):
 async def test_a_provider_that_names_no_model_is_stored_as_null(tmp_path, audio):
     svc = make(tmp_path, FakeLibrary(audio), FakeTranscriber({"text": "one", "provider": "openai"}))
     answer = await svc.transcribe(TRACK_ID)
-    assert answer["lyrics"]["transcription"] == {"provider": "openai", "model": None}
+    stored = dict(answer["lyrics"]["transcription"])
+    assert stored.pop("filter")["kept_raw"] is False
+    assert stored == {"provider": "openai", "model": None}
 
 
 @pytest.mark.asyncio

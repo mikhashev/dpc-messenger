@@ -28,6 +28,10 @@ DEFAULT_IDLE_UNLOAD_S = 300.0
 # How long shutdown waits for running transcriptions before it unloads anyway.
 SHUTDOWN_DRAIN_S = 10.0
 
+# mlx-whisper's `hallucination_silence_threshold` for the music path (`with_detail`): a segment that
+# sits in more than this much silence around a suspect word is skipped.
+MUSIC_HALLUCINATION_SILENCE_S = 2.0
+
 # The adaptive batch descent of `_transcribe_loaded`: over each length (audio seconds) the batch is
 # divided by its divisor. The warm figures are kept by the same bands (ADR-052 S3, Johnny #24-2), so
 # a band is a batch size: 16 up to 60 s, 8 up to 120 s, 4 up to 180 s, 2 over 180 s (batch 16).
@@ -249,7 +253,8 @@ async def transcribe_with_route(provider: Any, audio_path: str, release_if_loade
         try:
             result = await twin.transcribe(audio_path, release_if_loaded_here,
                                            language=kwargs.get("language"), task=kwargs.get("task"),
-                                           audio_s=kwargs.get("audio_s"))
+                                           audio_s=kwargs.get("audio_s"),
+                                           with_detail=bool(kwargs.get("with_detail")))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1841,8 +1846,30 @@ class LocalWhisperProvider(AIProvider):
         return segments
 
     @staticmethod
-    def _segments_from_mlx(raw_segments: Any, duration_seconds: float) -> List[Dict[str, Any]]:
-        """Normalise mlx_whisper segments into the same {start, end, text} shape."""
+    def _words_from_chunks(chunks: Any, duration_seconds: float) -> List[Dict[str, Any]]:
+        """HF pipeline word chunks (`return_timestamps="word"`) as `{word, start, end}`; a missing
+        end (the last word) runs to the end of the audio."""
+        words: List[Dict[str, Any]] = []
+        for chunk in chunks or []:
+            if not isinstance(chunk, dict):
+                continue
+            text = (chunk.get("text") or "").strip()
+            timestamp = chunk.get("timestamp") or (None, None)
+            try:
+                start, end = timestamp[0], timestamp[1]
+            except (TypeError, IndexError):
+                start, end = None, None
+            if not text or start is None:
+                continue
+            words.append({"word": text, "start": float(start),
+                          "end": float(duration_seconds if end is None else end)})
+        return words
+
+    @staticmethod
+    def _segments_from_mlx(raw_segments: Any, duration_seconds: float,
+                           detail: bool = False) -> List[Dict[str, Any]]:
+        """Normalise mlx_whisper segments into the same {start, end, text} shape. With `detail`
+        each segment also keeps `no_speech_prob`, `avg_logprob`, `compression_ratio` and `words`."""
         segments: List[Dict[str, Any]] = []
         if not raw_segments:
             return segments
@@ -1858,7 +1885,21 @@ class LocalWhisperProvider(AIProvider):
                 start = segments[-1]["end"] if segments else 0.0
             if end is None:
                 end = duration_seconds
-            segments.append({"start": float(start), "end": float(end), "text": text})
+            item: Dict[str, Any] = {"start": float(start), "end": float(end), "text": text}
+            if detail:
+                for key in ("no_speech_prob", "avg_logprob", "compression_ratio"):
+                    figure = segment.get(key)
+                    if isinstance(figure, (int, float)) and not isinstance(figure, bool):
+                        item[key] = float(figure)
+                words = []
+                for w in segment.get("words") or []:
+                    if isinstance(w, dict) and isinstance(w.get("start"), (int, float)) \
+                            and isinstance(w.get("end"), (int, float)) and str(w.get("word") or "").strip():
+                        words.append({"word": str(w["word"]).strip(), "start": float(w["start"]),
+                                      "end": float(w["end"])})
+                if words:
+                    item["words"] = words
+            segments.append(item)
         return segments
 
     async def transcribe(self, audio_path: str, release_if_loaded_here: bool = False,
@@ -1867,7 +1908,8 @@ class LocalWhisperProvider(AIProvider):
                          expected_s: Optional[float] = None,
                          on_wait: Optional[Callable[[Dict[str, Any]], None]] = None,
                          check: Optional[Callable[[], Awaitable[None]]] = None,
-                         audio_s: Optional[float] = None, cpu_route: bool = True) -> Dict[str, Any]:
+                         audio_s: Optional[float] = None, cpu_route: bool = True,
+                         with_detail: bool = False) -> Dict[str, Any]:
         """Transcribe `audio_path`. With `release_if_loaded_here`, a model this very call
         had to load is unloaded as the call ends, unless another transcription is using
         it (the decision is made under the load lock, so it cannot race).
@@ -1888,6 +1930,10 @@ class LocalWhisperProvider(AIProvider):
         batch its estimate assumed. The recorded run reads the decoded length, the one its elapsed
         time was measured on (S3 follow-up 6, Ark #49-3).
 
+        `with_detail` (the music player's Transcribe only) asks for word timestamps and, where the
+        backend reports them, per-segment confidence, with the backend's hallucination options
+        (`_transcribe_loaded`). It changes the decode and the answer, never the route or the lease.
+
         `cpu_route=False` skips L12 and asks the card: `transcribe_with_route` passes it after the CPU
         twin failed to load before any audio was processed (Johnny #63-5, S3e)."""
         # A stale reference to a replaced object forwards to the object that replaced it,
@@ -1898,12 +1944,12 @@ class LocalWhisperProvider(AIProvider):
                                             language=language, task=task, purpose=purpose,
                                             wait_s=wait_s, expected_s=expected_s,
                                             on_wait=on_wait, check=check, audio_s=audio_s,
-                                            cpu_route=cpu_route)
+                                            cpu_route=cpu_route, with_detail=with_detail)
         self._refuse_if_retired()
         device, lease = await self._route_for_the_card()
         if lease is None:
             return await self._transcribe_holding(audio_path, release_if_loaded_here, language, task, None,
-                                                  audio_s=audio_s)
+                                                  audio_s=audio_s, with_detail=with_detail)
         what = purpose or "transcription"
         # L11 (S3e): this call's declared peak, by its length band (the worst band when unknown).
         peak = whisper_vram_mib(self.model_name, audio_s)
@@ -1928,7 +1974,7 @@ class LocalWhisperProvider(AIProvider):
                 try:
                     return await self._transcribe_holding(audio_path, release_if_loaded_here,
                                                           language, task, lease, audio_s=audio_s,
-                                                          device=device)
+                                                          device=device, with_detail=with_detail)
                 finally:
                     runs.pop(id(token), None)
         finally:
@@ -1937,7 +1983,7 @@ class LocalWhisperProvider(AIProvider):
     async def _transcribe_holding(self, audio_path: str, release_if_loaded_here: bool,
                                   language: Optional[str], task: Optional[str],
                                   lease: Optional[Any], audio_s: Optional[float] = None,
-                                  device: Optional[str] = None) -> Dict[str, Any]:
+                                  device: Optional[str] = None, with_detail: bool = False) -> Dict[str, Any]:
         """The body of `transcribe` once the card is held (`lease`) or not needed (None); `device` is
         the route's, for a load under the lease."""
         # The lock is taken even when the model is loaded, so the use is counted
@@ -1984,6 +2030,8 @@ class LocalWhisperProvider(AIProvider):
                 overrides["task"] = task
             if _a_positive(audio_s) is not None:
                 overrides["audio_s"] = audio_s
+            if with_detail:
+                overrides["with_detail"] = True
             return await self._transcribe_loaded(audio_path, **overrides)
         finally:
             _CPU_RUNS.pop(id(run), None)
@@ -2024,7 +2072,8 @@ class LocalWhisperProvider(AIProvider):
         owner._calls_since_load += 1
 
     async def _transcribe_loaded(self, audio_path: str, language: Optional[str] = None,
-                                 task: Optional[str] = None, audio_s: Optional[float] = None) -> Dict[str, Any]:
+                                 task: Optional[str] = None, audio_s: Optional[float] = None,
+                                 with_detail: bool = False) -> Dict[str, Any]:
         # Per-call values, resolved once: the MLX thread and the HF generate call both use
         # these locals, never `self.language` / `self.task`, which another call may change.
         call_language = self.language if language is None else language
@@ -2061,11 +2110,16 @@ class LocalWhisperProvider(AIProvider):
                 duration_seconds = len(audio_array) / sample_rate
 
                 def mlx_transcribe():
+                    detail_options = {
+                        "word_timestamps": True, "condition_on_previous_text": False,
+                        "hallucination_silence_threshold": MUSIC_HALLUCINATION_SILENCE_S,
+                    } if with_detail else {}
                     return mlx_whisper.transcribe(
                         audio_path,
                         path_or_hf_repo=self.model_name,
                         language=call_language if call_language != "auto" else None,
-                        task=call_task
+                        task=call_task,
+                        **detail_options
                     )
 
                 result = await asyncio.to_thread(mlx_transcribe)
@@ -2085,7 +2139,7 @@ class LocalWhisperProvider(AIProvider):
                     "duration": duration_seconds,
                     "provider": "local_whisper_mlx",
                     "segments": self._segments_from_mlx(
-                        result.get("segments"), duration_seconds
+                        result.get("segments"), duration_seconds, detail=with_detail
                     ),
                 }
 
@@ -2131,13 +2185,33 @@ class LocalWhisperProvider(AIProvider):
                 # return_timestamps is passed at call time (the standard place for
                 # it); the pipeline itself is built once and shared. Segment-level
                 # timestamps give chunks of {"timestamp": (start, end), "text": ...}.
-                result = await asyncio.to_thread(
-                    self.pipeline,
-                    audio_array,
-                    batch_size=adaptive_batch_size,
-                    return_timestamps=True,
-                    **({"generate_kwargs": call_generate_kwargs} if call_generate_kwargs else {})
-                )
+                # `with_detail`: one chunk per word and no segments (the lyrics code regroups them);
+                # a model or transformers that refuses word timestamps falls back to segments and
+                # the answer says `words_unavailable`.
+                word_mode = bool(with_detail)
+                words_unavailable = False
+                pipeline_kwargs = {"generate_kwargs": call_generate_kwargs} if call_generate_kwargs else {}
+                try:
+                    result = await asyncio.to_thread(
+                        self.pipeline,
+                        audio_array,
+                        batch_size=adaptive_batch_size,
+                        return_timestamps="word" if word_mode else True,
+                        **pipeline_kwargs
+                    )
+                except Exception as word_error:
+                    if not word_mode or "CUDA out of memory" in str(word_error):
+                        raise
+                    logger.warning("Whisper '%s': word timestamps failed (%s); falling back to segment "
+                                   "timestamps", self.alias, word_error)
+                    word_mode, words_unavailable = False, True
+                    result = await asyncio.to_thread(
+                        self.pipeline,
+                        audio_array,
+                        batch_size=adaptive_batch_size,
+                        return_timestamps=True,
+                        **pipeline_kwargs
+                    )
 
                 elapsed = asyncio.get_event_loop().time() - start_time
                 self._record_run(duration_seconds, elapsed)
@@ -2155,7 +2229,12 @@ class LocalWhisperProvider(AIProvider):
                 if detected_language == "unknown" and isinstance(result.get("language"), str):
                     detected_language = result["language"]
 
-                segments = self._segments_from_chunks(chunks_list, duration_seconds)
+                words: List[Dict[str, Any]] = []
+                if word_mode:
+                    words = self._words_from_chunks(chunks_list, duration_seconds)
+                    segments: List[Dict[str, Any]] = []
+                else:
+                    segments = self._segments_from_chunks(chunks_list, duration_seconds)
 
                 logger.info(f"Local transcription completed in {elapsed:.1f}s ({self._realtime_ratio(duration_seconds, elapsed)} real-time): {len(text)} chars")
 
@@ -2166,13 +2245,18 @@ class LocalWhisperProvider(AIProvider):
                 gc.collect()
                 logger.debug("Python garbage collection completed after transcription")
 
-                return {
+                answer = {
                     "text": text,
                     "language": detected_language,
                     "duration": duration_seconds,
                     "provider": "local_whisper",
                     "segments": segments,
                 }
+                if word_mode:
+                    answer["words"] = words
+                if words_unavailable:
+                    answer["words_unavailable"] = True
+                return answer
 
         except Exception as e:
             error_msg = str(e)

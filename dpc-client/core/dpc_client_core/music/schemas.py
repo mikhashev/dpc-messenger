@@ -268,6 +268,8 @@ _LYRICS_LINE_KEYS = {"t_start", "t_end", "text"}
 _LRCLIB_KEYS = {"id", "artist_name", "track_name", "album_name", "duration", "synced"}
 # What ran a `source: "transcribe"` record (Mike, 2026-11-20); optional, so older records load.
 _TRANSCRIPTION_KEYS = {"provider", "model"}
+# The clean-up that ran on it (music/lyrics_filter.py), optional so older records load.
+_TRANSCRIPTION_FILTER_KEYS = {"version", "dropped", "kept_raw", "split_by_words", "split_proportional", "words"}
 
 
 def validate_lyrics(lyrics: Any) -> None:
@@ -317,10 +319,17 @@ def validate_lyrics(lyrics: Any) -> None:
     if "transcription" in lyrics:
         rec = lyrics["transcription"]
         _expect(s, lyrics["source"] == "transcribe", "'transcription' is only on lyrics with source 'transcribe'")
-        _expect(s, isinstance(rec, Mapping) and set(rec) == _TRANSCRIPTION_KEYS,
-                f"'transcription' must have exactly the keys {sorted(_TRANSCRIPTION_KEYS)}")
+        _expect(s, isinstance(rec, Mapping) and _TRANSCRIPTION_KEYS <= set(rec) <= _TRANSCRIPTION_KEYS | {"filter"},
+                f"'transcription' must have the keys {sorted(_TRANSCRIPTION_KEYS)} and may have 'filter'")
         _expect(s, all(rec[k] is None or _is_str(rec[k]) for k in _TRANSCRIPTION_KEYS),
                 "'transcription.provider' and 'transcription.model' must be strings or null")
+        if "filter" in rec:
+            flt = rec["filter"]
+            _expect(s, isinstance(flt, Mapping) and set(flt) == _TRANSCRIPTION_FILTER_KEYS,
+                    f"'transcription.filter' must have exactly the keys {sorted(_TRANSCRIPTION_FILTER_KEYS)}")
+            _expect(s, all(_is_int(flt[k]) for k in ("version", "dropped", "split_by_words", "split_proportional"))
+                    and isinstance(flt["kept_raw"], bool) and isinstance(flt["words"], bool),
+                    "'transcription.filter' counts must be integers and 'kept_raw', 'words' booleans")
 
 
 VALIDATORS: Dict[str, Any] = {

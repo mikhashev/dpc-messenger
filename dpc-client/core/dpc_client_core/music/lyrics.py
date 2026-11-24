@@ -33,7 +33,11 @@
 
 **Transcribe.** `transcribe` hands the track's file to a `transcriber` (injected by the
 command layer, which picks the provider exactly as DPC's voice transcription does; this
-module never loads a model). Each `{start, end, text}` segment of the result becomes one
+module never loads a model). The result is first cleaned by `lyrics_filter.clean_transcript`
+(hallucinations dropped, over-long segments split; the rules and thresholds are in that module,
+CC's proposal, `FILTER_VERSION` recorded on the stored lyrics as `transcription.filter`), and the
+unfiltered result is kept beside the lyrics as `<track_id>.transcribe-raw.json` (last run only).
+Each `{start, end, text}` segment of the cleaned result becomes one
 line `[mm:ss.xx] text`; a result with text but no segments (a cloud or peer provider
 answers text only) becomes unsynced lines with `synced: false`. The record is stored
 with `source: "transcribe"`, the word SPEC §4 and `schemas.LYRICS_SOURCES` already have
@@ -100,7 +104,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
-from . import schemas
+from . import lyrics_filter, schemas
 from .identity import FFPROBE_TIMEOUT_S, MediaTools
 from .library import MusicLibraryError
 from .store import atomic_write_json, atomic_write_text, music_dir_of
@@ -306,6 +310,8 @@ def make_lyrics(track_hash: str, source: str, lines: List[dict], *, synced: bool
         record["lrclib"] = dict(lrclib)
     if transcription is not None:
         record["transcription"] = {"provider": transcription.get("provider"), "model": transcription.get("model")}
+        if transcription.get("filter") is not None:
+            record["transcription"]["filter"] = dict(transcription["filter"])
     schemas.validate_lyrics(record)
     return record
 
@@ -343,17 +349,31 @@ def lines_from_segments(segments: Any) -> List[dict]:
     return lines
 
 
+def _filter_plain_lines(lines: List[dict], report: Dict[str, Any]) -> Dict[str, Any]:
+    """The text rules on lines that carry no times (a text-only provider), in place; every
+    line gone keeps them all, as for timed ones. Returns the report with the count."""
+    kept = [line for line in lines if not lyrics_filter.is_hallucination_text(line["text"])]
+    if kept:
+        report = {**report, "dropped": report["dropped"] + len(lines) - len(kept)}
+        lines[:] = kept
+    elif lines:
+        report = {**report, "kept_raw": True}
+    return report
+
+
 def transcript_lyrics(track_hash: str, result: Any) -> Tuple[dict, Dict[str, Any]]:
     """`(record, info)` for a transcription result. Segments give timed lines; text
     without segments gives unsynced lines (`synced: false`). No words at all raises
     `MusicLibraryError("no_speech")`. `info` is what the answer reports about the run."""
     if not isinstance(result, dict):
         raise MusicLibraryError("transcription_failed", "the transcription gave no result")
+    result, report = lyrics_filter.clean_transcript(result)
     text = str(result.get("text") or "")
     lines = lines_from_segments(result.get("segments"))
     synced = bool(lines)
     if not synced:
         lines = plain_lines(text)
+        report = _filter_plain_lines(lines, report)
     if not lines:
         raise MusicLibraryError(
             "no_speech", "the transcription found no words in this track (it may be instrumental)")
@@ -361,8 +381,11 @@ def transcript_lyrics(track_hash: str, result: Any) -> Tuple[dict, Dict[str, Any
     language = language.strip() if isinstance(language, str) and language.strip() not in ("", "unknown") else None
     provider = str(result["provider"]) if result.get("provider") else None
     model = str(result["model"]) if result.get("model") else None
+    stored_filter = {"version": report["version"], "dropped": report["dropped"], "kept_raw": report["kept_raw"],
+                     "split_by_words": report["split_by_words"], "split_proportional": report["split_proportional"],
+                     "words": report["words"]}
     record = make_lyrics(track_hash, TRANSCRIBE_SOURCE, lines, synced=synced, language=language,
-                         transcription={"provider": provider, "model": model})
+                         transcription={"provider": provider, "model": model, "filter": stored_filter})
     info: Dict[str, Any] = {
         "provider": provider,
         "model": model,
@@ -370,6 +393,7 @@ def transcript_lyrics(track_hash: str, result: Any) -> Tuple[dict, Dict[str, Any
         "duration_s": _finite(result.get("duration")),
         "segments": len(lines) if synced else 0,
         "synced": synced,
+        "filter": report,
     }
     if result.get("fallback_reason"):
         info["fallback_reason"] = str(result["fallback_reason"])
@@ -766,6 +790,20 @@ class MusicLyrics:
 
     # -- storage ---------------------------------------------------------------
 
+    def raw_transcript_path(self, track_id: str) -> Path:
+        """Where the last Transcribe's unfiltered result is kept, beside the lyrics."""
+        return self.lyrics_path(track_id).with_name(f"{track_id}.transcribe-raw.json")
+
+    async def _keep_raw_transcript(self, track_id: str, track_hash: str, result: Dict[str, Any],
+                                   report: Dict[str, Any]) -> None:
+        """Best effort: the filter's input stays recoverable; a failed write never fails the run."""
+        document = {"track_hash": track_hash, "saved_at": _now_iso(), "filter_version": report.get("version"),
+                    "result": result}
+        try:
+            await asyncio.to_thread(atomic_write_json, self.raw_transcript_path(track_id), document)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("music: the raw transcript of %s was not kept: %s", track_id, exc)
+
     def lyrics_path(self, track_id: str) -> Path:
         if not isinstance(track_id, str) or not schemas.TRACK_ID_RE.match(track_id):
             raise MusicLibraryError("invalid_track_id", f"not a track id: {track_id!r}")
@@ -1127,6 +1165,7 @@ class MusicLyrics:
                 logger.warning("music: transcribing %s failed: %s", track_id, exc)
                 raise MusicLibraryError("transcription_failed", f"transcription failed: {exc}") from exc
             record, info = transcript_lyrics(entry["source_hash"], result)
+            await self._keep_raw_transcript(track_id, entry["source_hash"], result, info["filter"])
             logger.info("music: transcribed %s with %s (%s): %d %s lines", track_id,
                         info.get("provider") or "an unnamed provider", info.get("model") or "model not named",
                         len(record["lines"]), "timed" if info["synced"] else "unsynced")
