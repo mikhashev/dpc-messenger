@@ -85,6 +85,15 @@ folder). Every change to what the library lists is also broadcast, coalesced to 
 per `DEFAULT_CHANGE_DELAY_S` window, as `music_library_changed {version, reasons, track_ids,
 track_ids_truncated}`; the UI re-reads on it instead of polling. The take's measured true peak (`loudness.true_peak_dbtp`) decides whether the -1 dBTP
 limiter runs; its sidecar and stored lyrics go into the MP3's tags.
+**For the agent tools** (music tools part 1, 2026-11-24; the tools call these on `CoreService`, they
+are not on the UI door, except that `propose_music_job` and `cancel_music_job` take an optional
+`requested_by`): `propose_music_job(..., requested_by={kind: "agent", agent_id, conversation_id?,
+turn_id?})` records who asked and applies the limits `[music] agent_queue_max` (default 2) and
+`turn_jobs_max` (default 1), read on every call with those defaults, so `settings.py` is unchanged;
+`cancel_music_job(job_id, requested_by=...)` lets an agent cancel only its own job (`not_your_job`);
+`cancel_music_jobs_of_turn(turn_id)` cancels a stopped turn's still-queued jobs; `get_music_take(take_id)`
+resolves a take to its file path and facts without the job's request. A caller that sends no
+`requested_by` is the person.
 "Stop X" on a job waiting for the card is the existing `stop_local_engine` command with the
 holder's alias from `job.card_wait.holders`; nothing here stops another engine.
 """
@@ -110,7 +119,7 @@ from .export import (
     DEFAULT_PRESET, PRESETS, ExportError, ExportSource, MusicExporter, SkippedTrack, default_export_root,
     read_take_sidecar,
 )
-from .jobs import MusicJobError, MusicJobStore
+from .jobs import DEFAULT_AGENT_QUEUE_MAX, DEFAULT_TURN_JOBS_MAX, MusicJobError, MusicJobStore
 from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
 from .loudness import LoudnessError, measure_loudness
 from .lyrics import MusicLyrics
@@ -195,6 +204,26 @@ class MusicCommandsMixin:
     _music_jobs_lock: Optional[asyncio.Lock] = None
     _music_engines_instance: Optional[MusicEngines] = None
     _music_runner_instance: Optional[MusicJobRunner] = None
+
+    def _music_positive_int(self, key: str, default: int) -> int:
+        """`[music] key` as an integer of at least 1, else `default` with a warning."""
+        raw = self._music_config_value(key, str(default))
+        try:
+            value = int(str(raw).strip())
+            if value >= 1:
+                return value
+        except (TypeError, ValueError):
+            pass
+        logger.warning("[music] %s %r is not an integer of at least 1; using %s", key, raw, default)
+        return default
+
+    def _music_agent_queue_max(self) -> int:
+        """`[music] agent_queue_max` (default 2): an agent's jobs queued or running at once."""
+        return self._music_positive_int("agent_queue_max", DEFAULT_AGENT_QUEUE_MAX)
+
+    def _music_turn_jobs_max(self) -> int:
+        """`[music] turn_jobs_max` (default 1): an agent's jobs per turn."""
+        return self._music_positive_int("turn_jobs_max", DEFAULT_TURN_JOBS_MAX)
 
     def _music_poll_interval_s(self) -> float:
         raw = self._music_config_value("poll_interval_s", str(DEFAULT_POLL_INTERVAL_S))
@@ -721,7 +750,12 @@ class MusicCommandsMixin:
     async def propose_music_job(self, type: Any = None, params: Any = None, track_id: Any = None,
                                 base_version_id: Any = None, comment_id: Any = None, action: Any = None,
                                 region: Any = None, prompt: Any = None,
-                                idempotency_key: Any = None) -> Dict[str, Any]:
+                                idempotency_key: Any = None, requested_by: Any = None) -> Dict[str, Any]:
+        """Propose a job. `requested_by` (`{kind: "person"|"agent", agent_id?, conversation_id?,
+        turn_id?}`) says who asks; without it the person does (the UI door sends none). An
+        agent's request is limited (`requester_queue_full`, `turn_job_limit`: `[music]
+        agent_queue_max`, default 2, and `turn_jobs_max`, default 1, read on every call) and,
+        with a `turn_id` and no `idempotency_key`, repeats return the same job."""
         try:
             job_type = _need_str(type, "type", "invalid_type")
             if not isinstance(params, dict):
@@ -731,8 +765,13 @@ class MusicCommandsMixin:
             strs = {k: _opt_str(v, k, "invalid_params") for k, v in (
                 ("track_id", track_id), ("base_version_id", base_version_id), ("comment_id", comment_id),
                 ("action", action), ("prompt", prompt), ("idempotency_key", idempotency_key))}
+            if requested_by is not None and not isinstance(requested_by, dict):
+                raise _bad("invalid_params", "requested_by", "an object or null")
             store = await self._music_jobs()
-            job = await asyncio.to_thread(lambda: store.create_job(job_type, params, region=region, **strs))
+            queue_max, turn_max = self._music_agent_queue_max(), self._music_turn_jobs_max()
+            job = await asyncio.to_thread(lambda: store.create_job(
+                job_type, params, region=region, requested_by=requested_by,
+                agent_queue_max=queue_max, turn_jobs_max=turn_max, **strs))
             if job.get("state") == "queued":
                 self._music_wake_runner()
             self._music_job_changed(job)
@@ -761,15 +800,70 @@ class MusicCommandsMixin:
             return _error(exc)
 
     @slow_command
-    async def cancel_music_job(self, job_id: Any = None, reason: Any = None) -> Dict[str, Any]:
+    async def cancel_music_job(self, job_id: Any = None, reason: Any = None,
+                               requested_by: Any = None) -> Dict[str, Any]:
+        """Cancel a job. Without `requested_by` (the UI door) it is the person's Cancel and takes
+        any job. With an agent's `requested_by` only a job that agent proposed is cancelled;
+        another's is refused `not_your_job`."""
         try:
             jid = _need_str(job_id, "job_id", "invalid_job_id")
             why = _opt_str(reason, "reason", "invalid_reason")
+            if requested_by is not None and not isinstance(requested_by, dict):
+                raise _bad("invalid_params", "requested_by", "an object or null")
             store = await self._music_jobs()
-            job = await asyncio.to_thread(store.cancel_job, jid, why)
+            job = await asyncio.to_thread(lambda: store.cancel_job(jid, why, requested_by=requested_by))
             self._music_wake_runner()
             self._music_job_changed(job)
             return {"status": "ok", "job": job}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
+    async def cancel_music_jobs_of_turn(self, turn_id: Any = None, agent_id: Any = None) -> Dict[str, Any]:
+        """Stop of a turn: cancel the jobs agents proposed in `turn_id` (of `agent_id` when given)
+        that are still `queued`. A running job is left alone. Answers `{cancelled: [job, ...]}`,
+        empty when nothing was queued. For the agent runtime, not the UI door."""
+        try:
+            tid = _need_str(turn_id, "turn_id", "invalid_params")
+            aid = _opt_str(agent_id, "agent_id", "invalid_params")
+            store = await self._music_jobs()
+            jobs = await asyncio.to_thread(lambda: store.cancel_jobs_of_turn(tid, agent_id=aid))
+            for job in jobs:
+                self._music_job_changed(job)
+            if jobs:
+                self._music_wake_runner()
+            return {"status": "ok", "turn_id": tid, "cancelled": jobs}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
+    async def get_music_take(self, take_id: Any = None) -> Dict[str, Any]:
+        """A take by its id, for a caller that has no access to the files (ADR-051 decision D):
+        where its file is and what is known about it, and nothing of the request that made it
+        (no prompt, lyrics, params or payload; those live in the job). `take`: `take_id`,
+        `job_id`, `track_id` (the source track, null for a new-track take), `library_track_id`,
+        `kind`, `variant`, `state` (the take's decision: pending, accepted or rejected),
+        `job_state`, `path` (absolute, null when the URI is not a local file), `file_exists`,
+        `duration_s`, `sample_rate`, `channels`, `content_hash`, `loudness`. Errors: `not_found`."""
+        try:
+            tid = _need_str(take_id, "take_id", "invalid_take_id")
+            store = await self._music_jobs()
+
+            def read() -> tuple:
+                take = store.get_take(tid)
+                return take, store.get_job(take["job_id"])["state"]
+            take, job_state = await asyncio.to_thread(read)
+            file = take.get("file") or {}
+            path = path_of_file_uri(file.get("uri"))
+            exists = await asyncio.to_thread(lambda: path is not None and path.is_file())
+            return {"status": "ok", "take": {
+                "take_id": take["id"], "job_id": take["job_id"], "track_id": take.get("track_id"),
+                "library_track_id": take.get("library_track_id"), "kind": take["kind"],
+                "variant": take.get("variant"), "state": take["decision"], "job_state": job_state,
+                "path": str(path) if path is not None else None, "file_exists": exists,
+                "duration_s": file.get("duration_s"), "sample_rate": file.get("sample_rate"),
+                "channels": file.get("channels"), "content_hash": file.get("content_hash"),
+                "loudness": take.get("loudness")}}
         except Exception as exc:
             return _error(exc)
 
@@ -1249,6 +1343,9 @@ class MusicCommandsMixin:
         return {"status": "ok", **answer}
 
 
+# The commands the UI door may call (every one is in `local_api.ALLOWED_COMMANDS`). Not listed on
+# purpose: `cancel_music_jobs_of_turn` and `get_music_take`, for the agent tools only, which call
+# them on `CoreService` directly and are kept off the UI allowlist.
 MUSIC_COMMANDS = (
     "list_music_folders",
     "add_music_folder",

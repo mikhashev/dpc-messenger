@@ -62,6 +62,13 @@ record without them is valid against both shapes:
   left; `fell_back`, null or `{from, adapters, why, at}`, set when the job did move.
   `reason` is the sentence the job card shows. No paths in it: it is copied into the take's
   provenance record.
+- `mp.job/1`: `requested_by`, `{kind: "person"|"agent", agent_id?, conversation_id?, turn_id?}`:
+  who proposed the job (music tools, part 1, 2026-11-24). A job from the UI carries
+  `{kind: "person"}`; one an agent proposed carries `kind` "agent" and its `agent_id` (required
+  for an agent), and the chat and turn it came from when known. The queue limits, the agent's
+  own-only cancel and the cancel of a stopped turn's jobs read it. A record written before the
+  field has none and is read as the person's (`requested_by_of`). It is provenance of the
+  request, not a credential: nothing here proves who called, the door that calls the store does.
 - `mp.take/1`: `seed`, `synth_batch_size`, `synth_batch_index` (a take is reproducible
   from codes, seed, params, batch size and batch index on the same build: PROVENANCE
   §2, measured 2026-11-21) and `payload` (the name of the payload whose bytes produced
@@ -197,8 +204,12 @@ _JOB_KEYS = set(_JOB_REQUIRED) | {
     "prompt", "state_reason", "progress", "take_ids", "result_text", "result", "backend",
     "history", "updated_at",
     # extensions, see the module docstring
-    "idempotency_key", "payloads", "card_wait", "engine_choice",
+    "idempotency_key", "payloads", "card_wait", "engine_choice", "requested_by",
 }
+REQUESTER_PERSON, REQUESTER_AGENT = "person", "agent"
+REQUESTER_KINDS = (REQUESTER_PERSON, REQUESTER_AGENT)
+_REQUESTED_BY_KEYS = {"kind", "agent_id", "conversation_id", "turn_id"}
+MAX_REQUESTER_ID_LEN = 200
 ENGINE_CHOICE_RULES = ("instrumental",)
 _ENGINE_CHOICE_KEYS = {"rule", "engine", "adapters", "fallback", "reason", "at", "fell_back"}
 _FELL_BACK_KEYS = {"from", "adapters", "why", "at"}
@@ -246,6 +257,41 @@ def _is_int(value: Any) -> bool:
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def check_requested_by(value: Any) -> dict:
+    """`requested_by` as a clean dict, or `ParamsError` (field `requested_by`): `kind` is
+    `person` or `agent`; an agent has a non-empty `agent_id`; `conversation_id` and `turn_id`
+    are optional non-empty strings (null counts as absent); nothing else is declared."""
+    if not isinstance(value, Mapping):
+        raise ParamsError("requested_by", "requested_by must be an object")
+    extra = sorted(set(value) - _REQUESTED_BY_KEYS)
+    if extra:
+        raise ParamsError("requested_by", f"requested_by has undeclared key(s): {', '.join(extra)}")
+    kind = value.get("kind")
+    if kind not in REQUESTER_KINDS:
+        raise ParamsError("requested_by", f"requested_by.kind must be one of {REQUESTER_KINDS}")
+    out: Dict[str, Any] = {"kind": kind}
+    for key in ("agent_id", "conversation_id", "turn_id"):
+        item = value.get(key)
+        if item is None:
+            continue
+        if not _is_str(item) or not item.strip() or len(item) > MAX_REQUESTER_ID_LEN:
+            raise ParamsError("requested_by", f"requested_by.{key} must be a non-empty string "
+                                              f"of at most {MAX_REQUESTER_ID_LEN} characters")
+        out[key] = item
+    if kind == REQUESTER_AGENT and "agent_id" not in out:
+        raise ParamsError("requested_by", "requested_by.agent_id is required when kind is agent")
+    if kind == REQUESTER_PERSON and len(out) > 1:
+        raise ParamsError("requested_by", "a person's requested_by carries only kind")
+    return out
+
+
+def requested_by_of(job: Mapping[str, Any]) -> dict:
+    """Who asked for `job`: its `requested_by`, or the person for a record written before the
+    field existed."""
+    rb = job.get("requested_by")
+    return dict(rb) if isinstance(rb, Mapping) else {"kind": REQUESTER_PERSON}
 
 
 def _check_keys(schema: str, record: Any, required: Iterable[str], allowed: set) -> None:
@@ -594,6 +640,12 @@ def validate_job(job: Any) -> None:
         _expect(s, _is_str(cw["since"]), "'card_wait.since' must be a string")
     if job.get("engine_choice") is not None:
         _check_engine_choice(s, job)
+    if "requested_by" in job:
+        try:
+            clean = check_requested_by(job["requested_by"])
+        except ParamsError as exc:
+            _fail(s, exc.message)
+        _expect(s, clean == dict(job["requested_by"]), "'requested_by' must not carry null or extra keys")
 
 
 def check_reason(reason_text: Any, reason_class: Any) -> tuple:

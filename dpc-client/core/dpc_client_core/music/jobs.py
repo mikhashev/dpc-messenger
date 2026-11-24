@@ -53,6 +53,21 @@ adapter, or goes to acestep.cpp); the job records it as `engine_choice`. When th
 adapter does not load, the runner calls `fall_back_job`: the params move to the fallback
 engine and `engine_choice.fell_back` says from what and why. That is not a state change.
 
+**Who asked** (music tools, part 1). `create_job` takes `requested_by` (`job_schemas.check_requested_by`):
+a job from the UI carries `{kind: "person"}`, one an agent proposes `{kind: "agent", agent_id,
+conversation_id?, turn_id?}`. Three rules read it, all for agents only; the person is never limited:
+
+- **Queue cap**: at most `agent_queue_max` (default 2) of an agent's jobs are `queued` or `running` at
+  once, else `requester_queue_full`.
+- **Turn cap**: at most `turn_jobs_max` (default 1) jobs per (agent, turn), an `unsupported` one not
+  counted since it never held the card, else `turn_job_limit`.
+- **Default key**: an agent request with a `turn_id` and no `idempotency_key` gets one derived from
+  agent, turn and the final params, so the same call repeated in the turn returns the same job (before
+  any cap is asked) and a different job is the cap's to judge.
+
+`cancel_job(requested_by=...)` lets an agent cancel only its own job (`not_your_job`);
+`cancel_jobs_of_turn` cancels a turn's still-`queued` jobs and leaves running ones alone.
+
 **Threading.** Every public method is blocking and thread-safe (one re-entrant lock).
 `job.json` is written before the method returns. Call it through `asyncio.to_thread` from
 the event loop. Every method returns copies.
@@ -86,6 +101,9 @@ PAYLOAD_DIR = "payload"
 REASONS_FILE = "reasons.json"
 RESTART_REASON = "interrupted by restart"
 CANCEL_REASON = "cancelled by the person"
+TURN_STOPPED_REASON = "cancelled: the turn that proposed it was stopped"
+DEFAULT_AGENT_QUEUE_MAX = 2   # an agent's queued + running jobs
+DEFAULT_TURN_JOBS_MAX = 1     # an agent's jobs per turn
 WAITING_FOR_CARD = "waiting for the card"
 MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 
@@ -158,7 +176,11 @@ class MusicJobStore:
         *,
         capabilities: Optional[MusicCapabilities] = None,
         now: Optional[Callable[[], str]] = None,
+        agent_queue_max: int = DEFAULT_AGENT_QUEUE_MAX,
+        turn_jobs_max: int = DEFAULT_TURN_JOBS_MAX,
     ):
+        self.agent_queue_max = agent_queue_max
+        self.turn_jobs_max = turn_jobs_max
         self.dpc_home = Path(dpc_home_dir)
         self.root = music_dir_of(dpc_home_dir) / JOBS_DIR
         self.capabilities = capabilities or MusicCapabilities()
@@ -408,7 +430,7 @@ class MusicJobStore:
             job["card_wait"] = None
 
     def _new_job(self, job_type: str, params: dict, *, track_id, base_version_id, comment_id, action, region,
-                 prompt, idempotency_key) -> dict:
+                 prompt, idempotency_key, requested_by) -> dict:
         at = self._now()
         return {
             "schema": js.JOB,
@@ -433,7 +455,35 @@ class MusicJobStore:
             "payloads": [],
             "card_wait": None,
             "engine_choice": None,
+            "requested_by": requested_by,
         }
+
+    @staticmethod
+    def _derived_key(requested_by: dict, job_type: str, params: Any, track_id: Optional[str]) -> str:
+        """The idempotency key of an agent request that gave none: agent, turn and what is asked."""
+        body = json.dumps({"type": job_type, "params": params, "track_id": track_id}, sort_keys=True,
+                          ensure_ascii=False, separators=(",", ":"))
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+        return f"turn:{requested_by['agent_id']}:{requested_by['turn_id']}:{digest}"
+
+    def _check_agent_limits(self, requested_by: dict, agent_queue_max: int, turn_jobs_max: int) -> None:
+        agent_id, turn_id = requested_by["agent_id"], requested_by.get("turn_id")
+        active = 0
+        in_turn = 0
+        for j in self._jobs.values():
+            rb = js.requested_by_of(j)
+            if rb["kind"] != js.REQUESTER_AGENT or rb["agent_id"] != agent_id:
+                continue
+            if j["state"] in (js.QUEUED, js.RUNNING):
+                active += 1
+            if turn_id is not None and rb.get("turn_id") == turn_id and j["state"] != js.UNSUPPORTED:
+                in_turn += 1
+        if turn_id is not None and in_turn >= turn_jobs_max:
+            raise MusicJobError("turn_job_limit", f"this turn already proposed {in_turn} music job(s); "
+                                                  f"at most {turn_jobs_max} per turn")
+        if active >= agent_queue_max:
+            raise MusicJobError("requester_queue_full", f"{active} music job(s) of this agent are queued or "
+                                                        f"running; at most {agent_queue_max} at once")
 
     def create_job(
         self,
@@ -447,6 +497,9 @@ class MusicJobStore:
         region: Optional[Mapping[str, float]] = None,
         prompt: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        requested_by: Optional[Mapping[str, Any]] = None,
+        agent_queue_max: Optional[int] = None,
+        turn_jobs_max: Optional[int] = None,
     ) -> dict:
         """Propose a job (SPEC §6 `propose_job`) and return it: `queued` when its type can
         run now, else `unsupported` with the reason.
@@ -457,11 +510,22 @@ class MusicJobStore:
         checked for shape only. The same `idempotency_key` returns the same job. The same
         key with another type or other params is refused (`idempotency_conflict`).
 
+        `requested_by` says who asks (module docstring, "Who asked"); None is the person. For an
+        agent the queue cap (`agent_queue_max`) and the turn cap (`turn_jobs_max`) apply, each
+        defaulting to the store's value, after a repeat of an earlier request is answered with
+        that job.
+
         Raises `MusicJobError`: `invalid_type`, `invalid_params` (with `field`),
-        `invalid_source`, `idempotency_conflict`."""
+        `invalid_source`, `idempotency_conflict`, `requester_queue_full`, `turn_job_limit`."""
         with self._lock:
             self._ready()
             engine_choice: Optional[dict] = None
+            try:
+                requester = js.check_requested_by(requested_by if requested_by is not None
+                                                  else {"kind": js.REQUESTER_PERSON})
+            except js.ParamsError as exc:
+                raise MusicJobError("invalid_params", exc.message, field=exc.field)
+            is_agent = requester["kind"] == js.REQUESTER_AGENT
             if job_type not in js.JOB_TYPES:
                 raise MusicJobError("invalid_type", f"{job_type!r} is not a job type; one of {', '.join(js.JOB_TYPES)}",
                                     field="type")
@@ -484,6 +548,8 @@ class MusicJobStore:
                     raise MusicJobError("invalid_params", "prompt must be text", field="prompt")
                 region = dict(region) if region is not None else None
 
+            if is_agent and idempotency_key is None and requester.get("turn_id") is not None:
+                idempotency_key = self._derived_key(requester, job_type, params, track_id)
             if idempotency_key is not None and idempotency_key in self._by_key:
                 old = self._jobs[self._by_key[idempotency_key]]
                 if old["type"] != job_type or not self._same_params(old, params) or old["track_id"] != track_id:
@@ -491,9 +557,13 @@ class MusicJobStore:
                                         f"idempotency_key {idempotency_key!r} belongs to job {old['id']} with other params")
                 return copy.deepcopy(old)
 
+            if is_agent:
+                self._check_agent_limits(requester,
+                                         self.agent_queue_max if agent_queue_max is None else agent_queue_max,
+                                         self.turn_jobs_max if turn_jobs_max is None else turn_jobs_max)
             job = self._new_job(job_type, params, track_id=track_id, base_version_id=base_version_id,
                                 comment_id=comment_id, action=action, region=region, prompt=prompt,
-                                idempotency_key=idempotency_key)
+                                idempotency_key=idempotency_key, requested_by=requester)
             job["engine_choice"] = engine_choice
             reason = self.capabilities.unsupported_reason(
                 job_type, params if job_type == js.GENERATE_FROM_TEXT else None)
@@ -582,14 +652,51 @@ class MusicJobStore:
             self._commit(job_id, before, before_takes)
             return copy.deepcopy(self._jobs[job_id])
 
-    def cancel_job(self, job_id: str, reason: Optional[str] = None) -> dict:
-        """The person's Cancel: a queued or running job becomes `cancelled`; a cancelled
-        job is returned as it is (idempotent, SPEC §6). The runner sees the state and stops."""
+    def cancel_job(self, job_id: str, reason: Optional[str] = None, *,
+                   requested_by: Optional[Mapping[str, Any]] = None) -> dict:
+        """A Cancel: a queued or running job becomes `cancelled`; a cancelled job is returned as
+        it is (idempotent, SPEC §6). The runner sees the state and stops.
+
+        `requested_by` None or a person is the person's Cancel and takes any job. An agent
+        (`kind` "agent") may cancel only a job whose own `requested_by.agent_id` is the same
+        (ADR-051 decision E): any other job, a UI job and a record from before the field
+        included, is refused `not_your_job`, also when it is already cancelled."""
+        try:
+            who = js.check_requested_by(requested_by if requested_by is not None
+                                        else {"kind": js.REQUESTER_PERSON})
+        except js.ParamsError as exc:
+            raise MusicJobError("invalid_params", exc.message, field=exc.field)
         with self._lock:
             self._ready()
-            if self._job(job_id)["state"] == js.CANCELLED:
-                return copy.deepcopy(self._jobs[job_id])
+            job = self._job(job_id)
+            if who["kind"] == js.REQUESTER_AGENT:
+                owner = js.requested_by_of(job)
+                if owner["kind"] != js.REQUESTER_AGENT or owner["agent_id"] != who["agent_id"]:
+                    raise MusicJobError("not_your_job", f"job {job_id} was not proposed by this agent; "
+                                                        "an agent cancels only its own jobs")
+                reason = reason or f"cancelled by agent {who['agent_id']}"
+            if job["state"] == js.CANCELLED:
+                return copy.deepcopy(job)
             return self._change(job_id, lambda j: self._move(j, js.CANCELLED, reason or CANCEL_REASON))
+
+    def cancel_jobs_of_turn(self, turn_id: str, *, agent_id: Optional[str] = None) -> List[dict]:
+        """Stop of a turn (decision K): cancel the agent jobs proposed in turn `turn_id` that are
+        still `queued`, and return them as cancelled. A `running` job is left alone (its engine
+        holds the card; the person cancels it), and so is a job in any other state. `agent_id`
+        narrows to one agent when turn ids are not unique across agents. Atomic against the
+        runner: a job it has already started is not queued here."""
+        if not isinstance(turn_id, str) or not turn_id.strip():
+            raise MusicJobError("invalid_params", "turn_id must be a non-empty string", field="turn_id")
+        with self._lock:
+            self._ready()
+            out: List[dict] = []
+            for job in sorted(self._jobs.values(), key=lambda j: (j["created_at"], j["id"])):
+                rb = js.requested_by_of(job)
+                if (job["state"] != js.QUEUED or rb["kind"] != js.REQUESTER_AGENT or rb.get("turn_id") != turn_id
+                        or (agent_id is not None and rb["agent_id"] != agent_id)):
+                    continue
+                out.append(self._change(job["id"], lambda j: self._move(j, js.CANCELLED, TURN_STOPPED_REASON)))
+            return out
 
     def start_job(self, job_id: str) -> dict:
         """The runner takes a queued job: `queued -> running`. Refused (`no_payload`) until
