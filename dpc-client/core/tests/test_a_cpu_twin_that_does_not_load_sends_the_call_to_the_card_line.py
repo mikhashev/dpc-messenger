@@ -14,6 +14,8 @@ is left of it after the twin's failed load.
 
 import asyncio
 import logging
+import time
+import types
 
 import pytest
 
@@ -115,11 +117,13 @@ class _SlowTwin:
 
     alias = "turbo (CPU twin)"
 
-    def __init__(self, load_s):
-        self.load_s = load_s
+    def __init__(self, load_s, clock=None):
+        self.load_s, self.clock = load_s, clock
 
     async def transcribe(self, audio_path, release_if_loaded_here=False, **kwargs):
         await asyncio.sleep(self.load_s)
+        if self.clock is not None:
+            self.clock[0] += self.load_s  # the provider's clock moves by exactly the load, whatever its tick
         raise TwinDidNotLoad("the twin's load failed")
 
 
@@ -138,11 +142,16 @@ class _RoutedOnce:
 
 
 @pytest.mark.asyncio
-async def test_the_line_gets_what_is_left_of_the_doors_bound_after_the_twins_load():
-    p = _RoutedOnce(_SlowTwin(0.3))
+async def test_the_line_gets_what_is_left_of_the_doors_bound_after_the_twins_load(monkeypatch):
+    # The provider reads time.monotonic with no seam; on Windows that clock steps by ~15.6 ms, so a real
+    # 0.3 s sleep can measure 0.297 s. The provider's `time` is a stand-in whose clock the twin's load
+    # advances by exactly 0.3 (the event loop keeps the real clock).
+    clock = [1000.0]
+    monkeypatch.setattr(wp, "time", types.SimpleNamespace(**{**vars(time), "monotonic": lambda: clock[0]}))
+    p = _RoutedOnce(_SlowTwin(0.3, clock))
     assert await asyncio.wait_for(transcribe_with_route(p, "f", purpose="dictation", wait_s=10.0), BOUND) == {"text": "f"}
     [ask] = p.asks
-    assert ask["wait_s"] <= 10.0 - 0.3, "the twin's load time is taken from the bound, not added to it"
+    assert ask["wait_s"] == pytest.approx(10.0 - 0.3), "the twin's load time is taken from the bound, not added to it"
     assert ask["wait_s"] > 10.0 - BOUND
 
 

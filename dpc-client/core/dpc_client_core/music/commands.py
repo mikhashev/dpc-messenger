@@ -1230,6 +1230,7 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    @slow_command
     async def delete_music_export(self, export_id: Any = None, path: Any = None) -> Dict[str, Any]:
         """Delete one single MP3 export's file and its index entry: `export_id` (from
         `get_music_export_info`) or `path`, exactly one. Only a file the export index lists and
