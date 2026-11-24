@@ -257,6 +257,9 @@ class ResearchLimitGuard(GuardMiddleware):
 # from one call repeated five times).
 _OUTPUT_KEYED_TOOLS = frozenset({
     "comfyui_progress", "comfyui_wait", "comfyui_check", "browser_snapshot",
+    # The music job's twins of comfyui_wait/check (ADR-051 D51): their output
+    # carries no elapsed seconds, so it changes only when the job moved on.
+    "music_wait", "music_check",
 })
 
 # Browser tools whose result reads the page, so a changed result means the

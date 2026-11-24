@@ -2454,6 +2454,11 @@ async def run_llm_loop(
     # Snapshot the context at loop entry — prevents race when another process()
     # or another process() call swaps ToolRegistry._ctx mid-loop.
     _loop_ctx = tools._ctx
+    if _loop_ctx is not None:
+        # Stop is read before each call and does not interrupt one that runs: a tool
+        # that waits long (music_wait, ADR-051 D51) reads these between its polls.
+        _loop_ctx.turn_stop_event = stop_event
+        _loop_ctx.turn_kill_event = kill_event
 
     llm_trace: Dict[str, Any] = {
         "assistant_notes": [],
@@ -3407,3 +3412,11 @@ async def run_llm_loop(
                 agent_id=_divergence_agent, conversation_id=conversation_id or "",
                 turn_id=turn_id,
             ))
+        # A person's Stop (or Kill) cancels the music jobs this turn proposed that are still
+        # queued (ADR-051 D48); a running one is left alone. Nothing for a turn without one.
+        if (stop_event is not None and stop_event.is_set()) or llm_trace.get("turn_end") == "killed":
+            try:
+                from .tools.music import cancel_jobs_of_stopped_turn
+                cancel_jobs_of_stopped_turn(_loop_ctx, turn_id)
+            except Exception:
+                log.warning("Stop: cancelling the queued music jobs of turn %s failed", turn_id, exc_info=True)

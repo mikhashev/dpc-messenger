@@ -1934,7 +1934,15 @@ def schedule_task(
             # enters the queue, so that what was scheduled — and for when — is
             # visible to a human before it runs. Fail-closed: an unanswered or
             # undeliverable request is a refusal, never a silent schedule.
-            if _schedule_needs_approval(ctx):
+            #
+            # ADR-051 D49 (Mike #46, #53-#57): a return to a music job this agent
+            # proposed and that is still queued or running asks nothing; the person
+            # approved that job when it was proposed. Any doubt reads as "ask".
+            from .music import is_return_to_own_music_job
+            if is_return_to_own_music_job(ctx, data):
+                log.info("check_back to the agent's own music job %s: no approval asked",
+                         data.get("music_job_id"))
+            elif _schedule_needs_approval(ctx):
                 when = f"in {delay_seconds}s" if delay_seconds else "immediately"
                 about = str(data.get("text") or data.get("message") or "")[:200]
                 approved, reason = _await_schedule_approval(
