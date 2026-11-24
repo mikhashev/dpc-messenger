@@ -661,6 +661,17 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
 
 - If any part of the estimate is unknown, `wait_s` is None and `known` is False. It is
   never 0.
+- **An engine's yield has a bound, not a figure (701cc077).** A music engine's stop has no measured
+  time; its lease declares `yield_bound_s` = 2 x `STOP_GRACE_S` (30 s: the signal wait and the wait
+  after the kill, `_stop_proc`). The estimate counts that bound for the holder and adds
+  `"upper_bound": True` to its shape when any part of `wait_s` is such a bound; the real wait is at
+  most that. Every line that shows the estimate then says "at most about N s": a transcription's
+  (`card_wait_words`) and a start by hand's (`card_wait_words_for_a_start`). **The start by hand's wait
+  row:** `start_music_engine` asks with `yields_idle=True` and an `on_wait`, so the engine's status
+  carries `card_wait {text, behind, wait_s, known, upper_bound}` while it waits ("yue2.cpp is waiting
+  for the card: Whisper (turbo) is letting go, at most about 30 s"), cleared at the grant or the
+  refusal; the Create panel's engine line shows it. A supervisor that is going counts its own
+  `_expected_stop_s()` and is not a bound.
 - `eta_s` comes from the holder:
   - **Orientations, stated once.** The Whisper **ratio** is audio seconds per wall second
     (`_realtime_ratio`, `whisper_provider.py:816-822`, `duration / elapsed`; the speech table
@@ -799,23 +810,27 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
        `n_ctx` and KV type + overhead, from `_admission`, 3539), recorded on the
        supervisor at launch by S3 as `predicted_vram_mib` (**built in S3e**: set when the child
        answers `/props`, from the `_admission()` its start computed and the KV type it was given;
-       None before a start, for a start that could not size the model, and for Strata, which never
-       calls `_admission`). Chosen over a live measurement
+       None before a start and for a start that could not size the model; **a Strata child declares its
+       own peak instead, since c5c1272c**, see the next bullet). Chosen over a live measurement
        (per-process figures read `[N/A]` under WDDM through nvidia-smi and need S8's PDH
        reader) and over "always unknown" (which would send every dictation beside a loaded
        LLM to L12 on the owner's 32 GB card for no reason): it is the arithmetic DPC
        already trusts to admit that very child, and it includes the measured overhead
        (`_DEFAULT_OVERHEAD_MIB`, 4608);
-     - **a Strata child, or a llama-server child whose start could not size its model**
-       (`_admission` None), has no such figure: its peak is unknown, and the outcome is
-       `unknown`. **[unverified]** why Strata has none: `_admission` reads
-       `self.config["gguf_path"]` (`llama_server_supervisor.py:3548-3549`) while Strata's
-       model keys are `native_gguf`, `ple_gguf`, `pack_dir`, `mtp_dir`
-       (`strata_supervisor.py:291-295`); whether `_admission` returns None or is never called
-       for it was not read (Johnny D). **S2's acceptance reads** `sup.config.get("gguf_path")`
-       on a live Strata supervisor: it decides whether `_admission` is never called (no figure
-       by construction) or would raise `KeyError`, which is not `unknown` (Johnny #32-5). S2 or
-       a later refactor may give supervisors a `vram_mib`;
+     - **a Strata child declares its peak as the card's total less its own `--vram-reserve-mib`**
+       (`strata_supervisor.declared_peak_of`, c5c1272c): the engine takes up to that and leaves the
+       reserve untouched (1152 on the live alias), so the figure is the engine's own bar, not a
+       measurement. It stays None, and L11 answers `unknown`, when the total could not be read or the
+       start config carries no reserve. Strata never calls `_admission` (it reads `gguf_path`, Strata's
+       model keys are `native_gguf`, `ple_gguf`, `pack_dir`, `mtp_dir`), which is why it needed a
+       figure of its own; the earlier **[unverified]** question is closed by reading
+       `declared_peak_of`. **Beside a resident Strata, L11 answers `does_not_fit` at the declared check**
+       (a Whisper peak of 3147 or 4447 against the 32 GB card, less what Strata declares, does not fit).
+       **F2 (Forge's review, confirmed by agent D of follow-up 11):** `_shared_holders` returns `[]` when
+       any blocker is an engine, so `_fit_now` is never reached while an engine holds the card; a `fits`
+       is reachable only with no engine on the card. A llama-server child whose start could not size its
+       model (`_admission` None) still has no figure: `unknown`. A later refactor may give supervisors
+       a common `vram_mib`;
      - the desktop is counted **once, as `_DESKTOP_RESERVE_MIB`**. A measured `dwm.exe`
        figure is never added: `dwm` is not a resident (it is on S8's ignore list), so the
        declared check cannot pay for the desktop twice (Ark #60 §5.2).
@@ -936,7 +951,7 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
   - `does_not_fit` (a known size or reading says no) → L12 chooses between the CPU and
     the line (`_LEASE_LINE`, L4).
   - `unknown` (any size unknown: `model_size_bytes` source None, a resident with no peak
-    such as a Strata child; or a reading unavailable or failed: no nvidia-smi, macOS, AMD,
+    such as a llama-server child whose start could not size its model, or a Strata child whose total or reserve could not be read; or a reading unavailable or failed: no nvidia-smi, macOS, AMD,
     an error) → never "loads beside anyway" and never "refused" for a person's door
     (Zcode #52: fail-safe); like `does_not_fit`, it goes to L12's choice between the CPU
     and the line.
