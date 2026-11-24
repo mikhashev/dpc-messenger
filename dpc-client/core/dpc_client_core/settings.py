@@ -410,6 +410,7 @@ class Settings:
             'yue2_port': '9994',  # The loopback port of the yue2.cpp server (always 127.0.0.1). 0 = a free port at each start
             'yue2_idle_stop_s': '300',  # Stop the yue2.cpp server after this many idle seconds to free the GPU card; 0 = as soon as a job ends
             'yue2_adapters_dir': '',  # The LoRA adapters folder (one level: .safetensors files, or folders holding one). Empty = <yue2_models_dir>/loras/ruach-voices/voices. DPC splits each into music and sound halves under <yue2_models_dir>/loras/.split
+            'yue2_instrumental_adapter': '',  # The adapter an Instrumental job on YuE2 runs with (a name in the adapters folder or <yue2_models_dir>/loras, read after it). Empty = YuE2-instrumental-cot-full-loras; none = no adapter. Without it Instrumental jobs go to acestep.cpp
             'yue2_device': '',  # Passed to yue2.cpp as --device (CUDA0, Vulkan0, MTL0, CPU). Empty = the engine picks the best device
             'yue2_max_seq': '0'  # Passed as --max-seq when above 0 (KV cache size; less VRAM, shorter songs). 0 = the model context
         }

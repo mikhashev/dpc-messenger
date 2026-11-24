@@ -47,6 +47,12 @@ acestep). When it cannot, the job is created `unsupported` with the reason, the 
 answer of SPEC §5. A YuE2 backbone whose file is missing or an adapter the adapters folder
 does not hold is refused as `invalid_params` (`MusicCapabilities.check_params`).
 
+**Engine choice.** Before that check a rule may choose the engine and adapters from what the
+job is (`MusicCapabilities.choose_engine`: an Instrumental job on YuE2 gets the instrumental
+adapter, or goes to acestep.cpp); the job records it as `engine_choice`. When the chosen
+adapter does not load, the runner calls `fall_back_job`: the params move to the fallback
+engine and `engine_choice.fell_back` says from what and why. That is not a state change.
+
 **Threading.** Every public method is blocking and thread-safe (one re-entrant lock).
 `job.json` is written before the method returns. Call it through `asyncio.to_thread` from
 the event loop. Every method returns copies.
@@ -426,6 +432,7 @@ class MusicJobStore:
             "idempotency_key": idempotency_key,
             "payloads": [],
             "card_wait": None,
+            "engine_choice": None,
         }
 
     def create_job(
@@ -454,6 +461,7 @@ class MusicJobStore:
         `invalid_source`, `idempotency_conflict`."""
         with self._lock:
             self._ready()
+            engine_choice: Optional[dict] = None
             if job_type not in js.JOB_TYPES:
                 raise MusicJobError("invalid_type", f"{job_type!r} is not a job type; one of {', '.join(js.JOB_TYPES)}",
                                     field="type")
@@ -465,6 +473,7 @@ class MusicJobStore:
                                                           "comment or region")
                 try:
                     params = js.normalize_params_from_text(params)
+                    params, engine_choice = self.capabilities.choose_engine(job_type, params, at=self._now())
                     self.capabilities.check_params(job_type, params)
                 except js.ParamsError as exc:
                     raise MusicJobError("invalid_params", exc.message, field=exc.field)
@@ -477,7 +486,7 @@ class MusicJobStore:
 
             if idempotency_key is not None and idempotency_key in self._by_key:
                 old = self._jobs[self._by_key[idempotency_key]]
-                if old["type"] != job_type or old["params"] != params or old["track_id"] != track_id:
+                if old["type"] != job_type or not self._same_params(old, params) or old["track_id"] != track_id:
                     raise MusicJobError("idempotency_conflict",
                                         f"idempotency_key {idempotency_key!r} belongs to job {old['id']} with other params")
                 return copy.deepcopy(old)
@@ -485,6 +494,7 @@ class MusicJobStore:
             job = self._new_job(job_type, params, track_id=track_id, base_version_id=base_version_id,
                                 comment_id=comment_id, action=action, region=region, prompt=prompt,
                                 idempotency_key=idempotency_key)
+            job["engine_choice"] = engine_choice
             reason = self.capabilities.unsupported_reason(
                 job_type, params if job_type == js.GENERATE_FROM_TEXT else None)
             if reason is not None:
@@ -500,6 +510,20 @@ class MusicJobStore:
             if idempotency_key is not None:
                 self._by_key[idempotency_key] = job["id"]
             return copy.deepcopy(job)
+
+    @staticmethod
+    def _same_params(old: dict, params: Any) -> bool:
+        """Whether a repeated proposal names the same params as job `old`, also after `old`
+        fell back to another engine (its params moved there)."""
+        if old["params"] == params:
+            return True
+        choice = old.get("engine_choice") or {}
+        if not choice.get("fell_back") or not isinstance(params, Mapping):
+            return False
+        try:
+            return js.fallback_params_from_text(params, choice["engine"]) == old["params"]
+        except js.ParamsError:
+            return False
 
     @staticmethod
     def _check_other_source(job_type, params, track_id, base_version_id, comment_id, action, region) -> dict:
@@ -589,6 +613,38 @@ class MusicJobStore:
         """The runner cannot build a queued job's request any more (an adapter it names
         went missing after the proposal): `queued -> unsupported`, with the reason."""
         return self._change(job_id, lambda j: self._move(j, js.UNSUPPORTED, reason))
+
+    def fall_back_job(self, job_id: str, why: str) -> dict:
+        """The adapters a job's engine choice picked did not load (or went missing): move the
+        params to the choice's `fallback` engine (`job_schemas.fallback_params_from_text`) and
+        record it in `engine_choice.fell_back`, `why` without paths (it goes into provenance).
+        Allowed on a queued or running job that has no take yet; the state does not change.
+        Refused: `no_fallback` (no choice, or no fallback left), `illegal_transition`."""
+        if not isinstance(why, str) or not why.strip():
+            raise MusicJobError("invalid_params", "a fall-back needs a reason", field="why")
+
+        def change(job: dict) -> None:
+            choice = job.get("engine_choice")
+            if not choice or not choice.get("fallback"):
+                raise MusicJobError("no_fallback", f"job {job_id} has no engine choice with a fallback")
+            if job["state"] not in (js.QUEUED, js.RUNNING) or self._takes[job_id]:
+                raise MusicJobError("illegal_transition",
+                                    f"job {job_id} is {job['state']} with {len(self._takes[job_id])} take(s); "
+                                    "only a queued or running job without takes falls back")
+            to = choice["fallback"]
+            try:
+                job["params"] = js.fallback_params_from_text(job["params"], to)
+            except js.ParamsError as exc:
+                raise MusicJobError("invalid_params", exc.message, field=exc.field)
+            at = self._now()
+            job["engine_choice"] = {
+                "rule": choice["rule"], "engine": to, "adapters": [], "fallback": None, "at": at,
+                "reason": f"{choice['rule'].capitalize()}: {js.ENGINE_IDS.get(to, to)}, because {why.strip()}",
+                "fell_back": {"from": choice["engine"], "adapters": list(choice.get("adapters") or []),
+                              "why": why.strip(), "at": at},
+            }
+            job["updated_at"] = at
+        return self._change(job_id, change)
 
     def fail_job(self, job_id: str, reason: str) -> dict:
         """The runner gives up: `running -> failed`, with the reason (required)."""

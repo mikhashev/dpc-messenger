@@ -24,7 +24,13 @@ holds what is its own.
   `<models dir>/loras/ruach-voices/voices`, read one level deep as the server reads a
   folder: each `.safetensors` file is an adapter by its file name, each folder holding one
   by the folder's name. A missing folder means no adapters (not an install problem). The
-  server itself reads the split cache made from it (below), not this folder.
+  server itself reads the split cache made from it (below), not this folder. The loras
+  folder itself (`<models dir>/loras`) is read the same way after it, so an adapter dropped
+  there (a file, or a folder holding one, as Ruach Studio keeps them) is found too; a name
+  the first folder already gave is not offered twice.
+- `yue2_instrumental_adapter`: the adapter an Instrumental job on YuE2 runs with (see
+  "adapters chosen by what the job is" below); empty means `YuE2-instrumental-cot-full-loras`,
+  `none` means no adapter, so Instrumental jobs go to acestep.cpp.
 - `yue2_device`: `--device` when set (`CUDA0`, `Vulkan0`, `MTL0`, `CPU`).
 - `yue2_max_seq`: `--max-seq` when above 0 (the KV cache size; 0 keeps the model context,
   24576 tokens; 8192 trades length for VRAM, README: 5.8 GB vs 3.8 GB for a 65 s song).
@@ -57,6 +63,19 @@ a build there is found the same way or named by `yue2_binary`.
 consent: for local listening only (`ADAPTER_NOTE`, shown by the form; decision 40). Each is
 split into its music and sound halves so the two take their own strengths (see "adapters"
 below).
+
+**Adapters chosen by what the job is** (Mike, 2026-11-24, group #75/#76: option (c), and
+the mechanism general, instrumental its first user). Stock YuE2 sings invented words when
+it is given no lyrics (backlog AN-INSTRUMENTAL-JOB-ON-YUE2-COMES-BACK-SUNG-...), so an
+Instrumental job on YuE2 runs with the instrumental adapter by default and goes to
+acestep.cpp when that adapter is not installed or does not load. The adapter is named by
+`yue2_instrumental_adapter`; `form_info()["purpose_adapters"]` says whether it is offered,
+`MusicCapabilities.choose_engine` adds it to the job (or moves the job to acestep.cpp) and
+records why on the job (`engine_choice`), and the runner falls back at run time
+(`runner.py`). The default is Mothersuperior's `YuE2-instrumental-cot-full-loras`
+(`ar_lora_inst_v3abc`, rank 64 on the music half only, CC BY-NC 4.0; also in
+goldhub/Ruach_Studio_Models_v2): its README asks for strength 1.0, `cot` full and the bare
+`[instrumental]` tag as the lyrics, which is what the request sends (`INSTRUMENTAL_LYRICS`).
 """
 
 from __future__ import annotations
@@ -93,7 +112,14 @@ DEFAULT_IDLE_STOP_S = 300.0
 MAX_BATCH = 1
 LOG_NAME = "yue2-server.log"
 IDENTITY_CACHE = "yue2_identity_cache.json"
-DEFAULT_ADAPTERS_SUBDIR = Path("loras") / "ruach-voices" / "voices"
+LORAS_SUBDIR = Path("loras")
+DEFAULT_ADAPTERS_SUBDIR = LORAS_SUBDIR / "ruach-voices" / "voices"
+
+# Adapters chosen by what the job is (module docstring). One purpose today.
+PURPOSE_INSTRUMENTAL = "instrumental"
+DEFAULT_INSTRUMENTAL_ADAPTER = "YuE2-instrumental-cot-full-loras"
+INSTRUMENTAL_ADAPTER_SCALE = 1.0          # its README: apply at scale 1.0
+INSTRUMENTAL_LYRICS = "[instrumental]"    # its README's bare form: the model picks the structure
 
 # Relative to the models folder, by role; the first present file is used.
 BACKBONE_FILES: Dict[str, Sequence[str]] = {
@@ -122,6 +148,7 @@ class Yue2Config:
     idle_stop_s: float = DEFAULT_IDLE_STOP_S
     adapters_dir: Optional[Path] = None
     device: Optional[str] = None
+    instrumental_adapter: Optional[str] = DEFAULT_INSTRUMENTAL_ADAPTER
     max_seq: int = 0
     log_path: Optional[Path] = None
     start_timeout_s: float = START_TIMEOUT_S
@@ -155,10 +182,14 @@ def read_config(get: Callable[[str, str, str], Any], dpc_home: Path) -> Yue2Conf
                        js.YUE2_BACKBONE_DEFAULT)
         backbone = js.YUE2_BACKBONE_DEFAULT
     adapters_dir = s.path("yue2_adapters_dir") or models_dir / DEFAULT_ADAPTERS_SUBDIR
+    instrumental = s.text("yue2_instrumental_adapter") or DEFAULT_INSTRUMENTAL_ADAPTER
+    if instrumental.lower() == "none":
+        instrumental = None
     return Yue2Config(binary=binary, models_dir=models_dir, backbone=backbone,
                       port=s.port("yue2_port", DEFAULT_PORT),
                       idle_stop_s=s.seconds("yue2_idle_stop_s", DEFAULT_IDLE_STOP_S),
                       adapters_dir=adapters_dir, device=s.text("yue2_device") or None,
+                      instrumental_adapter=instrumental,
                       max_seq=s.whole("yue2_max_seq", 0), log_path=home / "logs" / LOG_NAME, searched=searched)
 
 
@@ -204,9 +235,11 @@ def commit_of(version: Optional[str]) -> Optional[str]:
 # DPC-owned folder `<models dir>/loras/.split/`, and points `--adapters` at that folder. A
 # request stacks both files, each at its own strength. `manifest.json` there keys each
 # split by its source's sha256 (and size), so a changed source is split again and an
-# unchanged one is reused; files no source accounts for are removed. An adapter in another
-# key layout (native YuE2 trainer files, sliders) is not offered: DPC cannot split it, and
-# offering it whole would lose the per-half strengths [P].
+# unchanged one is reused; files no source accounts for are removed. A one-half adapter in
+# another layout (native trainer, ComfyUI) is used whole: copied byte for byte into the cache,
+# its keys checked as the server reads them (`adapter_key_half`). Not offered: both halves in
+# such a layout (no per-half strengths [P]), or a whole one beside an adapter_config.json (its
+# alpha would not follow the copy).
 
 HALF_PREFIXES = (("music", "text_encoders."), ("sound", "diffusion_model."))
 SPLIT_DIRNAME = ".split"
@@ -245,6 +278,107 @@ def adapter_halves(header: Mapping[str, Any]) -> Tuple[List[str], Optional[str]]
     if odd:
         return [], f"key {odd[0]!r} is not text_encoders.* or diffusion_model.* (a layout DPC cannot split)"
     return [h for h, p in HALF_PREFIXES if any(k.startswith(p) for k in keys)], None
+
+
+_ROLE_SUFFIXES = (  # (suffix, role, targets a bias), in yue2.cpp's order
+    (".lora_A.weight", "lora", False), (".lora_B.weight", "lora", False),
+    (".lora_down.weight", "lora", False), (".lora_up.weight", "lora", False),
+    (".lora_A", "lora", False), (".lora_B", "lora", False), (".alpha", "alpha", False),
+    (".diff_b", "diff", True), (".diff", "diff", False), (".weight", "full", False), (".bias", "full", True),
+)
+_SITES = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj",
+          "mlp.up_proj", "mlp.down_proj", "self_attn.qkv_proj", "mlp.gate_up_proj")
+_LAYER_RE = re.compile(r"[0-9]+")
+
+
+def adapter_key_half(key: str) -> Optional[str]:
+    """The half an adapter key changes, `music` (AR) or `sound` (NAR), read as yue2.cpp
+    e646d52 reads it (`src/adapter.h` adapter_parse_key), or None for a key the server
+    refuses (which makes it refuse the whole adapter)."""
+    role = bias = None
+    for suffix, r, b in _ROLE_SUFFIXES:
+        if len(key) > len(suffix) and key.endswith(suffix):
+            key, role, bias = key[:-len(suffix)], r, b
+            break
+    if role is None:
+        return None
+    hint = None
+    if key.startswith("text_encoders."):
+        key, hint = key[len("text_encoders."):], "music"
+    elif key.startswith("diffusion_model."):
+        key, hint = key[len("diffusion_model."):], "sound"
+    elif key.startswith("adapters."):
+        key = key[len("adapters."):].replace("-", ".")
+    elif key.startswith("companion."):
+        key = key[len("companion."):]
+    elif key.startswith("io."):
+        key = key[len("io."):]
+    if key in ("vae2llm", "llm2vae"):
+        return None if hint == "music" else "sound"
+    if bias or role in ("full", "diff"):
+        return None
+    if key.startswith("layers."):
+        key = "model." + key
+    if not key.startswith("model.layers."):
+        return None
+    tail = key[len("model.layers."):]
+    layer, _, site = tail.partition(".")
+    if not site or not _LAYER_RE.fullmatch(layer):
+        return None
+    nar = site.startswith("nar_")
+    if nar:
+        site = site[len("nar_"):]
+        if hint == "music":
+            return None
+    if site not in _SITES:
+        return None
+    return "sound" if nar or hint == "sound" else "music"
+
+
+def adapter_layout(header: Mapping[str, Any]) -> Tuple[Optional[str], List[str], Optional[str]]:
+    """How DPC offers an adapter, from its header: `("split", halves, None)` for AI-Toolkit
+    keys (split into one file per half), `("whole", [half], None)` for one half in any layout
+    yue2.cpp reads (used as it is), or `(None, [], why)`."""
+    halves, _why = adapter_halves(header)
+    if halves:
+        return "split", halves, None
+    keys = [k for k in header if k != "__metadata__"]
+    if not keys:
+        return None, [], "no tensors"
+    found = set()
+    for k in keys:
+        half = adapter_key_half(k)
+        if half is None:
+            return None, [], f"key {k!r} is not one yue2.cpp reads (it would refuse the adapter)"
+        found.add(half)
+    if len(found) > 1:
+        return None, [], ("it changes both halves in a layout DPC cannot split into one file per half "
+                          "(text_encoders.* / diffusion_model.*)")
+    return "whole", sorted(found), None
+
+
+def copy_adapter(source: Path, name: str, half: str, dest_dir: Path) -> Dict[str, Dict[str, Any]]:
+    """Copy a one-half adapter byte for byte as `dest_dir/<name>-<half>.safetensors` (temp
+    file then rename). Returns `{half: {file, bytes, sha256, tensors}}`. Blocking."""
+    header, _start = read_safetensors_header(source)
+    tensors = len([k for k in header if k != "__metadata__"])
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    target = dest_dir / split_name(name, half)
+    tmp = target.with_name(f".{target.name}.tmp")
+    h = hashlib.sha256()
+    size = 0
+    with open(source, "rb") as src, open(tmp, "wb") as o:
+        while True:
+            chunk = src.read(4 * 1024 * 1024)
+            if not chunk:
+                break
+            o.write(chunk)
+            h.update(chunk)
+            size += len(chunk)
+        o.flush()
+        os.fsync(o.fileno())
+    os.replace(tmp, target)
+    return {half: {"file": target.name, "bytes": size, "sha256": "sha256:" + h.hexdigest(), "tensors": tensors}}
 
 
 def split_stem(name: str) -> str:
@@ -313,9 +447,9 @@ def scan_adapters(folder: Optional[Path]) -> List[Dict[str, Any]]:
     """The adapters of the source folder, read the way `yue-server --adapters` reads a folder
     (`src/adapter.h`): names sorted, dot entries skipped; a `.safetensors` file is an
     adapter by its file name, a folder holding one by the folder's name (its first
-    `.safetensors`, sorted). Each entry: `{name, path, kind, halves, problem}`: `kind` `voice`
-    for the Ruach voices (`voice-*`); `halves` what DPC can split it into; `problem` why it
-    is not offered (None when it is)."""
+    `.safetensors`, sorted). Each entry: `{name, path, kind, layout, halves, problem}`: `kind`
+    `voice` for the Ruach voices (`voice-*`); `layout` `split` or `whole` (`adapter_layout`);
+    `halves` what it changes; `problem` why it is not offered (None when it is)."""
     if folder is None or not folder.is_dir():
         return []
     out = []
@@ -337,12 +471,16 @@ def scan_adapters(folder: Optional[Path]) -> List[Dict[str, Any]]:
         elif not name.endswith(".safetensors"):
             continue
         halves: List[str] = []
+        layout: Optional[str] = None
         try:
-            halves, problem = adapter_halves(_cached_header(path))
+            layout, halves, problem = adapter_layout(_cached_header(path))
         except (OSError, ValueError) as exc:
             problem = f"not a readable safetensors file: {exc}"
+        if layout == "whole" and (path.parent / "adapter_config.json").is_file():
+            layout, halves, problem = None, [], ("an adapter_config.json beside it sets its alpha, which DPC's "
+                                                 "cache copy would not carry")
         out.append({"name": name, "path": path, "kind": "voice" if name.startswith("voice-") else "other",
-                    "halves": halves, "problem": problem})
+                    "layout": layout, "halves": halves, "problem": problem})
     return out
 
 
@@ -401,9 +539,67 @@ class Yue2Server(SupervisedEngine):
     def vae_path(self) -> Path:
         return _first_present(self.config.models_dir, VAE_FILES)
 
+    def adapter_dirs(self) -> List[Path]:
+        """The folders adapters are read from, in order: `yue2_adapters_dir`, then the loras
+        folder of the models folder (once, when they are the same folder)."""
+        out: List[Path] = []
+        seen = set()
+        for folder in (self.config.adapters_dir, self.config.models_dir / LORAS_SUBDIR):
+            if folder is None:
+                continue
+            key = os.path.normcase(os.path.abspath(folder))
+            if key not in seen:
+                seen.add(key)
+                out.append(Path(folder))
+        return out
+
     def adapters(self) -> List[Dict[str, Any]]:
-        """Every adapter of the source folder, offered or not (`problem`)."""
-        return scan_adapters(self.config.adapters_dir)
+        """Every adapter of the source folders, offered or not (`problem`). A name an earlier
+        folder already gave is not offered again; the adapter `yue2_instrumental_adapter`
+        names has `kind` `instrumental`."""
+        out: List[Dict[str, Any]] = []
+        first: Dict[str, str] = {}
+        for folder in self.adapter_dirs():
+            for a in scan_adapters(folder):
+                if a["name"] in first:
+                    a = dict(a, layout=None, halves=[],
+                             problem=f"the name is already taken by an adapter in {first[a['name']]}")
+                else:
+                    first[a["name"]] = folder.name
+                if self.config.instrumental_adapter and a["name"] == self.config.instrumental_adapter:
+                    a["kind"] = PURPOSE_INSTRUMENTAL
+                out.append(a)
+        return out
+
+    def purpose_adapters(self, all_adapters: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
+        """The adapter of each purpose (module docstring, "adapters chosen by what the job is"):
+        `{instrumental: {adapter, offered, state, halves, scale, reason}}`: `state` `offered`,
+        `missing` (not in the folders), `unusable` (found, not offered) or `off` (no adapter
+        named); `reason` says why it is not offered (None when it is). Cheap (the scan's stat
+        and listdir)."""
+        name = self.config.instrumental_adapter
+        found = {a["name"]: a for a in (self.adapters() if all_adapters is None else all_adapters)}
+        a = found.get(name) if name else None
+        if not name:
+            reason = "turned off: [music] yue2_instrumental_adapter is none"
+        elif a is None:
+            reason = f"{name} is not in the adapters folders ({', '.join(d.name for d in self.adapter_dirs())})"
+        else:
+            reason = a["problem"]
+        offered = a is not None and not a["problem"]
+        state = "offered" if offered else "off" if not name else "missing" if a is None else "unusable"
+        return {PURPOSE_INSTRUMENTAL: {"adapter": name, "offered": offered, "state": state,
+                                       "halves": list(a["halves"]) if offered else [],
+                                       "scale": INSTRUMENTAL_ADAPTER_SCALE, "reason": None if offered else reason}}
+
+    def instrumental_lyrics_for(self, adapters: Sequence[Mapping[str, Any]]) -> Optional[str]:
+        """What an instrumental request sends as its lyrics when it stacks `adapters`: the
+        instrumental adapter's bare tag when it is among them, else None (the request's own
+        default, empty lyrics)."""
+        name = self.config.instrumental_adapter
+        if name and any(str(a.get("name")) == name for a in adapters):
+            return INSTRUMENTAL_LYRICS
+        return None
 
     def offered_adapters(self) -> List[Dict[str, Any]]:
         return [a for a in self.adapters() if not a["problem"]]
@@ -444,21 +640,27 @@ class Yue2Server(SupervisedEngine):
                 ident = self._file_identity(source, with_sha=True)
                 entry = old.get(a["name"])
                 fresh = (isinstance(entry, dict) and entry.get("source_sha256") == ident["sha256"]
+                         and entry.get("layout", "split") == a["layout"]
                          and entry.get("source_bytes") == ident["bytes"]
                          and all((self.split_dir / h.get("file", "")).is_file()
                                  and (self.split_dir / h["file"]).stat().st_size == h.get("bytes")
                                  for h in (entry.get("halves") or {}).values())
                          and sorted((entry.get("halves") or {})) == sorted(a["halves"]))
                 if not fresh:
-                    logger.info("yue2.cpp: splitting adapter %s into its halves (%s)", a["name"], ", ".join(a["halves"]))
                     try:
-                        halves = split_adapter(source, a["name"], self.split_dir)
+                        if a["layout"] == "whole":
+                            logger.info("yue2.cpp: copying adapter %s whole (%s half)", a["name"], a["halves"][0])
+                            halves = copy_adapter(source, a["name"], a["halves"][0], self.split_dir)
+                        else:
+                            logger.info("yue2.cpp: splitting adapter %s into its halves (%s)", a["name"],
+                                        ", ".join(a["halves"]))
+                            halves = split_adapter(source, a["name"], self.split_dir)
                     except (OSError, ValueError) as exc:
                         logger.warning("yue2.cpp: adapter %s could not be split: %s", a["name"], exc)
                         self.skipped_adapters[a["name"]] = f"{type(exc).__name__}: {exc}"
                         continue
                     entry = {"source_file": source.name, "source_bytes": ident["bytes"],
-                             "source_sha256": ident["sha256"], "halves": halves}
+                             "source_sha256": ident["sha256"], "layout": a["layout"], "halves": halves}
                 entries[a["name"]] = entry
             except Exception as exc:  # a broken adapter (TypeError, KeyError, struct.error, ...) must not stop the engine
                 reason = f"{type(exc).__name__}: {exc}"
@@ -501,7 +703,8 @@ class Yue2Server(SupervisedEngine):
 
     def form_info(self) -> Dict[str, Any]:
         """What the Create form needs: the backbones and whether their file is present,
-        the adapters found, and the voice-adapter note. Cheap (stat and listdir)."""
+        the adapters found, the voice-adapter note, and the adapter of each purpose
+        (`purpose_adapters`). Cheap (stat and listdir)."""
         if not self.alive():
             self.reload_config()
         all_adapters = self.adapters()
@@ -516,10 +719,13 @@ class Yue2Server(SupervisedEngine):
             "backbone_default": self.config.backbone,
             "running_backbone": self.running_backbone,
             "adapters_dir": str(self.config.adapters_dir) if self.config.adapters_dir else None,
-            "adapters": [{"name": a["name"], "file": a["path"].name, "kind": a["kind"], "halves": a["halves"]}
+            "adapters_dirs": [str(d) for d in self.adapter_dirs()],
+            "adapters": [{"name": a["name"], "file": a["path"].name, "kind": a["kind"], "layout": a["layout"],
+                          "halves": a["halves"]}
                          for a in all_adapters if not a["problem"]],
             "adapters_skipped": [{"name": a["name"], "reason": a["problem"]} for a in all_adapters if a["problem"]],
             "adapter_note": ADAPTER_NOTE,
+            "purpose_adapters": self.purpose_adapters(all_adapters),
         }
 
     # -- what SupervisedEngine asks for ----------------------------------------------

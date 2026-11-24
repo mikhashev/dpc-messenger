@@ -42,6 +42,19 @@ export interface MusicJob {
     updated_at?: string;
     history?: { state: string; at: string; reason: string | null }[];
     card_wait?: { holders: CardHolder[]; since: string } | null;
+    engine_choice?: EngineChoice | null;
+}
+
+/** What a rule chose for a job from what the job is (core `job_schemas`, `engine_choice`):
+ *  the engine, the adapters it added, the fallback, and the sentence the job card shows. */
+export interface EngineChoice {
+    rule: string;
+    engine: string;
+    adapters: string[];
+    fallback: string | null;
+    reason: string;
+    at?: string;
+    fell_back?: { from: string; adapters: string[]; why: string; at: string } | null;
 }
 
 /** A take's `loudness` record (core `loudness.py`). */
@@ -97,7 +110,9 @@ export interface FailureClass {
 export interface EngineAdapter {
     name: string;
     file?: string;
-    kind?: 'voice' | 'other' | string;
+    /** 'instrumental' for the adapter an Instrumental job gets by itself (not a voice choice). */
+    kind?: 'voice' | 'instrumental' | 'other' | string;
+    layout?: 'split' | 'whole' | string | null;
     halves?: string[];
 }
 
@@ -115,6 +130,8 @@ export interface MusicCapabilities {
     engine?: MusicEngine;
     engines?: Record<string, EngineInfo>;
     default_engine?: string;
+    /** What each rule would choose now (core `MusicCapabilities.engine_choice_rules`). */
+    engine_choice_rules?: Record<string, Omit<EngineChoice, 'at' | 'fell_back'> | null>;
     job_types?: Record<string, { status: string; reason: string }>;
     limits?: { generate_from_text?: Partial<FromTextLimits> & Record<string, any> };
     take_decisions?: { failure_classes?: FailureClass[]; max_reason_text?: number };
@@ -326,10 +343,33 @@ export function defaultEngineOf(caps: MusicCapabilities | null | undefined): Eng
     return d === 'acestep' || d === 'yue2' ? d : DEFAULT_ENGINE;
 }
 
-/** The adapters yue2.cpp offers (found in the adapters folder and splittable), voices first. */
+/** The adapters the person can pick in the Voice select, voices first: what yue2.cpp offers
+ *  minus the instrumental adapter, which an Instrumental job gets by itself. */
 export function yue2Adapters(caps: MusicCapabilities | null | undefined): EngineAdapter[] {
-    const list = caps?.engines?.yue2?.adapters ?? [];
+    const list = (caps?.engines?.yue2?.adapters ?? []).filter(a => a.kind !== 'instrumental');
     return [...list].sort((a, b) => (a.kind === 'voice' ? 0 : 1) - (b.kind === 'voice' ? 0 : 1) || a.name.localeCompare(b.name));
+}
+
+/** The line under Instrumental: which engine and adapter the job will use, from the core's
+ *  `engine_choice_rules` (it decides; the form only shows it). '' when the box is not ticked,
+ *  the engine is not YuE2, or the core names no rule (then nothing is claimed). */
+export function instrumentalChoiceText(form: Pick<FromTextForm, 'engine' | 'instrumental'>,
+    caps: MusicCapabilities | null | undefined): string {
+    if (!form.instrumental || (form.engine ?? DEFAULT_ENGINE) !== 'yue2') return '';
+    const rule = caps?.engine_choice_rules?.instrumental;
+    if (!rule) return '';
+    if (rule.engine === 'yue2') {
+        const name = rule.adapters?.[0] ?? 'the instrumental adapter';
+        return `Runs on YuE2 with the instrumental adapter ${name}${rule.fallback === 'acestep' ? '; if it does not load, acestep.cpp makes it instead' : ''}.`;
+    }
+    return `Runs on acestep.cpp instead of YuE2: ${rule.reason.replace(/^[^:]*:\s*acestep\.cpp,\s*because\s*/i, '')}.`;
+}
+
+/** The voice adapter a job names, leaving out the adapters its engine choice added. */
+export function jobVoiceName(job: Pick<MusicJob, 'params' | 'engine_choice'>): string | null {
+    const added = new Set(job.engine_choice?.adapters ?? []);
+    const voice = (job.params?.adapters ?? []).find((a: any) => a && typeof a.name === 'string' && !added.has(a.name));
+    return voice ? voice.name : null;
 }
 
 /** Whether a backbone's file is present (true when the report does not say). */

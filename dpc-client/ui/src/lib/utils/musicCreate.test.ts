@@ -36,6 +36,9 @@ import {
     takeInfo,
     upsertJob,
     validateFromTextForm,
+    instrumentalChoiceText,
+    jobVoiceName,
+    type MusicCapabilities,
     type MusicJob,
     type MusicTake,
     type TakeLoudness,
@@ -474,5 +477,45 @@ describe('take info and decisions', () => {
         expect(takeDecidable({ state: 'accepted' }, take)).toBe(true);
         expect(takeDecidable({ state: 'running' }, take)).toBe(false);
         expect(takeDecidable({ state: 'review' }, { decision: 'rejected' })).toBe(false);
+    });
+});
+
+describe('an Instrumental job on YuE2 says which engine and adapter it will use', () => {
+    const INST = 'YuE2-instrumental-cot-full-loras';
+    const withAdapter: MusicCapabilities = {
+        engine_choice_rules: { instrumental: { rule: 'instrumental', engine: 'yue2', adapters: [INST], fallback: 'acestep',
+            reason: `Instrumental: YuE2 with the instrumental adapter ${INST}; acestep.cpp if the adapter does not load` } },
+        engines: { yue2: { state: 'stopped', reason: 'installed', adapters: [
+            { name: INST, kind: 'instrumental', layout: 'whole' }, { name: 'voice-a', kind: 'voice' }] } },
+    };
+    const withoutAdapter: MusicCapabilities = {
+        engine_choice_rules: { instrumental: { rule: 'instrumental', engine: 'acestep', adapters: [], fallback: null,
+            reason: `Instrumental: acestep.cpp, because the YuE2 instrumental adapter ${INST} is not installed` } },
+    };
+
+    it('names the adapter and the fallback when the adapter is installed', () => {
+        const text = instrumentalChoiceText({ engine: 'yue2', instrumental: true }, withAdapter);
+        expect(text).toContain(INST);
+        expect(text).toContain('acestep.cpp makes it instead');
+    });
+
+    it('says the job goes to acestep.cpp, and why, when the adapter is missing', () => {
+        expect(instrumentalChoiceText({ engine: 'yue2', instrumental: true }, withoutAdapter))
+            .toBe(`Runs on acestep.cpp instead of YuE2: the YuE2 instrumental adapter ${INST} is not installed.`);
+    });
+
+    it('says nothing for a song, for acestep, or when the core names no rule', () => {
+        expect(instrumentalChoiceText({ engine: 'yue2', instrumental: false }, withAdapter)).toBe('');
+        expect(instrumentalChoiceText({ engine: 'acestep', instrumental: true }, withAdapter)).toBe('');
+        expect(instrumentalChoiceText({ engine: 'yue2', instrumental: true }, {})).toBe('');
+    });
+
+    it('keeps the instrumental adapter out of the Voice select and out of the job row voice', () => {
+        expect(yue2Adapters(withAdapter).map(a => a.name)).toEqual(['voice-a']);
+        const j = job({ params: { engine: 'yue2', adapters: [{ name: INST }, { name: 'voice-a' }] },
+            engine_choice: { rule: 'instrumental', engine: 'yue2', adapters: [INST], fallback: 'acestep', reason: 'x' } });
+        expect(jobVoiceName(j)).toBe('voice-a');
+        expect(jobVoiceName(job({ params: { adapters: [{ name: INST }] },
+            engine_choice: { rule: 'instrumental', engine: 'yue2', adapters: [INST], fallback: 'acestep', reason: 'x' } }))).toBeNull();
     });
 });

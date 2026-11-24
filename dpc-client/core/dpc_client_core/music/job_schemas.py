@@ -53,6 +53,15 @@ record without them is valid against both shapes:
   payload", PROVENANCE payload rule); `card_wait`, `{holders: [{alias, engine}], since}`
   while a queued job waits for the card (a running one too since ADR-052 S4: its engine child
   ended and its next start asks for the card again), so the job card can offer "Stop X" by alias.
+- `mp.job/1`: `engine_choice`, null or `{rule, engine, adapters, fallback, reason, at,
+  fell_back}`: the engine and adapters a rule chose for the job from what the job is, and
+  why (Mike, 2026-11-24, group #75/#76: the per-job choice is built general; `instrumental`
+  is its one rule today). `engine` is the engine the params name; `adapters` the adapter
+  names the rule put into `params.adapters` (or found there); `fallback` the engine the job
+  moves to when they do not load (`fallback_params_from_text`), null when there is none
+  left; `fell_back`, null or `{from, adapters, why, at}`, set when the job did move.
+  `reason` is the sentence the job card shows. No paths in it: it is copied into the take's
+  provenance record.
 - `mp.take/1`: `seed`, `synth_batch_size`, `synth_batch_index` (a take is reproducible
   from codes, seed, params, batch size and batch index on the same build: PROVENANCE
   §2, measured 2026-11-21) and `payload` (the name of the payload whose bytes produced
@@ -188,8 +197,11 @@ _JOB_KEYS = set(_JOB_REQUIRED) | {
     "prompt", "state_reason", "progress", "take_ids", "result_text", "result", "backend",
     "history", "updated_at",
     # extensions, see the module docstring
-    "idempotency_key", "payloads", "card_wait",
+    "idempotency_key", "payloads", "card_wait", "engine_choice",
 }
+ENGINE_CHOICE_RULES = ("instrumental",)
+_ENGINE_CHOICE_KEYS = {"rule", "engine", "adapters", "fallback", "reason", "at", "fell_back"}
+_FELL_BACK_KEYS = {"from", "adapters", "why", "at"}
 _PAYLOAD_KEYS = {"name", "sha256", "size_bytes", "written_at", "endpoint"}
 PAYLOAD_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -442,6 +454,50 @@ def normalize_params_from_text(params: Any, *, missing_engine: str = DEFAULT_FRO
     return out
 
 
+def fallback_params_from_text(params: Mapping[str, Any], engine: str) -> Dict[str, Any]:
+    """Normalized params of a `generate_from_text` job moved to `engine` (an engine choice's
+    fallback): the text, style, variants, seed and lyrics preparation kept, the engine's own
+    keys dropped (backbone, cot, adapters for acestep), the duration clamped into the new
+    engine's range. `ParamsError` when the result breaks a rule."""
+    if engine not in FROM_TEXT_ENGINES:
+        raise ParamsError("engine", f"engine must be one of {', '.join(FROM_TEXT_ENGINES)}, got {engine!r}")
+    dmin, dmax, _default = DURATION_LIMITS[engine]
+    kept = {k: params[k] for k in ("lyrics", "style", "variants", "seed", "lyrics_prep") if k in params}
+    duration = params.get("duration_s")
+    if _is_number(duration):
+        kept["duration_s"] = min(max(duration, dmin), dmax)
+    kept["engine"] = engine
+    return normalize_params_from_text(kept)
+
+
+def _check_engine_choice(s: str, job: Mapping[str, Any]) -> None:
+    ch = job["engine_choice"]
+    _expect(s, isinstance(ch, Mapping) and set(ch) == _ENGINE_CHOICE_KEYS,
+            f"'engine_choice' must have exactly {sorted(_ENGINE_CHOICE_KEYS)}")
+    _expect(s, ch["rule"] in ENGINE_CHOICE_RULES, f"'engine_choice.rule' must be one of {ENGINE_CHOICE_RULES}")
+    _expect(s, job["type"] == GENERATE_FROM_TEXT, "only a generate_from_text job carries an engine_choice")
+    _expect(s, ch["engine"] == engine_of(job["params"]), "'engine_choice.engine' must be the engine the params name")
+    _expect(s, isinstance(ch["adapters"], list) and all(_is_str(a) and YUE2_ADAPTER_NAME_RE.match(a)
+                                                         for a in ch["adapters"]),
+            "'engine_choice.adapters' must be a list of adapter names")
+    named = {a.get("name") for a in job["params"].get("adapters") or [] if isinstance(a, Mapping)}
+    _expect(s, set(ch["adapters"]) <= named, "'engine_choice.adapters' must be in params.adapters")
+    _expect(s, ch["fallback"] is None or (ch["fallback"] in FROM_TEXT_ENGINES and ch["fallback"] != ch["engine"]),
+            "'engine_choice.fallback' must be another engine or null")
+    _expect(s, _is_str(ch["reason"]) and bool(ch["reason"].strip()), "'engine_choice.reason' must be text")
+    _expect(s, _is_str(ch["at"]), "'engine_choice.at' must be a string")
+    fb = ch["fell_back"]
+    if fb is not None:
+        _expect(s, isinstance(fb, Mapping) and set(fb) == _FELL_BACK_KEYS,
+                f"'engine_choice.fell_back' must have exactly {sorted(_FELL_BACK_KEYS)}")
+        _expect(s, fb["from"] in FROM_TEXT_ENGINES and fb["from"] != ch["engine"],
+                "'engine_choice.fell_back.from' must be the engine the job left")
+        _expect(s, isinstance(fb["adapters"], list) and all(_is_str(a) for a in fb["adapters"]),
+                "'engine_choice.fell_back.adapters' must be a list of adapter names")
+        _expect(s, _is_str(fb["why"]) and bool(fb["why"].strip()) and _is_str(fb["at"]),
+                "'engine_choice.fell_back' needs why and at")
+
+
 # -- records -----------------------------------------------------------------------
 
 
@@ -531,6 +587,8 @@ def validate_job(job: Any) -> None:
             _expect(s, _is_str(h["alias"]) and h["alias"], f"card_wait.holders[{i}].alias must be a string")
             _expect(s, h["engine"] is None or _is_str(h["engine"]), f"card_wait.holders[{i}].engine must be a string or null")
         _expect(s, _is_str(cw["since"]), "'card_wait.since' must be a string")
+    if job.get("engine_choice") is not None:
+        _check_engine_choice(s, job)
 
 
 def check_reason(reason_text: Any, reason_class: Any) -> tuple:

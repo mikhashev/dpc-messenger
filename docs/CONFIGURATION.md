@@ -750,7 +750,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **34 sections, 194 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **34 sections, 203 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -1009,6 +1009,7 @@ An empty default means the key is written blank and the feature stays off until 
 | `yue2_port` | `9994` | The loopback port of the yue2.cpp server (always 127.0.0.1). 0 = a free port at each start |
 | `yue2_idle_stop_s` | `300` | Stop the yue2.cpp server after this many idle seconds to free the GPU card; 0 = as soon as a job ends |
 | `yue2_adapters_dir` | *(empty)* | The LoRA adapters folder (one level: .safetensors files, or folders holding one). Empty = <yue2_models_dir>/loras/ruach-voices/voices. DPC splits each into music and sound halves under <yue2_models_dir>/loras/.split |
+| `yue2_instrumental_adapter` | *(empty)* | The adapter an Instrumental job on YuE2 runs with (a name in the adapters folder or <yue2_models_dir>/loras, read after it). Empty = YuE2-instrumental-cot-full-loras; none = no adapter. Without it Instrumental jobs go to acestep.cpp |
 | `yue2_device` | *(empty)* | Passed to yue2.cpp as --device (CUDA0, Vulkan0, MTL0, CPU). Empty = the engine picks the best device |
 | `yue2_max_seq` | `0` | Passed as --max-seq when above 0 (KV cache size; less VRAM, shorter songs). 0 = the model context |
 

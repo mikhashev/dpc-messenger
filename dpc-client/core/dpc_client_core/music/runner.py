@@ -158,6 +158,17 @@ class _JobFailure(Exception):
     """A step failed; the message is the job's `failed` reason."""
 
 
+class _FallBack(Exception):
+    """The adapters the job's engine choice picked did not load: the job moves to the choice's
+    fallback engine (`MusicJobStore.fall_back_job`). `why` has no paths; `detail` is the engine's
+    own message, for the log and for the failure when there is no fallback after all."""
+
+    def __init__(self, why: str, detail: str):
+        super().__init__(why)
+        self.why = why
+        self.detail = detail
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -272,16 +283,18 @@ def variant_seed(seed: int, index: int) -> int:
     return (seed + index) % (js.SEED_MAX + 1)
 
 
-def build_yue2_body(params: Mapping[str, Any], seed: int, adapters: Optional[List[Dict[str, Any]]] = None) -> bytes:
+def build_yue2_body(params: Mapping[str, Any], seed: int, adapters: Optional[List[Dict[str, Any]]] = None,
+                    instrumental_lyrics: Optional[str] = None) -> bytes:
     """One variant's yue2.cpp `/synth` body, in the shape of the trial's requests
     (`engine/yue2-cpp/scripts/mkreq.py`): batch 1, the token and noise seeds both `seed`,
     wav24. `adapters` is the request form, one entry per split half
-    (`Yue2Server.request_adapters`). An instrumental sends empty lyrics: the model then
-    composes on its own (ARCHITECTURE.md, `lyrics`)."""
+    (`Yue2Server.request_adapters`). An instrumental sends `instrumental_lyrics` (the
+    instrumental adapter's tag, `Yue2Server.instrumental_lyrics_for`), else empty lyrics: the
+    model then composes on its own (ARCHITECTURE.md, `lyrics`)."""
     lyrics = params.get("lyrics")
     req: Dict[str, Any] = {
         "style": params["style"],
-        "lyrics": lyrics if lyrics is not None else "",
+        "lyrics": lyrics if lyrics is not None else (instrumental_lyrics or ""),
         "cot": params.get("cot") or js.YUE2_COT_DEFAULT,
         "duration": float(params["duration_s"]),
         "lm_seed": seed,
@@ -619,43 +632,85 @@ class MusicJobRunner:
         job = await self._get(job_id)
         if job is None or job["state"] != js.QUEUED or job["type"] != js.GENERATE_FROM_TEXT:
             return
-        key = js.engine_of(job["params"])
-        engine = self.engines.find(key)
-        if engine is None:
-            logger.error("music: job %s names engine %s, which this DPC has not set up", job_id, key)
-            await self._refuse(job_id, f"engine {key!r} is not set up in this DPC; install or configure it and "
-                                       "propose the job again")
-            return
-        if key == js.ENGINE_YUE2:
-            try:
-                seed = await self._yue2_payloads(job)
-            except (MusicEngineError, MusicJobError) as exc:
-                # The adapter went missing between the proposal and the run, or a payload
-                # cannot be written (too large, or an unrecorded earlier file that differs).
-                await self._refuse(job_id, exc.message)
+        started = False
+        while True:
+            fell: Optional[_FallBack] = None
+            key = js.engine_of(job["params"])
+            engine = self.engines.find(key)
+            if engine is None:
+                logger.error("music: job %s names engine %s, which this DPC has not set up", job_id, key)
+                reason = f"engine {key!r} is not set up in this DPC; install or configure it and propose the job again"
+                await (self._fail(job_id, reason) if started else self._refuse(job_id, reason))
                 return
-            lm_body = b""
-        else:
+            if key == js.ENGINE_YUE2:
+                try:
+                    seed = await self._yue2_payloads(job)
+                except (MusicEngineError, MusicJobError) as exc:
+                    # The adapter went missing between the proposal and the run, or a payload
+                    # cannot be written (too large, or an unrecorded earlier file that differs).
+                    why = self._fall_back_why(job, exc, "is no longer offered by the adapters folders")
+                    moved = await self._fall_back(job_id, why, exc.message) if why else None
+                    if moved is None:
+                        await self._refuse(job_id, exc.message)
+                        return
+                    job = moved
+                    continue
+                lm_body = b""
+            else:
+                try:
+                    lm_body, seed = await self._lm_payload(job)
+                except MusicJobError as exc:
+                    await (self._fail(job_id, exc.message) if started else self._refuse(job_id, exc.message))
+                    return
+            shown = _CardWait(self, job_id, engine.card_lease)
             try:
-                lm_body, seed = await self._lm_payload(job)
-            except MusicJobError as exc:
-                await self._refuse(job_id, exc.message)
-                return
-        shown = _CardWait(self, job_id, engine.card_lease)
-        try:
-            # The card first (ADR-052 section 3.2): one lease use for the whole job, asked for while
-            # the job is queued; no deadline of its own, only the person's cancel ends the wait.
-            async with engine.in_use(f"music job {job_id}", wait_s=None, check=self._card_check(job_id),
-                                     on_wait=shown, expected_s=js.music_expected_s(job["params"])):
+                # The card first (ADR-052 section 3.2): one lease use for the whole job, asked for while
+                # the job is queued; no deadline of its own, only the person's cancel ends the wait.
+                async with engine.in_use(f"music job {job_id}", wait_s=None, check=self._card_check(job_id),
+                                         on_wait=shown, expected_s=js.music_expected_s(job["params"])):
+                    await shown.settled()
+                    await self._run_on_the_card(job_id, job, key, engine, lm_body, seed, started=started)
+            except _Cancelled:
+                # Cancelled while it waited in the lease line: the wait left the line (`_leaves`).
                 await shown.settled()
-                await self._run_on_the_card(job_id, job, key, engine, lm_body, seed)
-        except _Cancelled:
-            # Cancelled while it waited in the lease line: the wait left the line (`_leaves`).
-            await shown.settled()
-            logger.info("music: job %s cancelled while it waited for the card", job_id)
-        finally:
-            # A grant with nothing on the card (the job ended before its engine came up) goes back.
-            engine.card_lease.release_when_empty("its job ended with no engine running", holds=engine.alive)
+                logger.info("music: job %s cancelled while it waited for the card", job_id)
+            except _FallBack as exc:
+                fell = exc   # handled once this engine's lease use has ended
+            finally:
+                # A grant with nothing on the card (the job ended before its engine came up) goes back.
+                engine.card_lease.release_when_empty("its job ended with no engine running", holds=engine.alive)
+            if fell is None:
+                return
+            # The running job moves to the fallback engine, which asks for the card through its own
+            # lease use; the idle engine left behind is let go by the usual exclusive start.
+            moved = None if await self._cancelled(job_id) else await self._fall_back(job_id, fell.why, fell.detail)
+            if moved is None:
+                if not await self._cancelled(job_id):
+                    await self._fail(job_id, fell.detail)
+                return
+            job, started = moved, True
+
+    @staticmethod
+    def _fall_back_why(job: Mapping[str, Any], exc: Exception, what: str) -> Optional[str]:
+        """The path-free reason a job falls back, when `exc` says that an adapter its engine choice
+        picked is missing or did not load and the choice has a fallback; else None."""
+        choice = job.get("engine_choice") or {}
+        if not isinstance(exc, MusicEngineError) or exc.code != "invalid_adapter" or not choice.get("fallback"):
+            return None
+        hit = [n for n in choice.get("adapters") or [] if n in exc.message]
+        if not hit:
+            return None
+        return f"the {choice['rule']} adapter {', '.join(hit)} {what}"
+
+    async def _fall_back(self, job_id: str, why: str, detail: str) -> Optional[dict]:
+        """`MusicJobStore.fall_back_job`, logged; None when the store refuses it."""
+        try:
+            job = await self._change(self.store.fall_back_job, job_id, why)
+        except MusicJobError as exc:
+            logger.warning("music: job %s could not fall back (%s): %s", job_id, exc.message, detail)
+            return None
+        logger.warning("music: job %s falls back to %s: %s (%s)", job_id, js.engine_of(job["params"]), why, detail)
+        return job
 
     def _card_check(self, job_id: str) -> Callable[[], Awaitable[None]]:
         """The lease's `check` for a job waiting for the card: the store is read every `card_poll_s`
@@ -673,18 +728,28 @@ class MusicJobRunner:
         return check
 
     async def _run_on_the_card(self, job_id: str, job: dict, key: str, engine: Any, lm_body: bytes,
-                               seed: int) -> None:
-        try:
-            await self._change(self.store.start_job, job_id)
-        except MusicJobError:
-            if await self._cancelled(job_id):
-                return
-            raise
+                               seed: int, *, started: bool = False) -> None:
+        """Run the job on its engine; `started` when it is already `running` (it fell back to this
+        engine from another). Raises `_FallBack` when the adapters its engine choice picked do
+        not load."""
+        if not started:
+            try:
+                await self._change(self.store.start_job, job_id)
+            except MusicJobError:
+                if await self._cancelled(job_id):
+                    return
+                raise
         self.current_engine = key
         engine_job: List[Optional[str]] = [None]
         try:
             if key == js.ENGINE_YUE2:
-                await self._produce_yue2(job_id, job["params"], seed, engine, engine_job)
+                try:
+                    await self._produce_yue2(job_id, job["params"], seed, engine, engine_job)
+                except MusicEngineError as exc:
+                    why = self._fall_back_why(job, exc, "did not load in yue2.cpp")
+                    if why is None:
+                        raise
+                    raise _FallBack(why, exc.message) from exc
             else:
                 await self._produce(job_id, job["params"], lm_body, seed, engine_job, engine)
         except _Cancelled:
@@ -725,11 +790,12 @@ class MusicJobRunner:
             seed = params["seed"] if params.get("seed") is not None else int(self._draw_seed())
         engine = self.engines.get(js.ENGINE_YUE2)
         request_adapters = engine.request_adapters(params.get("adapters") or [])
+        instrumental_lyrics = engine.instrumental_lyrics_for(params.get("adapters") or [])
         wrote = False
         for index, name in enumerate(names):
             if name in have:
                 continue
-            body = build_yue2_body(params, variant_seed(seed, index), request_adapters)
+            body = build_yue2_body(params, variant_seed(seed, index), request_adapters, instrumental_lyrics)
             await self._call(self.store.write_payload, job_id, name, body, endpoint="/synth")
             wrote = True
         if wrote:
@@ -839,7 +905,8 @@ class MusicJobRunner:
                 if index < len(latents):
                     latent_sha = await asyncio.to_thread(_range_sha256, multipart, latents[index][1], latents[index][2])
                 await self._one_take(job_id, params, out_dir, slug, multipart, start, end, index, variants, seed,
-                                     lm0, codes, payloads, identity, latent_sha, lm_body, synth_body)
+                                     lm0, codes, payloads, identity, latent_sha, lm_body, synth_body,
+                                     engine_choice=(job or {}).get("engine_choice"))
                 await self._progress(job_id, round(0.8 + 0.2 * (index + 1) / variants, 4))
         finally:
             try:
@@ -852,7 +919,8 @@ class MusicJobRunner:
     async def _one_take(self, job_id: str, params: Mapping[str, Any], out_dir: Path, slug: str, multipart: Path,
                         start: int, end: int, index: int, batch_size: int, seed: int, lm0: Mapping[str, Any],
                         codes: str, payloads: Dict[str, str], identity: Dict[str, Any],
-                        latent_sha: Optional[str], lm_body: bytes, synth_body: bytes) -> None:
+                        latent_sha: Optional[str], lm_body: bytes, synth_body: bytes,
+                        engine_choice: Optional[Mapping[str, Any]] = None) -> None:
         variant = index + 1
         lm_request = json.loads(lm_body.decode("utf-8"))
         synth_request = json.loads(synth_body.decode("utf-8"))
@@ -864,7 +932,7 @@ class MusicJobRunner:
             return prov.build_acestep_record(
                 job_id=job_id, variant=variant, params=params, identity=identity, lm_request=lm_request,
                 lm_result=lm0, synth_request=synth_request, seed=seed, batch_size=batch_size, batch_index=index,
-                window_s=window, payloads=payloads, **facts)
+                window_s=window, payloads=payloads, engine_choice=engine_choice, **facts)
 
         await self._store_take(
             job_id, params, out_dir, slug, variant, multipart, start, end, latent_sha=latent_sha,
@@ -878,6 +946,7 @@ class MusicJobRunner:
                 "task_type": lm0.get("task_type") or "text2music",
                 "engine": {k: identity.get(k) for k in ("engine", "version", "binaries", "server_args")},
                 "models": identity.get("models"),
+                "engine_choice": engine_choice,
                 "payloads": payloads,
                 "seed": seed,
                 "variant_seed": seed + index,
@@ -952,7 +1021,8 @@ class MusicJobRunner:
                 payloads = {p["name"]: p["sha256"] for p in (job or {}).get("payloads") or []}
                 sent = json.loads(body.decode("utf-8"))
                 await self._yue2_take(job_id, params, out_dir, slug, multipart, audio[0][1], audio[0][2], variant,
-                                      seed, sent, replay, replay_raw, payloads, identity, latent_sha)
+                                      seed, sent, replay, replay_raw, payloads, identity, latent_sha,
+                                      engine_choice=(job or {}).get("engine_choice"))
             finally:
                 try:
                     multipart.unlink()
@@ -965,7 +1035,8 @@ class MusicJobRunner:
     async def _yue2_take(self, job_id: str, params: Mapping[str, Any], out_dir: Path, slug: str, multipart: Path,
                          start: int, end: int, variant: int, seed: int, sent: Mapping[str, Any],
                          replay: Mapping[str, Any], replay_raw: bytes, payloads: Dict[str, str],
-                         identity: Dict[str, Any], latent_sha: Optional[str]) -> None:
+                         identity: Dict[str, Any], latent_sha: Optional[str],
+                         engine_choice: Optional[Mapping[str, Any]] = None) -> None:
         # The engine's replay request carries the seeds it consumed; ours were explicit, so
         # they agree, but the record keeps what the engine says it used.
         v_seed = _int_or(replay.get("seed"), sent["seed"])
@@ -984,7 +1055,7 @@ class MusicJobRunner:
             return prov.build_yue2_record(
                 job_id=job_id, variant=variant, params=params, identity=identity, sent=sent, replay=replay,
                 seed=seed, variant_seed=v_seed, lm_seed=v_lm_seed, backbone=backbone, payloads=payloads,
-                **facts)
+                engine_choice=engine_choice, **facts)
 
         await self._store_take(
             job_id, params, out_dir, slug, variant, multipart, start, end, latent_sha=latent_sha,
@@ -1000,6 +1071,7 @@ class MusicJobRunner:
                 "models": identity.get("models"),
                 "backbone": backbone,
                 "adapters": adapters,
+                "engine_choice": engine_choice,
                 "payloads": payloads,
                 "seed": seed,
                 "variant_seed": v_seed,

@@ -6,7 +6,8 @@ track (the replay request as JSON, a short wav24, the latents). No GPU.
 
 `FAKE_YUE2_MODE` (comma-separated) picks a misbehaviour: `exit_at_start`, `wrong_model`
 (`/props` names another backbone), `fail_synth`, `slow_synth` (stays running until
-cancelled). `FAKE_YUE2_RECORD`, when set, is a folder where each `/synth` body is written as
+cancelled), `skip_instrumental` (an adapter whose name holds "instrumental" is left out, as
+the real server leaves out one it cannot merge). `FAKE_YUE2_RECORD`, when set, is a folder where each `/synth` body is written as
 `<n>-synth.json` and each cancel as `<n>-cancel.txt`. SIGTERM (POSIX) or SIGBREAK (Windows)
 stops it with exit code 0.
 """
@@ -32,13 +33,16 @@ def log(msg):
     sys.stderr.flush()
 
 
-def scan(folder):
+def scan(folder, skip=""):
     """The adapters `--adapters` offers, as yue2.cpp's scan reads a folder."""
     out = []
     if not folder or not os.path.isdir(folder):
         return out
     for name in sorted(n for n in os.listdir(folder) if not n.startswith(".")):
         path = os.path.join(folder, name)
+        if skip and skip in name:
+            log(f"[Adapter] Skip {name}: unsupported tensor")
+            continue
         if os.path.isdir(path):
             if not any(f.endswith(".safetensors") for f in os.listdir(path)):
                 continue
@@ -68,7 +72,7 @@ def main():
     if "exit_at_start" in modes:
         log("exit_at_start")
         sys.exit(3)
-    adapters = scan(args.adapters)
+    adapters = scan(args.adapters, "instrumental" if "skip_instrumental" in modes else "")
     jobs = {}
     counter = {"n": 0}
 

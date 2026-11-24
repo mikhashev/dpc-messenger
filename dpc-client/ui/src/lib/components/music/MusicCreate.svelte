@@ -12,7 +12,9 @@
     variants, duration (for YuE2 a cap, with a warning when it looks short for the lyrics:
     an estimate) and an optional seed, checked against the core's limits before sending; a
     core refusal is shown on the field it names. Generate is off, with the reason, while the
-    selected engine is not available;
+    selected engine is not available. With Instrumental ticked on YuE2, a line says what the
+    core will choose (`engine_choice_rules`): the instrumental adapter, or acestep.cpp and why;
+  - each job row shows its `engine_choice` sentence when a rule chose its engine;
   - the jobs: state and progress live from `music_job_updated` (polled when quiet), Cancel,
     "Waiting for the GPU: X holds it" with a "Stop X" button (the person's press, the
     existing stop_local_engine; nothing is stopped by itself), failures with the reason;
@@ -40,9 +42,11 @@
     formFieldOf,
     formForEngine,
     fromTextSupport,
+    instrumentalChoiceText,
     isActive,
     jobStateText,
     jobTitle,
+    jobVoiceName,
     limitsFrom,
     shortCapWarning,
     validateFromTextForm,
@@ -81,6 +85,7 @@
   let support = $derived(fromTextSupport(caps, selectedEngine));
   let adapters = $derived(yue2Adapters(caps));
   let capWarning = $derived(shortCapWarning($musicCreateDraft, caps));
+  let instrumentalNote = $derived(instrumentalChoiceText($musicCreateDraft, caps));
   let classes = $derived(caps?.take_decisions?.failure_classes ?? []);
   let jobs = $derived(jobsState.jobs);
   let showAllJobs = $state(false);
@@ -310,6 +315,7 @@
       <input type="checkbox" bind:checked={$musicCreateDraft.instrumental} onchange={() => clearError('lyrics')} />
       <span class="small">Instrumental (no lyrics)</span>
     </label>
+    {#if instrumentalNote}<p class="muted tiny" role="status">{instrumentalNote}</p>{/if}
     <p id="mc-lyrics-error" class="field-error" role="alert">{errors.lyrics ?? ''}</p>
 
     <label class="field-label" for="mc-style">Style</label>
@@ -406,7 +412,8 @@
             {#if job.state === 'running'}
               <progress class="job-progress" max="1" value={job.progress ?? 0} aria-label="Progress of {jobTitle(job, 40)}"></progress>
             {/if}
-            <span class="muted tiny">{job.params?.engine === 'yue2' ? 'YuE2' : 'ACE-Step'} · {job.params?.variants ?? '?'} × {job.params?.duration_s ?? '?'} s{job.params?.seed != null ? ` · seed ${job.params.seed}` : ''}{job.params?.adapters?.length ? ` · voice ${job.params.adapters[0].name}` : ''} · {new Date(job.created_at).toLocaleString()}</span>
+            <span class="muted tiny">{job.params?.engine === 'yue2' ? 'YuE2' : 'ACE-Step'} · {job.params?.variants ?? '?'} × {job.params?.duration_s ?? '?'} s{job.params?.seed != null ? ` · seed ${job.params.seed}` : ''}{jobVoiceName(job) ? ` · voice ${jobVoiceName(job)}` : ''} · {new Date(job.created_at).toLocaleString()}</span>
+            {#if job.engine_choice?.reason}<span class="muted tiny">{job.engine_choice.reason}</span>{/if}
           </div>
           <span class="row-actions">
             {#each holders as h (h.alias)}

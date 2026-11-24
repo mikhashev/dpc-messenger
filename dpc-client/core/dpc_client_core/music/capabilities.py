@@ -30,6 +30,14 @@ engine it names (`unsupported_reason(type, params)`), and its YuE2 backbone and 
 against the files present (`check_params`). A single probe (`MusicCapabilities(probe)`)
 answers for every engine: a stand-in for tests and start-up, never what the service builds.
 
+**Engine choice** (Mike, 2026-11-24, group #75/#76: option (c), built general). Before a
+proposal is checked, `choose_engine` lets a rule pick the engine and adapters from what the
+job is, and the store records why on the job (`engine_choice`, `job_schemas`). One rule
+today, `instrumental`: an Instrumental job (lyrics null) on YuE2 gets the instrumental adapter
+(`Yue2Server.purpose_adapters`) with acestep.cpp as its fallback, or goes to acestep.cpp when
+that adapter is not offered. The report's `engine_choice_rules` says what each rule would
+choose now, so the form shows it before the job is sent.
+
 **Statuses** are SPEC §7's `supported | planned | unsupported`. `planned` means on the
 roadmap and not built in DPC; `propose_job` answers `unsupported` for it, as SPEC §7 says a
 real backend does. `features.lyrics_*` and `features.transcribe` describe what the DPC
@@ -41,7 +49,7 @@ from __future__ import annotations
 import copy
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from . import job_schemas as js
 
@@ -255,6 +263,60 @@ class MusicCapabilities:
             return f"planned, not built: {st['reason']}"
         return st["reason"]
 
+    def choose_engine(self, job_type: str, params: Mapping[str, Any], *, at: str,
+                      yue2_status: Optional[EngineStatus] = None) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """`(params, engine_choice)` for normalized params: what a rule chooses from what the job
+        is (module docstring, "engine choice"), or the params unchanged and None when no rule
+        applies. Nothing is chosen while YuE2 is not available (the job is `unsupported` with its
+        reason) or without a supervisor that reports its purpose adapters (a test stand-in).
+        `ParamsError` when the instrumental adapter would be a fifth adapter. `yue2_status` is
+        YuE2's status when the caller has read it already (the report reads each probe once)."""
+        out = copy.deepcopy(dict(params))
+        if job_type != js.GENERATE_FROM_TEXT or js.engine_of(out) != js.ENGINE_YUE2 or out.get("lyrics") is not None:
+            return out, None
+        if not (yue2_status or self.engine_status(js.ENGINE_YUE2)).available:
+            return out, None
+        purpose = (self._form_info(js.ENGINE_YUE2).get("purpose_adapters") or {}).get("instrumental")
+        if not isinstance(purpose, Mapping):
+            return out, None
+        name = purpose.get("adapter")
+        if purpose.get("offered") and name:
+            adapters = list(out.get("adapters") or [])
+            if not any(a.get("name") == name for a in adapters):
+                if len(adapters) >= js.YUE2_ADAPTERS_MAX:
+                    raise js.ParamsError("adapters", f"an Instrumental job on YuE2 runs with the instrumental adapter "
+                                                     f"{name}, and {js.YUE2_ADAPTERS_MAX} adapters are already named")
+                scale = purpose.get("scale", 1.0)
+                adapters.append({"name": name, "music": scale, "sound": scale})
+            out["adapters"] = adapters
+            return out, {"rule": "instrumental", "engine": js.ENGINE_YUE2, "adapters": [name],
+                         "fallback": js.ENGINE_ACESTEP, "at": at, "fell_back": None,
+                         "reason": f"Instrumental: YuE2 with the instrumental adapter {name}; "
+                                   "acestep.cpp if the adapter does not load"}
+        # No path in the reason: it goes into the take's provenance record.
+        why = {"off": "is turned off", "unusable": f"{name} cannot be used"}.get(
+            str(purpose.get("state")), f"{name} is not installed" if name else "is not installed")
+        dropped = [a.get("name") for a in out.get("adapters") or []]
+        moved = js.fallback_params_from_text(out, js.ENGINE_ACESTEP)
+        reason = f"Instrumental: acestep.cpp, because the YuE2 instrumental adapter {why}"
+        if dropped:
+            reason += f"; adapter(s) {', '.join(dropped)} left out with YuE2"
+        return moved, {"rule": "instrumental", "engine": js.ENGINE_ACESTEP, "adapters": [], "fallback": None,
+                       "at": at, "fell_back": None, "reason": reason}
+
+    def engine_choice_rules(self, yue2_status: Optional[EngineStatus] = None) -> Dict[str, Optional[Dict[str, Any]]]:
+        """What each rule would choose now (`choose_engine` on a bare YuE2 job of that kind), for
+        the form: `{instrumental: {rule, engine, adapters, fallback, reason} or None}`."""
+        try:
+            _params, choice = self.choose_engine(
+                js.GENERATE_FROM_TEXT, js.normalize_params_from_text({"lyrics": None, "style": "-"}), at="",
+                yue2_status=yue2_status)
+        except js.ParamsError:
+            choice = None
+        if choice is not None:
+            choice = {k: choice[k] for k in ("rule", "engine", "adapters", "fallback", "reason")}
+        return {"instrumental": choice}
+
     def check_params(self, job_type: str, params: Mapping[str, Any]) -> None:
         """Raise `job_schemas.ParamsError` when normalized `generate_from_text` params name a
         YuE2 backbone whose file is missing or an adapter the adapters folder does not hold.
@@ -321,6 +383,7 @@ class MusicCapabilities:
             "engine": default.as_dict(),
             "engines": engines,
             "default_engine": self.default_engine,
+            "engine_choice_rules": self.engine_choice_rules(statuses.get(js.ENGINE_YUE2)),
             "job_types": job_types,
             "actions": copy.deepcopy(_EDIT_ACTIONS),
             "limits": {

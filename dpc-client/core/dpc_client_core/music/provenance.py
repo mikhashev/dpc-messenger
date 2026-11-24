@@ -337,6 +337,18 @@ def _chain(engine_output: Mapping[str, Any], postprocess: Mapping[str, Any], out
             "output": {**dict(output), "pcm_md5_basis": PCM_MD5_BASIS}, "pcm_md5": output.get("pcm_md5")}
 
 
+def _add_engine_choice(rec: Dict[str, Any], choice: Optional[Mapping[str, Any]]) -> None:
+    """The job's `engine_choice` (`job_schemas`: which rule chose the engine and adapters, and
+    a fall-back when there was one), kept as it is but without its timestamps. Outside the
+    genotype and the substrate: the adapters themselves are in `adapters` by sha256."""
+    if not isinstance(choice, Mapping):
+        return
+    out = {k: choice.get(k) for k in ("rule", "engine", "adapters", "fallback", "reason")}
+    fb = choice.get("fell_back")
+    out["fell_back"] = {k: fb.get(k) for k in ("from", "adapters", "why")} if isinstance(fb, Mapping) else None
+    rec["engine_choice"] = out
+
+
 def build_acestep_record(*, job_id: str, variant: int, created_at: str, params: Mapping[str, Any],
                          identity: Mapping[str, Any], lm_request: Mapping[str, Any], lm_result: Mapping[str, Any],
                          synth_request: Mapping[str, Any], seed: int, batch_size: int, batch_index: int,
@@ -344,11 +356,14 @@ def build_acestep_record(*, job_id: str, variant: int, created_at: str, params: 
                          loudness: Optional[Mapping[str, Any]], engine_output: Mapping[str, Any],
                          postprocess: Mapping[str, Any], output: Mapping[str, Any],
                          payloads: Optional[Mapping[str, str]] = None,
-                         device: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+                         device: Optional[Mapping[str, Any]] = None,
+                         engine_choice: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """The `mp.provenance/1` record of one acestep.cpp take, from what the runner holds: the
-    `/lm` request as sent, the LM's answer, the `/synth` body as sent, the engine identity."""
+    `/lm` request as sent, the LM's answer, the `/synth` body as sent, the engine identity, and
+    the job's engine choice when a rule made one."""
     rec = _base(engine="acestep.cpp", job_id=job_id, variant=variant, created_at=created_at, identity=identity,
                 device=device, payloads=payloads)
+    _add_engine_choice(rec, engine_choice)
     codes = str(lm_result.get("audio_codes") or "")
     lyrics = lm_request.get("lyrics")
     chosen_lyrics = lm_result.get("lyrics")
@@ -397,11 +412,14 @@ def build_yue2_record(*, job_id: str, variant: int, created_at: str, params: Map
                       loudness: Optional[Mapping[str, Any]], engine_output: Mapping[str, Any],
                       postprocess: Mapping[str, Any], output: Mapping[str, Any],
                       payloads: Optional[Mapping[str, str]] = None,
-                      device: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+                      device: Optional[Mapping[str, Any]] = None,
+                      engine_choice: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """The record of one yue2.cpp take: the `/synth` body as sent and the engine's replay request
-    (the score as ABC and the semantic tokens), which is what makes the song repeatable."""
+    (the score as ABC and the semantic tokens), which is what makes the song repeatable; the
+    job's engine choice when a rule made one."""
     rec = _base(engine="yue2.cpp", job_id=job_id, variant=variant, created_at=created_at, identity=identity,
                 device=device, payloads=payloads)
+    _add_engine_choice(rec, engine_choice)
     tokens = str(replay.get("semantic_tokens") or "")
     abc = str(replay.get("abc") or "")
     lyrics = sent.get("lyrics")
