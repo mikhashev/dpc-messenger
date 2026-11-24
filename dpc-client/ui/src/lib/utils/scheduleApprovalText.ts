@@ -21,6 +21,10 @@ export interface MusicJobRequest {
   type?: string;
   style?: string;
   variants?: number;
+  /** true: no lyrics (an instrumental); false: sung, with lyrics. Absent: not said. */
+  instrumental?: boolean;
+  /** The engine's name; null or absent means the default engine. */
+  engine?: string | null;
   /** The expected time on the card, in seconds. */
   eta_seconds?: number;
 }
@@ -69,6 +73,9 @@ export function musicJobSentence(request: Pick<ApprovalRequestLike, 'about' | 'm
   if (m && typeof m.variants === 'number' && Number.isFinite(m.variants) && m.variants > 0) {
     parts.push(`${m.variants} ${m.variants === 1 ? 'take' : 'takes'}`);
   }
+  if (m && typeof m.instrumental === 'boolean') parts.push(m.instrumental ? 'instrumental' : 'with lyrics');
+  if (m && typeof m.engine === 'string' && m.engine.trim()) parts.push(`${m.engine.trim()} engine`);
+  else if (m && m.engine === null && parts.length > 0) parts.push('default engine');
   const eta = formatEta(m?.eta_seconds);
   if (eta) parts.push(`about ${eta}`);
   if (parts.length > 0) return `Run a music job on the GPU: ${parts.join(', ')}`;

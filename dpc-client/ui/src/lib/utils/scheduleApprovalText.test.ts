@@ -12,6 +12,14 @@ const backendMusic = {
 
 describe('the schedule card for a check_back', () => {
   const v = approvalView({ task_type: 'check_back', when: 'in 1200s', about: 'look at the job' });
+  it('says instrumental or with lyrics, and the engine, from the music block', () => {
+    expect(musicJobSentence({
+      about: '',
+      music: { type: 'generate_from_text', style: 'slow piano', variants: 2, instrumental: true, engine: 'yue2', eta_seconds: 120 },
+    })).toBe('Run a music job on the GPU: generate from text, slow piano, 2 takes, instrumental, yue2 engine, about 2 min');
+    expect(musicJobSentence({ about: '', music: { style: 's', instrumental: false, engine: null } }))
+      .toBe('Run a music job on the GPU: s, with lyrics, default engine');
+  });
   it('keeps its own words', () => {
     expect(v.isMusicJob).toBe(false);
     expect(v.headText).toBe('wants to come back to this later');
