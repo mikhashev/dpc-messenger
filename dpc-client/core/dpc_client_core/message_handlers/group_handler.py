@@ -344,8 +344,8 @@ class GroupTextHandler(MessageHandler):
         sender_name = payload.get("sender_name", sender_node_id)
 
         # A group this node does not hold: dropped before anything else, so the
-        # id never names a folder, a 1:1 history or a wake. No member check
-        # here: a node that takes part through `agents` is not on `members`.
+        # id never names a folder, a 1:1 history or a wake. The member check
+        # needs the author, so it follows the signature check below.
         if not group_id or self.service.group_manager.get_group(group_id) is None:
             shown_group = str(group_id)[:20]
             loud, for_pair, for_sender = self._note_drop_not_held(sender_node_id, shown_group)
@@ -365,6 +365,22 @@ class GroupTextHandler(MessageHandler):
             sender_node_id, payload
         )
         if verification == "rejected":
+            return None
+        # A post is a member's: an author off our roster is refused before
+        # dedup, relay and storage. Answered only when the author handed it
+        # over itself; a relaying member is not the one refused, and the
+        # word would tell it so.
+        if author_node_id not in self.service.group_manager.get_group(group_id).members:
+            if author_node_id == sender_node_id:
+                await refuse_group_access(
+                    self.service.p2p_manager, sender_node_id, group_id, "GROUP_TEXT", self.logger,
+                )
+            else:
+                self.logger.warning(
+                    "Dropped GROUP_TEXT %s in group %s relayed by %s: its author %s is not a member (%s)",
+                    str(payload.get("message_id"))[:8], group_id, sender_node_id[:20],
+                    str(author_node_id)[:20], verification,
+                )
             return None
         if verification == "unverified" and author_node_id != sender_node_id:
             # Stored anyway — refusing on first contact would be a denial of
@@ -890,6 +906,11 @@ class GroupSyncHandler(MessageHandler):
         # spent, and without this the group would stay unasked until a restart.
         if result and self.service.p2p_manager.node_id in getattr(result, "members", ()):
             self.service.clear_group_access_denied(sender_node_id, group_id)
+        elif result and self.service.p2p_manager.node_id in members_before:
+            self.logger.warning(
+                "Group %s: the roster from %s no longer lists this node; it is removed here, "
+                "posting is refused, history kept", group_id, sender_node_id[:20],
+            )
         if result:
             # Notify UI of updated group
             await self.service.local_api.broadcast_event("group_updated", {
@@ -1452,6 +1473,14 @@ class GroupAccessDeniedHandler(MessageHandler):
         self.service.note_group_access_denied(sender_node_id, group_id)
 
         group = self.service.group_manager.get_group(group_id)
+        # The creator's "no" marks the group removed here for this session:
+        # the send paths refuse (group_access.posting_refusal), history stays.
+        if group is not None and group.created_by and group.created_by == sender_node_id:
+            self.logger.warning(
+                "Group %s marked removed on this node: its creator answered %s; posting is "
+                "refused until a roster from the creator lists this node again, history kept",
+                group_id, reason,
+            )
         await self.service.local_api.broadcast_event("group_access_denied", {
             "group_id": group_id,
             "group_name": getattr(group, "name", None),

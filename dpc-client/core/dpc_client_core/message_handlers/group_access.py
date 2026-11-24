@@ -41,6 +41,28 @@ def may_share_group(group_manager, group_id: Optional[str], sender_node_id: str)
     return sender_node_id in getattr(group, "members", ())
 
 
+def posting_refusal(group, node_id: str, refused_by=()) -> Optional[str]:
+    """Why `node_id` may not post into `group`, or None when it may.
+
+    Only `members` lets a node post; `agents[node]` survives a removal on
+    purpose (a re-add needs it) and grants nothing. `refused_by` holds the
+    (peer, group) pairs that answered `not_a_member`; only the creator's
+    counts, because the roster is the creator's (ADR-038 part 1) and another
+    member may answer from a stale copy. History is never touched.
+    """
+    if group is None:
+        return "this node does not hold that group"
+    group_id = getattr(group, "group_id", None)
+    if node_id not in (getattr(group, "members", None) or ()):
+        return (f"this node is not on the roster of group {group_id}: it was removed, so it "
+                f"cannot post there (its history here is kept)")
+    creator = getattr(group, "created_by", "") or ""
+    if creator and creator != node_id and (creator, group_id) in (refused_by or ()):
+        return (f"the creator of group {group_id} answered {REASON}: this node was removed, so it "
+                f"cannot post there (its history here is kept)")
+    return None
+
+
 async def refuse_group_access(
     p2p_manager,
     sender_node_id: str,

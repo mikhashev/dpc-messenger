@@ -154,6 +154,34 @@ class FileOfferHandler(MessageHandler):
         file_requests = getattr(file_transfer_manager, "file_requests", None)
         open_request = (file_requests.open_request_for_offer(sender_node_id, payload)
                         if file_requests is not None else None)
+
+        # A pushed group file is a post, and a post is a member's: refused when
+        # its author is off our roster, whether the offer's claim or the signed
+        # description names it. A file this node asked for completes a record it
+        # already holds, so a former member's old file still comes.
+        if group_id and open_request is None:
+            described = payload.get("file_description")
+            authors = {author_node_id,
+                       described.get("sender_node_id") if isinstance(described, dict) else None}
+            members = self.service.group_manager.get_group(group_id).members
+            outsider = next((a for a in authors if a and a not in members), None)
+            if outsider:
+                self.logger.warning(
+                    f"Refused offer {transfer_id} from {sender_node_id} for group {group_id}: "
+                    f"its author {outsider} is not a member"
+                )
+                try:
+                    await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                        "command": "FILE_CANCEL",
+                        "payload": {"transfer_id": transfer_id, "reason": NOT_A_MEMBER_REASON},
+                    })
+                except Exception as e:  # noqa: BLE001 - the refusal stands without its answer
+                    self.logger.warning(
+                        f"Could not send FILE_CANCEL ({NOT_A_MEMBER_REASON}) for {transfer_id} "
+                        f"to {sender_node_id}: {e}"
+                    )
+                return None
+
         if open_request is not None and open_request.transfer_id:
             # A second holder answered the same request: the first one's file is coming.
             from ..managers.file_transfer_manager import ALREADY_RECEIVED_REASON

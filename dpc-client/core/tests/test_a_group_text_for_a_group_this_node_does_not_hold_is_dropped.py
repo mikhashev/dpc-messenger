@@ -4,8 +4,9 @@ Team vote 2026-11-13 (A-GROUP-TEXT-IS-STORED-AND-SHOWN-UNDER-ANY-GROUP-ID-A-PEER
 the one group handler that carries text used to go straight to dedup, storage
 and mention routing for any `group_id` a connected peer named. Now an id with
 no group behind it is dropped with one log line and a running count; nothing
-is stored, no folder is made, no agent wakes. There is deliberately no member
-check: a node that takes part through `agents` is not on `members`.
+is stored, no folder is made, no agent wakes. The member check on the author
+came later (2026-11-24) and is tested in
+test_a_node_off_the_roster_can_neither_post_into_a_group_nor_have_its_post_stored.py.
 """
 
 import logging
@@ -200,12 +201,19 @@ async def test_text_for_a_held_group_is_still_stored_shown_and_routed(node):
 
 
 @pytest.mark.asyncio
-async def test_a_held_group_that_does_not_list_the_sender_still_stores(node):
-    """The live constraint: DPC Project lists only this node, the Linux node
-    takes part through `agents`. No member rule on GROUP_TEXT."""
+async def test_a_held_group_that_does_not_list_the_sender_stores_nothing(node):
+    """Until 2026-11-24 this asserted the opposite: the 2026-11-13 vote read the
+    Linux node's `agents` entry in DPC Project as a way to take part. It was the
+    entry `remove_member` keeps, and no flow puts a node in `agents` without
+    `members` (A-NODE-REMOVED-FROM-A-GROUP-CAN-STILL-POST-INTO-IT-AND-THE-OWNER-
+    STORES-THE-POST). Not dropped as "not held": refused with `not_a_member`."""
     group = node.service.group_manager.create_group("DPC Project", "", [])
     assert group.members == [ME]
 
     await node.handler.handle(PEER, _payload(group.group_id))
 
-    assert node.service.stored == ["m-1"]
+    assert node.service.stored == []
+    assert GroupTextHandler.dropped_not_held == 0
+    node.service.p2p_manager.send_message_to_peer.assert_awaited_once_with(PEER, {
+        "command": "GROUP_ACCESS_DENIED",
+        "payload": {"group_id": group.group_id, "reason": "not_a_member"}})

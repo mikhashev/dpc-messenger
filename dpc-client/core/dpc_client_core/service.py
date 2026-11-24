@@ -148,6 +148,7 @@ from .message_handlers.group_handler import (  # v0.19.0+ Group chat
     GroupAccessDeniedHandler,  # the refusal a removed node learns from
     send_history_status as send_group_history_status,  # the one door into a group's history
 )
+from .message_handlers.group_access import posting_refusal
 from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
     SkillSearchHandler, SkillsCatalogHandler, SkillRequestHandler,
     SkillDataHandler, SkillOfferHandler,
@@ -348,6 +349,20 @@ def roster_refusal(group_manager, requester_node_id: str, group_id: str, node_id
     verb = "remove" if removing else "add"
     logger.warning("Refusing to %s %s in group %s: %s", verb, node_id[:20], group_id, reason)
     return {"status": "error", "message": f"Cannot {verb} {node_id}: {reason}"}
+
+
+def group_post_refusal(service, group, what: str) -> Optional[Dict[str, Any]]:
+    """The error a group sender returns when this node may not post into `group`, else None.
+
+    Only a formatter around `group_access.posting_refusal`, the one rule every
+    group sender asks before it writes, signs or sends anything.
+    """
+    reason = posting_refusal(group, service.p2p_manager.node_id,
+                             getattr(service, "_group_access_denied", ()))
+    if reason is None:
+        return None
+    logger.warning("%s refused in group %s: %s", what, getattr(group, "group_id", None), reason)
+    return {"status": "error", "message": reason}
 
 
 def _bounded_hostname_lookup(hostname: str, deadline_s: float) -> list:
@@ -7620,6 +7635,9 @@ class CoreService(MusicCommandsMixin):
             group = self.group_manager.get_group(group_id)
             if not group:
                 return {"status": "error", "message": f"Group {group_id} not found"}
+            refusal = group_post_refusal(self, group, "send_group_message")
+            if refusal:
+                return refusal
 
             # A literal here meant a human's name never left the machine: every
             # peer rendered "User" because that is what arrived. Fourteen other
@@ -8038,8 +8056,11 @@ class CoreService(MusicCommandsMixin):
         `agent_names[node]`, the display part of each `ext:` tag, the config name
         of each embedded agent in `agents[node]`, and — under the same transitional
         rule as `external_agents_to_wake` — the CC display name while no `ext:`
-        tag is registered here."""
+        tag is registered here. None at all while this node may not post into
+        the group (`group_access.posting_refusal`): `agents[node]` outlives a removal."""
         node_id = self.p2p_manager.node_id
+        if posting_refusal(group, node_id, getattr(self, "_group_access_denied", ())):
+            return set()
         agent_ids = list((getattr(group, "agents", None) or {}).get(node_id) or [])
         names = {n for n in ((getattr(group, "agent_names", None) or {}).get(node_id) or {}).values() if n}
         for aid in agent_ids:
@@ -8093,7 +8114,8 @@ class CoreService(MusicCommandsMixin):
             Callers use this to track posted messages for later deletion (e.g. morning
             brief replacement on Sleep button). A name this node did not register for
             the group is refused with `{"status": "error", "message": ...}`, and so
-            is a `mention_depth` that is not a whole number >= 0.
+            is a `mention_depth` that is not a whole number >= 0, and any post while
+            this node may not post into the group (`group_post_refusal`).
         """
         # A bridge's value arrives through the local API unchecked, and is signed as given.
         if mention_depth is None:
@@ -8108,6 +8130,9 @@ class CoreService(MusicCommandsMixin):
         if not group:
             logger.warning("send_group_agent_message: group %s not found", group_id)
             return None
+        refusal = group_post_refusal(self, group, "send_group_agent_message")
+        if refusal:
+            return refusal
 
         # A registered folder id resolves to the name it was registered under:
         # the check_back delivery passed `agent_forge_7244b181` and was refused,
@@ -8615,6 +8640,9 @@ class CoreService(MusicCommandsMixin):
             group = self.group_manager.get_group(group_id)
             if not group:
                 return {"status": "error", "message": f"Group {group_id} not found"}
+            refusal = group_post_refusal(self, group, "send_group_file")
+            if refusal:
+                return refusal
 
             path = Path(file_path)
             if not path.exists():
@@ -8844,6 +8872,9 @@ class CoreService(MusicCommandsMixin):
             group = self.group_manager.get_group(group_id)
             if not group:
                 return {"status": "error", "message": f"Group {group_id} not found"}
+            refusal = group_post_refusal(self, group, "send_group_image")
+            if refusal:
+                return refusal
 
             # Parse and decode image (once)
             if not image_base64.startswith("data:image/"):
@@ -9128,6 +9159,9 @@ class CoreService(MusicCommandsMixin):
             group = self.group_manager.get_group(group_id)
             if not group:
                 return {"status": "error", "message": f"Group {group_id} not found"}
+            refusal = group_post_refusal(self, group, "send_group_voice_message")
+            if refusal:
+                return refusal
 
             # Decode audio
             try:

@@ -110,6 +110,23 @@ def _registered_tags(group_id: str) -> list:
     return tags
 
 
+def _on_roster(meta: dict, node_id: str):
+    """Whether this node is on the group's `members`; None when that cannot be told."""
+    if not node_id or not isinstance(meta, dict) or not isinstance(meta.get("members"), list):
+        return None
+    return node_id in meta["members"]
+
+
+def _this_node_on_roster(group_id: str):
+    """`_on_roster` for one group's metadata.json; None when it cannot be read."""
+    try:
+        with open(_find_group_dir(group_id) / "metadata.json", "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return _on_roster(meta, _get_node_id())
+
+
 def _identity_names(group_id: str, override=None) -> list:
     """Names this bridge answers to: --as, else registered tags, else cc_display_name."""
     if override:
@@ -144,6 +161,7 @@ def list_groups(with_chat_context: bool = False) -> list:
     if not conversations_dir.exists():
         return []
     groups, canonical_ids = [], []
+    node_id = _get_node_id()
     for d in sorted(conversations_dir.iterdir()):
         if d.is_dir() and (d / "metadata.json").exists():
             try:
@@ -153,6 +171,8 @@ def list_groups(with_chat_context: bool = False) -> list:
                     "group_id": d.name,
                     "name": meta.get("name", d.name),
                     "members": len(meta.get("members", [])),
+                    # False: this node was removed and cannot post there.
+                    "on_roster": _on_roster(meta, node_id),
                 })
                 canonical_ids.append(meta.get("group_id", d.name))
             except Exception:
@@ -509,6 +529,14 @@ async def send_group_message(group_id: str, text: str, name: str = None,
         return {"status": "error", "message": "@all refused"}
 
     canonical_id = _resolve_group_id(group_id)
+
+    # The backend refuses it too (group_access.posting_refusal); said here
+    # first, so the reason does not hide behind a connection error.
+    if _this_node_on_roster(group_id) is False:
+        message = (f"this node is not on the roster of group {group_id}: it was removed, "
+                   f"so it cannot post there")
+        print(f"[ERROR] refused: {message}. Nothing was sent.")
+        return {"status": "error", "message": message}
 
     try:
         import websockets
@@ -881,7 +909,9 @@ def main(argv=None):
         else:
             print(f"Found {len(groups)} group(s):\n")
             for g in groups:
-                print(f"  {g['group_id']} — {g['name']} ({g['members']} members)")
+                removed = ("  [REMOVED: this node is not on its roster, cannot post]"
+                           if g.get("on_roster") is False else "")
+                print(f"  {g['group_id']} — {g['name']} ({g['members']} members){removed}")
                 if g.get("chat_context"):
                     print(f"    {_format_chat_context(g['chat_context'])}")
         sys.exit(0)

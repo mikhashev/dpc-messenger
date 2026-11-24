@@ -61,8 +61,9 @@ class _Service:
 
 
 class _Group:
-    # Held, with no other member connected: no relay fan-out in this test.
-    members = [_P2P.node_id]
+    # Held, the author a member (an author off the roster is refused), and no
+    # other member connected: no relay fan-out in this test.
+    members = [_P2P.node_id, PEER]
 
 
 class _GroupManager:

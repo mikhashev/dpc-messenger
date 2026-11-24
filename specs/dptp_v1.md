@@ -3012,8 +3012,8 @@ removing itself (`roster_change_refusal`). That method is the rule's one owner:
   `name` and every node's `agents` and `agent_names`. ADR-038 part 2 limits `topic` to the
   creator, makes `name` immutable and lets a node change only its own agent entry (the
   creator may remove one). Enforced by the transport sender, as `members` is, those rules
-  would stop a field from crossing the star (a node reached only through another member)
-  and would refuse a node that takes part through `agents` alone; they wait for part 3.
+  would stop a field from crossing the star (a node reached only through another member);
+  they wait for part 3.
   The interface hides the topic edit from a node that is not the creator, and
   `update_group_topic` refuses it locally; no receiver does.
 - **Unsigned.** The record carries no signature (ADR-038 part 3), so the author of a roster
@@ -3207,8 +3207,7 @@ A message in a group: a human's, or an agent's.
    and nothing is answered. The test is the receiver's own record of the group, not the
    id's spelling: no `group-` prefix is required (the prefix is how this implementation
    makes ids, not a wire rule), and an id that names a 1:1 conversation is dropped like any
-   other unheld id. There is no membership test: a node that takes part in a group through
-   its `agents` entry need not be on `members`.
+   other unheld id. The membership test needs the author, so it is step 2's last part.
 2. **Author and verdict** (§4.2). Not all of `content_hash`, `signature`,
    `signer_node_id` present, or a `preimage_version` the receiver cannot recompute:
    `legacy`, and the author is the transport sender. `signer_node_id` differing from
@@ -3216,8 +3215,15 @@ A message in a group: a human's, or an agent's.
    fails or cannot be evaluated: `rejected`. No cached certificate for the signer:
    `unverified`, author as claimed. Otherwise `verified`, author as claimed
    (`_authenticate_author`, `group_handler.py:181-273`). `rejected`: the frame is dropped,
-   not stored, not relayed, not shown, and nothing is answered. `unverified` where the author
-   is not the transport sender: a `CERT_REQUEST` for the author goes to the transport sender.
+   not stored, not relayed, not shown, and nothing is answered. Then the **member test**: an
+   author (any verdict but `rejected`) that is not on the receiver's `members` is refused
+   before steps 3-8: nothing is stored, relayed, shown or woken, and no dedup key is kept.
+   When the author is the transport sender it is answered `GROUP_ACCESS_DENIED` with reason
+   `not_a_member`; a relayed copy is dropped with a WARNING and the relaying member is told
+   nothing, since it is not the node refused. An `agents` entry is not membership: a removal
+   keeps it so a re-add restores it, and nothing writes one for a node outside `members`.
+   `unverified` where the author is not the transport sender: a `CERT_REQUEST` for the
+   author goes to the transport sender.
 3. **Blocked author.** When the author or the `agent_owner` is in `blocked_nodes`, the
    message is stored and shown, but not relayed and it wakes nobody.
 4. **Duplicate.** A `group_id:message_id` already seen in this session, or already in the
@@ -3237,13 +3243,12 @@ A message in a group: a human's, or an agent's.
 
 **Reply:** none.
 
-**Not yet:** no step asks whether the author is on the roster. A `GROUP_TEXT` for a held
-group from a node that is not on its roster is stored, shown, and relayed to the whole
-roster. That is deliberate for now: a node can take part through `agents` without being on
-`members`, so a member rule would cut such a node off. The signature says
-who wrote the message and nothing about whether the author belongs to the group: the roster
-it would be checked against is unsigned (ADR-037 P1, membership as signed state, which ADR-038
-answers and has not built).
+**Not yet:** the roster the member test reads is unsigned (ADR-037 P1, membership as
+signed state, which ADR-038 answers and has not built), so a member whose copy is stale
+still stores and relays a removed node's post until the creator's roster reaches it. The
+history exchange (`GROUP_HISTORY_RESPONSE`) merges records by authors who are no longer
+members, because a former member's posts from before its removal are history; with no
+removal time on the roster it cannot tell those from a post made after.
 
 **Source:** `message_handlers/group_handler.py:169-437`; senders `service.py:6914-6996`
 (human), `7323-7476` (agent; `tool_calls` and `speed_summary` are removed from the copy
