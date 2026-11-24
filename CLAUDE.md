@@ -166,6 +166,13 @@ Coverage HTML lands in `htmlcov/index.html`. If `uv run pytest` fails with `uv t
 failed to canonicalize script path`, the tests are fine: run `uv run python -m pytest` and see
 [QUICK_START.md](QUICK_START.md#if-a-command-in-venv-stops-starting-windows) for the repair.
 
+**A test that waits reads a frozen clock, or keeps at least 50 ms of slack.** `time.monotonic` steps in
+15.6 ms ticks on Windows, so a test that compares two readings a few milliseconds apart, or waits
+a few milliseconds for something to happen, can pass on Linux and fail on Windows. The twin-wait test
+failed 7 runs in 1000 until it read a frozen clock (6c03484c, 02fa3f48). That is a property of the
+platform, not a flake to chase: freeze the clock (`freeze_clocks` in `tests/_card_lease_helpers.py`
+stops the card's clocks), or make the margin at least 50 ms.
+
 ## Commit message hook — one command per clone
 
 ```bash

@@ -79,6 +79,22 @@ CREATION_NEW_PROCESS_GROUP = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform
 LOOPBACK = "127.0.0.1"
 START_TIMEOUT_S = 60.0
 STOP_GRACE_S = 15.0
+
+
+def card_wait_words_for_a_start(display: str, estimate: Optional[Dict[str, Any]]) -> str:
+    """A person's line for a start by hand waiting for the card: "yue2.cpp is waiting for the card:
+    Whisper (turbo) is letting go, at most about 30 s", "..., about 6 min" or "..., time unknown". From
+    the lease's wait estimate (L10); an estimate that is a declared bound (`upper_bound`) says "at
+    most"."""
+    estimate = estimate or {}
+    behind = ", ".join(str(name) for name in estimate.get("behind") or []) or "another job on the card"
+    wait_s = estimate.get("wait_s") if estimate.get("known") else None
+    if not isinstance(wait_s, (int, float)) or isinstance(wait_s, bool) or not wait_s > 0:
+        when = "time unknown"
+    else:
+        amount = f"{max(1, round(wait_s))} s" if wait_s < 90 else f"{round(wait_s / 60)} min"
+        when = ("at most " if estimate.get("upper_bound") else "") + f"about {amount}"
+    return f"{display} is waiting for the card: {behind} is letting go, {when}"
 LOG_ROTATE_BYTES = 10 * 1024 * 1024
 LOG_KEEP = 3
 _HASH_CHUNK = 4 * 1024 * 1024
@@ -306,6 +322,8 @@ class SupervisedEngine:
         self._port: Optional[int] = None
         self._state = "stopped"
         self._reason: Optional[str] = None
+        # What a start by hand waits for on the card, while it waits (`_show_card_wait`), else None.
+        self._card_wait: Optional[Dict[str, Any]] = None
         self._last_exit: Optional[Dict[str, Any]] = None
         self._props: Optional[Dict[str, Any]] = None
         self._version: Optional[str] = None
@@ -322,6 +340,9 @@ class SupervisedEngine:
             f"music:{self.KEY}", kind="music", engine=self.ENGINE, display=self.DISPLAY,
             vram_mib=self.VRAM_ESTIMATE_MIB, yield_cost="engine", on_yield=self._yield_card,
             waits_for_engines=True, stop_hint=_STOP_HINT,
+            # The stop signals, waits `STOP_GRACE_S`, kills and waits as long again (`_stop_proc`): the
+            # wait estimate of whoever stands behind an idle engine counts that, as an upper bound.
+            yield_bound_s=2 * STOP_GRACE_S,
         )
 
     # -- what a subclass supplies ----------------------------------------------------
@@ -397,7 +418,8 @@ class SupervisedEngine:
 
     def _status(self, state: str, reason: str) -> EngineStatus:
         return EngineStatus(state=state, reason=reason, engine_id=self.ENGINE, name=self.NAME, key=self.KEY,
-                            supervised=True, version=self.version, models=self.status_models())
+                            supervised=True, version=self.version, models=self.status_models(),
+                            card_wait=self._card_wait)
 
     def status(self) -> EngineStatus:
         """The capability probe's answer. Synchronous and cheap."""
@@ -485,14 +507,39 @@ class SupervisedEngine:
         """The grant a start needs, asked for with `wait_s=0` when this engine holds none: granted at
         once on a free card, else `MusicEngineError("card_busy")` naming what holds it. With
         `yields_idle` (a start by hand) idle holders with no queue behind them are let go of first,
-        on the terms a queued job gets, and waited for (`CardLease.acquire`). Never under a client
-        lock: callers run it before `_the_lock` (yue2.cpp before its own start lock too)."""
+        on the terms a queued job gets, and waited for (`CardLease.acquire`), and the wait is shown:
+        `card_wait` in this engine's status (`_show_card_wait`) names what is being let go and the
+        estimate, until the grant or the refusal. Never under a client lock: callers run it before
+        `_the_lock` (yue2.cpp before its own start lock too)."""
         if self.card_lease.granted:
             return
         try:
-            await self.card_lease.acquire(what or f"start of {self.DISPLAY}", wait_s=0, yields_idle=yields_idle)
+            await self.card_lease.acquire(what or f"start of {self.DISPLAY}", wait_s=0, yields_idle=yields_idle,
+                                          on_wait=self._show_card_wait if yields_idle else None)
         except LeaseRefusal as exc:
             raise MusicEngineError("card_busy", f"{self.DISPLAY} cannot start now: {exc}") from None
+        finally:
+            if yields_idle:
+                self._set_card_wait(None)
+
+    def _show_card_wait(self, estimate: Dict[str, Any]) -> None:
+        """A start by hand's `on_wait`: what it waits for on the card, in the status the UI shows."""
+        self._set_card_wait({
+            "text": card_wait_words_for_a_start(self.DISPLAY, estimate),
+            "behind": list(estimate.get("behind") or []),
+            "wait_s": estimate.get("wait_s"), "known": bool(estimate.get("known")),
+            "upper_bound": bool(estimate.get("upper_bound")),
+        })
+
+    def _set_card_wait(self, wait: Optional[Dict[str, Any]]) -> None:
+        if wait == self._card_wait:
+            return
+        self._card_wait = wait
+        if self.on_change is not None:
+            try:
+                self.on_change(self.status())
+            except Exception:
+                logger.exception("%s: the state listener failed", self.DISPLAY)
 
     def _let_go_of_the_card(self, why: str) -> None:
         """The child is gone, or never came: nothing of it is on the card (ADR-052 L8)."""
@@ -545,6 +592,12 @@ class SupervisedEngine:
             reason = f"{self.DISPLAY} did not start: {exc}"
             self._set_state("error", reason)
             raise MusicEngineError("start_failed", reason) from exc
+        except BaseException:
+            # A cancel inside the spawn: no child came back, so none is counted, and the state must not
+            # stay `starting` for it (Zcode, follow-up 10 review, P2). Not a failure of the engine: `stopped`.
+            self._close_log()
+            self._set_state("stopped", f"{self.DISPLAY} start was cancelled before its child came up")
+            raise
         self._proc = proc
         try:
             await self._wait_healthy(proc, port)
@@ -749,7 +802,13 @@ class SupervisedEngine:
         """The backend's stop: stop the child and the idle timer, and let the card go however the stop
         ended (Zcode #87-4). A stop that failed, or was cancelled before it could run (waiting for
         `_the_lock`), leaves the child killed and the card let go. Never raises, except a
-        cancellation, which goes on after the release."""
+        cancellation, which goes on after the release.
+
+        A start that owns `_the_lock` and has no child yet keeps the card (the guard below). A start
+        outside `_the_lock` does not: yue2.cpp's `start` runs `prepare_adapters` under its own
+        `_start_lock` with `_the_lock` free, so a `shutdown` in that window releases the card, and the
+        start is stopped by the grant check in `_start_child` (`card_busy`, "lost the card before its
+        start"), not by the guard."""
         task, self._idle_task = self._idle_task, None
         if task is not None:
             task.cancel()
@@ -770,7 +829,10 @@ class SupervisedEngine:
                 # child yet: the card is its grant, and it lets go on its own failure path
                 # (`_start_child`). Releasing it here would let that child come up with no lease, unseen by
                 # L11 (Zcode #14, follow-up 10). A child that exists is killed above and the card let go
-                # here; the start then finds it dead and releases again, which does nothing.
+                # here; the start then finds it dead and releases again, which does nothing. (This guard
+                # sees only a start under `_the_lock`: yue2.cpp's `prepare_adapters` window is under its
+                # own `_start_lock`, the lock is free here, the card is released, and the grant check in
+                # `_start_child` is what stops that start.)
                 logger.info("%s: the stop did not finish while a start owns the engine; the start keeps "
                             "the card", self.DISPLAY)
             else:

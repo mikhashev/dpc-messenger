@@ -52,8 +52,15 @@ def test_a_queued_jobs_estimate_is_the_text_estimate_divided_by_the_factor_times
     # The cap bounds the song: a 30 s cap never reads as a longer one (30 / 3.5 = 8.571 s, two variants).
     capped = {**params, "duration_s": 30}
     assert js.music_expected_s(capped) == pytest.approx(17.143, abs=0.001)
-    # An instrumental is the intro alone, as the text estimate says (20 s at factor 3.5 = 5.714 s).
-    assert js.music_expected_s({**params, "lyrics": None, "variants": 1}) == pytest.approx(5.714, abs=0.001)
+    # An instrumental has no lines to count: its song is the nominal length, the job's cap (Mike, 2026-11-24,
+    # group #33), not the intro alone (which was 20 s at factor 3.5 = 5.714 s). A 360 s cap at factor 3.0
+    # is 120 s; the form's default cap of 180 s at factor 3.143 is 57.27 s; with no cap in the params, the
+    # default one. The text estimate itself (the short-cap warning's) is unchanged.
+    assert js.music_expected_s({**params, "lyrics": None, "variants": 1}) == pytest.approx(120.0, abs=0.001)
+    assert js.music_expected_s({**params, "lyrics": None, "variants": 1, "duration_s": 180}) ==         pytest.approx(57.27, abs=0.01)
+    assert js.music_expected_s({"engine": "yue2", "lyrics": None, "variants": 1}) == pytest.approx(57.27, abs=0.01)
+    assert js.music_expected_s({**params, "lyrics": None, "variants": 2, "duration_s": 180}) ==         pytest.approx(114.55, abs=0.01)
+    assert js.estimate_yue2_seconds(None) == js.YUE2_INTRO_S
     assert js.music_expected_s({"engine": "acestep", "lyrics": lyrics, "duration_s": 30, "variants": 2}) is None
 
 

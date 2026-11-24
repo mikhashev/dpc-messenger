@@ -131,6 +131,10 @@ class EngineStatus:
     version: Optional[str] = None
     models: Mapping[str, str] = field(default_factory=dict)
     key: Optional[str] = None     # the job-param word: "yue2", "acestep"
+    # A start by hand waiting for the card (ADR-052 section 3.2): `{text, behind, wait_s, known,
+    # upper_bound}`; None when nothing waits. `as_dict` always carries the key, so the UI's merge of
+    # a later event clears a finished wait.
+    card_wait: Optional[Mapping[str, Any]] = None
 
     def __post_init__(self) -> None:
         if self.state not in ENGINE_STATES:
@@ -147,6 +151,7 @@ class EngineStatus:
             "id": self.engine_id, "key": self.key, "name": self.name, "state": self.state,
             "available": self.available, "reason": self.reason, "supervised": self.supervised,
             "version": self.version, "models": dict(self.models),
+            "card_wait": dict(self.card_wait) if self.card_wait else None,
         }
 
 

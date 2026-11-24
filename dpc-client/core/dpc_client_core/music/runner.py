@@ -896,7 +896,12 @@ class MusicJobRunner:
                                   "without all of them the batch index of each cannot be told")
             await self._progress(job_id, 0.8)
             job = await self._get(job_id)
-            payloads = {p["name"]: p["sha256"] for p in (job or {}).get("payloads") or []}
+            # Only the requests and the answer acestep.cpp took part in: a job that fell back from YuE2
+            # holds `synth.vN.request.json` files that were written and never sent (Zcode, follow-up 10
+            # review, P2), and a record names only what was sent.
+            sent_here = (LM_PAYLOAD, LM_RESULT_PAYLOAD, SYNTH_PAYLOAD)
+            payloads = {p["name"]: p["sha256"] for p in (job or {}).get("payloads") or []
+                        if p["name"] in sent_here}
             identity = await asyncio.to_thread(engine.identity)
             slug = slug_of(params.get("style") or "")
             for index, (_h, start, end) in enumerate(audio):

@@ -239,3 +239,13 @@ async def test_the_command_deletes_answers_ok_and_never_raises_on_a_refusal(tmp_
         assert len(announced) == 1 and announced[0]["reasons"] == ["export"] and announced[0]["track_ids"] == ["trk_a"]
     finally:
         await service.stop_music_library()
+
+
+def test_delete_music_export_is_a_slow_command_like_its_neighbours():
+    """The delete walks the export folder and can wait on Windows for a file another program holds, so the
+    door gives it the long timeout (`@slow_command`). Removing the decorator must fail here (Zcode,
+    follow-up 10 review, P2)."""
+    from dpc_client_core.music import commands
+    for name in ("delete_music_export", "export_music_track", "export_music_playlist"):
+        assert name in MUSIC_COMMANDS
+        assert getattr(getattr(commands.MusicCommandsMixin, name), "dpc_slow", False) is True, name

@@ -65,8 +65,10 @@ _LEASE_POLL_S = 0.1
 # How soon a waiter asks a holder again after `refused` or `could_not_let_go` is the supervisors'
 # `_LEASE_ASK_AGAIN_S`, read where used; at most `_MAX_SWAP_ROUNDS` asks per holder and waiter.
 # The wait estimate's figure for a cheap holder letting go (Whisper unloads in 0.35-0.61 s, ADR-052
-# "GPU figures on speech"). A music engine's stop has no figure: unknown. A supervisor that is going
-# counts its own `_expected_stop_s()` (`_supervisor_stop_estimate`).
+# "GPU figures on speech"). A music engine's stop has no measured figure, but a bound: the client
+# declares `yield_bound_s` (the longest its stop can take: two `STOP_GRACE_S`, the signal wait and the
+# wait after the kill), and the estimate counts that bound and says so (`upper_bound`). A supervisor
+# that is going counts its own `_expected_stop_s()` (`_supervisor_stop_estimate`).
 _CHEAP_YIELD_S = 1.0
 # A peer's whole trip (ADR-052 L13, point 2): its wait and its own `expected_s` fit in this, or it is
 # refused at once, whatever bound its door passes. A rule, not only arithmetic (Mike #17, 2026-11-23):
@@ -272,7 +274,8 @@ class CardLease:
                  waits_for_engines: bool = False,
                  shares_with: Optional[Callable[["CardLease"], bool]] = None,
                  eta_s: Callable[[], Optional[float]] = lambda: None,
-                 stop_hint: str = ""):
+                 stop_hint: str = "",
+                 yield_bound_s: Optional[float] = None):
         if not holder or not isinstance(holder, str):
             raise ValueError(f"a card lease needs a holder name, not {holder!r}")
         if yield_cost not in _YIELD_COSTS:
@@ -288,6 +291,11 @@ class CardLease:
         self.display = display
         self.vram_mib = vram_mib
         self.yield_cost = yield_cost
+        # The longest a yield of cost `engine` can take, in seconds: an upper bound the wait estimate
+        # counts for it (`_yield_estimate`), never a measured figure. None: the yield has no figure.
+        if yield_bound_s is not None and not _positive(yield_bound_s):
+            raise ValueError(f"yield_bound_s is seconds above 0, or None for none, never {yield_bound_s!r}")
+        self.yield_bound_s = None if yield_bound_s is None else float(yield_bound_s)
         self._on_yield = on_yield
         # Whether this lease waits for a busy supervisor and swaps an idle one out by the owner-start
         # rule, with the swap on (section 2.2 item 12; ADR-052 section 3.2 builds music engines with
@@ -873,14 +881,17 @@ def _may_ask(waiter: _LeaseWaiter) -> bool:
 
 def _estimate(waiter: _LeaseWaiter, blockers: Optional[List[Tuple[str, Any, Optional[str]]]] = None
               ) -> Dict[str, Any]:
-    """`{"wait_s", "known", "behind", "where"}`. The holders on the card go together (the longest
-    counts); the waiters ahead go one after another (their `expected_s` add up). Any part unknown:
-    `wait_s` None and `known` False, never 0."""
+    """`{"wait_s", "known", "behind", "where"}`, plus `"upper_bound": True` when a part of `wait_s` is a
+    declared bound, not a measured figure (a music engine's yield, `yield_bound_s`): the real wait is
+    at most that. The holders on the card go together (the longest counts); the waiters ahead go one
+    after another (their `expected_s` add up). Any part unknown: `wait_s` None and `known` False,
+    never 0."""
     if blockers is None:
         blockers = _blockers(waiter)
     if not blockers:
         return {"wait_s": None, "known": False, "behind": [], "where": "lease_line"}
     known, holders_s, ahead_s = True, 0.0, 0.0
+    bounded = False
     behind: List[str] = []
     wheres = set()
     may_ask = _may_ask(waiter)
@@ -890,10 +901,12 @@ def _estimate(waiter: _LeaseWaiter, blockers: Optional[List[Tuple[str, Any, Opti
         if kind == "holder" and _a_lease(what):
             if what._draining:
                 seconds, where = _yield_estimate(what), "yielding"
+                bounded = bounded or _yield_is_a_bound(what, seconds)
             elif what._busy_for_the_card(state, before=before):
                 seconds, where = what._eta(), "busy_holder"
             elif may_ask:
                 seconds, where = _yield_estimate(what), "yielding"
+                bounded = bounded or _yield_is_a_bound(what, seconds)
             else:
                 seconds, where = None, "busy_holder"
             behind.append(what._named())
@@ -923,16 +936,28 @@ def _estimate(waiter: _LeaseWaiter, blockers: Optional[List[Tuple[str, Any, Opti
         wheres.add(where)
         if seconds is None:
             known = False
-    return {
+    result: Dict[str, Any] = {
         "wait_s": holders_s + ahead_s if known else None,
         "known": known,
         "behind": behind,
         "where": next(where for where in _WHERE_ORDER if where in wheres),
     }
+    if bounded and known:
+        result["upper_bound"] = True
+    return result
 
 
 def _yield_estimate(holder: CardLease) -> Optional[float]:
-    return _CHEAP_YIELD_S if holder.yield_cost == "cheap" else None
+    """Seconds `holder` takes to let go: the cheap figure, else the bound its client declared for an
+    engine's stop (`yield_bound_s`: at most this, never a measurement), else unknown."""
+    if holder.yield_cost == "cheap":
+        return _CHEAP_YIELD_S
+    return holder.yield_bound_s
+
+
+def _yield_is_a_bound(holder: CardLease, seconds: Optional[float]) -> bool:
+    """Whether `seconds`, from `_yield_estimate(holder)`, is a declared bound and not a figure."""
+    return seconds is not None and holder.yield_cost != "cheap"
 
 
 def _supervisor_stop_estimate(sup: Any) -> Optional[float]:
@@ -1015,7 +1040,9 @@ def _within_the_fitted_peak(waiter: "_LeaseWaiter") -> bool:
 
 def _declared_peak(holder: Any) -> Optional[int]:
     """A resident's declared peak in MiB, or None: a lease's `vram_mib`, a supervisor child's
-    `predicted_vram_mib` (llama-server; a Strata child has none)."""
+    `predicted_vram_mib`. llama-server records its predicted peak; a Strata child declares the card's total
+    less its `--vram-reserve-mib` (`strata_supervisor.declared_peak_of`), and still has none (None) when
+    the total could not be read or its start config carries no reserve."""
     figure = holder.vram_mib if _a_lease(holder) else getattr(holder, "predicted_vram_mib", None)
     return figure if isinstance(figure, int) and not isinstance(figure, bool) and figure > 0 else None
 

@@ -284,8 +284,9 @@ def engine_of(params: Any) -> str:
 def estimate_yue2_seconds(lyrics: Optional[str]) -> float:
     """About how long YuE2 needs to sing these lyrics: `YUE2_INTRO_S` plus
     `YUE2_SECONDS_PER_LINE` per sung line (section tags such as [verse] and blank lines do
-    not count). An instrumental (None) is the intro alone. An estimate for the short-cap
-    warning, never a refusal."""
+    not count). An instrumental (None) is the intro alone: that is the short-cap warning's figure (an
+    instrumental gets no warning); the queue's ETA for an instrumental counts the nominal length
+    instead (`music_expected_s`). An estimate, never a refusal."""
     if not lyrics:
         return YUE2_INTRO_S
     lines = [ln.strip() for ln in lyrics.splitlines()]
@@ -324,6 +325,9 @@ def music_expected_s(params: Any) -> Optional[float]:
     an estimate, or None for unknown (ADR-052 L10, "a job that has not started"): YuE2's text estimate
     per variant (`estimate_yue2_seconds`, never more than the duration cap, which the song cannot
     outrun), divided by the factor for that length (audio seconds per wall second), times the variants.
+    An instrumental (no lyrics) has no lines to count: its song is the nominal length, the cap the job
+    carries (`duration_s`, the form's value, `YUE2_DURATION_DEFAULT_S` = 180 s when absent; the
+    instrumental adapter's README says "3-5 minutes"), not the intro alone (Mike, 2026-11-24, group #33).
     It routes and informs, never refuses. acestep.cpp has no measured factor: unknown."""
     if not isinstance(params, Mapping) or engine_of(params) != ENGINE_YUE2:
         return None
@@ -332,7 +336,8 @@ def music_expected_s(params: Any) -> Optional[float]:
         cap = float(params.get("duration_s") or YUE2_DURATION_DEFAULT_S)
     except (TypeError, ValueError):
         return None
-    audio_s = min(estimate_yue2_seconds(params.get("lyrics")), cap)
+    lyrics = params.get("lyrics")
+    audio_s = min(estimate_yue2_seconds(lyrics), cap) if lyrics else cap
     return yue2_wall_s(audio_s) * variants
 
 

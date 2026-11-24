@@ -82,7 +82,7 @@ def test_a_one_half_native_adapter_in_the_loras_folder_is_offered_whole_and_copi
         "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
     assert engine.request_adapters([{"name": INST, "music": 1.0, "sound": 1.0}]) == [
         {"name": f"{INST}-music.safetensors", "scale": 1.0}]
-    assert engine.instrumental_lyrics_for([{"name": INST}]) == INSTRUMENTAL_LYRICS
+    assert engine.instrumental_lyrics_for([{"name": INST}]) == "[instrumental]"
     assert engine.instrumental_lyrics_for([{"name": VOICES[0]}]) is None
 
     (source.parent / "adapter_config.json").write_text('{"lora_alpha": 32}')
@@ -133,7 +133,10 @@ async def test_an_instrumental_job_runs_on_yue2_with_the_adapter_and_its_take_na
         (path,) = record.glob("*-synth.json")
         body = json.loads(path.read_bytes())
         assert body["adapters"] == [{"name": f"{INST}-music.safetensors", "scale": 1.0}]
-        assert body["lyrics"] == INSTRUMENTAL_LYRICS and body["cot"] == "full"
+        # The literal, not the constant: the adapter's README asks for exactly this bare tag, and a test that
+        # compares the constant with itself passes an empty tag (Zcode, follow-up 10 review, P2).
+        assert INSTRUMENTAL_LYRICS == "[instrumental]"
+        assert body["lyrics"] == "[instrumental]" and body["cot"] == "full"
 
         out = home / "music" / "generated" / job["id"]
         sidecar = json.loads(next(out.glob("*_v1.json")).read_text(encoding="utf-8"))
@@ -143,6 +146,15 @@ async def test_an_instrumental_job_runs_on_yue2_with_the_adapter_and_its_take_na
         assert sidecar["engine_choice"]["rule"] == "instrumental" and sidecar["engine_choice"]["engine"] == "yue2"
         assert sidecar["engine_choice"]["fell_back"] is None and sidecar["instrumental"] is True
         assert str(tmp_path) not in json.dumps(sidecar)
+        # Mike, 2026-11-24 (#32): the YuE2 base and the instrumental adapter are CC BY-NC 4.0, and the take
+        # says so, so a non-commercial take can be told apart later. The VAE and anything else is `unknown`.
+        licence = sidecar["licence"]
+        assert licence["non_commercial"] is True
+        assert licence["key"] == "cc-by-nc-4.0+mit+unknown"
+        by_role = {c["role"]: c for c in licence["components"]}
+        assert by_role["backbone"]["licence"] == "cc-by-nc-4.0" and by_role["adapter"]["licence"] == "cc-by-nc-4.0"
+        assert by_role["adapter"]["name"] == INST and by_role["engine"]["licence"] == "mit"
+        assert by_role["vae"]["licence"] == "unknown"
 
 
 @pytest.mark.asyncio
@@ -168,6 +180,7 @@ async def test_without_the_adapter_an_instrumental_job_goes_to_acestep_and_says_
         out = home / "music" / "generated" / job["id"]
         sidecar = json.loads(next(out.glob("*_v1.json")).read_text(encoding="utf-8"))
         assert sidecar["engine"] == "acestep.cpp" and sidecar["engine_choice"]["engine"] == "acestep"
+        assert sidecar["licence"]["key"] == "mit" and sidecar["licence"]["non_commercial"] is False
 
 
 @pytest.mark.asyncio
@@ -194,6 +207,12 @@ async def test_an_adapter_that_does_not_load_moves_the_running_job_to_acestep(tm
         out = home / "music" / "generated" / job["id"]
         sidecar = json.loads(next(out.glob("*_v1.json")).read_text(encoding="utf-8"))
         assert sidecar["engine_choice"]["fell_back"]["from"] == "yue2"
+        # The job holds the YuE2 request it wrote and never sent, but the take's record names only what
+        # acestep.cpp was sent and answered (Zcode, follow-up 10 review, P2).
+        assert set(sidecar["payloads"]) == {"lm.request.json", "lm.result.json", "synth.request.json"}
+        assert not any(name.startswith("synth.v") for name in sidecar["payloads"])
+        # The take is acestep's: MIT, not the CC BY-NC of the YuE2 parts it fell back from.
+        assert sidecar["licence"]["key"] == "mit" and sidecar["licence"]["non_commercial"] is False
 
 
 @pytest.mark.asyncio

@@ -444,6 +444,28 @@ describe('what the jobs list and the engine line say', () => {
         expect(engineCanStop({ state: 'stopped', reason: '' })).toBe(false);
     });
 
+    it('a start by hand that waits for the card shows what is letting go and an upper bound', () => {
+        const wait = {
+            text: 'yue2.cpp is waiting for the card: Whisper (turbo) is letting go, at most about 30 s',
+            behind: ['Whisper (turbo)'], wait_s: 30, known: true, upper_bound: true,
+        };
+        // Still `stopped` while it waits: the wait row replaces the "DPC starts it when a job runs" line.
+        expect(engineStatusText({ state: 'stopped', reason: '', card_wait: wait })).toBe(wait.text);
+        expect(engineStatusText({ state: 'error', reason: 'x', card_wait: wait })).toBe(wait.text);
+        expect(engineStatusText({ state: 'stopped', reason: '', card_wait: null })).toBe('Engine stopped (DPC starts it when a job runs)');
+        expect(engineStatusText({ state: 'starting', reason: '', card_wait: wait })).toBe('Engine starting…');
+        expect(engineCanStart({ state: 'stopped', reason: '', card_wait: wait })).toBe(true);
+
+        // The event that ends the wait carries `card_wait: null`, and the merge clears the row.
+        const waiting = reduceMusicEvent({ jobs: [], engine: null, engines: {} } as any, 'music_engine_status',
+            { engine: { key: 'yue2', state: 'stopped', reason: 'r', card_wait: wait } });
+        expect(engineStatusText(waiting.engine)).toBe(wait.text);
+        const done = reduceMusicEvent(waiting, 'music_engine_status',
+            { engine: { key: 'yue2', state: 'starting', reason: 'r', card_wait: null } });
+        expect(engineStatusText(done.engine)).toBe('Engine starting…');
+        expect(done.engine?.card_wait).toBeNull();
+    });
+
     it('Generate follows the capability report', () => {
         expect(fromTextSupport(null).supported).toBe(false);
         expect(fromTextSupport({ job_types: { generate_from_text: { status: 'unsupported', reason: 'binary missing' } } }))

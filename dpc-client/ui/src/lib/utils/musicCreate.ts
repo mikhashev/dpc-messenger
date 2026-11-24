@@ -99,6 +99,18 @@ export interface MusicEngine {
     reason: string;
     version?: string | null;
     busy?: boolean;
+    /** A start by hand waiting for the card (the core's `card_wait`): what is letting go and for how
+     *  long, `text` being the person's line; null when nothing waits. */
+    card_wait?: MusicEngineCardWait | null;
+}
+
+export interface MusicEngineCardWait {
+    text: string;
+    behind?: string[];
+    wait_s?: number | null;
+    known?: boolean;
+    /** The figure is the longest the wait can take, not an estimate. */
+    upper_bound?: boolean;
 }
 
 export interface FailureClass {
@@ -290,6 +302,9 @@ export function jobsToPoll(jobs: readonly MusicJob[], lastSeen: Readonly<Record<
 export function engineStatusText(engine: MusicEngine | null | undefined): string {
     if (!engine) return 'Engine status unknown';
     const reason = (engine.reason ?? '').trim();
+    // A start by hand that waits for the card (before the child exists: the state is still `stopped`).
+    const wait = (engine.card_wait?.text ?? '').trim();
+    if (wait && (engine.state === 'stopped' || engine.state === 'error')) return wait;
     switch (engine.state) {
         case 'not_built': return `Engine not available: ${reason || 'not built in DPC'}`;
         case 'not_installed': return `Engine not installed: ${reason || 'binary or weights missing'}`;

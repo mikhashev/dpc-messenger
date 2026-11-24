@@ -16,7 +16,8 @@ extensions, because ADR-051 Q4 and the metadata scope need them:
 - `hash_notes`: short strings saying why the hash is the kind it is (`"ffmpeg
   absent"`, `"ffmpeg could not read the audio"`); empty for a normal hash.
 - `provenance`: the small summary of the file's own `mp.provenance/1` record (`{engine, seed,
-  has_codes, codes_by_hash_only, genome_basis?, genome_sha256?, intent_sha256?, render_sha256?};
+  has_codes, codes_by_hash_only, licence_key?, non_commercial?, genome_basis?, genome_sha256?, intent_sha256?,
+  render_sha256?};
   an older record without `genome_basis` gives `legacy_genome_sha256?` / `legacy_render_sha256?`
   instead, see provenance.py), read on a scan with a size cap and a strict check (`provenance.read_summary`). Never a path; absent when the file has no
   good record.
@@ -270,8 +271,8 @@ _LRCLIB_KEYS = {"id", "artist_name", "track_name", "album_name", "duration", "sy
 _TRANSCRIPTION_KEYS = {"provider", "model"}
 # The clean-up that ran on it (music/lyrics_filter.py), optional so older records load.
 _TRANSCRIPTION_FILTER_KEYS = {"version", "dropped", "kept_raw", "split_by_words", "split_proportional", "words"}
-
 _TRANSCRIPTION_FILTER_OPTIONAL = {"words_unavailable"}
+
 
 def validate_lyrics(lyrics: Any) -> None:
     """Raise `SchemaError` unless `lyrics` has the shape of `mp.lyrics/1` (SPEC §4)."""
@@ -333,10 +334,10 @@ def validate_lyrics(lyrics: Any) -> None:
             _expect(s, all(_is_int(flt[k]) for k in ("version", "dropped", "split_by_words", "split_proportional"))
                     and isinstance(flt["kept_raw"], bool) and isinstance(flt["words"], bool),
                     "'transcription.filter' counts must be integers and 'kept_raw', 'words' booleans")
-
             if "words_unavailable" in flt:
                 _expect(s, flt["words_unavailable"] is True,
                         "'transcription.filter.words_unavailable' must be true when present")
+
 
 VALIDATORS: Dict[str, Any] = {
     LIBRARY_ENTRY: validate_library_entry,

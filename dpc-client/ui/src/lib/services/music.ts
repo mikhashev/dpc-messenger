@@ -152,13 +152,46 @@ export async function loadMusicLibrary(quiet = false): Promise<void> {
  *  (its own call); after that the core's `music_library_changed` is the only trigger. */
 export function setMusicLibraryWatch(on: boolean): void {
     watching = on;
+    if (!on && eventTimer !== null) {
+        clearTimeout(eventTimer);
+        eventTimer = null;
+    }
+}
+
+/** The least time between two reads the core's events start (hashing sends up to two events a second,
+ *  and each read is the whole library, the playlists and the folders): an event inside it waits for one
+ *  trailing read at its end, so the last change is always read and the burst costs one read a second. */
+export const EVENT_REREAD_MIN_MS = 1000;
+let lastEventReadAt = 0;
+let eventTimer: ReturnType<typeof setTimeout> | null = null;
+
+function readForAnEvent(): void {
+    lastEventReadAt = Date.now();
+    void loadMusicLibrary(true);
 }
 
 /** A `music_library_changed` event from the core: read the library again, once, when the
- *  window shows a library that has been read. A closed window reads nothing; it reads on open. */
+ *  window shows a library that has been read. A closed window reads nothing; it reads on open.
+ *  An event that comes while a read is under way (the first read on opening included, whose status is
+ *  `loading`) is remembered and read once more when that read ends: the read may have started before
+ *  the change. A burst of events is coalesced (`EVENT_REREAD_MIN_MS`). */
 export function noteMusicLibraryChanged(_payload?: unknown): void {
-    if (!watching || get(musicLibrary).status !== 'ready') return;
-    void loadMusicLibrary(true);
+    if (!watching) return;
+    if (loading) {
+        readAgain = true;
+        return;
+    }
+    if (get(musicLibrary).status !== 'ready') return;
+    const wait = lastEventReadAt + EVENT_REREAD_MIN_MS - Date.now();
+    if (wait <= 0) {
+        readForAnEvent();
+        return;
+    }
+    if (eventTimer !== null) return;
+    eventTimer = setTimeout(() => {
+        eventTimer = null;
+        if (watching && get(musicLibrary).status === 'ready') readForAnEvent();
+    }, wait);
 }
 
 /** The library refresh never touches the audio element, `currentTime`, the queue or

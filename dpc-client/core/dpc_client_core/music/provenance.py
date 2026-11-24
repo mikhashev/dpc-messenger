@@ -49,6 +49,15 @@ canonical JSON (sorted keys, no spaces, UTF-8).
 - `render_sha256` is the hash of the genome id plus the substrate (the batch index is in it), so
   it says "repeatable exactly like this". Group by genome, never by render.
 
+**Licence** (Mike, 2026-11-24, group #32; ADR-051 D17). `licence` is `{key, non_commercial,
+components}`, written by `licence_record`: each part the take was made with (engine code, weights,
+each adapter) with its licence key, the take's `key` the sorted distinct component keys joined by `+`
+(`"cc-by-nc-4.0+mit+unknown"`), and `non_commercial` true when any component is a non-commercial
+licence, false when every component is known and none is, null when one is unknown and none is known
+non-commercial. A licence this module has no source for is `unknown`, never a guess. It sits outside the
+genotype and the substrate, so no id changes. `summarize` carries `licence_key` and `non_commercial`
+into the library entry, so takes that must stay non-commercial can be told apart without opening files.
+
 **Legacy records.** Until 2026-11-22 `genome_sha256` was the hash of the whole genotype bucket
 (the wide definition), and 55 re-tagged files carry that value. A record **without
 `genome_basis` is legacy**: its stored `genome_sha256` / `render_sha256` mean the wide
@@ -106,6 +115,58 @@ _BIG_FIELDS = (
     ("semantic_tokens", "semantic_tokens_sha256", "semantic_tokens_count", None),
     ("score_abc", "score_abc_sha256", None, None),
 )
+
+# -- licences (module docstring, "Licence") ------------------------------------------------------
+
+LICENCE_UNKNOWN = "unknown"
+NON_COMMERCIAL_LICENCES = frozenset({"cc-by-nc-4.0", "cc-by-nc-sa-4.0"})
+# Where each figure comes from: acestep.cpp and yue2.cpp code, and acestep.cpp's GGUF weights, are MIT
+# (ai-studio experiments/music-player/engine/acestep-cpp/BUILD.md "License", yue2-cpp/BUILD.md "Repo");
+# the stock YuE2 backbone is m-a-p/YuE2-3B, cc-by-nc-4.0 (yue2-cpp/BUILD.md "Official weights"), the RS-TW
+# backbone is Ruach Studio's finetune, CC BY-NC-SA 4.0 (yue2-cpp/trial.md), the instrumental adapter
+# `ar_lora_inst_v3abc` is CC BY-NC 4.0 (its README, ADR-051 D17; `yue2.py`). Nothing else has a source here:
+# the VAE and the Ruach voice adapters are `unknown`.
+_ENGINE_CODE_LICENCE = {"acestep.cpp": "mit", "yue2.cpp": "mit"}
+_ACESTEP_WEIGHTS_LICENCE = "mit"
+_YUE2_BACKBONE_LICENCE = {"stock": "cc-by-nc-4.0", "rs-tw": "cc-by-nc-sa-4.0"}
+INSTRUMENTAL_ADAPTER_NAME = "YuE2-instrumental-cot-full-loras"
+INSTRUMENTAL_ADAPTER_SOURCE_PREFIX = "ar_lora_inst_v3abc"
+_LICENCE_KEY_RE = re.compile(r"^[a-z0-9.+-]{1,96}$")
+
+
+def _adapter_licence(adapter: Mapping[str, Any]) -> str:
+    name = str(adapter.get("name") or "")
+    source = adapter.get("source") if isinstance(adapter.get("source"), Mapping) else {}
+    file = str(source.get("file") or "")
+    if name.lower() == INSTRUMENTAL_ADAPTER_NAME.lower() or file.lower().startswith(INSTRUMENTAL_ADAPTER_SOURCE_PREFIX):
+        return "cc-by-nc-4.0"
+    return LICENCE_UNKNOWN
+
+
+def licence_record(engine: str, *, backbone: Optional[str] = None, adapters: Any = ()) -> Dict[str, Any]:
+    """The take's `licence` (module docstring): `{key, non_commercial, components}` for what it was made
+    with. `engine` is the record's engine id; `backbone` and `adapters` (the record's adapter list, each
+    `{name, source: {file}}`) apply to yue2.cpp. An engine this module does not know is `unknown`."""
+    parts: List[Dict[str, str]] = [
+        {"role": "engine", "name": engine, "licence": _ENGINE_CODE_LICENCE.get(engine, LICENCE_UNKNOWN)}]
+    if engine == "acestep.cpp":
+        parts.append({"role": "weights", "name": "acestep.cpp models", "licence": _ACESTEP_WEIGHTS_LICENCE})
+    elif engine == "yue2.cpp":
+        parts.append({"role": "backbone", "name": f"YuE2 backbone {backbone}",
+                      "licence": _YUE2_BACKBONE_LICENCE.get(str(backbone), LICENCE_UNKNOWN)})
+        parts.append({"role": "vae", "name": "YuE2 VAE", "licence": LICENCE_UNKNOWN})
+        for adapter in adapters or ():
+            if isinstance(adapter, Mapping):
+                parts.append({"role": "adapter", "name": str(adapter.get("name")), "licence": _adapter_licence(adapter)})
+    else:
+        parts.append({"role": "weights", "name": f"{engine} models", "licence": LICENCE_UNKNOWN})
+    keys = {p["licence"] for p in parts}
+    if keys & NON_COMMERCIAL_LICENCES:
+        non_commercial: Optional[bool] = True
+    else:
+        non_commercial = None if LICENCE_UNKNOWN in keys else False
+    return {"key": "+".join(sorted(keys)), "non_commercial": non_commercial, "components": parts}
+
 
 REPRODUCIBLE_WITHIN = {
     "acestep.cpp": ("same binary build, same GPU backend and driver, same synth_batch_size and batch index; "
@@ -364,6 +425,7 @@ def build_acestep_record(*, job_id: str, variant: int, created_at: str, params: 
     rec = _base(engine="acestep.cpp", job_id=job_id, variant=variant, created_at=created_at, identity=identity,
                 device=device, payloads=payloads)
     _add_engine_choice(rec, engine_choice)
+    rec["licence"] = licence_record("acestep.cpp")
     codes = str(lm_result.get("audio_codes") or "")
     lyrics = lm_request.get("lyrics")
     chosen_lyrics = lm_result.get("lyrics")
@@ -420,6 +482,7 @@ def build_yue2_record(*, job_id: str, variant: int, created_at: str, params: Map
     rec = _base(engine="yue2.cpp", job_id=job_id, variant=variant, created_at=created_at, identity=identity,
                 device=device, payloads=payloads)
     _add_engine_choice(rec, engine_choice)
+    rec["licence"] = licence_record("yue2.cpp", backbone=backbone, adapters=identity.get("adapters"))
     tokens = str(replay.get("semantic_tokens") or "")
     abc = str(replay.get("abc") or "")
     lyrics = sent.get("lyrics")
@@ -617,6 +680,13 @@ def summarize(rec: Mapping[str, Any]) -> Dict[str, Any]:
         "has_codes": bool(isinstance(codes, str) and codes.strip()),
         "codes_by_hash_only": bool(set(refs) & {"audio_codes", "semantic_tokens"}),
     }
+    licence = rec.get("licence")
+    if isinstance(licence, dict):
+        key = licence.get("key")
+        if isinstance(key, str) and _LICENCE_KEY_RE.match(key):
+            out["licence_key"] = key
+            nc = licence.get("non_commercial")
+            out["non_commercial"] = nc if isinstance(nc, bool) else None
     basis = rec.get("genome_basis")
     narrow = isinstance(basis, str) and basis != NOT_STORED
     if narrow:

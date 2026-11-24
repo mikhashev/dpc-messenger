@@ -8,7 +8,7 @@ import playerUtils from '../utils/musicPlayer.ts?raw';
 
 const h = vi.hoisted(() => {
     (globalThis as any).window = { localStorage: { getItem: () => null, setItem: () => {} } };
-    return { reads: 0, exportReads: 0, deletes: [] as string[], deleteAnswer: { ok: true } as any };
+    return { reads: 0, exportReads: 0, deletes: [] as string[], deleteAnswer: { ok: true } as any, gate: null as Promise<void> | null };
 });
 
 vi.mock('$lib/coreService', () => {
@@ -17,7 +17,7 @@ vi.mock('$lib/coreService', () => {
     return {
         addMusicFolder: unavailable, createMusicPlaylist: unavailable, deleteMusicPlaylist: unavailable,
         removeMusicFolder: unavailable, rescanMusicFolder: unavailable, updateMusicPlaylist: unavailable,
-        listMusicLibrary: async () => { h.reads += 1; return { ok: true, data: { entries: [] } }; },
+        listMusicLibrary: async () => { h.reads += 1; if (h.gate) await h.gate; return { ok: true, data: { entries: [] } }; },
         listMusicPlaylists: ok({ playlists: [] }),
         listMusicFolders: ok({ folders: [] }),
         getMusicExportInfo: async () => { h.exportReads += 1; return { ok: true, data: { exports: {} } }; },
@@ -40,6 +40,7 @@ async function fresh(status: 'ready' | 'idle' = 'ready') {
     h.exportReads = 0;
     h.deletes = [];
     h.deleteAnswer = { ok: true };
+    h.gate = null;
     const m = await import('./music');
     m.musicLibrary.set({ status, message: '', entries: [], playlists: [], folders: [] });
     return m;
@@ -79,6 +80,56 @@ describe('the library re-reads on the core event, not on a timer', () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(h.reads).toBe(0);
         expect(get(unread.musicLibrary).status).toBe('idle');
+    });
+});
+
+describe('an event is not lost while the library is loading, and a burst of them costs few reads', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('remembers an event that arrives during the first read and reads again when that read ends', async () => {
+        const m = await fresh('idle');
+        m.setMusicLibraryWatch(true);
+        let open!: () => void;
+        h.gate = new Promise<void>(resolve => { open = resolve; });
+        const first = m.loadMusicLibrary();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(get(m.musicLibrary).status).toBe('loading');
+        expect(h.reads).toBe(1);
+
+        m.noteMusicLibraryChanged({ version: 1, reasons: ['scan'] });   // the read may predate this change
+        m.noteMusicLibraryChanged({ version: 2, reasons: ['scan'] });   // two events, one more read
+        h.gate = null;
+        open();
+        await first;
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.reads).toBe(2);
+        expect(get(m.musicLibrary).status).toBe('ready');
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(h.reads).toBe(2);
+    });
+
+    it('coalesces a burst: one read now, one trailing read a second later, the last event always read', async () => {
+        const m = await fresh();
+        m.setMusicLibraryWatch(true);
+        for (let i = 0; i < 4; i++) {
+            m.noteMusicLibraryChanged({ version: i, reasons: ['hash'] });
+            await vi.advanceTimersByTimeAsync(300);
+        }
+        // t = 1200 ms: the first event read at once, the other three waited for one trailing read.
+        expect(h.reads).toBe(2);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(h.reads).toBe(2);
+        expect(vi.getTimerCount()).toBe(0);
+
+        m.noteMusicLibraryChanged({ version: 9, reasons: ['hash'] });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.reads).toBe(3);
+        m.noteMusicLibraryChanged({ version: 10, reasons: ['hash'] });
+        m.setMusicLibraryWatch(false);          // the window closed before the trailing read: nothing is read
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(h.reads).toBe(3);
+        expect(vi.getTimerCount()).toBe(0);
     });
 });
 
