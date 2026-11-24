@@ -28,6 +28,11 @@ export type MessageAttachment = {
   available?: boolean;         // false: the record names a file that is not on this node (synced from another)
   data_url?: string;           // Base64 data URL (used in ChatPanel image preview)
   duration_seconds?: number;   // An audio file's length when the record knows it; else the player measures it
+  sha256?: string;             // Hex digest of the kept file's bytes (keep_agent_chat_attachment)
+  caption?: string;            // A line the agent posted with the file (chat_post_file)
+  // The library track this file is, when the agent posted a music take (ADR-051 D40).
+  // "Open in player" shows only when track_id is set.
+  music?: { track_id?: string; take_id?: string; job_id?: string };
   thumbnail?: string;          // Base64 thumbnail data URL
   // Image-specific fields (Phase 2.4):
   dimensions?: { width: number; height: number };

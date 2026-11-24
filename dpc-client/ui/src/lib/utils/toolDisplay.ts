@@ -4,7 +4,7 @@
  * English only — i18n deferred until full UI localization.
  */
 
-export type ToolCategory = 'search' | 'files' | 'git' | 'browser' | 'comfyui' | 'memory' | 'tasks' | 'skills' | 'shell' | 'messaging' | 'archive' | 'auth' | 'audio' | 'vision';
+export type ToolCategory = 'search' | 'files' | 'git' | 'browser' | 'comfyui' | 'memory' | 'tasks' | 'skills' | 'shell' | 'messaging' | 'archive' | 'auth' | 'audio' | 'vision' | 'music';
 
 interface ToolDisplayEntry {
     label: string;
@@ -38,6 +38,18 @@ const genericArg = (input: string) =>
 const nameArg = (input: string) => extractFirst(input, 'name');
 const audioArg = (input: string) => extractFirst(input, 'audio_path');
 const imageArg = (input: string) => extractFirst(input, 'image_path');
+const jobArg = (input: string) => extractFirst(input, 'job_id');
+const trackArg = (input: string) => extractFirst(input, 'track_id');
+// music_propose_job nests its style under params; the style is what a person recognises.
+const styleArg = (input: string) => {
+    try {
+        const obj = typeof input === 'string' ? JSON.parse(input) : input;
+        const style = typeof obj?.params?.style === 'string' ? obj.params.style : '';
+        return style.length > 60 ? style.slice(0, 60) + '...' : style;
+    } catch {
+        return '';
+    }
+};
 const msgArg = (input: string) => {
     const t = extractFirst(input, 'text') || extractFirst(input, 'message');
     return t.length > 60 ? t.slice(0, 60) + '...' : t;
@@ -127,13 +139,24 @@ const TOOL_DISPLAY: Record<string, ToolDisplayEntry> = {
     transcribe_audio_file: { label: 'Transcribe audio', category: 'audio', argExtract: audioArg },
 
     describe_image:  { label: 'Describe image',    category: 'vision', argExtract: imageArg },
+
+    music_capabilities: { label: 'Music capabilities', category: 'music' },
+    music_propose_job:  { label: 'Propose music job',  category: 'music', argExtract: styleArg },
+    music_check:        { label: 'Music job status',   category: 'music', argExtract: jobArg },
+    music_wait:         { label: 'Wait for music job', category: 'music', argExtract: jobArg },
+    music_cancel_job:   { label: 'Cancel music job',   category: 'music', argExtract: jobArg },
+    music_list_takes:   { label: 'Music takes',        category: 'music', argExtract: jobArg },
+    music_list_library: { label: 'Music library',      category: 'music', argExtract: patternArg },
+    music_get_lyrics:   { label: 'Track lyrics',       category: 'music', argExtract: trackArg },
+    music_playlist_add: { label: 'Add to playlist',    category: 'music' },
+    chat_post_file:     { label: 'Post file in chat',  category: 'music', argExtract: pathArg },
 };
 
 const CATEGORY_LABELS: Record<ToolCategory | 'other', string> = {
     search: 'SEARCH', files: 'FILES', git: 'GIT', browser: 'BROWSER',
     comfyui: 'COMFYUI', memory: 'MEMORY', tasks: 'TASKS', skills: 'SKILLS',
     shell: 'SHELL', messaging: 'MESSAGES', archive: 'ARCHIVE', auth: 'AUTH',
-    audio: 'AUDIO', vision: 'VISION', other: 'OTHER',
+    audio: 'AUDIO', vision: 'VISION', music: 'MUSIC', other: 'OTHER',
 };
 
 export function getToolLabel(toolName: string): string {

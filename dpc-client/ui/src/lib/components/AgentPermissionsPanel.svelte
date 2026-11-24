@@ -5,6 +5,7 @@
    */
   import { nodeStatus, sendCommand } from '$lib/coreService';
   import { voiceMemoryNote } from '$lib/utils/voiceMemoryExtra';
+  import { MUSIC_TOOL_CATEGORY, OWNER_ONLY_BADGE, OWNER_ONLY_HINT, type PermissionCategory } from '$lib/utils/musicToolPermissions';
   import { openPath } from '@tauri-apps/plugin-opener';
   import { onMount } from 'svelte';
 
@@ -31,7 +32,7 @@
   let toolLoadFailures: Array<{module: string; error: string}> = [];
 
   // Tool definitions by category
-  const toolCategories = [
+  const toolCategories: PermissionCategory[] = [
     {
       name: 'File Operations',
       tools: [
@@ -141,6 +142,7 @@
     },
     {
       name: 'ComfyUI Tools (image/video generation)',
+      ownerOnly: true,
       tools: [
         { key: 'comfyui_submit', label: 'Submit Workflow', desc: 'Submit ComfyUI workflow for execution' },
         { key: 'comfyui_check', label: 'Check Status', desc: 'Check status of submitted workflow' },
@@ -150,6 +152,8 @@
         { key: 'comfyui_convert', label: 'Convert Workflow', desc: 'Convert UI-format workflow to API format' },
       ]
     },
+    // The nine music_* tools and chat_post_file (ADR-051 D42); off by default, owner-only.
+    MUSIC_TOOL_CATEGORY,
     {
       name: 'Session Archives (read-only)',
       tools: [
@@ -970,6 +974,9 @@
         {#each toolCategories as category}
           <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: {category.isDanger ? 'var(--danger)' : 'var(--text-secondary)'};">
             {category.name}
+            {#if category.ownerOnly}
+              <span class="owner-only-badge" title={OWNER_ONLY_HINT}>{OWNER_ONLY_BADGE}</span>
+            {/if}
           </h5>
           <div class="notification-events">
             {#each category.tools as tool}
@@ -1405,6 +1412,18 @@
   .perm-ok { color: #4caf50; }
   .perm-deny { color: #f44336; }
   .perm-warn { color: #ff9800; }
+
+  /* A category whose tools only run in the owner's turns (the registry's owner_only). */
+  .owner-only-badge {
+    margin-left: 0.5rem;
+    padding: 1px 6px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    font-size: 0.75em;
+    font-weight: normal;
+    opacity: 0.85;
+    cursor: help;
+  }
 
   .compute-settings {
     display: flex;

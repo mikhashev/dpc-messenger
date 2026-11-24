@@ -18,6 +18,10 @@
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import { revealInFolder } from '$lib/utils/revealInFolder';
   import { playsInline, knownDurationSeconds, isAttachmentPlaceholderText } from '$lib/utils/pendingAttachment';
+  import {
+    audioMetaParts, attachmentCaption, musicTrackIdOf, showsOpenInPlayer, renderableAttachments,
+  } from '$lib/utils/musicAttachment';
+  import { openTrackInPlayer } from '$lib/services/music';
   import { tick } from 'svelte';
   import {
     historyPagers, shouldLoadOlder, pickAnchorIndex, scrollTopKeepingAnchor,
@@ -474,10 +478,11 @@
           </details>
         {/if}
 
-        <!-- Attachments (Phase 2.5: Images + Files + v0.13.0: Voice) -->
-        {#if msg.attachments && msg.attachments.length > 0}
+        <!-- Attachments (Phase 2.5: Images + Files + v0.13.0: Voice). An agent's answer may be
+             only a file, with no text (chat_post_file), so the bubble is made of this list alone. -->
+        {#if renderableAttachments(msg.attachments).length > 0}
           <div class="message-attachments">
-            {#each msg.attachments as attachment}
+            {#each renderableAttachments(msg.attachments) as attachment}
               {#if attachment.type === 'image' && isMissingHere(attachment)}
                 <!-- An image whose file is not here: its thumbnail, if the record has one, and the request -->
                 <ImageMessage attachment={{ ...attachment, file_path: undefined }} {conversationId} />
@@ -524,10 +529,16 @@
                       {#if attachment.mime_type}
                         • {attachment.mime_type}
                       {/if}
+                      {#each audioMetaParts(attachment) as part}
+                        • {part}
+                      {/each}
                       {#if attachment.status && !missingHere}
                         • {attachment.status}
                       {/if}
                     </div>
+                    {#if attachmentCaption(attachment)}
+                      <div class="file-caption">{attachmentCaption(attachment)}</div>
+                    {/if}
                     {#if missingHere}
                       {@render missingFileRow(msg.id, attachment)}
                     {:else if playsInline(attachment)}
@@ -547,14 +558,27 @@
                       <div class="file-reveal-error">{revealErrors[attachment.file_path]}</div>
                     {/if}
                   </div>
-                  {#if attachment.file_path && !missingHere}
-                    {@const savedPath = attachment.file_path}
-                    <button
-                      type="button"
-                      class="file-reveal-btn"
-                      title={savedPath}
-                      onclick={() => showInFolder(savedPath)}
-                    >Show in folder</button>
+                  {#if showsOpenInPlayer(attachment) || (attachment.file_path && !missingHere)}
+                    <div class="file-actions">
+                      {#if showsOpenInPlayer(attachment)}
+                        {@const trackId = musicTrackIdOf(attachment) ?? ''}
+                        <button
+                          type="button"
+                          class="file-reveal-btn file-open-player-btn"
+                          title="Open this track in the Music Player"
+                          onclick={() => openTrackInPlayer(trackId)}
+                        >Open in player</button>
+                      {/if}
+                      {#if attachment.file_path && !missingHere}
+                        {@const savedPath = attachment.file_path}
+                        <button
+                          type="button"
+                          class="file-reveal-btn"
+                          title={savedPath}
+                          onclick={() => showInFolder(savedPath)}
+                        >Show in folder</button>
+                      {/if}
+                    </div>
                   {/if}
                 </div>
               {/if}
@@ -811,6 +835,23 @@
     color: #4a4a4a;
     font-size: 12px;
     margin-top: 4px;
+  }
+
+  /* The posted caption: a line under the file's name, in the words the agent chose. */
+  .file-caption {
+    color: #1a1a1a;
+    font-size: 13px;
+    margin-top: 4px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .file-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    flex-shrink: 0;
   }
 
   .file-reveal-btn {

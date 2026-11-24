@@ -23,6 +23,9 @@ export type ScheduleApprovalRequest = {
    *  then reported nothing and scheduled nothing. Absent on a backend older
    *  than 2026-08-29, and then the card behaves as it always did. */
   timeout_seconds?: number;
+  /** A music_job request, structured (type, style, variants, eta_seconds). Not sent by
+   *  the backend yet: the card then shows `about`, which is already a sentence. */
+  music?: import('$lib/utils/scheduleApprovalText').MusicJobRequest | null;
 };
 
 /**

@@ -82,6 +82,7 @@ import {
     type PlaybackSource,
 } from '$lib/utils/musicPlayer';
 import { abSwitchPosition } from '../utils/musicCreate';
+import { openTrackPlan } from '../utils/musicAttachment';
 
 // -- the library -----------------------------------------------------------------
 
@@ -893,6 +894,43 @@ export function clearNotice(): void {
 }
 
 export { say as musicNotice };
+
+// -- open a track from elsewhere (a chat bubble's "Open in player") -----------------
+
+/** Bumped by `openTrackInPlayer`; the page watches it and opens the window. The window
+ *  is page state (`showMusicPlayer`), so a bubble far below it asks through a store. */
+export const musicWindowRequests = writable(0);
+
+/** Open the Music Player on a library track and play it, as a chat bubble asks.
+ *  The track plays next in the current queue (what is queued stays), and a track that
+ *  is already playing is left playing. Resolves true when the track is playing or
+ *  loading; false when the window opened with a notice saying why not. */
+export async function openTrackInPlayer(trackId: string): Promise<boolean> {
+    if (!entryOf(trackId)) await loadMusicLibrary(true);
+    // The window opens whatever follows: the notice is shown there.
+    musicWindowRequests.update(n => n + 1);
+    const entry = entryOf(trackId);
+    const s0 = get(musicPlayback);
+    const plan = openTrackPlan(entry, s0.loadedId, s0.playing);
+    if (plan === 'missing') {
+        say('This track is not in the library (yet). If it is a take still in review, keep it first.');
+        return false;
+    }
+    if (plan === 'hidden') {
+        say(`"${titleOf(trackId)}" is hidden: unhide it to play it.`);
+        return false;
+    }
+    if (plan === 'already-playing') return true;
+    const problem = playbackProblem(entry, await getPlaybackEnv());
+    if (problem) {
+        say(`"${titleOf(trackId)}": ${problem.reason}.`);
+        return false;
+    }
+    const q = enqueue(get(musicPlayback).queue, [trackId], true);
+    const index = q.ids.indexOf(trackId);
+    if (index < 0) return false;
+    return startAt(q, index, true);
+}
 
 // -- hide, remove, delete --------------------------------------------------------
 

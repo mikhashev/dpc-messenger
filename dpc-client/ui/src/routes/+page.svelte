@@ -26,6 +26,7 @@
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
   import AgentMap from "$lib/components/AgentMap.svelte";
   import MusicPlayer from "$lib/components/music/MusicPlayer.svelte";
+  import { musicWindowRequests } from "$lib/services/music";
   import ScheduleApprovalDialog from "$lib/components/ScheduleApprovalDialog.svelte";
   import ProviderSelector from "$lib/components/ProviderSelector.svelte";
   import Toast from "$lib/components/Toast.svelte";
@@ -181,6 +182,10 @@
   // closing or minimising the window, or switching chats, does not stop playback.
   let showMusicPlayer = $state(false);
   let musicPlayerMinimised = $state(false);
+  // A chat bubble's "Open in player" (services/music.ts openTrackInPlayer) asks for the window.
+  $effect(() => {
+    if ($musicWindowRequests > 0) { showMusicPlayer = true; musicPlayerMinimised = false; }
+  });
   let showCommitDialog = $state(false);
   let commitVoteError = $state("");
   let extractingChats = $state(new Set<string>());

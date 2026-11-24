@@ -1,18 +1,22 @@
 <!-- ScheduleApprovalDialog.svelte -->
 <!-- An agent asks to queue a deferred wake-up. The person decides BEFORE it -->
 <!-- is queued, so what is planned and for when is visible in advance. -->
+<!-- A music_job is a request to use the GPU now, not a plan: the card shows -->
+<!-- the request and asks Approve or Refuse (utils/scheduleApprovalText.ts). -->
 <script lang="ts">
   import { pendingScheduleApprovals, respondToScheduleRequest } from '$lib/services/scheduleApproval';
+  import { approvalView } from '$lib/utils/scheduleApprovalText';
 
   // Only the oldest is shown: two of these stacked is a decision no one reads.
   $: request = $pendingScheduleApprovals[0] ?? null;
   $: queued = $pendingScheduleApprovals.length;
+  $: view = request ? approvalView(request) : null;
 </script>
 
-{#if request}
-  <div class="schedule-approval" role="dialog" aria-label="Agent wants to schedule a task">
+{#if request && view}
+  <div class="schedule-approval" role="dialog" aria-label={view.ariaLabel}>
     <div class="head">
-      <strong>{request.agent_name}</strong> wants to come back to this later
+      <strong>{request.agent_name}</strong> {view.headText}
       {#if request.conversation_title || request.conversation_id}<span class="origin"
         >in {request.conversation_title || request.conversation_id}</span
       >{/if}
@@ -20,18 +24,18 @@
     </div>
 
     <dl>
-      <dt>When</dt>
-      <dd>{request.when}</dd>
-      <dt>What it will do</dt>
-      <dd class="about">{request.about || '(no description given)'}</dd>
+      {#each view.rows as row}
+        <dt>{row.label}</dt>
+        <dd class:about={row.long}>{row.value}</dd>
+      {/each}
     </dl>
 
     <div class="actions">
       <button class="allow" on:click={() => respondToScheduleRequest(request.request_id, true)}>
-        Schedule it
+        {view.approveLabel}
       </button>
       <button class="deny" on:click={() => respondToScheduleRequest(request.request_id, false)}>
-        Not now
+        {view.refuseLabel}
       </button>
     </div>
   </div>
