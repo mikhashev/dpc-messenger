@@ -105,3 +105,13 @@ def test_the_reserve_is_the_resident_engines_own_and_never_a_sum(tmp_path):
 def test_no_reading_is_unknown_never_fits(free, total):
     fit = l11_arithmetic(4447, [("yue2.cpp", 5600, True)], reserve_mib=2048, free_mib=free, total_mib=total)
     assert fit["outcome"] == "unknown"
+
+
+def test_a_need_above_a_known_total_does_not_fit_even_with_free_unread():
+    """Zcode #88-6: the declared check needs only the total; an unread `free` cannot rescue a `need`
+    the card is too small for, so the answer is `does_not_fit`, not `unknown`."""
+    fit = l11_arithmetic(4447, [("yue2.cpp", 5600, True)], reserve_mib=2048, free_mib=None, total_mib=8192)
+    assert fit["need"] == 4447 + 5600 + 2048 == 12095
+    assert fit["outcome"] == "does_not_fit" and fit["why"] == "12095 MiB declared against the card's 8192 MiB"
+    unread_total = l11_arithmetic(4447, [("yue2.cpp", 5600, True)], reserve_mib=2048, free_mib=None, total_mib=None)
+    assert unread_total["outcome"] == "unknown", "without the total nothing is decided"

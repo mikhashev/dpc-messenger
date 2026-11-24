@@ -132,7 +132,14 @@ def describe_free_commit(reading: Optional[Dict[str, Any]]) -> str:
 # kept for the backend's life once read.
 _VRAM_READING_TTL_S = 30.0
 _vram_reading: Dict[str, Any] = {"at": None, "wall": None, "free": None, "total": None}
+# Guards `_vram_reading` and `_vram_forgets` only, never a probe: `forget_vram_reading` runs on the
+# card lease's owner loop, and a hung nvidia-smi (10 s timeout) under this lock would stop the whole
+# backend (Zcode #88-1).
 _vram_reading_lock = threading.Lock()
+# One nvidia-smi read at a time: a second reader waits here for the first one's reading, as before.
+_vram_probe_lock = threading.Lock()
+# Bumped by every forget: a read that began before a forget does not store its pre-forget figure.
+_vram_forgets = 0
 
 
 def forget_vram_reading() -> None:
@@ -141,8 +148,12 @@ def forget_vram_reading() -> None:
     card's size is kept for the backend's life, and clearing it would cost every later read a second
     nvidia-smi. Called by the card lease when the card changes (a grant, a load done, a release) and
     by L11 after a reading that came back None, so neither a stale figure nor a failure is served
-    for the rest of the 30 s. Never sets a future `at`; never probes."""
+    for the rest of the 30 s. Never sets a future `at`; never probes, and never waits for a probe
+    under way: it takes only the short lock over the cached figures, so it is safe on an event loop.
+    A probe that began before this call answers its own caller but is not cached."""
+    global _vram_forgets
     with _vram_reading_lock:
+        _vram_forgets += 1
         _vram_reading.update(at=None, wall=None, free=None)
 
 
@@ -171,22 +182,30 @@ def read_vram_mib(now: Optional[float] = None) -> Tuple[Optional[int], Optional[
     a signal. Reads through `_free_vram_mib` / `_total_vram_mib` of
     `llama_server_supervisor` at most once per `_VRAM_READING_TTL_S`; blocking, so
     callers run it off the event loop. A probe refused during the backend's stop
-    answers `(None, None)` and is not cached."""
+    answers `(None, None)` and is not cached. The probe runs outside `_vram_reading_lock`, so a
+    `forget_vram_reading` never waits for it; a reading begun before a forget is returned to its
+    caller and not cached (the generation check below)."""
     # Imported here, not at the top: the supervisor module is heavy and no other reader in this file needs it.
     from . import llama_server_supervisor as engine
 
     when = time.monotonic() if now is None else now
-    with _vram_reading_lock:
-        at = _vram_reading["at"]
-        if at is not None and 0 <= when - at < _VRAM_READING_TTL_S:
-            return _vram_reading["free"], _vram_reading["total"]
+    with _vram_probe_lock:
+        with _vram_reading_lock:
+            at = _vram_reading["at"]
+            if at is not None and 0 <= when - at < _VRAM_READING_TTL_S:
+                return _vram_reading["free"], _vram_reading["total"]
+            generation, known_total = _vram_forgets, _vram_reading["total"]
         try:
             free = engine._free_vram_mib()
-            total = _vram_reading["total"] if _vram_reading["total"] is not None else engine._total_vram_mib()
+            total = known_total if known_total is not None else engine._total_vram_mib()
         except Exception as e:  # a reading is advisory: the registry closed, a probe failed
             logger.debug("VRAM reading unavailable: %s", e)
             return None, None
-        _vram_reading.update(at=when, wall=time.time(), free=free, total=total)
+        with _vram_reading_lock:
+            if total is not None:
+                _vram_reading["total"] = total  # the card's size: true before and after any forget
+            if generation == _vram_forgets:
+                _vram_reading.update(at=when, wall=time.time(), free=free)
         return free, total
 
 

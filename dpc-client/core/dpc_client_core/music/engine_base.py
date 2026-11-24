@@ -497,7 +497,9 @@ class SupervisedEngine:
 
     async def _start_child(self) -> None:
         """The start itself, under `_the_lock`, on a grant this engine already holds. A start that
-        ends with no child alive lets the card go."""
+        ends with no child alive lets the card go. A failed start never leaves its child counted as
+        alive, a second cancel during its stop included (`_stop_proc`, Zcode #87-4), so the release
+        below runs on every failure that spawned a child."""
         async with self._the_lock():
             if self._running_as_wanted():
                 return
@@ -687,36 +689,60 @@ class SupervisedEngine:
             return True
 
     async def _stop_proc(self, proc: Any, why: str) -> None:
+        """Signal `proc`, wait `STOP_GRACE_S`, then kill it and wait as long again. However this
+        ends (a second cancel while it waits, a failed wait), the child is killed if it has not exited
+        and `self._proc` lets go of it, so every caller's `not self.alive()` holds and its release of
+        the card runs (ADR-052 L8; Zcode #87-4); the exception goes on. A child still there after the
+        kill and the second wait is logged and no longer counted: holding the card for it forever
+        would stop every other client."""
         pid = getattr(proc, "pid", None)
-        if proc.returncode is None:
-            if isinstance(pid, int):
-                _procreg.get_registry().note_stop_sent(pid, "stopped", why)
-            try:
+        try:
+            if proc.returncode is None:
+                if isinstance(pid, int):
+                    _procreg.get_registry().note_stop_sent(pid, "stopped", why)
                 try:
-                    proc.send_signal(signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGTERM)
-                except ProcessLookupError:
-                    raise
-                except OSError as exc:
-                    logger.warning("%s: could not signal pid %s to stop (%s); killing it", self.DISPLAY, pid, exc)
+                    try:
+                        proc.send_signal(signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGTERM)
+                    except ProcessLookupError:
+                        raise
+                    except OSError as exc:
+                        logger.warning("%s: could not signal pid %s to stop (%s); killing it", self.DISPLAY, pid, exc)
+                        self._kill(proc)
+                    await asyncio.wait_for(proc.wait(), timeout=STOP_GRACE_S)
+                except (ProcessLookupError, asyncio.TimeoutError):
                     self._kill(proc)
-                await asyncio.wait_for(proc.wait(), timeout=STOP_GRACE_S)
-            except (ProcessLookupError, asyncio.TimeoutError):
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=STOP_GRACE_S)
+                    except asyncio.TimeoutError:
+                        logger.error("%s: pid %s has not exited %.0f s after it was killed; DPC no longer "
+                                     "counts it as its child", self.DISPLAY, pid, STOP_GRACE_S)
+        except BaseException:
+            if proc.returncode is None:
                 self._kill(proc)
-                await proc.wait()
-        if self._proc is proc:
-            self._proc = None
-        self._end_child(proc)
-        self._close_log()
+            raise
+        finally:
+            if self._proc is proc:
+                self._proc = None
+            self._end_child(proc)
+            self._close_log()
 
     @staticmethod
     def _kill(proc: Any) -> None:
+        """Kill `proc`; never raises. A child already gone is `ProcessLookupError`; any other `OSError`
+        (access denied, as Windows answers for a process that is exiting) is logged, so the stop that
+        called this goes on to let the card go (Zcode #87-4)."""
         try:
             proc.kill()
         except ProcessLookupError:
             pass
+        except OSError as exc:
+            logger.warning("music engine: could not kill pid %s (%s)", getattr(proc, "pid", None), exc)
 
     async def shutdown(self) -> None:
-        """The backend's stop: stop the child and the idle timer. Never raises."""
+        """The backend's stop: stop the child and the idle timer, and let the card go however the stop
+        ended (Zcode #87-4). A stop that failed, or was cancelled before it could run (waiting for
+        `_the_lock`), leaves the child killed and the card let go. Never raises, except a
+        cancellation, which goes on after the release."""
         task, self._idle_task = self._idle_task, None
         if task is not None:
             task.cancel()
@@ -724,9 +750,15 @@ class SupervisedEngine:
             await self.stop("ui_stop")
         except Exception:
             logger.exception("%s: the server did not stop cleanly", self.DISPLAY)
-        watch, self._watch_task = self._watch_task, None
-        if watch is not None and not watch.done():
-            watch.cancel()
+        finally:
+            watch, self._watch_task = self._watch_task, None
+            if watch is not None and not watch.done():
+                watch.cancel()
+            proc = self._proc
+            if proc is not None and proc.returncode is None:
+                logger.warning("%s: the stop did not finish; killing pid %s", self.DISPLAY, getattr(proc, "pid", None))
+                self._kill(proc)
+            self._let_go_of_the_card("ui_stop")
 
     # -- use and idle stop ----------------------------------------------------------
 

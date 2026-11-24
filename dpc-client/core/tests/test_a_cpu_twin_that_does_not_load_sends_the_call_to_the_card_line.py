@@ -7,6 +7,9 @@ RAM check, a load error) failed the call, even a 299 s file the GPU could have t
 is not asked again). Inside an agent's own turn (section 3.5) it is still refused at once
 (`test_an_agents_transcription_inside_its_own_turn.py`). A twin that fails while transcribing has
 started the flight: that failure is still the call's.
+
+The door's `wait_s` is a deadline, not a fresh bound for each attempt (Zcode #88-4): the line gets what
+is left of it after the twin's failed load.
 """
 
 import asyncio
@@ -16,7 +19,7 @@ import pytest
 
 from dpc_client_core.managers.card_lease import LeaseWaitedTooLong
 from dpc_client_core.providers import whisper_provider as wp
-from dpc_client_core.providers.whisper_provider import TwinDidNotLoad, transcribe_with_route
+from dpc_client_core.providers.whisper_provider import RoutedToCpu, TwinDidNotLoad, transcribe_with_route
 
 from tests._card_lease_helpers import BOUND, fast, hold_open, music, nothing_left, until, waiting  # noqa: F401
 from tests._whisper_lease_helpers import cpu_twin, gpu_whisper, host_ram, lease_of
@@ -105,3 +108,48 @@ async def test_a_twin_that_fails_while_transcribing_is_the_calls_failure(monkeyp
     await asyncio.wait_for(task, BOUND)
     m.lease.release("test")
     await nothing_left()
+
+
+class _SlowTwin:
+    """A twin whose load takes `load_s` of wall time and then fails."""
+
+    alias = "turbo (CPU twin)"
+
+    def __init__(self, load_s):
+        self.load_s = load_s
+
+    async def transcribe(self, audio_path, release_if_loaded_here=False, **kwargs):
+        await asyncio.sleep(self.load_s)
+        raise TwinDidNotLoad("the twin's load failed")
+
+
+class _RoutedOnce:
+    """A GPU alias whose L12 sends the first call to `twin`; the second (`cpu_route=False`) records its
+    arguments."""
+
+    def __init__(self, twin):
+        self.twin, self.asks = twin, []
+
+    async def transcribe(self, audio_path, **kwargs):
+        if kwargs.get("cpu_route") is False:
+            self.asks.append(kwargs)
+            return {"text": audio_path}
+        raise RoutedToCpu(self.twin, {"route": "cpu"})
+
+
+@pytest.mark.asyncio
+async def test_the_line_gets_what_is_left_of_the_doors_bound_after_the_twins_load():
+    p = _RoutedOnce(_SlowTwin(0.3))
+    assert await asyncio.wait_for(transcribe_with_route(p, "f", purpose="dictation", wait_s=10.0), BOUND) == {"text": "f"}
+    [ask] = p.asks
+    assert ask["wait_s"] <= 10.0 - 0.3, "the twin's load time is taken from the bound, not added to it"
+    assert ask["wait_s"] > 10.0 - BOUND
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [None, 0.0, 0.1])
+async def test_no_bound_stays_none_and_a_spent_bound_is_zero_never_negative(bound):
+    p = _RoutedOnce(_SlowTwin(0.2))
+    await asyncio.wait_for(transcribe_with_route(p, "f", purpose="dictation", wait_s=bound), BOUND)
+    [ask] = p.asks
+    assert ask["wait_s"] == (None if bound is None else 0.0)

@@ -231,9 +231,14 @@ async def transcribe_with_route(provider: Any, audio_path: str, release_if_loade
     `wait_s`, `expected_s`, `on_wait`) have no use there; `check` runs once before the twin starts, as
     it would at a grant. No switch in mid-flight (Zcode #69), but a twin that did not load has not
     flown (Johnny #63-5): that call goes to the card's line (`cpu_route=False`), or inside an agent's
-    own turn (3.5, `if_it_fails`) is refused at once. A failure while transcribing is the call's."""
+    own turn (3.5, `if_it_fails`) is refused at once. A failure while transcribing is the call's.
+
+    The door's `wait_s` is a deadline from this call's start (Zcode #88-4): the line gets what is left
+    of it after L12's choice and the twin's failed load, never the whole bound again."""
     # Passed only when set, as each door passed it before the selector.
     released = {"release_if_loaded_here": True} if release_if_loaded_here else {}
+    bound_s = kwargs.get("wait_s")
+    deadline = None if bound_s is None else time.monotonic() + max(0.0, float(bound_s))
     try:
         return await provider.transcribe(audio_path, **released, **kwargs)
     except RoutedToCpu as routed:
@@ -256,6 +261,8 @@ async def transcribe_with_route(provider: Any, audio_path: str, release_if_loade
                         getattr(provider, "alias", provider), exc, kwargs.get("purpose") or "the call")
         else:
             return {**(result or {}), "device": "cpu"}
+    if deadline is not None:
+        kwargs["wait_s"] = max(0.0, deadline - time.monotonic())
     return await provider.transcribe(audio_path, **released, **kwargs, cpu_route=False)
 
 

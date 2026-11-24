@@ -5,9 +5,14 @@ The card lease calls it when the card changes: a grant, a load that finished und
 (`mark_running`) and a release, so L11 never decides on a reading older than the last change of
 holder. L11 calls it after a reading that came back None, so a failure is not served for 30 s. L11
 reads through `commit_memory.read_vram_mib`, never by calling the two nvidia-smi helpers itself.
+
+The forget runs on the owner loop, so it never waits for an nvidia-smi read under way (Zcode #88-1):
+the lock it takes covers the cached figures, not the probe, and a probe begun before a forget answers
+its own caller but is not cached.
 """
 
 import asyncio
+import threading
 
 import pytest
 
@@ -83,6 +88,16 @@ async def test_a_grant_a_finished_load_and_a_release_each_drop_the_reading():
 async def test_l11_reads_through_the_agent_maps_reader_and_drops_a_none_reading(monkeypatch):
     monkeypatch.setattr(card_lease, "_READ_THE_CARD", card_lease._card_vram)
     card = _Card(free=None).install(monkeypatch)
+    reads = []
+    real_read = cm.read_vram_mib
+
+    def read_vram_mib(*args, **kwargs):
+        reads.append(args)
+        return real_read(*args, **kwargs)
+
+    # The fit's path must go through the agent map's reader (Zcode #88-2): a direct
+    # `_free_vram_mib` call would pass the nvidia-smi count below and miss this one.
+    monkeypatch.setattr(cm, "read_vram_mib", read_vram_mib)
     m = music()
     over = asyncio.Event()
     task = asyncio.create_task(hold_open(m.lease, "music job J", over))
@@ -91,13 +106,50 @@ async def test_l11_reads_through_the_agent_maps_reader_and_drops_a_none_reading(
     w.lease.shares_with = lambda holder: holder.kind == "music"
     with pytest.raises(LeaseWaitedTooLong):
         await asyncio.wait_for(w.lease.acquire("dictation", wait_s=0.05), BOUND)
-    assert card.free_calls == 1, "L11 asked nvidia-smi through read_vram_mib once"
+    assert card.free_calls == 1 and len(reads) == 1, "L11 asked nvidia-smi through read_vram_mib once"
     assert cm._vram_reading["at"] is None, "a None reading is not served for the next 30 s"
     card.free = 30000
     await asyncio.wait_for(w.lease.acquire("dictation", wait_s=BOUND), BOUND)
-    assert w.lease.beside == "music:yue2" and card.free_calls == 2
+    assert w.lease.beside == "music:yue2" and card.free_calls == 2 and len(reads) == 2
     over.set()
     await asyncio.wait_for(task, BOUND)
     w.lease.release("test")
     m.lease.release("test")
     await nothing_left()
+
+
+def test_a_forget_never_waits_for_a_probe_under_way_and_that_probe_is_not_cached(monkeypatch):
+    """Zcode #88-1: the card lease forgets on its owner loop; a hung nvidia-smi (10 s timeout) under the
+    forget's lock would stop the whole backend. The forget returns while the probe is blocked, the
+    probe's caller still gets its reading, and that pre-forget reading is not served afterwards."""
+    entered, unblock = threading.Event(), threading.Event()
+
+    def free(while_stopping=False):
+        entered.set()
+        unblock.wait(BOUND)
+        return 1000
+
+    monkeypatch.setattr(lss, "_free_vram_mib", free)
+    monkeypatch.setattr(lss, "_total_vram_mib", lambda: 32623)
+    answers = []
+    reader = threading.Thread(target=lambda: answers.append(cm.read_vram_mib(now=100.0)), daemon=True)
+    reader.start()
+    try:
+        assert entered.wait(BOUND), "the probe started"
+        forgetter = threading.Thread(target=cm.forget_vram_reading, daemon=True)
+        forgetter.start()
+        forgetter.join(1.0)
+        assert not forgetter.is_alive(), "the forget waited for the nvidia-smi read"
+    finally:
+        unblock.set()
+        reader.join(BOUND)
+    assert answers == [(1000, 32623)], "the probe answers its own caller"
+    assert (cm._vram_reading["at"], cm._vram_reading["free"]) == (None, None), "the pre-forget figure is not cached"
+    assert cm._vram_reading["total"] == 32623, "the card's size is true before and after the forget"
+
+
+def test_a_probe_with_no_forget_under_way_is_cached_as_before(monkeypatch):
+    card = _Card(free=7000).install(monkeypatch)
+    assert cm.read_vram_mib(now=100.0) == (7000, 32623)
+    assert cm.read_vram_mib(now=110.0) == (7000, 32623)
+    assert card.free_calls == 1 and cm._vram_reading["at"] == 100.0

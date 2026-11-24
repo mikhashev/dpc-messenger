@@ -1030,7 +1030,8 @@ def l11_arithmetic(peak_mib: Optional[int], residents: List[Tuple[str, Optional[
     """ADR-052 L11 in MiB. `residents`: every holder but the contender, as (name, peak, grows).
     Declared check `need = peak + Σ peaks + reserve <= total`, then the live veto `free >= peak +
     growth_left` (the whole peak of every growing resident, a lease; a supervisor allocates at its
-    start). Any unknown size or reading is `unknown`, never "fits"."""
+    start). Any unknown size or reading is `unknown`, never "fits"; a `need` above a known total does
+    not fit whatever `free` is, read or not (Zcode #88-6)."""
     out: Dict[str, Any] = {"peak": peak_mib, "reserve": reserve_mib, "total": total_mib,
                            "free": free_mib, "need": None, "growth_left": None}
     if peak_mib is None:
@@ -1041,11 +1042,11 @@ def l11_arithmetic(peak_mib: Optional[int], residents: List[Tuple[str, Optional[
     need = peak_mib + sum(peak for _name, peak, _grows in residents) + reserve_mib
     growth_left = sum(peak for _name, peak, grows in residents if grows)
     out.update(need=need, growth_left=growth_left)
-    if total_mib is None or free_mib is None:
-        return {**out, "outcome": "unknown", "why": "the card's VRAM cannot be read"}
-    if need > total_mib:
+    if total_mib is not None and need > total_mib:
         return {**out, "outcome": "does_not_fit",
                 "why": f"{need} MiB declared against the card's {total_mib} MiB"}
+    if total_mib is None or free_mib is None:
+        return {**out, "outcome": "unknown", "why": "the card's VRAM cannot be read"}
     if free_mib < peak_mib + growth_left:
         return {**out, "outcome": "does_not_fit",
                 "why": (f"{free_mib} MiB free, {peak_mib + growth_left} MiB needed now ({peak_mib} of its "
