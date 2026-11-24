@@ -186,7 +186,7 @@ def test_a_take_carries_seed_batch_size_batch_index_and_its_payload(tmp_path):
     assert err.value.field == "payload"
 
 
-def test_waiting_for_the_card_is_a_reason_on_a_queued_job_not_a_state(tmp_path):
+def test_waiting_for_the_card_is_a_reason_on_a_queued_or_running_job_not_a_state(tmp_path):
     store = store_at(tmp_path)
     job = queued_job(store)
     waiting = store.set_waiting_for_card(job["id"], [
@@ -206,6 +206,11 @@ def test_waiting_for_the_card_is_a_reason_on_a_queued_job_not_a_state(tmp_path):
     store.write_payload(job["id"], "lm.request.json", LM_BODY)
     started = store.start_job(job["id"])
     assert started["card_wait"] is None and started["state_reason"] is None
+    # ADR-052 S4 (section 3.2, "Two gates accept running"): a running job whose engine child ended
+    # asks for the card again, so its wait is a reason on `running` too; every other state refuses.
+    again = store.set_waiting_for_card(job["id"], [{"alias": "x"}])
+    assert again["state"] == "running" and again["state_reason"] == "waiting for the card: x holds it"
+    store.fail_job(job["id"], "the engine is gone")
     with pytest.raises(MusicJobError) as err:
         store.set_waiting_for_card(job["id"], [{"alias": "x"}])
     assert err.value.code == "illegal_transition"

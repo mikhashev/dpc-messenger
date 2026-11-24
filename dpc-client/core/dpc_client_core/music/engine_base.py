@@ -20,6 +20,18 @@ models, a job is a `POST` that answers `{"id": ...}`, `GET /job?id=N` polls it,
 - **One instance.** A start of a running server returns at once: never a second child.
 - **Idle stop.** After `idle_stop_s` without use the server is stopped to free the card;
   `in_use()` marks it busy for the length of a job.
+- **The card lease** (ADR-052 slice S4, section 3.2). Each engine holds `CardLease("music:<KEY>")`,
+  kind `music`, its declared peak `VRAM_ESTIMATE_MIB`, an `engine` yield cost, and
+  `waits_for_engines` (Mike #70: an idle local LLM engine is swapped out by the owner-start rule,
+  with the swap on). The lease first, then `_the_lock`: a start asks for the card before the lock
+  and never waits for it (`wait_s=0`: refused at once naming the holder, `card_busy`); the runner's
+  job has its grant already, from `in_use`, which is the job's one lease use and counts `_busy` in
+  the same place (the lease's busy is the card's authority). `starting` while the child boots
+  (busy: never asked to let go), `running` once it answers. The grant is let go however the child
+  ends: `stop()` (`ui_stop`, `idle_unload`, `swap`), `_watch` (it exited on its own), a failed start
+  and `shutdown()`; a child that ends under a job's open use lets go too (its memory is gone), and
+  the job's next start asks again. A contender asks an idle engine to let go (`_yield_card`: a
+  stop); a busy or booting one is waited for.
 - **Identity** (PROVENANCE §2): files by name, size and sha256, cached by path, size and
   mtime in a JSON file under `<DPC home>/music/`, so a multi-GB model is hashed once.
   Records carry file names only, never local paths (PROVENANCE rule 3).
@@ -53,6 +65,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from .. import process_registry as _procreg
+from ..managers.card_lease import CardLease, LeaseRefusal
 from .capabilities import EngineStatus
 from .store import atomic_write_text, music_dir_of
 
@@ -70,6 +83,11 @@ LOG_KEEP = 3
 _HASH_CHUNK = 4 * 1024 * 1024
 BUILD_SEARCH_DEPTH = 3
 BUILD_SEARCH_SKIP = {"CMakeFiles", "vendor", "tests", ".cmake", "_deps"}
+
+
+# What a refusal naming a music engine as the card's holder tells the person (ADR-052 section 2.2
+# item 7).
+_STOP_HINT = "It lets go when idle; Stop stops it now, or cancel its job in the music player."
 
 
 class MusicEngineError(RuntimeError):
@@ -271,6 +289,9 @@ class SupervisedEngine:
     LOG_NAME = "engine.log"
     IDENTITY_CACHE = "engine_identity_cache.json"
     PORT_SETTING = "port"
+    # The engine's declared peak on the card in MiB (ADR-052 L11: a music holder's peak is its declared
+    # `vram_mib`), None for unknown; each engine carries its trial's figure.
+    VRAM_ESTIMATE_MIB: Optional[int] = None
 
     def __init__(self, config: Any, *, dpc_home: Path,
                  config_source: Optional[Callable[[], Any]] = None,
@@ -294,6 +315,13 @@ class SupervisedEngine:
         self._watch_task: Optional[asyncio.Task] = None
         self._idle_task: Optional[asyncio.Task] = None
         self._hashes = HashCache(music_dir_of(self.dpc_home) / self.IDENTITY_CACHE)
+        # One standing on the card per engine (ADR-052 section 3.2): a job, a start by hand and a
+        # contender's yield all go through it.
+        self.card_lease = CardLease(
+            f"music:{self.KEY}", kind="music", engine=self.ENGINE, display=self.DISPLAY,
+            vram_mib=self.VRAM_ESTIMATE_MIB, yield_cost="engine", on_yield=self._yield_card,
+            waits_for_engines=True, stop_hint=_STOP_HINT,
+        )
 
     # -- what a subclass supplies ----------------------------------------------------
 
@@ -443,58 +471,98 @@ class SupervisedEngine:
 
     async def start(self) -> None:
         """Start the server and wait until it answers `/health` and `/props`, or raise
-        `MusicEngineError` (`not_installed`, `port_taken`, `backend_stopping`,
-        `start_failed`). A running server is left as it is: never a second child."""
+        `MusicEngineError` (`card_busy`, `not_installed`, `port_taken`, `backend_stopping`,
+        `start_failed`). A running server is left as it is: never a second child.
+
+        The card first (ADR-052 section 3.2, Ark #44): without a grant the start asks for one at
+        once, before `_the_lock`, and never waits for it (`card_busy` names the holder); a job's
+        start has its grant already. Nothing is acquired under the lock."""
+        await self._card_for_a_start()
+        await self._start_child()
+
+    async def _card_for_a_start(self, what: Optional[str] = None) -> None:
+        """The grant a start needs, asked for with `wait_s=0` when this engine holds none: granted at
+        once on a free card, else `MusicEngineError("card_busy")` naming what holds it. Never under a
+        client lock: callers run it before `_the_lock` (yue2.cpp before its own start lock too)."""
+        if self.card_lease.granted:
+            return
+        try:
+            await self.card_lease.acquire(what or f"start of {self.DISPLAY}", wait_s=0)
+        except LeaseRefusal as exc:
+            raise MusicEngineError("card_busy", f"{self.DISPLAY} cannot start now: {exc}") from None
+
+    def _let_go_of_the_card(self, why: str) -> None:
+        """The child is gone, or never came: nothing of it is on the card (ADR-052 L8)."""
+        self.card_lease.release(why)
+
+    async def _start_child(self) -> None:
+        """The start itself, under `_the_lock`, on a grant this engine already holds. A start that
+        ends with no child alive lets the card go."""
         async with self._the_lock():
             if self._running_as_wanted():
                 return
-            self.reload_config()
-            problem = self.installed_problem()
-            if problem:
-                raise MusicEngineError("not_installed", problem)
-            port = self.config.port or free_port()
-            if not port_free(port):
-                reason = (f"{LOOPBACK}:{port} is taken by another process (a {self.BINARY_NAME} left from an "
-                          f"earlier run, or another program); free it or set [music] {self.PORT_SETTING}")
-                self._set_state("error", reason)
-                raise MusicEngineError("port_taken", reason)
+            if not self.card_lease.granted:
+                # Let go between the card step and the lock (a person's Stop): never load without it.
+                raise MusicEngineError("card_busy", f"{self.DISPLAY} lost the card before its start; "
+                                                    "start it again")
             try:
-                _procreg.get_registry().check_open()
-            except _procreg.ProcessRegistryClosed as exc:
-                raise MusicEngineError("backend_stopping", str(exc)) from None
-            self._port = port
-            cmd = self.build_command(port)
-            self._open_log(cmd)
-            self._set_state("starting")
-            try:
-                proc = await self._spawn(cmd)
-            except OSError as exc:
-                self._close_log()
-                reason = f"{self.DISPLAY} did not start: {exc}"
-                self._set_state("error", reason)
-                raise MusicEngineError("start_failed", reason) from exc
-            self._proc = proc
-            try:
-                await self._wait_healthy(proc, port)
-                props = await self._get_json("/props")
-                self._answered_by(proc, "/props")
-                self._check_props(props)
-            except BaseException as exc:
-                await self._stop_proc(proc, "failed_start")
-                message = exc.message if isinstance(exc, MusicEngineError) else f"{type(exc).__name__}: {exc}"
-                reason = self.with_log_tail(f"{self.DISPLAY} did not start: {message}")
-                self._set_state("error", reason)
-                if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
-                    raise
-                raise MusicEngineError("start_failed", reason) from exc
-            self._props = props
-            self._version = props.get("version") if isinstance(props.get("version"), str) else self._version
-            self._last_used = time.monotonic()
-            self._set_state("running")
-            logger.info("%s: running on %s:%s (pid %s, %s)", self.DISPLAY, LOOPBACK, port, proc.pid, self._version)
-            self._watch_task = asyncio.ensure_future(self._watch(proc))
-            if self._idle_task is None or self._idle_task.done():
-                self._idle_task = asyncio.ensure_future(self._idle_loop())
+                await self._start_locked()
+            except BaseException:
+                if not self.alive():
+                    self._let_go_of_the_card("failed_start")
+                raise
+
+    async def _start_locked(self) -> None:
+        self.reload_config()
+        problem = self.installed_problem()
+        if problem:
+            raise MusicEngineError("not_installed", problem)
+        port = self.config.port or free_port()
+        if not port_free(port):
+            reason = (f"{LOOPBACK}:{port} is taken by another process (a {self.BINARY_NAME} left from an "
+                      f"earlier run, or another program); free it or set [music] {self.PORT_SETTING}")
+            self._set_state("error", reason)
+            raise MusicEngineError("port_taken", reason)
+        try:
+            _procreg.get_registry().check_open()
+        except _procreg.ProcessRegistryClosed as exc:
+            raise MusicEngineError("backend_stopping", str(exc)) from None
+        self._port = port
+        cmd = self.build_command(port)
+        self._open_log(cmd)
+        # Busy for the card while it boots (L1): no contender marks a booting engine.
+        self.card_lease.mark_starting()
+        self._set_state("starting")
+        try:
+            proc = await self._spawn(cmd)
+        except OSError as exc:
+            self._close_log()
+            reason = f"{self.DISPLAY} did not start: {exc}"
+            self._set_state("error", reason)
+            raise MusicEngineError("start_failed", reason) from exc
+        self._proc = proc
+        try:
+            await self._wait_healthy(proc, port)
+            props = await self._get_json("/props")
+            self._answered_by(proc, "/props")
+            self._check_props(props)
+        except BaseException as exc:
+            await self._stop_proc(proc, "failed_start")
+            message = exc.message if isinstance(exc, MusicEngineError) else f"{type(exc).__name__}: {exc}"
+            reason = self.with_log_tail(f"{self.DISPLAY} did not start: {message}")
+            self._set_state("error", reason)
+            if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                raise
+            raise MusicEngineError("start_failed", reason) from exc
+        self._props = props
+        self._version = props.get("version") if isinstance(props.get("version"), str) else self._version
+        self._last_used = time.monotonic()
+        self.card_lease.mark_running()
+        self._set_state("running")
+        logger.info("%s: running on %s:%s (pid %s, %s)", self.DISPLAY, LOOPBACK, port, proc.pid, self._version)
+        self._watch_task = asyncio.ensure_future(self._watch(proc))
+        if self._idle_task is None or self._idle_task.done():
+            self._idle_task = asyncio.ensure_future(self._idle_loop())
 
     async def _spawn(self, cmd: List[str]) -> asyncio.subprocess.Process:
         proc = await asyncio.create_subprocess_exec(
@@ -578,6 +646,8 @@ class SupervisedEngine:
         self._proc = None
         self._end_child(proc)
         self._close_log()
+        # Its memory is gone, under a job's open use too: the job's next start asks again (L8).
+        self._let_go_of_the_card("exited on its own")
         self._last_exit = {"code": code, "at": now_text(), "why": "exited on its own"}
         reason = self.with_log_tail(f"{self.DISPLAY} exited on its own with code {code}")
         logger.warning("%s: %s", self.DISPLAY, reason)
@@ -588,10 +658,12 @@ class SupervisedEngine:
         if isinstance(pid, int) and code is not None:
             _procreg.get_registry().end(pid, code)
 
-    async def stop(self, why: str = "ui_stop") -> bool:
+    async def stop(self, why: str = "ui_stop", *, keep_the_card: bool = False) -> bool:
         """Ask the child to stop, then kill it after `STOP_GRACE_S`. True when a running
         child was stopped. `why` is the registry's stop word (`ui_stop`, `idle_unload`,
-        `swap` when the other music engine needs the card)."""
+        `swap` when another client needs the card). The card is let go with the child
+        (ADR-052 L8), unless `keep_the_card`: a restart for other boot options (yue2.cpp) is
+        one start, and the card stays with the engine across it."""
         async with self._the_lock():
             proc = self._proc
             if proc is None or proc.returncode is not None:
@@ -599,12 +671,16 @@ class SupervisedEngine:
                     self._proc = None
                     self._end_child(proc)
                     self._close_log()
+                if not keep_the_card:
+                    self._let_go_of_the_card(why)
                 return False
             self._stopping = True
             try:
                 await self._stop_proc(proc, why)
             finally:
                 self._stopping = False
+                if not keep_the_card and not self.alive():
+                    self._let_go_of_the_card(why)
             self._last_exit = {"code": proc.returncode, "at": now_text(), "why": why}
             self._set_state("stopped", f"stopped by DPC ({why}) at {self._last_exit['at']}")
             logger.info("%s: stopped (%s, rc=%s)", self.DISPLAY, why, proc.returncode)
@@ -655,14 +731,32 @@ class SupervisedEngine:
     # -- use and idle stop ----------------------------------------------------------
 
     @contextlib.asynccontextmanager
-    async def in_use(self) -> AsyncIterator[None]:
-        """Mark the server busy for a job, so the idle stop and the other engine wait."""
-        self._busy += 1
-        try:
-            yield
-        finally:
-            self._busy -= 1
-            self._last_used = time.monotonic()
+    async def in_use(self, what: str = "a job", **acquire_kw: Any) -> AsyncIterator[None]:
+        """Hold the card for a job and mark the server busy, so the idle stop and the other
+        engine wait: one lease use (`card_lease.use`, ADR-052 L1), waiting in the lease line as
+        the arguments say (`wait_s` None by default: until `check` raises or the caller is
+        cancelled), and `_busy` counted in the same place. The runner takes it before
+        `start_job`; one use per job, so no second use of the job waits behind a contender that
+        waits for the first (L5)."""
+        acquire_kw.setdefault("wait_s", None)
+        async with self.card_lease.use(what, **acquire_kw):
+            self._busy += 1
+            try:
+                yield
+            finally:
+                self._busy -= 1
+                self._last_used = time.monotonic()
+
+    async def _yield_card(self, why: str) -> str:
+        """The lease's `on_yield` (ADR-052 L6, section 3.2): a child that is not alive has nothing
+        to give; a start or a stop under way (`_the_lock` held) or a job (busy) refuses without
+        calling `stop()`; else the idle child is stopped (`swap`), which lets the card go."""
+        if not self.alive():
+            return "nothing_to_give"
+        if self._the_lock().locked() or self.busy:
+            return "refused"
+        await self.stop("swap")
+        return "could_not_let_go" if self.alive() else "let_go"
 
     async def _idle_loop(self) -> None:
         while True:

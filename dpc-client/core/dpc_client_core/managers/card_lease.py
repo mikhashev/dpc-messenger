@@ -31,8 +31,10 @@ S3d: `route_view`, what Whisper's GPU/CPU choice (L12) reads before it asks. Sli
 shared cell (`shares_with`, `l11_arithmetic`, `_try_beside`): a lease that shares with a busy holder
 (Whisper with a music lease) is granted beside it only when the declared peaks fit the card's total
 and the live free-VRAM reading does not veto; the card's VRAM reading is dropped on every change of
-holder (`commit_memory.forget_vram_reading`). Not here yet: the music engines as clients (S4), so the
-cell is reached by no production pair before S4; the probe of foreign GPU use (S8).
+holder (`commit_memory.forget_vram_reading`). Slice S4: the music engines are clients (`music:yue2`,
+`music:acestep`, built by `music.engine_base.SupervisedEngine`), so the cell has its production pair;
+`holders_in_the_way` names a waiter's holders for the music job's `card_wait`. Not here yet: the probe
+of foreign GPU use (S8).
 """
 
 import asyncio
@@ -651,6 +653,26 @@ class CardLease:
 def lease_named(holder: str) -> Optional[CardLease]:
     """The lease registered under `holder`, or None."""
     return _CARD_LEASES.get(holder)
+
+
+def holders_in_the_way(lease: CardLease) -> List[Dict[str, Any]]:
+    """`{"alias", "engine"}` of what keeps `lease`'s earliest waiter from the card, for a client that
+    names its wait by holder (the music job's `card_wait`, S4): the holders on the card first (a
+    supervisor or another lease); with none, the waiters and card-queue places ahead of it. [] when
+    the lease does not wait. Synchronous and read-only: nothing is asked, no number is drawn."""
+    mine = sorted((w for w in _LEASE_LINE if w.lease is lease and not w.granted and w.out is None),
+                  key=_line_key)
+    if not mine:
+        return []
+    found: List[Dict[str, Any]] = []
+    rest: List[Dict[str, Any]] = []
+    for kind, what, _state in _blockers(mine[0]):
+        alias, engine = _holder_of(kind, what)
+        row = {"alias": alias, "engine": engine or None}
+        target = found if kind in ("holder", "draining") else rest
+        if alias and row not in target:
+            target.append(row)
+    return found or rest
 
 
 # --- the line ---------------------------------------------------------------------------------------

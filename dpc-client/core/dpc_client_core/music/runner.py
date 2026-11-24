@@ -18,14 +18,22 @@ job store, which keeps the state machine; every store call goes through
 1. **The LM payload.** The `/lm` body is built from the params and a seed (the job's, or
    one drawn here) and written as payload `lm.request.json` before anything is sent. A job
    resumed after a restart reuses the bytes already on disk, so its seed does not change.
-2. **The card** (decision 32). `card_holders()` names the DPC engines (Strata,
-   llama-server) holding the GPU card. While one does, the job stays `queued` with "waiting
-   for the card: X holds it" (`set_waiting_for_card`), re-checked every `card_poll_s` and on
-   every `wake()`. No engine is stopped here: the job card's "Stop X" is the person's press,
-   through the existing `stop_local_engine` command with the holder's alias. An idle lease
-   with a cheap yield (a warm Whisper, ADR-052 S3b) is asked to let go, until S4.
+2. **The card** (decision 32; ADR-052 slice S4, section 3.2). The job holds its engine's card
+   lease (`music:<key>`) through `engine.in_use(...)`, one use from before `start_job` to the
+   end of the job, waiting in the lease line with no deadline of its own: until the person
+   cancels (`check`, read every `card_poll_s` and on every `wake()`). While it waits the job
+   stays `queued` with "waiting for the card: X holds it" (`set_waiting_for_card`, the holders
+   the lease names, `card_lease.holders_in_the_way`). The lease does what the matrix says for a
+   music start (2.1): an idle Whisper or the idle other music engine is asked to let go, a busy
+   one is waited for; an idle local LLM engine is swapped out only with `swap_when_idle` on
+   (Mike #70), else waited for. The job card's "Stop X" is the person's press, through the
+   existing `stop_local_engine` command with the holder's alias. The job's expected time
+   (`job_schemas.music_expected_s`) is what the waiters behind it count.
 3. `queued -> running`; the server is started when it is not running (`AceStepServer.start`,
-   one try; a failure fails the job with the engine's reason and log tail).
+   one try; a failure fails the job with the engine's reason and log tail). A child that ended
+   under the job's use let the card go (L8): the start asks for it again and the job waits
+   `running`, its `card_wait` shown the same way (the runner's second gate: it ends only on a
+   real cancel, never on the job's state).
 4. **`POST /lm`**, polled through `/job` until done. The answer (the JSON with
    `audio_codes`, the only thing that makes the song repeatable: PROVENANCE §1) is written
    as payload `lm.result.json`.
@@ -98,6 +106,7 @@ cap (about 3.5x real time on the trial card).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -139,7 +148,6 @@ DEFAULT_ENGINE_JOB_TIMEOUT_S = 1800.0
 _COPY_CHUNK = 4 * 1024 * 1024
 
 Converter = Callable[[Path, Path, Mapping[str, str]], None]
-CardHolders = Callable[[], List[Dict[str, Any]]]
 
 
 class _Cancelled(Exception):
@@ -154,13 +162,52 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-# How long the old card wait waits for an idle lease to let go (a Whisper unload takes about 1 s).
-_LEASE_YIELD_BOUND_S = 30.0
+class _CardWait:
+    """What a job shows while its engine's card lease waits (ADR-052 section 3.2): the lease's
+    `on_wait` (synchronous, on the owner loop) notes the holders in the way, and one task at a time
+    writes the latest to the job store (`set_waiting_for_card`, through a thread), so a burst of
+    changes ends with the last one written. `settled()` waits for that task and clears what was
+    shown, once the grant came."""
 
+    def __init__(self, runner: "MusicJobRunner", job_id: str, lease: Any):
+        self.runner, self.job_id, self.lease = runner, job_id, lease
+        self.wanted: Optional[List[Dict[str, Any]]] = None
+        self.shown: Optional[List[Dict[str, Any]]] = None
+        self.task: Optional[asyncio.Future] = None
 
-def default_card_holders() -> List[Dict[str, Any]]:
-    from ..managers.llama_server_supervisor import card_holders
-    return card_holders()
+    def __call__(self, estimate: Dict[str, Any]) -> None:
+        from ..managers.card_lease import holders_in_the_way
+        holders = holders_in_the_way(self.lease)
+        if not holders:
+            return
+        self.wanted = holders
+        if self.task is None or self.task.done():
+            self.task = asyncio.ensure_future(self._write())
+
+    async def _write(self) -> None:
+        while self.wanted is not None and self.wanted != self.shown:
+            holders = self.wanted
+            try:
+                await self.runner._change(self.runner.store.set_waiting_for_card, self.job_id, holders)
+            except MusicJobError as exc:
+                # Cancelled meanwhile: the lease's check ends the wait at its next round.
+                logger.info("music: job %s: its wait for the card was not shown (%s)", self.job_id, exc.message)
+                return
+            self.shown = holders
+            logger.info("music: job %s waits for the card (%s)", self.job_id,
+                        ", ".join(str(h.get("alias")) for h in holders))
+
+    async def settled(self) -> None:
+        self.wanted = None
+        if self.task is not None:
+            with contextlib.suppress(Exception):
+                await self.task
+        if self.shown is not None:
+            self.shown = None
+            try:
+                await self.runner._change(self.runner.store.clear_waiting_for_card, self.job_id)
+            except MusicJobError:
+                pass  # the job moved on (cancelled): its wait went with it
 
 
 _WINDOWS_RESERVED = frozenset({"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
@@ -410,7 +457,6 @@ class MusicJobRunner:
         library: Callable[[], Awaitable[Any]],
         *,
         dpc_home: Path,
-        card_holders: Optional[CardHolders] = None,
         converter: Optional[Converter] = None,
         on_job_change: Optional[Callable[[dict], Any]] = None,
         card_poll_s: float = DEFAULT_CARD_POLL_S,
@@ -425,13 +471,13 @@ class MusicJobRunner:
         self.engines = MusicEngines.of(engines)
         self._library = library
         self.generated_root = music_dir_of(dpc_home) / "generated"
-        self._card_holders = card_holders or default_card_holders
         self._convert = converter or ffmpeg_converter()
         self._measure = loudness_meter or ffmpeg_loudness_meter()
         self._device_probe = device_probe or prov.device_identity
         self._ffmpeg_version: Optional[str] = None
         self._ffmpeg_version_known = False
         self.on_job_change = on_job_change
+        # How often a job waiting for the card reads whether it was cancelled (a `wake()` reads at once).
         self.card_poll_s = card_poll_s
         self.engine_poll_s = engine_poll_s
         self.engine_job_timeout_s = engine_job_timeout_s
@@ -439,6 +485,7 @@ class MusicJobRunner:
         self._task: Optional[asyncio.Task] = None
         self._wake: Optional[asyncio.Event] = None
         self._skipped: Dict[str, str] = {}
+        self._wakes = 0
         self.current_job_id: Optional[str] = None
         self.current_engine: Optional[str] = None
 
@@ -462,6 +509,7 @@ class MusicJobRunner:
     def wake(self) -> None:
         """A job was proposed or cancelled, or the card may be free: look again now."""
         self._skipped.clear()  # an engine may be installed or started since a job was skipped
+        self._wakes += 1  # a job waiting for the card reads its state now (a cancel)
         if self._wake is not None:
             self._wake.set()
 
@@ -593,8 +641,39 @@ class MusicJobRunner:
             except MusicJobError as exc:
                 await self._refuse(job_id, exc.message)
                 return
-        if not await self._wait_for_card(job_id):
-            return
+        shown = _CardWait(self, job_id, engine.card_lease)
+        try:
+            # The card first (ADR-052 section 3.2): one lease use for the whole job, asked for while
+            # the job is queued; no deadline of its own, only the person's cancel ends the wait.
+            async with engine.in_use(f"music job {job_id}", wait_s=None, check=self._card_check(job_id),
+                                     on_wait=shown, expected_s=js.music_expected_s(job["params"])):
+                await shown.settled()
+                await self._run_on_the_card(job_id, job, key, engine, lm_body, seed)
+        except _Cancelled:
+            # Cancelled while it waited in the lease line: the wait left the line (`_leaves`).
+            await shown.settled()
+            logger.info("music: job %s cancelled while it waited for the card", job_id)
+        finally:
+            # A grant with nothing on the card (the job ended before its engine came up) goes back.
+            engine.card_lease.release_when_empty("its job ended with no engine running", holds=engine.alive)
+
+    def _card_check(self, job_id: str) -> Callable[[], Awaitable[None]]:
+        """The lease's `check` for a job waiting for the card: the store is read every `card_poll_s`
+        and after every `wake()` (the person's cancel wakes the runner), not on every round of the
+        line; `_Cancelled` ends the wait."""
+        loop = asyncio.get_running_loop()
+        state = {"next_at": 0.0, "wakes": self._wakes}
+
+        async def check() -> None:
+            now = loop.time()
+            if now < state["next_at"] and self._wakes == state["wakes"]:
+                return
+            state["next_at"], state["wakes"] = now + self.card_poll_s, self._wakes
+            await self._check(job_id)
+        return check
+
+    async def _run_on_the_card(self, job_id: str, job: dict, key: str, engine: Any, lm_body: bytes,
+                               seed: int) -> None:
         try:
             await self._change(self.store.start_job, job_id)
         except MusicJobError:
@@ -602,23 +681,22 @@ class MusicJobRunner:
                 return
             raise
         self.current_engine = key
-        async with engine.in_use():
-            engine_job: List[Optional[str]] = [None]
-            try:
-                if key == js.ENGINE_YUE2:
-                    await self._produce_yue2(job_id, job["params"], seed, engine, engine_job)
-                else:
-                    await self._produce(job_id, job["params"], lm_body, seed, engine_job, engine)
-            except _Cancelled:
-                if engine_job[0] is not None and engine.alive():
-                    await engine.cancel(engine_job[0])
-                logger.info("music: job %s cancelled", job_id)
-            except (_JobFailure, MusicEngineError) as exc:
-                reason = exc.message if isinstance(exc, MusicEngineError) else str(exc)
-                logger.warning("music: job %s failed: %s", job_id, reason)
-                if await self._cancelled(job_id):
-                    return
-                await self._fail(job_id, reason)
+        engine_job: List[Optional[str]] = [None]
+        try:
+            if key == js.ENGINE_YUE2:
+                await self._produce_yue2(job_id, job["params"], seed, engine, engine_job)
+            else:
+                await self._produce(job_id, job["params"], lm_body, seed, engine_job, engine)
+        except _Cancelled:
+            if engine_job[0] is not None and engine.alive():
+                await engine.cancel(engine_job[0])
+            logger.info("music: job %s cancelled", job_id)
+        except (_JobFailure, MusicEngineError) as exc:
+            reason = exc.message if isinstance(exc, MusicEngineError) else str(exc)
+            logger.warning("music: job %s failed: %s", job_id, reason)
+            if await self._cancelled(job_id):
+                return
+            await self._fail(job_id, reason)
 
     async def _lm_payload(self, job: dict) -> Tuple[bytes, int]:
         """The acestep `/lm` body on disk, written now or reused from an earlier start."""
@@ -658,76 +736,24 @@ class MusicJobRunner:
             self._emit(await self._get(job_id))
         return seed
 
-    async def _wait_for_card(self, job_id: str) -> bool:
-        """Wait while a DPC engine holds the card; False when the job was cancelled."""
-        shown: Optional[List[Tuple[str, Optional[str]]]] = None
-        while True:
-            job = await self._get(job_id)
-            if job is None or job["state"] != js.QUEUED:
-                return False
-            try:
-                holders = list(self._card_holders() or [])
-            except Exception:
-                logger.exception("music: reading the card holders failed; treating the card as free")
-                holders = []
-            if holders and await self._ask_idle_leases_to_let_go(job_id, holders):
-                try:
-                    holders = list(self._card_holders() or [])
-                except Exception:
-                    logger.exception("music: reading the card holders failed; treating the card as free")
-                    holders = []
-            if not holders:
-                if job.get("card_wait"):
-                    await self._change(self.store.clear_waiting_for_card, job_id)
-                return True
-            names = [(h.get("alias"), h.get("engine")) for h in holders]
-            if names != shown:
-                try:
-                    await self._change(self.store.set_waiting_for_card, job_id, holders)
-                except MusicJobError:
-                    if await self._cancelled(job_id):
-                        return False
-                    raise
-                shown = names
-                logger.info("music: job %s waits for the card (%s)", job_id,
-                            ", ".join(str(a) for a, _ in names))
-            await self._sleep_or_wake(self.card_poll_s)
-
-    async def _ask_idle_leases_to_let_go(self, job_id: str, holders: List[Dict[str, Any]]) -> bool:
-        """Until S4 moves the runner onto the card lease (ADR-052 3.3): a holder row that names an
-        idle lease with a cheap yield (a warm Whisper, S3b) is asked to let go, as a music start does
-        by the matrix (2.1: "yields while idle"); a busy one is waited for and named, as before.
-        True when one let go."""
-        from ..managers import card_lease
-        let_go = False
-        for row in holders:
-            lease = card_lease.lease_named(str(row.get("alias") or ""))
-            if (lease is None or lease.yield_cost != "cheap" or not lease.granted or lease._draining
-                    or lease._busy_for_the_card(lease.state)):
-                continue
-            try:
-                outcome = await lease.give_up_for(f"music job {job_id}",
-                                                  card_lease._clock() + _LEASE_YIELD_BOUND_S)
-            except asyncio.TimeoutError:
-                logger.warning("music: job %s: %s did not let go within %g s", job_id, lease.display,
-                               _LEASE_YIELD_BOUND_S)
-                continue
-            let_go = let_go or outcome in ("let_go", "nothing_to_give")
-        return let_go
-
-    async def _sleep_or_wake(self, seconds: float) -> None:
-        if self._wake is None:
-            await asyncio.sleep(seconds)
-            return
-        try:
-            await asyncio.wait_for(self._wake.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
-            pass
-        self._wake.clear()
-
     async def _start_engine(self, job_id: str, key: str, engine: Any, **start_kw) -> None:
-        """Start the job's engine with the card free of the other music engine: an idle one
-        is stopped, a busy one is waited for (`MusicEngines.exclusive`)."""
+        """Start the job's engine on the job's grant, with the card free of the other music engine:
+        an idle one is stopped, a busy one is waited for (`MusicEngines.exclusive`, which agrees
+        with the leases: the other engine's lease is let go with its stop).
+
+        A grant the job no longer has (its engine's child ended under the job's use and let the
+        card go, ADR-052 L8) is asked for again here, before any lock, with a fresh arrival, while
+        the job is `running` (section 3.2, test 29): the job shows its `card_wait`, and the wait
+        ends only when the card comes or the person cancels (`_Cancelled`), never on the job's
+        state."""
+        if not engine.card_lease.granted:
+            shown = _CardWait(self, job_id, engine.card_lease)
+            try:
+                await engine.card_lease.acquire(f"music job {job_id}", wait_s=None, check=self._card_check(job_id),
+                                                on_wait=shown)
+            finally:
+                await shown.settled()
+
         async def check() -> None:
             await self._check(job_id)
         async with self.engines.exclusive(key, check=check):

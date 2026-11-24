@@ -104,9 +104,8 @@ class DualRig:
     """Both engines (yue2 fake, acestep fake), a job store, a library and a runner over one
     temp DPC home."""
 
-    def __init__(self, home: Path, *, holders=None, start_runner=True, yue2_settings=None, ace_settings=None):
+    def __init__(self, home: Path, *, start_runner=True, yue2_settings=None, ace_settings=None):
         self.home = home
-        self.holders = list(holders or [])
         self.yue2 = make_yue2(home, settings=yue2_settings)
         self.ace = make_engine(home, settings=ace_settings)
         self.engines = MusicEngines({"yue2": self.yue2, "acestep": self.ace}, poll_s=0.05)
@@ -115,7 +114,7 @@ class DualRig:
         self.library = MusicLibrary(home, tools=MediaTools(ffmpeg=None, ffprobe=None), save_delay_s=0.01)
         self.events = []
         self.runner = MusicJobRunner(
-            self.store, self.engines, self._library, dpc_home=home, card_holders=lambda: list(self.holders),
+            self.store, self.engines, self._library, dpc_home=home,
             converter=fake_flac, on_job_change=self.events.append, card_poll_s=0.05, engine_poll_s=0.02,
             loudness_meter=fake_loudness)
         self._start_runner = start_runner

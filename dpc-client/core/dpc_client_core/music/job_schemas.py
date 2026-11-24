@@ -51,7 +51,8 @@ record without them is valid against both shapes:
   record it); `payloads`, the request bodies written for the engine, each
   `{name, sha256, size_bytes, written_at, endpoint}` (SPEC §3 "show and store the
   payload", PROVENANCE payload rule); `card_wait`, `{holders: [{alias, engine}], since}`
-  while a queued job waits for the card, so the job card can offer "Stop X" by alias.
+  while a queued job waits for the card (a running one too since ADR-052 S4: its engine child
+  ended and its next start asks for the card again), so the job card can offer "Stop X" by alias.
 - `mp.take/1`: `seed`, `synth_batch_size`, `synth_batch_index` (a take is reproducible
   from codes, seed, params, batch size and batch index on the same build: PROVENANCE
   §2, measured 2026-11-21) and `payload` (the name of the payload whose bytes produced
@@ -280,6 +281,46 @@ def estimate_yue2_seconds(lyrics: Optional[str]) -> float:
     return YUE2_INTRO_S + YUE2_SECONDS_PER_LINE * len(sung)
 
 
+# YuE2's factor by song length (ADR-052 L10; slice S4 records it): wall seconds per audio second, as
+# L10 orients it ("about 3.5x real time", the trial card, ai-studio engine/yue2-cpp/trial.md:40, for a
+# 30 s song; "about 3x" for 4-minute ones). Straight between the two, the end value beyond either end.
+# A start value, tuned from operation (Mike #11).
+YUE2_FACTOR_BY_LENGTH = ((30.0, 3.5), (240.0, 3.0))
+
+
+def yue2_factor(audio_s: float) -> float:
+    """YuE2's factor for a song of `audio_s` seconds (`YUE2_FACTOR_BY_LENGTH`)."""
+    (short_s, short_f), (long_s, long_f) = YUE2_FACTOR_BY_LENGTH
+    if audio_s <= short_s:
+        return short_f
+    if audio_s >= long_s:
+        return long_f
+    return short_f + (long_f - short_f) * (audio_s - short_s) / (long_s - short_s)
+
+
+def yue2_wall_s(audio_s: float, *, factor: Optional[float] = None) -> float:
+    """Wall seconds YuE2 takes for `audio_s` seconds of song: audio seconds times the factor (L10:
+    "wall time = estimate x factor"), by default the factor for that length."""
+    return audio_s * (yue2_factor(audio_s) if factor is None else factor)
+
+
+def music_expected_s(params: Any) -> Optional[float]:
+    """How long a `generate_from_text` job that has not started will hold the card, in wall seconds,
+    an estimate, or None for unknown (ADR-052 L10, "a job that has not started"): YuE2's text estimate
+    per variant (`estimate_yue2_seconds`, never more than the duration cap, which the song cannot
+    outrun), times the factor for that length, times the variants. It routes and informs, never
+    refuses. acestep.cpp has no measured factor: unknown."""
+    if not isinstance(params, Mapping) or engine_of(params) != ENGINE_YUE2:
+        return None
+    try:
+        variants = int(params.get("variants") or VARIANTS_DEFAULT)
+        cap = float(params.get("duration_s") or YUE2_DURATION_DEFAULT_S)
+    except (TypeError, ValueError):
+        return None
+    audio_s = min(estimate_yue2_seconds(params.get("lyrics")), cap)
+    return yue2_wall_s(audio_s) * variants
+
+
 def _normalize_adapters(raw: Any) -> list:
     if not isinstance(raw, list):
         raise ParamsError("adapters", "adapters must be a list of {name, music, sound}")
@@ -478,7 +519,8 @@ def validate_job(job: Any) -> None:
             _expect(s, p["endpoint"] is None or _is_str(p["endpoint"]), f"payloads[{i}].endpoint must be a string or null")
     if "card_wait" in job and job["card_wait"] is not None:
         cw = job["card_wait"]
-        _expect(s, job["state"] == QUEUED, "only a queued job waits for the card")
+        # ADR-052 S4 (section 3.2): a running job whose engine child ended waits for the card again.
+        _expect(s, job["state"] in (QUEUED, RUNNING), "only a queued or running job waits for the card")
         _expect(s, isinstance(cw, Mapping) and set(cw) == {"holders", "since"}, "'card_wait' must have exactly holders, since")
         _expect(s, isinstance(cw["holders"], list) and cw["holders"], "'card_wait.holders' must be a non-empty array")
         for i, h in enumerate(cw["holders"]):

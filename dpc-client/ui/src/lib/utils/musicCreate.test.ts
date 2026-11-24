@@ -414,7 +414,13 @@ describe('what the jobs list and the engine line say', () => {
         expect(cardHolders(waiting).map(h => h.alias)).toEqual(['strata']);
         expect(jobStateText(waiting)).toBe('Waiting for the GPU: strata holds it');
         expect(cardWaitText([{ alias: 'a', engine: null }, { alias: 'b', engine: null }])).toBe('Waiting for the GPU: a, b hold it');
-        expect(cardHolders({ ...waiting, state: 'running' })).toEqual([]);
+        // ADR-052 S4: a running job whose engine stopped under it waits for the card again, named the same way.
+        const runningWait = job({ state: 'running', progress: 0.05, state_reason: 'waiting for the card: whisper:turbo holds it', card_wait: { holders: [{ alias: 'whisper:turbo', engine: 'whisper' }], since: 'x' } });
+        expect(cardHolders(runningWait).map(h => h.alias)).toEqual(['whisper:turbo']);
+        expect(jobStateText(runningWait)).toBe('Waiting for the GPU: whisper:turbo holds it');
+        expect(cardHolders({ ...runningWait, card_wait: null })).toEqual([]);
+        expect(jobStateText({ ...runningWait, card_wait: null })).toBe('Running · 5%');
+        expect(cardHolders({ ...waiting, state: 'review' })).toEqual([]);
     });
 
     it('failures and unsupported carry their reason', () => {

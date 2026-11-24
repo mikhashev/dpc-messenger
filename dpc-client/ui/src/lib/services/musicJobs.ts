@@ -224,11 +224,12 @@ export async function cancelJob(jobId: string): Promise<MusicAnswer<{ job: Music
  *  waiting job is asked for again at the next tick, since the runner sees the free card
  *  within a few seconds. A card lease (ADR-052) is not an engine child: since S2 item 8,
  *  `stop_local_engine` lets an idle lease go by its holder name and answers a busy one with what it
- *  is busy with; the job's `card_wait` holds only alias and engine, so this button cannot tell a
- *  lease apart (S4). */
+ *  is busy with; the job's `card_wait` holds only alias and engine, and the button needs no more
+ *  (S4: the stop reaches a lease by its holder name). A running job waits too when its engine
+ *  stopped under it (S4), so it is asked for again as well. */
 export async function stopCardHolder(alias: string): Promise<MusicAnswer<{ alias: string }>> {
     const a = await stopLocalEngine(alias);
-    for (const j of get(musicJobs).jobs) if (j.state === 'queued') lastSeen[j.id] = 0;
+    for (const j of get(musicJobs).jobs) if (j.state === 'queued' || j.card_wait) lastSeen[j.id] = 0;
     return a;
 }
 

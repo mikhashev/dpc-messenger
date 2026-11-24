@@ -125,7 +125,6 @@ def _runner_with_fake_flac(original):
     class Runner(original):
         def __init__(self, *a, **kw):
             kw.setdefault("converter", fake_flac)
-            kw.setdefault("card_holders", lambda: [])
             kw.setdefault("card_poll_s", 0.05)
             kw.setdefault("engine_poll_s", 0.02)
             super().__init__(*a, **kw)

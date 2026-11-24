@@ -377,6 +377,10 @@ class Yue2Server(SupervisedEngine):
     LOG_NAME = LOG_NAME
     IDENTITY_CACHE = IDENTITY_CACHE
     PORT_SETTING = "yue2_port"
+    # ADR-052 L11 (slice S4): the trial's whole-card nvidia-smi peak with the Q8 backbone was 5222-5570
+    # MiB ("5.2 to 5.6 GB", ai-studio engine/yue2-cpp/trial.md); the larger figure, rounded up, is the
+    # declared peak. The README's 5.8 GB at full context was not measured here.
+    VRAM_ESTIMATE_MIB = 5600
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -606,22 +610,32 @@ class Yue2Server(SupervisedEngine):
             raise MusicEngineError("invalid_backbone", f"backbone must be one of {', '.join(js.YUE2_BACKBONES)}, "
                                                        f"got {want!r}")
         needed = [r["name"] for r in self.request_adapters(adapters)] if adapters else []
+        # The card before any lock (ADR-052 section 3.2): asked for at once, never waited for.
+        await self._card_for_a_start()
         async with self._start_lock():
             as_wanted = self.alive() and self._state == "running" and self._backbone == want                 and set(needed) <= set(self._served_adapters)
             if as_wanted:
                 return
-            if self.alive():
-                why = (f"the {want} backbone (running {self._backbone})" if self._backbone != want
-                       else f"adapter(s) {', '.join(sorted(set(needed) - set(self._served_adapters)))}")
-                logger.info("yue2.cpp: restarting for %s", why)
-                await self.stop("swap")
-            # After the stop: on Windows a split the old child still holds open cannot be replaced.
-            await asyncio.to_thread(self.prepare_adapters)
-            problem = self.installed_problem(want)
-            if problem:
-                raise MusicEngineError("not_installed", problem)
-            self._next_backbone = want
-            await super().start()
+            try:
+                if self.alive():
+                    why = (f"the {want} backbone (running {self._backbone})" if self._backbone != want
+                           else f"adapter(s) {', '.join(sorted(set(needed) - set(self._served_adapters)))}")
+                    logger.info("yue2.cpp: restarting for %s", why)
+                    # One start, two children: the card stays with the engine, busy (`starting`), so
+                    # no contender takes it between them.
+                    self.card_lease.mark_starting()
+                    await self.stop("swap", keep_the_card=True)
+                # After the stop: on Windows a split the old child still holds open cannot be replaced.
+                await asyncio.to_thread(self.prepare_adapters)
+                problem = self.installed_problem(want)
+                if problem:
+                    raise MusicEngineError("not_installed", problem)
+                self._next_backbone = want
+                await self._start_child()
+            except BaseException:
+                if not self.alive():
+                    self._let_go_of_the_card("failed_start")
+                raise
             missing = sorted(set(needed) - set(self._served_adapters))
             if missing:
                 raise MusicEngineError("invalid_adapter", f"yue2.cpp did not load the adapter split(s) "

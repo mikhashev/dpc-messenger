@@ -186,6 +186,9 @@ class AceStepServer(SupervisedEngine):
     LOG_NAME = LOG_NAME
     IDENTITY_CACHE = IDENTITY_CACHE
     PORT_SETTING = "acestep_port"
+    # ADR-052 L11 (slice S4): "about 9.3 GB" peak, mostly the 4B LM and its 4.6 GB KV cache (ai-studio
+    # engine/acestep-cpp trial notes), read as 9300 MiB, the larger reading of the two units.
+    VRAM_ESTIMATE_MIB = 9300
 
     def build_command(self, port: int) -> List[str]:
         cmd = [str(self.config.binary), "--host", LOOPBACK, "--port", str(port),

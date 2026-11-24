@@ -79,17 +79,16 @@ def fake_loudness(flac: Path) -> dict:
 class Rig:
     """An engine, a job store, a library and a runner over one temp DPC home."""
 
-    def __init__(self, home: Path, *, holders=None, converter=fake_flac, engine_settings=None, start_runner=True,
+    def __init__(self, home: Path, *, converter=fake_flac, engine_settings=None, start_runner=True,
                  loudness_meter=fake_loudness):
         self.home = home
-        self.holders = list(holders or [])
         self.engine = make_engine(home, settings=engine_settings)
         self.store = MusicJobStore(home, capabilities=MusicCapabilities(self.engine.status))
         self.store.open()
         self.library = MusicLibrary(home, tools=MediaTools(ffmpeg=None, ffprobe=None), save_delay_s=0.01)
         self.events = []
         self.runner = MusicJobRunner(
-            self.store, self.engine, self._library, dpc_home=home, card_holders=lambda: list(self.holders),
+            self.store, self.engine, self._library, dpc_home=home,
             converter=converter, on_job_change=self.events.append, card_poll_s=0.05, engine_poll_s=0.02,
             loudness_meter=loudness_meter)
         self._start_runner = start_runner

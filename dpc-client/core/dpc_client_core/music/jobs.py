@@ -605,10 +605,13 @@ class MusicJobStore:
         return self._change(job_id, change)
 
     def set_waiting_for_card(self, job_id: str, holders: Iterable[Mapping[str, Any]]) -> dict:
-        """Record that a queued job waits for the GPU card (SPEC §5, decision 32).
-        `holders` is `card_holders()`'s list; only `alias` and `engine` are kept. The
-        reason is "waiting for the card: X holds it". An empty list clears the wait.
-        Nothing is stopped here: "Stop X" is the person's action."""
+        """Record that a queued or running job waits for the GPU card (SPEC §5, decision 32;
+        ADR-052 S4, section 3.2: a running job whose engine child ended asks for the card
+        again before its next start). `holders` are rows with `alias` and `engine` (the card
+        lease's `holders_in_the_way`, or `card_holders()`'s); only those two are kept. The
+        reason is "waiting for the card: X holds it"; the state does not change. An empty
+        list clears the wait. Every other state refuses (`illegal_transition`). Nothing is
+        stopped here: "Stop X" is the person's action."""
         kept = []
         for h in holders:
             alias = h.get("alias") if isinstance(h, Mapping) else None
@@ -618,8 +621,9 @@ class MusicJobStore:
             kept.append({"alias": alias, "engine": engine if isinstance(engine, str) else None})
 
         def change(job: dict) -> None:
-            if job["state"] != js.QUEUED:
-                raise MusicJobError("illegal_transition", f"job {job_id} is {job['state']}; only a queued job waits")
+            if job["state"] not in (js.QUEUED, js.RUNNING):
+                raise MusicJobError("illegal_transition",
+                                    f"job {job_id} is {job['state']}; only a queued or running job waits")
             if not kept:
                 job["card_wait"] = None
                 job["state_reason"] = None

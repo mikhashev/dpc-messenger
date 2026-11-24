@@ -628,7 +628,10 @@ class MusicCommandsMixin:
         also the way out of an `error` state). For yue2, `backbone` (`stock` or `rs-tw`)
         picks the backbone; without it the running one, else `[music] yue2_backbone`. Only
         one music engine is on the card at a time: the other is stopped when idle, and the
-        start is refused (`engine_busy`) while it runs a job. Slow: it waits for /health."""
+        start is refused (`engine_busy`) while it runs a job. Anything else on the card (a
+        local LLM engine, a Whisper model) refuses it at once, named (`card_busy`; ADR-052
+        S4: the card lease is asked with `wait_s=0`); the person stops that holder first.
+        Slow: it waits for /health."""
         try:
             chosen = self._music_engine(engine)
             if backbone is not None and chosen.KEY != js.ENGINE_YUE2:
@@ -638,11 +641,24 @@ class MusicCommandsMixin:
             if busy and backbone is not None and running_backbone and backbone != running_backbone:
                 raise MusicEngineError("engine_busy", f"music job {busy} is using {chosen.DISPLAY} with the "
                                                       f"{running_backbone} backbone; cancel it first")
-            async with self._music_engine_set().exclusive(chosen.KEY, wait=False):
-                if chosen.KEY == js.ENGINE_YUE2:
-                    await chosen.start(backbone=backbone)
-                else:
-                    await chosen.start()
+            engines = self._music_engine_set()
+            # The other music engine first: an idle one is stopped (its card lease let go), a busy one
+            # refuses (`engine_busy`), as before.
+            async with engines.exclusive(chosen.KEY, wait=False):
+                pass
+            # Then the card (ADR-052 section 3.2): asked for at once, before any lock, never waited
+            # for; refused naming the holder (`card_busy`). A grant the runner's job holds on this
+            # engine is its own and is granted again.
+            await chosen._card_for_a_start("start by hand")
+            try:
+                async with engines.exclusive(chosen.KEY, wait=False):
+                    if chosen.KEY == js.ENGINE_YUE2:
+                        await chosen.start(backbone=backbone)
+                    else:
+                        await chosen.start()
+            finally:
+                # A start by hand that brought no child up keeps no grant.
+                chosen.card_lease.release_when_empty("a start by hand that did not start", holds=chosen.alive)
             return {"status": "ok", "engine": chosen.details()}
         except Exception as exc:
             return _error(exc)

@@ -18,9 +18,35 @@ from pathlib import Path
 
 import pytest
 
+from dpc_client_core.managers import llama_server_supervisor as base_mod
 from dpc_client_core.music import job_schemas as js
 from dpc_client_core.music.runner import LM_PAYLOAD, LM_RESULT_PAYLOAD, SYNTH_PAYLOAD, ffmpeg_converter
 from tests._acestep_helpers import Rig, files_in, free_env, from_text, install_fake_engine, wait_until
+
+
+class FakeSup:
+    """A supervisor child on the card, as `_CARD_CLAIMS` holds one (ADR-052, Confirmation test 13):
+    running and idle; the swap is off in these tests (no settings bound), so nothing stops it."""
+
+    EXCLUSIVE_ON_THE_CARD = True
+    DROPS_PARKED_ON_STOP = False
+
+    def __init__(self, alias, engine):
+        self.alias, self.ENGINE = alias, engine
+        self._proc = type("Proc", (), {"returncode": None, "pid": 4242})()
+        self.props = {"total_slots": 1}
+        self._draining = False
+        self._swap_for = None
+        self.port = 51234
+
+    def _busy_for_the_card(self, state, but_for=None):
+        return False
+
+
+def on_the_card(alias, engine):
+    sup = FakeSup(alias, engine)
+    base_mod._CARD_CLAIMS[sup] = "claimed"
+    return sup
 
 DONE = (js.REVIEW, js.FAILED, js.CANCELLED)
 
@@ -154,8 +180,8 @@ async def test_a_dpc_engine_on_the_card_keeps_the_job_queued_and_nothing_is_stop
     stops = []
     import dpc_client_core.providers.llamacpp_server_provider as provider
     monkeypatch.setattr(provider, "stop_local_engine", lambda *a, **k: stops.append(a))
-    holder = {"alias": "qwen-27b", "engine": "strata", "state": "running", "port": 51234}
-    async with Rig(home, holders=[holder]) as rig:
+    holder = on_the_card("qwen-27b", "strata")
+    async with Rig(home) as rig:
         job = rig.store.create_job("generate_from_text", from_text())
         rig.runner.wake()
         await wait_until(lambda: rig.store.get_job(job["id"]).get("card_wait") is not None)
@@ -169,7 +195,7 @@ async def test_a_dpc_engine_on_the_card_keeps_the_job_queued_and_nothing_is_stop
         assert rig.engine.state == "stopped" and not rig.engine.alive()  # never started while held
         assert stops == []
 
-        rig.holders.clear()  # the person pressed "Stop qwen-27b"
+        base_mod._CARD_CLAIMS.pop(holder)  # the person pressed "Stop qwen-27b"
         job = await rig.wait_for(job["id"], DONE)
         assert job["state"] == js.REVIEW, job["state_reason"]
         assert job["card_wait"] is None
@@ -179,7 +205,8 @@ async def test_a_dpc_engine_on_the_card_keeps_the_job_queued_and_nothing_is_stop
 @pytest.mark.asyncio
 async def test_cancel_while_waiting_for_the_card(home, monkeypatch):
     free_env(monkeypatch)
-    async with Rig(home, holders=[{"alias": "llama", "engine": "llamacpp_server"}]) as rig:
+    on_the_card("llama", "llamacpp_server")
+    async with Rig(home) as rig:
         job = rig.store.create_job("generate_from_text", from_text())
         rig.runner.wake()
         await wait_until(lambda: rig.store.get_job(job["id"]).get("card_wait") is not None)
@@ -188,6 +215,7 @@ async def test_cancel_while_waiting_for_the_card(home, monkeypatch):
         await wait_until(lambda: rig.runner.current_job_id is None)
         assert rig.store.get_job(job["id"])["state"] == js.CANCELLED
         assert not rig.engine.alive()
+        assert rig.engine.card_lease._waiters() == [], "the cancelled wait left the lease line"
 
 
 @pytest.mark.asyncio
@@ -259,11 +287,13 @@ async def test_an_engine_that_dies_mid_job_fails_it_and_the_next_job_restarts_it
 @pytest.mark.asyncio
 async def test_a_restart_resumes_queued_jobs_with_the_seed_already_written(home, monkeypatch):
     free_env(monkeypatch)
-    async with Rig(home, holders=[{"alias": "strata-a", "engine": "strata"}]) as first:
+    strata = on_the_card("strata-a", "strata")
+    async with Rig(home) as first:
         job = first.store.create_job("generate_from_text", from_text(seed=None))
         first.runner.wake()
         await wait_until(lambda: first.store.get_job(job["id"]).get("card_wait") is not None)
         seed = json.loads(first.store.read_payload(job["id"], LM_PAYLOAD))["seed"]
+    base_mod._CARD_CLAIMS.pop(strata)
     # The backend stops while the job waits; the next start finds it queued.
     async with Rig(home) as second:
         resumed = second.store.get_job(job["id"])

@@ -140,9 +140,10 @@ export function isActive(job: Pick<MusicJob, 'state'>): boolean {
     return ACTIVE_STATES.includes(job.state);
 }
 
-/** The GPU card holders a queued job waits for (decision 32), or []. */
+/** The GPU card holders a queued job waits for (decision 32), or []. A running job waits too
+ *  when its engine stopped under it and its next start asks for the card again (ADR-052 S4). */
 export function cardHolders(job: Pick<MusicJob, 'state' | 'card_wait'>): CardHolder[] {
-    if (job.state !== 'queued' || !job.card_wait) return [];
+    if ((job.state !== 'queued' && job.state !== 'running') || !job.card_wait) return [];
     return (job.card_wait.holders ?? []).filter(h => typeof h?.alias === 'string' && h.alias);
 }
 
@@ -163,7 +164,12 @@ export function jobStateText(job: MusicJob): string {
             const holders = cardHolders(job);
             return holders.length ? cardWaitText(holders) : 'Queued';
         }
-        case 'running': return `Running · ${Math.round(Math.max(0, Math.min(1, job.progress ?? 0)) * 100)}%`;
+        case 'running': {
+            const holders = cardHolders(job);
+            return holders.length
+                ? cardWaitText(holders)
+                : `Running · ${Math.round(Math.max(0, Math.min(1, job.progress ?? 0)) * 100)}%`;
+        }
         case 'review': return reason ? `Ready for review (${reason})` : 'Ready for review';
         case 'accepted': return 'Kept';
         case 'rejected': return 'None kept (every take discarded)';

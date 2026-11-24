@@ -2,8 +2,12 @@
 
 Before a music engine starts, an idle other one is stopped (`swap`); a busy one (a job holds
 it) is never stopped: the runner waits for it, a start by hand is refused with
-`engine_busy`. The engine commands take an optional `engine` and default to yue2. Both
-servers are real child processes (`_fake_yue2_server.py`, `_fake_acestep_server.py`).
+`engine_busy`. Since ADR-052 S4 each engine holds the card lease `music:<key>`, and every lease
+excludes every other, so a job's wait for the other engine is its wait for the card: the job stays
+`queued` with `card_wait` naming the other engine's lease (before S4 it waited `running`, inside
+`MusicEngines.exclusive`, which stays and agrees). The engine commands take an optional `engine` and
+default to yue2. Both servers are real child processes (`_fake_yue2_server.py`,
+`_fake_acestep_server.py`).
 """
 
 import asyncio
@@ -53,10 +57,12 @@ async def test_a_busy_engine_is_waited_for_never_stopped(tmp_path, monkeypatch):
         holder = asyncio.ensure_future(acestep_job())
         await wait_until(lambda: rig.ace.busy)
         job = rig.propose(yue2_params(variants=1))
-        await wait_until(lambda: rig.store.get_job(job["id"])["state"] == "running")
+        await wait_until(lambda: rig.store.get_job(job["id"]).get("card_wait") is not None)
         await asyncio.sleep(0.4)
         assert rig.ace.alive() and not rig.yue2.alive()   # waiting, nothing stopped
-        assert rig.store.get_job(job["id"])["state"] == "running"
+        waiting = rig.store.get_job(job["id"])
+        assert waiting["state"] == "queued"
+        assert waiting["card_wait"]["holders"] == [{"alias": "music:acestep", "engine": "acestep.cpp"}]
         with pytest.raises(MusicEngineError) as err:
             async with rig.engines.exclusive("yue2", wait=False):
                 pass
@@ -83,7 +89,7 @@ async def test_a_job_cancelled_while_waiting_for_the_other_engine_ends_cancelled
         holder = asyncio.ensure_future(acestep_job())
         await wait_until(lambda: rig.ace.busy)
         job = rig.propose(yue2_params(variants=1))
-        await wait_until(lambda: rig.store.get_job(job["id"])["state"] == "running")
+        await wait_until(lambda: rig.store.get_job(job["id"]).get("card_wait") is not None)
         rig.store.cancel_job(job["id"])
         await wait_until(lambda: rig.runner.current_job_id is None)
         assert rig.store.get_job(job["id"])["state"] == "cancelled"
@@ -145,7 +151,7 @@ async def test_a_start_by_hand_is_refused_while_the_other_engine_runs_a_job(tmp_
 
     class Runner(original):
         def __init__(self, *a, **kw):
-            kw.update(converter=fake_flac, card_holders=lambda: [], card_poll_s=0.05, engine_poll_s=0.02)
+            kw.update(converter=fake_flac, card_poll_s=0.05, engine_poll_s=0.02)
             super().__init__(*a, **kw)
     monkeypatch.setattr(commands, "MusicJobRunner", Runner)
     try:

@@ -19,8 +19,12 @@ The runner runs one job at a time and holds its own engine (`in_use`) from befor
 switch to the end of the job, so a start by hand of the other engine during a job is
 refused, and the idle stop never takes the engine from under a job.
 
-The card holders of other DPC subsystems (Strata, llama-server) are a separate wait, the
-runner's `card_holders()` check (decision 32), with the person's "Stop X".
+Since ADR-052 S4 each engine also holds the card lease `music:<key>`, and every lease excludes
+every other, so the runner's job meets a busy other engine in the lease line first (queued, its
+`card_wait` naming it) and this switch then finds nothing to wait for; it stays, and agrees: its
+stop of an idle other engine lets that engine's lease go. The other holders of the card (Strata,
+llama-server, a Whisper model) are the same lease wait (decision 32, amended by Mike #70), with the
+person's "Stop X".
 """
 
 from __future__ import annotations
