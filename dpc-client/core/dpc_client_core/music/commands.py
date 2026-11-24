@@ -780,6 +780,29 @@ class MusicCommandsMixin:
             return _error(exc)
 
     @slow_command
+    async def check_music_job(self, type: Any = None, params: Any = None,
+                              idempotency_key: Any = None, requested_by: Any = None) -> Dict[str, Any]:
+        """What `propose_music_job` with these arguments would answer, without making a job, for
+        the agent runtime (music tools follow-up 12): `{repeat: job|null, params}`, or the error
+        `propose_music_job` would give, and `unsupported` (with the reason) where it would make
+        the job `unsupported`. Only a request that passes is put to the person for approval."""
+        try:
+            job_type = _need_str(type, "type", "invalid_type")
+            if not isinstance(params, dict):
+                raise _bad("invalid_params", "params", "an object")
+            key = _opt_str(idempotency_key, "idempotency_key", "invalid_params")
+            if requested_by is not None and not isinstance(requested_by, dict):
+                raise _bad("invalid_params", "requested_by", "an object or null")
+            store = await self._music_jobs()
+            queue_max, turn_max = self._music_agent_queue_max(), self._music_turn_jobs_max()
+            answer = await asyncio.to_thread(lambda: store.check_job(
+                job_type, params, idempotency_key=key, requested_by=requested_by,
+                agent_queue_max=queue_max, turn_jobs_max=turn_max))
+            return {"status": "ok", **answer}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
     async def get_music_job(self, job_id: Any = None) -> Dict[str, Any]:
         try:
             jid = _need_str(job_id, "job_id", "invalid_job_id")
@@ -843,7 +866,8 @@ class MusicCommandsMixin:
         (no prompt, lyrics, params or payload; those live in the job). `take`: `take_id`,
         `job_id`, `track_id` (the source track, null for a new-track take), `library_track_id`,
         `kind`, `variant`, `state` (the take's decision: pending, accepted or rejected),
-        `job_state`, `path` (absolute, null when the URI is not a local file), `file_exists`,
+        `job_state`, `library_hidden` (true/false, null without a library entry), `path`
+        (absolute, null when the URI is not a local file), `file_exists`,
         `duration_s`, `sample_rate`, `channels`, `content_hash`, `loudness`. Errors: `not_found`."""
         try:
             tid = _need_str(take_id, "take_id", "invalid_take_id")
@@ -856,9 +880,20 @@ class MusicCommandsMixin:
             file = take.get("file") or {}
             path = path_of_file_uri(file.get("uri"))
             exists = await asyncio.to_thread(lambda: path is not None and path.is_file())
+            # Whether the take's library entry is hidden (a Discard hides it, decision 35): true,
+            # false, or null when the take has no entry or the library does not know it.
+            library_hidden = None
+            if take.get("library_track_id"):
+                try:
+                    entry = (await self._music()).get_entry(take["library_track_id"])
+                    library_hidden = bool(entry.get("hidden"))
+                except Exception:
+                    logger.debug("music: the library entry of take %s was not read", tid, exc_info=True)
+                    library_hidden = None
             return {"status": "ok", "take": {
                 "take_id": take["id"], "job_id": take["job_id"], "track_id": take.get("track_id"),
-                "library_track_id": take.get("library_track_id"), "kind": take["kind"],
+                "library_track_id": take.get("library_track_id"), "library_hidden": library_hidden,
+                "kind": take["kind"],
                 "variant": take.get("variant"), "state": take["decision"], "job_state": job_state,
                 "path": str(path) if path is not None else None, "file_exists": exists,
                 "duration_s": file.get("duration_s"), "sample_rate": file.get("sample_rate"),
@@ -1344,7 +1379,7 @@ class MusicCommandsMixin:
 
 
 # The commands the UI door may call (every one is in `local_api.ALLOWED_COMMANDS`). Not listed on
-# purpose: `cancel_music_jobs_of_turn` and `get_music_take`, for the agent tools only, which call
+# purpose: `cancel_music_jobs_of_turn`, `get_music_take` and `check_music_job`, for the agent tools only, which call
 # them on `CoreService` directly and are kept off the UI allowlist.
 MUSIC_COMMANDS = (
     "list_music_folders",

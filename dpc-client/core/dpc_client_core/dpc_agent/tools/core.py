@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1645,6 +1646,7 @@ _SCHEDULE_APPROVAL_WORDS = {
         "refused_outcome": "❌ Not scheduled.",
         "expiry_note": "after that it is not scheduled",
         "killed_outcome": "⛔ The turn was killed; this was not scheduled.",
+        "stopped_outcome": "⛔ The turn was stopped; this was not scheduled.",
     },
     "music_job": {
         "heading": "asks to run a music job on the GPU",
@@ -1654,6 +1656,7 @@ _SCHEDULE_APPROVAL_WORDS = {
         "refused_outcome": "❌ Refused: no music job was made.",
         "expiry_note": "after that no music job is made",
         "killed_outcome": "⛔ The turn was killed; no music job was made.",
+        "stopped_outcome": "⛔ The turn was stopped; no music job was made.",
     },
 }
 
@@ -1700,17 +1703,33 @@ def _schedule_needs_approval(ctx) -> bool:
     return True if value is None else bool(value)
 
 
+def _turn_stop_pressed(ctx) -> bool:
+    """Whether Stop was pressed on the turn this context runs. A Kill answers the request
+    itself (release_schedule_approvals_of_turn), with its own words."""
+    event = getattr(ctx, "turn_stop_event", None)
+    try:
+        return event is not None and event.is_set()
+    except Exception:
+        return False
+
+
+_SCHEDULE_STOP_CHECK_S = 0.1
+_SCHEDULE_TURN_STOPPED = "the turn was stopped before the person answered"
+
+
 def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str,
-                             music: Optional[Dict[str, Any]] = None) -> tuple:
+                             music: Optional[Dict[str, Any]] = None,
+                             void_on_stop: bool = False) -> tuple:
     """Ask the person before anything enters the queue.
 
     The point is not to guard execution — check_back runs the agent's own
     words — but to make sure a human sees what was planned and for when,
     before it is planned. Returns (approved, reason).
 
-    `music` is a music job's request in parts (music_propose_job, ADR-051 D47:
-    type, style, variants, eta_seconds), carried to the interface beside
-    `about` so the card can lay it out; given only for a music job.
+    `music` is a music job's request in parts (music_propose_job, ADR-051 D47),
+    carried to the interface beside `about`; given only for a music job.
+    `void_on_stop`: a Stop while the card is up withdraws it, so a later "yes"
+    approves nothing.
     """
     import threading
     import uuid
@@ -1811,15 +1830,48 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str,
         _pending_schedule_approvals.pop(request_id, None)
         return False, f"could not deliver the approval request: {e}"
 
-    log.info("check_back approval requested: %s (%s, %s)", request_id, task_type, when)
+    # Named by what it asks: a music job's card is not a check_back's (follow-up 12, live log).
+    log.info("%s approval requested: %s (%s)", task_type, request_id, when)
 
     # The agent's turn reads `approval` while this thread waits for the answer.
     with turn_waits_for("approval", gate=getattr(getattr(ctx, "_agent", None), "_run_gate", None),
                         conversation_id=getattr(ctx, "conversation_id", None) or None):
-        signaled = event.wait(timeout=_SCHEDULE_APPROVAL_TTL_SECONDS)
+        if not void_on_stop:
+            signaled = event.wait(timeout=_SCHEDULE_APPROVAL_TTL_SECONDS)
+        else:
+            signaled = False
+            deadline = time.monotonic() + _SCHEDULE_APPROVAL_TTL_SECONDS
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                if event.wait(timeout=min(_SCHEDULE_STOP_CHECK_S, left)):
+                    signaled = True
+                    break
+                if _turn_stop_pressed(ctx):
+                    pending = _pending_schedule_approvals.get(request_id)
+                    with _schedule_decision_lock:
+                        if pending is not None and not pending.get("decided"):
+                            pending["approved"] = False
+                            pending["decided"] = True
+                            pending["turn_stopped"] = True
+                    signaled = True  # decided now, by the Stop, or a moment ago by the person
+                    break
     entry = _pending_schedule_approvals.pop(request_id, None)
+    if entry is not None and entry.get("turn_stopped"):
+        try:
+            _on_main_loop(dpc_service.announce_schedule_approval_closed(
+                request_id=request_id,
+                agent_id=agent_id,
+                outcome=schedule_approval_words(task_type)["stopped_outcome"],
+                resolution="superseded",
+            ))
+        except Exception as e:
+            log.warning("Failed to announce schedule_approval_closed: %s", e)
+        log.info("%s approval withdrawn by the turn's Stop: %s", task_type, request_id)
+        return False, _SCHEDULE_TURN_STOPPED
     if not signaled or entry is None:
-        log.info("check_back approval timed out (%ds): %s", _SCHEDULE_APPROVAL_TTL_SECONDS, request_id)
+        log.info("%s approval timed out (%ds): %s", task_type, _SCHEDULE_APPROVAL_TTL_SECONDS, request_id)
         try:
             _on_main_loop(dpc_service.announce_schedule_approval_closed(
                 request_id=request_id,

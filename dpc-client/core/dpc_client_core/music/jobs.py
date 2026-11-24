@@ -59,8 +59,9 @@ conversation_id?, turn_id?}`. Three rules read it, all for agents only; the pers
 
 - **Queue cap**: at most `agent_queue_max` (default 2) of an agent's jobs are `queued` or `running` at
   once, else `requester_queue_full`.
-- **Turn cap**: at most `turn_jobs_max` (default 1) jobs per (agent, turn), an `unsupported` one not
-  counted since it never held the card, else `turn_job_limit`.
+- **Turn cap**: at most `turn_jobs_max` (default 1) jobs per (agent, turn), an `unsupported` one
+  counted too, else `turn_job_limit`. `check_job` answers what `create_job` would, without a job
+  (`unsupported` is then an error), so the music tools ask the person only for a job core makes.
 - **Default key**: an agent request with a `turn_id` and no `idempotency_key` gets one derived from
   agent, turn and the final params, so the same call repeated in the turn returns the same job (before
   any cap is asked) and a different job is the cap's to judge.
@@ -476,7 +477,9 @@ class MusicJobStore:
                 continue
             if j["state"] in (js.QUEUED, js.RUNNING):
                 active += 1
-            if turn_id is not None and rb.get("turn_id") == turn_id and j["state"] != js.UNSUPPORTED:
+            # Every job of the turn counts, an `unsupported` one too (follow-up 12, Zcode #68:
+            # left out, one turn made six with a limit of one).
+            if turn_id is not None and rb.get("turn_id") == turn_id:
                 in_turn += 1
         if turn_id is not None and in_turn >= turn_jobs_max:
             raise MusicJobError("turn_job_limit", f"this turn already proposed {in_turn} music job(s); "
@@ -500,6 +503,7 @@ class MusicJobStore:
         requested_by: Optional[Mapping[str, Any]] = None,
         agent_queue_max: Optional[int] = None,
         turn_jobs_max: Optional[int] = None,
+        _check_only: bool = False,
     ) -> dict:
         """Propose a job (SPEC §6 `propose_job`) and return it: `queued` when its type can
         run now, else `unsupported` with the reason.
@@ -555,12 +559,20 @@ class MusicJobStore:
                 if old["type"] != job_type or not self._same_params(old, params) or old["track_id"] != track_id:
                     raise MusicJobError("idempotency_conflict",
                                         f"idempotency_key {idempotency_key!r} belongs to job {old['id']} with other params")
+                if _check_only:
+                    return {"repeat": copy.deepcopy(old), "params": None}
                 return copy.deepcopy(old)
 
             if is_agent:
                 self._check_agent_limits(requester,
                                          self.agent_queue_max if agent_queue_max is None else agent_queue_max,
                                          self.turn_jobs_max if turn_jobs_max is None else turn_jobs_max)
+            if _check_only:
+                reason = self.capabilities.unsupported_reason(
+                    job_type, params if job_type == js.GENERATE_FROM_TEXT else None)
+                if reason is not None:
+                    raise MusicJobError("unsupported", reason)
+                return {"repeat": None, "params": copy.deepcopy(params)}
             job = self._new_job(job_type, params, track_id=track_id, base_version_id=base_version_id,
                                 comment_id=comment_id, action=action, region=region, prompt=prompt,
                                 idempotency_key=idempotency_key, requested_by=requester)
@@ -580,6 +592,15 @@ class MusicJobStore:
             if idempotency_key is not None:
                 self._by_key[idempotency_key] = job["id"]
             return copy.deepcopy(job)
+
+    def check_job(self, job_type: str, params: Any, **kwargs: Any) -> dict:
+        """What `create_job` with these arguments would answer, without making a job: every
+        check a person must not be asked to approve past (music tools follow-up 12, Zcode #68
+        P2), by `create_job`'s own code. Returns `{repeat: job, params: None}` when the request
+        repeats an earlier one (`create_job` would return that job), else `{repeat: None,
+        params}` with the final params. Raises what `create_job` raises, and `unsupported`
+        (with the reason) where `create_job` would make the job `unsupported`."""
+        return self.create_job(job_type, params, _check_only=True, **kwargs)
 
     @staticmethod
     def _same_params(old: dict, params: Any) -> bool:
@@ -658,9 +679,10 @@ class MusicJobStore:
         it is (idempotent, SPEC §6). The runner sees the state and stops.
 
         `requested_by` None or a person is the person's Cancel and takes any job. An agent
-        (`kind` "agent") may cancel only a job whose own `requested_by.agent_id` is the same
-        (ADR-051 decision E): any other job, a UI job and a record from before the field
-        included, is refused `not_your_job`, also when it is already cancelled."""
+        (`kind` "agent") may cancel only a job whose own `requested_by.agent_id` and
+        `conversation_id` are the same (ADR-051 decision E; follow-up 12): any other job, a UI
+        job and a record from before the field included, is refused `not_your_job`, also when
+        it is already cancelled."""
         try:
             who = js.check_requested_by(requested_by if requested_by is not None
                                         else {"kind": js.REQUESTER_PERSON})
@@ -674,6 +696,12 @@ class MusicJobStore:
                 if owner["kind"] != js.REQUESTER_AGENT or owner["agent_id"] != who["agent_id"]:
                     raise MusicJobError("not_your_job", f"job {job_id} was not proposed by this agent; "
                                                         "an agent cancels only its own jobs")
+                # And from the chat it was proposed in (follow-up 12, Zcode #68 P3): the same
+                # agent's turn in another chat does not cancel it.
+                if owner.get("conversation_id") != who.get("conversation_id"):
+                    raise MusicJobError("not_your_job", f"job {job_id} was proposed in another chat; "
+                                                        "an agent cancels a job only from the chat that "
+                                                        "proposed it")
                 reason = reason or f"cancelled by agent {who['agent_id']}"
             if job["state"] == js.CANCELLED:
                 return copy.deepcopy(job)

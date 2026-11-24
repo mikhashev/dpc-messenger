@@ -28,9 +28,12 @@ gives the take's own file and nothing of the job's request (D44).
 
 `check_back` is the way back to a job (D49): `schedule_task` with task_type `check_back` and
 `music_job_id` in its task data asks no approval when that job is this agent's and still
-queued or running (`is_return_to_own_music_job`). `with_check_back` is the allowed-tools rule
-that keeps `schedule_task` available wherever a music tool is. `cancel_jobs_of_stopped_turn`
-is what the loop calls when the person stops a turn (D48).
+queued or running (`own_music_job_to_return_to`); core then sets its delay
+(`check_back_delay_s`) and its wake text (`music_return_text`). `with_check_back` is the
+allowed-tools rule that keeps `schedule_task` available wherever a music tool is; a
+`schedule_task` only that rule brings takes nothing but such a return
+(`ToolContext.schedule_task_music_return_only`). `cancel_jobs_of_stopped_turn` is what the
+loop calls when the person stops a turn (D48).
 """
 
 from __future__ import annotations
@@ -312,39 +315,64 @@ def _approval_about(job_type: str, params: Dict[str, Any]) -> str:
         style = style[:APPROVAL_STYLE_CHARS - 1].rstrip() + "…"
     variants = params.get("variants") or js.VARIANTS_DEFAULT
     takes = f"{variants} take" + ("" if variants == 1 else "s")
-    sung = "instrumental" if not params.get("lyrics") else "with lyrics"
+    sung = "instrumental" if not str(params.get("lyrics") or "").strip() else "with lyrics"
+    duration = _duration_s(params)
+    long = f", {duration:g} s long" if duration else ""
     engine = params.get("engine") or "default engine"
     try:
         eta = js.music_expected_s(params)
     except Exception:
         eta = None
     on_card = f"about {int(round(eta))} s on the GPU" if eta else "time on the GPU not known"
-    return (f"Run a music job on the GPU: {job_type}, \"{style or '(no style)'}\", {takes}, {sung}, "
+    return (f"Run a music job on the GPU: {job_type}, \"{style or '(no style)'}\", {takes}, {sung}{long}, "
             f"{engine}, {on_card}")
 
 
+# The lyrics as the approval card quotes them: their start, so the person sees what is sung.
+APPROVAL_LYRICS_CHARS = 120
+
+
+def _duration_s(params: Dict[str, Any]) -> Optional[float]:
+    try:
+        value = params.get("duration_s")
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _approval_parts(job_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    """The same request in parts, for the interface's card (`music` on schedule_approval_request)."""
+    """The same request in parts, for the interface's card (`music` on schedule_approval_request):
+    type, style, variants, instrumental and its twin has_lyrics, engine, duration_s, eta_seconds,
+    and lyrics_excerpt (the lyrics' first APPROVAL_LYRICS_CHARS characters, only when there are
+    lyrics)."""
     try:
         eta = js.music_expected_s(params)
     except Exception:
         eta = None
-    return {
+    lyrics = " ".join(str(params.get("lyrics") or "").split())
+    parts = {
         "type": job_type,
         "style": " ".join(str(params.get("style") or "").split()),
         "variants": params.get("variants") or js.VARIANTS_DEFAULT,
-        "instrumental": not params.get("lyrics"),
+        "instrumental": not lyrics,
+        "has_lyrics": bool(lyrics),
         "engine": params.get("engine") or None,
+        "duration_s": _duration_s(params),
         "eta_seconds": int(round(eta)) if eta else None,
     }
+    if lyrics:
+        parts["lyrics_excerpt"] = (lyrics if len(lyrics) <= APPROVAL_LYRICS_CHARS
+                                   else lyrics[:APPROVAL_LYRICS_CHARS - 1].rstrip() + "…")
+    return parts
 
 
 def _turn_jobs(jobs: List[Dict[str, Any]], agent_id: str, turn_id: str) -> List[Dict[str, Any]]:
     out = []
     for job in jobs:
         rb = js.requested_by_of(job)
+        # An `unsupported` job counts as well (follow-up 12): core's turn cap counts it too.
         if (rb.get("kind") == js.REQUESTER_AGENT and rb.get("agent_id") == agent_id
-                and rb.get("turn_id") == turn_id and job.get("state") != js.UNSUPPORTED):
+                and rb.get("turn_id") == turn_id):
             out.append(job)
     return out
 
@@ -421,13 +449,28 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
         return (f"⚠️ music_propose_job refused: requester_queue_full: {len(active)} of this agent's music "
                 f"job(s) are queued or running, at most {queue_max} at once. Nothing was asked or proposed.")
 
-    # The person's consent first, through schedule_task's machinery (D47).
+    # Everything core would refuse, and a job core would make `unsupported`, is answered before
+    # anyone is asked (follow-up 12, Zcode #68 P2): core's own checks, with no job made.
+    checked = _service_call(ctx, "check_music_job", type=type, params=params,
+                            idempotency_key=idempotency_key or None, requested_by=who)
+    refused = _error_text(checked, "music_propose_job")
+    if refused:
+        return refused + " Nothing was asked or proposed."
+    if checked.get("repeat"):
+        return ("This request repeats a job already made; no new job was made and nothing was asked.\n"
+                + "\n".join(_job_lines(checked["repeat"])))
+    final = checked.get("params") if isinstance(checked.get("params"), dict) else params
+
+    # The person's consent first, through schedule_task's machinery (D47). Stop while the card
+    # is up withdraws it: a "yes" after Stop makes no job (follow-up 12, Zcode #68 P3).
     from .core import _await_schedule_approval
     approved, reason = _await_schedule_approval(
-        ctx, task_type="music_job", when="now", about=_approval_about(type, params),
-        music=_approval_parts(type, params))
+        ctx, task_type="music_job", when="now", about=_approval_about(type, final),
+        music=_approval_parts(type, final), void_on_stop=True)
     if not approved:
         return f"⚠️ The music job was not proposed: {reason}. No job was made."
+    if _turn_stopped(ctx):
+        return "⚠️ The music job was not proposed: the turn was stopped. No job was made."
 
     answer = _service_call(ctx, "propose_music_job", type=type, params=params,
                            idempotency_key=idempotency_key or None, requested_by=who)
@@ -789,8 +832,9 @@ def get_tools() -> List[ToolEntry]:
                          "description": "Job type; only generate_from_text."},
                 "params": {"type": "object",
                            "description": "style (text, required), lyrics (text with [verse]/[chorus] "
-                                          "tags; omit for an instrumental), variants (1-4), duration_s, "
-                                          "engine (see music_capabilities), seed."},
+                                          "tags; null for an instrumental), variants (1-4), duration_s, "
+                                          "engine (see music_capabilities), seed. Params core would "
+                                          "refuse are refused before the person is asked."},
                 "idempotency_key": {"type": "string",
                                     "description": "Optional; the default comes from the turn."}},
                ["params"], music_propose_job, timeout_sec=PROPOSE_TOOL_TIMEOUT_S),

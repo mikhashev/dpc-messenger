@@ -330,7 +330,7 @@ def test_the_agent_only_commands_are_coroutines_off_the_ui_allowlist():
     from dpc_client_core.local_api import ALLOWED_COMMANDS
     from dpc_client_core.music.commands import MUSIC_COMMANDS, MusicCommandsMixin
 
-    for name in ("cancel_music_jobs_of_turn", "get_music_take"):
+    for name in ("cancel_music_jobs_of_turn", "get_music_take", "check_music_job"):
         handler = getattr(MusicCommandsMixin, name)
         assert asyncio.iscoroutinefunction(handler) and getattr(handler, "dpc_slow", False)
         assert name not in ALLOWED_COMMANDS and name not in MUSIC_COMMANDS
