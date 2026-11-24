@@ -384,6 +384,10 @@ def transcript_lyrics(track_hash: str, result: Any) -> Tuple[dict, Dict[str, Any
     stored_filter = {"version": report["version"], "dropped": report["dropped"], "kept_raw": report["kept_raw"],
                      "split_by_words": report["split_by_words"], "split_proportional": report["split_proportional"],
                      "words": report["words"]}
+    if report.get("words_unavailable"):
+        # The model refused word timestamps and the provider fell back to segments: the lines' times
+        # are the segments', not the words'. Stored only when true.
+        stored_filter["words_unavailable"] = True
     record = make_lyrics(track_hash, TRANSCRIBE_SOURCE, lines, synced=synced, language=language,
                          transcription={"provider": provider, "model": model, "filter": stored_filter})
     info: Dict[str, Any] = {

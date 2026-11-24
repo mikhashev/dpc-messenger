@@ -31,6 +31,19 @@ SHUTDOWN_DRAIN_S = 10.0
 # mlx-whisper's `hallucination_silence_threshold` for the music path (`with_detail`): a segment that
 # sits in more than this much silence around a suspect word is skipped.
 MUSIC_HALLUCINATION_SILENCE_S = 2.0
+# The HF pipeline leaves the end of the LAST word (or chunk) as None. On the music path that end is
+# estimated from the words themselves instead of being the end of the file: a song with an outro
+# would otherwise get a last word held for the whole outro and its line split (follow-up 11B).
+# The median length of the words that did get an end, held to these bounds; the default when none did.
+OPEN_WORD_DEFAULT_S = 0.5
+OPEN_WORD_MIN_S = 0.2
+OPEN_WORD_MAX_S = 1.5
+# The same for an open last SEGMENT (the word-timestamp fallback): half a second per word, held to
+# these bounds, so a last line of a few words is never stretched over an instrumental outro. A
+# segment this length is below the lyrics filter's 7 s line limit, so the limit never fires on it.
+OPEN_SEGMENT_PER_WORD_S = 0.5
+OPEN_SEGMENT_MIN_S = 1.0
+OPEN_SEGMENT_MAX_S = 6.0
 
 # The adaptive batch descent of `_transcribe_loaded`: over each length (audio seconds) the batch is
 # divided by its divisor. The warm figures are kept by the same bands (ADR-052 S3, Johnny #24-2), so
@@ -1112,9 +1125,12 @@ class LocalWhisperProvider(AIProvider):
         if length > cap:
             to("line", f"{length:g} s of audio is over cpu_max_audio_s {cap:g} s")
             return None
-        # Point 3 (Mike, 2026-11-24, Q2): whatever computes on the CPU now, each named: a resident
-        # Strata or llama-server busy by its own test, a llama-server off the card with a call in
-        # flight (`route_view`), and a local Whisper transcription already running on the CPU.
+        # Point 3 (Mike, 2026-11-24, Q2): whatever small work computes on the CPU now, each named:
+        # a resident child (Strata or llama-server, a claim on the card) that is busy by its own test,
+        # the embedding model and GLiNER while they compute on the CPU (`route_view`'s
+        # `cpu_contention`, from `card_lease._cpu_contention`), and a local Whisper transcription
+        # already running on the CPU (added here). A llama-server kept off the card (`--device none`)
+        # is not counted: `_cpu_contention` has no branch for an engine off the card.
         contention = list(view["cpu_contention"])
         contention += [f"a CPU transcription on '{alias}'" for alias in cpu_transcriptions_running()]
         decision["contention"] = contention
@@ -1817,12 +1833,15 @@ class LocalWhisperProvider(AIProvider):
         return f"{duration_seconds / elapsed:.1f}x"
 
     @staticmethod
-    def _segments_from_chunks(chunks: Any, duration_seconds: float) -> List[Dict[str, Any]]:
+    def _segments_from_chunks(chunks: Any, duration_seconds: float,
+                              bounded_last: bool = False) -> List[Dict[str, Any]]:
         """Normalise HF pipeline chunks into {start, end, text} segments.
 
         The pipeline hands back ``{"timestamp": (start, end), "text": ...}`` per
         chunk and leaves ``end`` as None on the last one; that chunk runs to the
-        end of the audio, so it gets the measured duration.
+        end of the audio, so it gets the measured duration. With `bounded_last` (the music
+        path's `with_detail` fallback only) it gets a length estimated from its words instead,
+        see `_open_segment_end`: dictation keeps the end of the audio.
         """
         segments: List[Dict[str, Any]] = []
         if not chunks:
@@ -1837,19 +1856,31 @@ class LocalWhisperProvider(AIProvider):
                 start, end = None, None
             if start is None:
                 start = segments[-1]["end"] if segments else 0.0
-            if end is None:
-                end = duration_seconds
             text = (chunk.get("text") or "").strip()
             if not text:
                 continue
+            if end is None:
+                end = (LocalWhisperProvider._open_segment_end(float(start), text, duration_seconds)
+                       if bounded_last else duration_seconds)
             segments.append({"start": float(start), "end": float(end), "text": text})
         return segments
 
     @staticmethod
+    def _open_segment_end(start: float, text: str, duration_seconds: float) -> float:
+        """An end for a last segment the pipeline left open: `OPEN_SEGMENT_PER_WORD_S` per word held
+        to `OPEN_SEGMENT_MIN_S`..`OPEN_SEGMENT_MAX_S`, never past the end of the audio and never
+        before the start. An estimate, not an alignment."""
+        length = min(max(OPEN_SEGMENT_PER_WORD_S * len(text.split()), OPEN_SEGMENT_MIN_S), OPEN_SEGMENT_MAX_S)
+        return max(start, min(start + length, duration_seconds))
+
+    @staticmethod
     def _words_from_chunks(chunks: Any, duration_seconds: float) -> List[Dict[str, Any]]:
-        """HF pipeline word chunks (`return_timestamps="word"`) as `{word, start, end}`; a missing
-        end (the last word) runs to the end of the audio."""
-        words: List[Dict[str, Any]] = []
+        """HF pipeline word chunks (`return_timestamps="word"`) as `{word, start, end}`. A missing end
+        (the last word) is NOT the end of the audio: a song with an outro would hold its last word,
+        and so its line, for the whole outro. It is the start plus the median length of the words
+        that did get an end, held to `OPEN_WORD_MIN_S`..`OPEN_WORD_MAX_S` (`OPEN_WORD_DEFAULT_S`
+        when none did), and never past the end of the audio. An estimate, not an alignment."""
+        parsed: List[tuple] = []
         for chunk in chunks or []:
             if not isinstance(chunk, dict):
                 continue
@@ -1861,8 +1892,19 @@ class LocalWhisperProvider(AIProvider):
                 start, end = None, None
             if not text or start is None:
                 continue
-            words.append({"word": text, "start": float(start),
-                          "end": float(duration_seconds if end is None else end)})
+            parsed.append((text, float(start), None if end is None else float(end)))
+        known = sorted(end - start for _, start, end in parsed if end is not None and end > start)
+        if known:
+            middle = len(known) // 2
+            median = known[middle] if len(known) % 2 else (known[middle - 1] + known[middle]) / 2
+            open_s = min(max(median, OPEN_WORD_MIN_S), OPEN_WORD_MAX_S)
+        else:
+            open_s = OPEN_WORD_DEFAULT_S
+        words: List[Dict[str, Any]] = []
+        for text, start, end in parsed:
+            if end is None:
+                end = max(start, min(start + open_s, duration_seconds))
+            words.append({"word": text, "start": start, "end": end})
         return words
 
     @staticmethod
@@ -2234,7 +2276,8 @@ class LocalWhisperProvider(AIProvider):
                     words = self._words_from_chunks(chunks_list, duration_seconds)
                     segments: List[Dict[str, Any]] = []
                 else:
-                    segments = self._segments_from_chunks(chunks_list, duration_seconds)
+                    segments = self._segments_from_chunks(chunks_list, duration_seconds,
+                                                          bounded_last=with_detail)
 
                 logger.info(f"Local transcription completed in {elapsed:.1f}s ({self._realtime_ratio(duration_seconds, elapsed)} real-time): {len(text)} chars")
 

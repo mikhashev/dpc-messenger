@@ -96,8 +96,8 @@ def test_the_backends_compression_ratio_drops_a_long_degenerate_text():
     assert texts(result) == [REAL_EN["text"]] and report["dropped_reasons"] == {"loop": 1}
 
 
-def test_a_segment_repeated_over_and_over_keeps_its_first_copy():
-    echoes = [seg(10.0 + 3 * i, 12.0 + 3 * i, "Я тебя люблю") for i in range(6)]
+def test_a_segment_repeated_with_times_that_cannot_be_singing_keeps_its_first_copy():
+    echoes = [seg(10.0 + 0.1 * i, 10.05 + 0.1 * i, "Я тебя люблю") for i in range(6)]
     result, report = clean(echoes + [REAL_EN])
     assert texts(result) == ["Я тебя люблю", REAL_EN["text"]]
     assert report["dropped_reasons"] == {"repeat": 5}
@@ -191,7 +191,7 @@ def test_a_long_segment_without_word_times_is_split_in_proportion_to_its_charact
     assert pieces[0]["start"] == 30.0 and pieces[-1]["end"] == 60.0
     assert all(a["end"] == pytest.approx(b["start"], abs=1e-2) for a, b in zip(pieces, pieces[1:]))
     for p in pieces:
-        assert p["end"] - p["start"] <= lf.MAX_LINE_S + 1.0
+        assert p["end"] - p["start"] <= lf.MAX_LINE_S + 0.0005 and len(p["text"]) <= lf.MAX_LINE_CHARS
 
 
 def test_words_that_do_not_match_the_text_fall_back_to_the_proportional_split():
@@ -338,7 +338,8 @@ async def test_with_detail_asks_the_pipeline_for_word_timestamps(fakes):
 
     answer = await hf_provider(pipe).transcribe("a.wav", with_detail=True)
     assert seen == ["word"] and answer["segments"] == []
-    assert answer["words"] == [{"word": "Hello", "start": 1.0, "end": 1.4}, {"word": "world", "start": 1.5, "end": 10.0}]
+    # The open last word gets the median of the known word lengths (0.4 s), not the end of the 10 s file.
+    assert answer["words"] == [{"word": "Hello", "start": 1.0, "end": 1.4}, {"word": "world", "start": 1.5, "end": 1.9}]
     assert "words_unavailable" not in answer
 
 

@@ -271,6 +271,7 @@ _TRANSCRIPTION_KEYS = {"provider", "model"}
 # The clean-up that ran on it (music/lyrics_filter.py), optional so older records load.
 _TRANSCRIPTION_FILTER_KEYS = {"version", "dropped", "kept_raw", "split_by_words", "split_proportional", "words"}
 
+_TRANSCRIPTION_FILTER_OPTIONAL = {"words_unavailable"}
 
 def validate_lyrics(lyrics: Any) -> None:
     """Raise `SchemaError` unless `lyrics` has the shape of `mp.lyrics/1` (SPEC §4)."""
@@ -325,12 +326,17 @@ def validate_lyrics(lyrics: Any) -> None:
                 "'transcription.provider' and 'transcription.model' must be strings or null")
         if "filter" in rec:
             flt = rec["filter"]
-            _expect(s, isinstance(flt, Mapping) and set(flt) == _TRANSCRIPTION_FILTER_KEYS,
-                    f"'transcription.filter' must have exactly the keys {sorted(_TRANSCRIPTION_FILTER_KEYS)}")
+            _expect(s, isinstance(flt, Mapping)
+                    and _TRANSCRIPTION_FILTER_KEYS <= set(flt) <= _TRANSCRIPTION_FILTER_KEYS | _TRANSCRIPTION_FILTER_OPTIONAL,
+                    f"'transcription.filter' must have the keys {sorted(_TRANSCRIPTION_FILTER_KEYS)} "
+                    f"and may have {sorted(_TRANSCRIPTION_FILTER_OPTIONAL)}")
             _expect(s, all(_is_int(flt[k]) for k in ("version", "dropped", "split_by_words", "split_proportional"))
                     and isinstance(flt["kept_raw"], bool) and isinstance(flt["words"], bool),
                     "'transcription.filter' counts must be integers and 'kept_raw', 'words' booleans")
 
+            if "words_unavailable" in flt:
+                _expect(s, flt["words_unavailable"] is True,
+                        "'transcription.filter.words_unavailable' must be true when present")
 
 VALIDATORS: Dict[str, Any] = {
     LIBRARY_ENTRY: validate_library_entry,
