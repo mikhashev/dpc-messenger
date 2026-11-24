@@ -497,6 +497,35 @@ class ToolEntry:
     timeout_sec: int = 120
     is_core: bool = True  # Core tools loaded by default
     default_enabled: bool = False  # Canonical default for privacy_rules.json (fail-closed)
+    # Runs only on the owner's own turns (agent.OWNER_TURN): outside them the tool is not
+    # offered and a call is refused before its body runs. See owner_only_refusal.
+    owner_only: bool = False
+
+
+def is_owner_turn(ctx: Optional["ToolContext"]) -> bool:
+    """Is this the owner's own turn, by the class agent.turn_class gave it?
+
+    Fails closed: a context with no class (a bare context, a probe, a run that no turn
+    classified) or with any value other than agent.OWNER_TURN is not the owner's.
+    """
+    from ..agent import OWNER_TURN  # agent imports this module; read at call time
+    return getattr(ctx, "turn_class", None) == OWNER_TURN
+
+
+def owner_only_refusal(entry: "ToolEntry", ctx: Optional["ToolContext"]) -> Optional[str]:
+    """The refusal of an owner_only tool on a turn that is not the owner's, else None.
+
+    The one place the owner_only rule is decided: ToolRegistry.execute refuses with it,
+    and the offered lists (ToolRegistry.schemas, DpcAgent._get_allowed_tools) leave out
+    what it would refuse. A turn whose class cannot be determined is not the owner's
+    (fail closed). A tool may check again inside its body, as a second line.
+    """
+    if not entry.owner_only or is_owner_turn(ctx):
+        return None
+    cls = getattr(ctx, "turn_class", None) or "unknown"
+    return (f"⚠️ Tool '{entry.name}' runs only on the owner's own turns; this turn's class is "
+            f"'{cls}' (a peer, a group with another node, Discord, Telegram that is not the "
+            f"owner's private chat, or a turn nobody classified). Nothing was run.")
 
 
 # Core tools that are always available
@@ -654,9 +683,17 @@ class ToolRegistry:
             # empty one silently offered the model every tool it had.
             if self._ctx.tool_whitelist is not None and e.name not in self._ctx.tool_whitelist:
                 continue
+            # An owner_only tool is not offered on a turn that is not the owner's,
+            # whitelist or none (no firewall gives None, which gates nothing).
+            if owner_only_refusal(e, self._ctx) is not None:
+                continue
 
             result.append({"type": "function", "function": e.schema})
         return result
+
+    def owner_only_names(self) -> set:
+        """The names of the tools marked owner_only."""
+        return {e.name for e in self._entries.values() if e.owner_only}
 
     def list_non_core_tools(self) -> List[Dict[str, str]]:
         """Return name+description of all non-core tools."""
@@ -712,6 +749,14 @@ class ToolRegistry:
         if _ctx.tool_whitelist is not None and name not in _ctx.tool_whitelist:
             return f"⚠️ Tool '{name}' is not in the allowed tools list"
 
+        # owner_only: refused before the body runs on a turn that is not the owner's,
+        # an unclassified one included (fail closed).
+        refusal = owner_only_refusal(entry, _ctx)
+        if refusal is not None:
+            log.info("Tool %s refused: owner_only, turn class %r", name,
+                     getattr(_ctx, "turn_class", None))
+            return refusal
+
         args = _resolve_arg_aliases(entry.handler, args, name)
         args, arg_error = coerce_args_to_schema(entry.schema, args, name)
         if arg_error is not None:
@@ -763,4 +808,5 @@ class ToolRegistry:
                 timeout_sec=entry.timeout_sec,
                 is_core=entry.is_core,
                 default_enabled=entry.default_enabled,
+                owner_only=entry.owner_only,
             )

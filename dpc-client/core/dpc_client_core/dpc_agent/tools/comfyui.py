@@ -1121,6 +1121,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=45,
             is_core=False,
             default_enabled=False,
+            owner_only=True,
         ),
         ToolEntry(
             name="comfyui_check",
@@ -1151,6 +1152,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=15,
             is_core=False,
             default_enabled=False,
+            owner_only=True,
         ),
         ToolEntry(
             name="comfyui_wait",
@@ -1186,6 +1188,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=610,
             is_core=False,
             default_enabled=False,
+            owner_only=True,
         ),
         ToolEntry(
             name="comfyui_queue_status",
@@ -1211,6 +1214,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=10,
             is_core=False,
             default_enabled=False,
+            owner_only=True,
         ),
         ToolEntry(
             name="comfyui_progress",
@@ -1248,6 +1252,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=80,
             is_core=False,
             default_enabled=False,
+            owner_only=True,
         ),
         ToolEntry(
             name="comfyui_convert",
@@ -1286,6 +1291,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=120,
             is_core=False,
             default_enabled=False,
+            owner_only=True,
         ),
         ToolEntry(
             name="comfyui_diagnose",
@@ -1326,5 +1332,6 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=30,
             is_core=False,
             default_enabled=False,
+            owner_only=True,
         ),
     ]

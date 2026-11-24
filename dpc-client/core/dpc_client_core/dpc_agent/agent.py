@@ -87,6 +87,7 @@ DEFAULT_LAYER_AUDIENCE = {"L5": "private", "L6": "private", "EXT": "private"}
 OWNER_TURN = "owner"            # the owner's doors, or a group of this node and own nodes
 OTHER_NODE_TURN = "other_node"  # a group with anyone else, a Discord bridge, an unknown group
 STRANGER_TURN = "stranger"      # telegram, discord, no source, anything unknown
+_CLASS_NOT_GIVEN = object()     # _get_allowed_tools: classify the turn itself
 
 
 def turn_class(message_source: Optional[str], group: Optional[Any] = None,
@@ -611,9 +612,15 @@ class DpcAgent:
         annotation_store = SentAnnotationStore(self.agent_root)
         sent_annotations = annotation_store.load(conversation_id) if prior_history else None
 
+        # Who this turn is decides which memory layers it may see (ADR-048) and whether
+        # an owner_only tool is offered, asked now, for scheduled tasks too: the class is
+        # recomputed from the stored source and the conversation's members at run time.
+        audience_class, layers_open = self.turn_audience(message_source, conversation_id)
+
         # Get firewall-controlled tool access (needed for both context and tool registry)
         allowed_tools = self._get_allowed_tools(message_source=message_source,
-                                                  conversation_id=conversation_id)
+                                                  conversation_id=conversation_id,
+                                                  turn_class=audience_class)
 
         # Collect firewall metadata for capabilities section (transparency)
         all_tools_map = None
@@ -646,10 +653,6 @@ class DpcAgent:
             memory_system = bool(mem_cfg.enabled)
             active_recall = bool(mem_cfg.active_recall)
             max_recall = mem_cfg.max_recall_results
-        # Who this turn is decides which memory layers it may see (ADR-048), asked now,
-        # for scheduled tasks too: the class is recomputed from the stored source and
-        # the conversation's members at run time.
-        audience_class, layers_open = self.turn_audience(message_source, conversation_id)
         # No open layer, no hints; otherwise the closed layers' rows are dropped below.
         active_recall = active_recall and bool(layers_open)
         if audience_class != OWNER_TURN and not layers_open:
@@ -1025,7 +1028,35 @@ class DpcAgent:
     })
 
     def _get_allowed_tools(self, message_source: Optional[str] = None,
-                           conversation_id: Optional[str] = None) -> Optional[set]:
+                           conversation_id: Optional[str] = None,
+                           turn_class: Any = _CLASS_NOT_GIVEN) -> Optional[set]:
+        """
+        The firewall's tools (_firewall_allowed_tools) less every owner_only tool
+        on a turn that is not the owner's.
+
+        `turn_class` is the class process() computed; not given, it is asked of
+        turn_audience. A class that cannot be determined is not the owner's (fail
+        closed). No firewall stays None (no gate): ToolRegistry.schemas and
+        ToolRegistry.execute apply owner_only by the context's class then.
+        """
+        if turn_class is _CLASS_NOT_GIVEN:
+            try:
+                turn_class = self.turn_audience(message_source, conversation_id)[0]
+            except Exception:
+                log.warning("Agent %s: turn class unknown for %s; owner_only tools withheld",
+                            self.agent_root.name, conversation_id or message_source, exc_info=True)
+                turn_class = None
+        allowed = self._firewall_allowed_tools(message_source, conversation_id)
+        if allowed is not None and turn_class != OWNER_TURN:
+            owner_only = allowed & self.tools.owner_only_names()
+            if owner_only:
+                allowed = allowed - owner_only
+                log.info("Turn class %r: %d owner_only tool(s) withheld: %s",
+                         turn_class, len(owner_only), sorted(owner_only))
+        return allowed
+
+    def _firewall_allowed_tools(self, message_source: Optional[str],
+                                conversation_id: Optional[str]) -> Optional[set]:
         """
         Get set of allowed tools from firewall, restricted by message source
         and conversation context (group vs 1:1).
