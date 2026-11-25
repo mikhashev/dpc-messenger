@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -704,14 +705,13 @@ def music_playlist_add(ctx: ToolContext, playlist_id: str, track_ids: Optional[L
 # For schedule_task, the allowed tools and the loop's Stop
 # ---------------------------------------------------------------------------
 
-def own_music_job_to_return_to(ctx: ToolContext, data: Any) -> Optional[Dict[str, Any]]:
-    """The music job a check_back's task data names (`music_job_id`) when this agent proposed
-    it and it is still queued or running (D49), else None. Any doubt is None."""
-    if not isinstance(data, dict):
-        return None
-    job_id = data.get("music_job_id")
-    if not isinstance(job_id, str) or not job_id.strip():
-        return None
+# A job id as it appears inside a sentence (job_schemas.JOB_ID_RE, unanchored).
+_JOB_ID_IN_TEXT_RE = re.compile(r"(?<![0-9A-Za-z_])job_[0-9a-f]{16}(?![0-9A-Za-z_])")
+
+
+def _own_unfinished_job(ctx: ToolContext, job_id: str) -> Optional[Dict[str, Any]]:
+    """The job `job_id` when this agent proposed it and it is still queued or running, else
+    None. Any doubt is None."""
     try:
         job, refused = _get_job(ctx, job_id)
     except Exception:
@@ -725,6 +725,29 @@ def own_music_job_to_return_to(ctx: ToolContext, data: Any) -> Optional[Dict[str
             and job.get("state") in _UNFINISHED):
         return job
     return None
+
+
+def own_music_job_to_return_to(ctx: ToolContext, data: Any) -> Optional[Dict[str, Any]]:
+    """The music job a check_back's task data names when this agent proposed it and it is
+    still queued or running (D49), else None. Any doubt is None.
+
+    The job is named by `music_job_id`. Without that field, a job id written in the task's
+    text fields counts when exactly one such id there is a job of this agent's that is still
+    queued or running (an agent wrote «check job_… at 04:26» and core did not know its own
+    job, so it asked for an approval). The own-and-unfinished check is the same either way."""
+    if not isinstance(data, dict):
+        return None
+    if "music_job_id" in data:
+        job_id = data.get("music_job_id")
+        if not isinstance(job_id, str) or not job_id.strip():
+            return None
+        return _own_unfinished_job(ctx, job_id)
+    named: List[str] = []
+    for value in data.values():
+        if isinstance(value, str):
+            named.extend(m for m in _JOB_ID_IN_TEXT_RE.findall(value) if m not in named)
+    found = [job for job in (_own_unfinished_job(ctx, job_id) for job_id in named) if job]
+    return found[0] if len(found) == 1 else None
 
 
 def is_return_to_own_music_job(ctx: ToolContext, data: Any) -> bool:

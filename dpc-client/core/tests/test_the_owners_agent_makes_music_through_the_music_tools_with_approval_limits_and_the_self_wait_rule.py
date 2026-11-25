@@ -80,6 +80,8 @@ class QueueAgent:
 
     def __init__(self, root):
         self.queue = TaskQueue(root)
+        # Marked running, as a started agent's is: schedule_task refuses a queue nothing runs.
+        self.queue._running = True
         self._task_handlers = {}
         self._firewall_profile = None
 

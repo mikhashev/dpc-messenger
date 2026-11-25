@@ -233,7 +233,7 @@ def _schedule_ctx(source):
         scheduled.append(task)
         return task
 
-    agent = SimpleNamespace(queue=SimpleNamespace(_queue=[]), schedule_task=_schedule,
+    agent = SimpleNamespace(queue=SimpleNamespace(_queue=[], is_running=lambda: True), schedule_task=_schedule,
                             _task_handlers={})
     return SimpleNamespace(_agent=agent, current_task_id="agent_001", check_back_depth=0,
                            reply_telegram_chat_id=None, message_source=source,

@@ -57,6 +57,12 @@ def _task_timeout(task_type: str) -> int:
 # Ceiling for a task whose type declares none.
 DEFAULT_TASK_TIMEOUT_SEC = 900
 
+# A task with a time (`scheduled_at`) that is later than this when its turn to
+# start comes is not run but skipped as overdue (Mike's decision, 2026-11-25).
+# Typically the process was down at the time: a check_back that wakes an hour
+# after the moment it was for answers a situation that has moved on.
+OVERDUE_SKIP_AFTER_SEC = 10 * 60
+
 
 class TaskPriority(Enum):
     """Task priority levels."""
@@ -157,6 +163,7 @@ class TaskQueue:
         self._on_task_start: Optional[Callable[[Task], Any]] = None
         self._on_task_complete: Optional[Callable[[Task], Any]] = None
         self._on_task_failed: Optional[Callable[[Task], Any]] = None
+        self._on_task_skipped: Optional[Callable[[Task], Any]] = None
 
         self._load_queue()
         log.info(f"TaskQueue initialized with {len(self._queue)} pending tasks")
@@ -236,6 +243,7 @@ class TaskQueue:
         on_task_start: Optional[Callable[[Task], Any]] = None,
         on_task_complete: Optional[Callable[[Task], Any]] = None,
         on_task_failed: Optional[Callable[[Task], Any]] = None,
+        on_task_skipped: Optional[Callable[[Task], Any]] = None,
     ) -> None:
         """
         Set callback functions for task lifecycle events.
@@ -244,10 +252,13 @@ class TaskQueue:
             on_task_start: Called when a task starts
             on_task_complete: Called when a task completes successfully
             on_task_failed: Called when a task fails
+            on_task_skipped: Called when a task is skipped without running
+                (overdue); falls back to on_task_failed when not given
         """
         self._on_task_start = on_task_start
         self._on_task_complete = on_task_complete
         self._on_task_failed = on_task_failed
+        self._on_task_skipped = on_task_skipped
 
     def schedule(
         self,
@@ -428,6 +439,49 @@ class TaskQueue:
 
         self._save_queue()
 
+    @staticmethod
+    def overdue_seconds(task: Task, now: Optional[datetime] = None) -> float:
+        """How many seconds past its `scheduled_at` a task is; 0 for one with no
+        time, one not yet due, or a time that cannot be read."""
+        if not task.scheduled_at:
+            return 0.0
+        try:
+            scheduled = datetime.fromisoformat(task.scheduled_at.replace("Z", "+00:00"))
+        except Exception:
+            return 0.0
+        if scheduled.tzinfo is None:
+            scheduled = scheduled.replace(tzinfo=timezone.utc)
+        now = now or datetime.now(timezone.utc)
+        return max(0.0, (now - scheduled).total_seconds())
+
+    def mark_skipped(self, task: Task, reason: str) -> None:
+        """End a task without running it: status `failed` with the reason as its
+        error, no retry. The board and the UI already know a failed task; a new
+        status would be one more they would have to learn."""
+        task.status = "failed"
+        task.error = reason[:2000] if reason else "skipped"
+        task.completed_at = utc_now_iso()
+        self._queue = [t for t in self._queue if t.id != task.id]
+        self._save_queue()
+        log.warning("Task %s (%s) skipped: %s", task.id, task.task_type, task.error)
+
+        callback = self._on_task_skipped or self._on_task_failed
+        if callback:
+            try:
+                callback_result = callback(task)
+                if asyncio.iscoroutine(callback_result):
+                    asyncio.create_task(callback_result)
+            except Exception as e:
+                log.error(f"on_task_skipped callback error: {e}")
+
+    def _skip_if_overdue(self, task: Task) -> bool:
+        """Skip `task` when it is more than OVERDUE_SKIP_AFTER_SEC late; whether it was."""
+        late = self.overdue_seconds(task)
+        if late <= OVERDUE_SKIP_AFTER_SEC:
+            return False
+        self.mark_skipped(task, f"overdue: {int(late // 60)} min late, not run")
+        return True
+
     async def start_processor(
         self,
         executor: Callable[[Task], Any],
@@ -453,6 +507,8 @@ class TaskQueue:
             while self._running:
                 try:
                     task = self.get_next()
+                    if task and self._skip_if_overdue(task):
+                        continue  # the next due task, if any, without waiting a poll
                     if task:
                         log.info(f"Executing task {task.id}: {task.task_type}")
                         self.mark_running(task)

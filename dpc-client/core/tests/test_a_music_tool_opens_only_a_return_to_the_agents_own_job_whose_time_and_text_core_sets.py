@@ -125,9 +125,13 @@ def _agent(tmp_path, provider, service, *, grant_schedule_task=False):
     rules = tmp_path / "privacy_rules.json"
     rules.write_text(json.dumps({"dpc_agent": {"enabled": True, "tools": tools},
                                  "agent_profiles": {PROFILE: {"tools": tools}}}), encoding="utf-8")
-    return DpcAgent(llm_manager=_Manager(provider), config=AgentConfig(max_rounds=3),
-                    agent_root=tmp_path / "agents" / PROFILE, provider_alias=ALIAS,
-                    firewall=ContextFirewall(rules), firewall_profile=PROFILE, service=service)
+    agent = DpcAgent(llm_manager=_Manager(provider), config=AgentConfig(max_rounds=3),
+                     agent_root=tmp_path / "agents" / PROFILE, provider_alias=ALIAS,
+                     firewall=ContextFirewall(rules), firewall_profile=PROFILE, service=service)
+    # As the manager's started agent has it: schedule_task refuses a queue nothing runs.
+    # Marked, not started, so a pending task stays in the queue for the test to read.
+    agent.queue._running = True
+    return agent
 
 
 async def _turn(tmp_path, home, rig, args, *, grant=False, person=None):

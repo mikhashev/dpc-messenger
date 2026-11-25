@@ -204,13 +204,90 @@ class DpcAgentManager:
             service=self.service,            # For tools that need service access
             compute_host=self._host_of_alias(provider_alias),  # Remote peer for LLM inference
             run_gate=self._run_gate,          # Same gate as process_message — the queue is the second door
+            # The default agent's queue, not a second one over the same file: the
+            # default agent's processor is the one that runs it (chat #114).
+            task_queue=self._agent.queue if self._agent is not None else None,
         )
+        self._wire_alias_agent(new_agent, provider_alias)
 
         # Cache for reuse
         self._agents[provider_alias] = new_agent
         log.info(f"Created and cached agent for provider: {provider_alias}")
 
         return new_agent
+
+    def _wire_alias_agent(self, agent: DpcAgent, provider_alias: str) -> None:
+        """Give a per-alias agent what the default agent has for scheduled tasks:
+        the one queue, the alias its tasks wake on, and the run's chat progress,
+        Stop and Telegram delivery (the default agent's wiring is in start())."""
+        if self._agent is not None:
+            agent.queue = self._agent.queue
+        agent._wake_alias = provider_alias
+        agent._telegram_send_fn = self._deliver_telegram_result
+        agent._task_progress_scope = self._task_progress_scope
+        agent._task_notice_fn = self._post_task_notice
+
+    def _agent_for_task(self, task: Any) -> Optional[DpcAgent]:
+        """The agent object a queued task runs on: the per-alias agent it was
+        scheduled through (rebuilt after a restart while the alias is still a
+        provider), else the default agent, with a line in the log."""
+        alias = ((getattr(task, "data", None) or {}).get("_provider_alias") or "")
+        if not alias:
+            return self._agent
+        if alias in self._agents:
+            return self._agents[alias]
+        providers = getattr(getattr(self.service, "llm_manager", None), "providers", None) or {}
+        if alias in providers:
+            try:
+                return self._get_or_create_agent_for_provider(alias)
+            except Exception as e:
+                log.warning("Task %s: agent for alias %r not built (%s); it runs on the default agent",
+                            getattr(task, "id", "?"), alias, e)
+                return self._agent
+        log.warning("Task %s was scheduled on alias %r, which no longer exists; it runs on the "
+                    "default agent", getattr(task, "id", "?"), alias)
+        return self._agent
+
+    async def _post_task_notice(self, task: Any, text: str) -> None:
+        """Put a line about a scheduled task that did not run into the chat it
+        would have answered in, where the agent and the person both read it: a
+        group gets it as the agent's post, any other chat as the task's prompt
+        closed by the line, and a Telegram chat it came from gets it too."""
+        data = getattr(task, "data", None) or {}
+        conversation_id = data.get("_reply_conversation_id") or ""
+        if isinstance(conversation_id, str) and conversation_id.startswith("group-"):
+            sender = getattr(self._agent, "display_name", None) or self._agent_display_name or self.agent_id
+            try:
+                await self.service.send_group_agent_message(
+                    group_id=conversation_id, agent_name=sender, text=text,
+                )
+            except Exception as e:
+                log.warning("Notice for task %s not posted to %s: %s",
+                            getattr(task, "id", "?"), conversation_id, e)
+        elif conversation_id:
+            try:
+                monitor = self._get_or_create_agent_monitor(conversation_id)
+                task_type = getattr(task, "task_type", None) or "chat"
+                prompt = str(data.get("text") or data.get("message") or "") or f"({task_type})"
+                self._record_prompt(monitor, prompt, f"Scheduled {task_type}", task_type=task_type,
+                                    message_source=data.get("_message_source"))
+                monitor.add_message(
+                    role="assistant",
+                    content=text,
+                    timestamp=utc_now_iso(),
+                    sender_node_id=conversation_id,
+                    sender_name=self._agent_display_name or self.agent_id or "DPC Agent",
+                    turn_end="guard",
+                    message_source=data.get("_message_source"),
+                )
+                monitor.save_history()
+            except Exception as e:
+                log.warning("Notice for task %s not recorded in %s: %s",
+                            getattr(task, "id", "?"), conversation_id, e)
+            await self._broadcast_history_to_ui(conversation_id)
+        telegram_chat_id = data.get("_reply_telegram_chat_id")
+        if telegram_chat_id:
+            await self._deliver_telegram_result(telegram_chat_id, text)
 
     async def start(self) -> None:
         """Initialize the agent and Telegram bridge."""
@@ -267,6 +344,13 @@ class DpcAgentManager:
             compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
             run_gate=self._run_gate,          # Same gate as process_message — the queue is the second door
         )
+        # The one processor runs every task of this agent root, each on the agent
+        # object it was scheduled through; a per-alias agent built before this
+        # start takes this queue now.
+        self._agent._task_agent_for = self._agent_for_task
+        self._agent._task_notice_fn = self._post_task_notice
+        for alias, cached in self._agents.items():
+            self._wire_alias_agent(cached, alias)
 
         # Start task processor if enabled
         if agent_config.enable_task_queue:
@@ -1660,11 +1744,13 @@ class DpcAgentManager:
                 "stop_event": interrupt_ev,
                 "kill_event": kill_ev,
             }
-            if monitor is not None and "answer" in run and self._agent is not None:
+            # The agent object that ran it: a per-alias agent holds its own trace.
+            ran_on = run.get("agent") or self._agent
+            if monitor is not None and "answer" in run and ran_on is not None:
                 try:
-                    self._record_answer(monitor, conversation_id, self._agent, run["answer"], streamed,
+                    self._record_answer(monitor, conversation_id, ran_on, run["answer"], streamed,
                                         message_source=run.get("message_source"),
-                                        attachments=self._take_posted_attachments(self._agent, conversation_id))
+                                        attachments=self._take_posted_attachments(ran_on, conversation_id))
                 except Exception as e:
                     log.warning("Task run in %s: answer not recorded: %s", conversation_id, e)
                 await self._broadcast_history_to_ui(conversation_id)

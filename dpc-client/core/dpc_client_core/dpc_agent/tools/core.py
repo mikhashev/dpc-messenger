@@ -1946,6 +1946,13 @@ def release_schedule_approvals_of_turn(turn_id: str) -> int:
     return released
 
 
+# What schedule_task answers when the queue it would write to has no running
+# processor: nothing was queued, so nothing is promised.
+NO_TASK_PROCESSOR_REFUSAL = (
+    "⚠️ Not scheduled: this agent has no running task processor, so nothing would run "
+    "the task. Nothing was queued.")
+
+
 def schedule_task(
     ctx: ToolContext,
     task_type: str,
@@ -2001,6 +2008,12 @@ def schedule_task(
             return SCHEDULE_RETURN_ONLY_REFUSAL + why
         if not isinstance(data, dict):
             return "⚠️ task_data must be a JSON object"
+
+        # A queue no processor runs would take the task and never run it, while
+        # this answered «✓ Scheduled» (chat #114: a check_back on a per-alias
+        # agent's own queue). Refused before any approval card is shown.
+        if not ctx._agent.queue.is_running():
+            return NO_TASK_PROCESSOR_REFUSAL
 
         # Map priority string
         from ..task_queue import TaskPriority

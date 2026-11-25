@@ -37,7 +37,8 @@ class _NoApproval:
 
 
 def _ctx(depth=0, queued=(), firewall=None):
-    queue = SimpleNamespace(_queue=list(queued))
+    # A running processor: schedule_task refuses a queue nothing runs.
+    queue = SimpleNamespace(_queue=list(queued), is_running=lambda: True)
     scheduled = []
 
     def _schedule(task_type, data, priority, delay_seconds):

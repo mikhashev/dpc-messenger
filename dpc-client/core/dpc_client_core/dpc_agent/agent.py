@@ -242,6 +242,7 @@ class DpcAgent:
         service: Optional[Any] = None,  # CoreService reference for commit proposals
         compute_host: str = "",  # Optional remote peer node_id for LLM inference
         run_gate: Optional[Any] = None,  # Per-agent run gate, shared with the manager
+        task_queue: Optional[TaskQueue] = None,  # The agent root's one queue, when another agent of it holds it
     ):
         """
         Initialize the agent.
@@ -253,6 +254,9 @@ class DpcAgent:
             firewall: ContextFirewall instance for tool permissions
             provider_alias: Specific LLM provider to use (overrides agent_provider)
             firewall_profile: Permission profile name from privacy_rules.json
+            task_queue: The queue of this agent root that another agent object
+                already holds (the manager passes the default agent's to a
+                per-alias agent). None builds one from the root's file.
         """
         self.config = config or AgentConfig()
         self.agent_root = agent_root or get_agent_root("default")
@@ -330,9 +334,22 @@ class DpcAgent:
                 except RuntimeError:
                     pass  # constructed outside an event loop (e.g. a sync test)
 
-        # Task queue for background execution
-        self.queue = TaskQueue(self.agent_root)
+        # Task queue for background execution. One queue object per agent root:
+        # two would each hold their own list of the one file, and each save
+        # would write its own list over the other's (a per-alias agent's task
+        # erased, a finished task brought back).
+        self.queue = task_queue if task_queue is not None else TaskQueue(self.agent_root)
         self._queue_enabled = self.config.enable_task_queue
+        # Set by the agent manager on a per-alias agent: the alias it is cached
+        # under. A task scheduled through this agent records it, so the one
+        # processor wakes it on the model it was scheduled on.
+        self._wake_alias: Optional[str] = None
+        # Set by the agent manager on the agent whose processor runs the queue:
+        # given a task, the agent object it runs on (None: this one).
+        self._task_agent_for: Optional[Callable[[Task], Any]] = None
+        # Set by the agent manager: posts a line about a task that did not run
+        # (overdue) into the chat it would have answered in.
+        self._task_notice_fn: Optional[Callable[[Task, str], Any]] = None
 
         # Custom task handlers (extensible)
         self._task_handlers: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
@@ -1318,14 +1335,57 @@ class DpcAgent:
                 "error": task.error[:500] if task.error else None,
             })
 
+        async def on_task_skipped(task: Task) -> None:
+            await on_task_failed(task)
+            await DpcAgent._post_overdue_notice(self, task)
+
         self.queue.set_callbacks(
             on_task_start=on_task_start,
             on_task_complete=on_task_complete,
             on_task_failed=on_task_failed,
+            on_task_skipped=on_task_skipped,
         )
 
-        await self.queue.start_processor(self._execute_task)
+        await self.queue.start_processor(lambda task: DpcAgent._execute_queued_task(self, task))
         log.info("Task processor started")
+
+    async def _execute_queued_task(self, task: Task) -> str:
+        """The processor's executor: run `task` on the agent object it was
+        scheduled through (a per-alias agent, picked by the manager's hook), or
+        on this one."""
+        route = getattr(self, "_task_agent_for", None)
+        agent = None
+        if route is not None:
+            try:
+                agent = route(task)
+            except Exception as e:
+                log.warning("Task %s: no agent found for it (%s); it runs on the default agent",
+                            task.id, e)
+        return await (agent or self)._execute_task(task)
+
+    async def _post_overdue_notice(self, task: Task) -> None:
+        """Say in the task's chat that it was skipped as overdue, so the agent and
+        the person both see it rather than a silent gap."""
+        late_min = int(TaskQueue.overdue_seconds(task) // 60)
+        when = task.scheduled_at or ""
+        try:
+            from datetime import datetime, timezone
+            at = datetime.fromisoformat(when.replace("Z", "+00:00"))
+            at = at.replace(tzinfo=timezone.utc) if at.tzinfo is None else at.astimezone(timezone.utc)
+            fmt = "%H:%M" if at.date() == datetime.now(timezone.utc).date() else "%Y-%m-%d %H:%M"
+            when = at.strftime(fmt) + " UTC"
+        except Exception:
+            pass
+        line = (f"A {task.task_type} scheduled for {when} was skipped: "
+                f"it was {late_min} min overdue.")
+        notice_fn = getattr(self, "_task_notice_fn", None)
+        if notice_fn is None:
+            log.warning("Task %s skipped as overdue and no chat to say so in: %s", task.id, line)
+            return
+        try:
+            await notice_fn(task, line)
+        except Exception as e:
+            log.warning("Task %s: overdue notice not posted: %s", task.id, e)
 
     def stop_task_processor(self) -> None:
         """Stop background task processor."""
@@ -1604,7 +1664,8 @@ class DpcAgent:
             if data.get("_reply_conversation_id"):
                 prompt = data.get("text") or self._convert_task_data_to_prompt(data)
                 run = {"prompt": prompt, "task_type": task.task_type,
-                       "message_source": data.get("_message_source")}
+                       "message_source": data.get("_message_source"),
+                       "agent": self}  # whose trace the record reads: a per-alias agent's own
             async with scope(conversation_id, run) as live:
                 run["answer"] = await self._execute_task_guarded(task, live)
                 return run["answer"]
@@ -1845,6 +1906,13 @@ class DpcAgent:
         scheduled_at = None
         if delay_seconds > 0:
             scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+
+        # The alias the task wakes on is this agent's, never the payload's.
+        data = dict(data or {})
+        data.pop("_provider_alias", None)
+        wake_alias = getattr(self, "_wake_alias", None)
+        if wake_alias:
+            data["_provider_alias"] = wake_alias
 
         task = self.queue.schedule(
             task_type=task_type,
