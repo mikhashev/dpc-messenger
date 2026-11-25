@@ -391,7 +391,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 ### music QA gate
 
 - **Met in:** code, screen
-- **Meaning:** One of the four deterministic stage-1 checks of a music take: `length`, `clipping`, `true_peak`, `silence`. Each is `pass`, `fail` or `not_measured` in the take's `qa_report.gates`; the verdict is `failed` if any failed, `passed` only if all four passed, and `not_measured` otherwise, so an unmeasured gate is never a pass. A gate flags the take (the review's "QA failed: clipping" badge) and never rejects it. A quiet tail of 1-5 s is not a silence failure; the seam metrics and lyrics WER are advisory and are not gates.
+- **Meaning:** One of the four deterministic stage-1 checks of a music take: `length`, `clipping`, `true_peak`, `silence`. Each is `pass`, `fail` or `not_measured` in the take's `qa_report.gates`; the verdict is `failed` if any failed, `passed` only if all four passed, and `not_measured` otherwise, so an unmeasured gate is never a pass. A gate flags the take (the review's "QA failed: clipping" badge) and never rejects it. A quiet tail of 1-5 s is not a silence failure; the seam metrics and lyrics WER are advisory and are not gates. An edit take's clipping and true-peak gates are read against its control: overs the source already had pass with `inherited_from_source` (advisory), and only overs the take adds (over 0.1 dB, or more clipped samples) fail; a cover keeps its own verdict and shows the source's figures beside it.
 - **Defined in:** [music/qa.py — the gates and why these numbers](../dpc-client/core/dpc_client_core/music/qa.py)
 
 ### region edit
@@ -427,7 +427,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 ### Match sections
 
 - **Met in:** code, wire
-- **Meaning:** The step of a YuE2 **song job** cover that tags the lyrics' blocks with the sections of the source's score: each block takes the tag of the section it is sung in, by where its first line is sung (the stored synced lyrics' line times, `lyrics_times`); a section with no voice becomes an instrumental tag, and a sung section the lyrics skip gets the last block of its kind again. Words never change. Ported from Ruach Studio (its "Match sections" button, after YuE2-Studio and HOT-Step's Cover Studio); recorded on the take as `song.section_match`.
+- **Meaning:** The step of a YuE2 **song job** cover that tags the lyrics' blocks with the sections of the source's score: each block takes the tag of the section it is sung in, by where its first line is sung (the stored synced lyrics' line times, `lyrics_times`); a section with no voice becomes an instrumental tag, and a sung section the lyrics skip gets the last block of its kind again (when those copies alone would overflow yue2.cpp's context, the run drops them, keeps their tags and records `copies_dropped`). Words never change. Ported from Ruach Studio (its "Match sections" button, after YuE2-Studio and HOT-Step's Cover Studio); recorded on the take as `song.section_match`.
 - **Defined in:** [music/cover_score.py — `match_sections`, `pre_tag`](../dpc-client/core/dpc_client_core/music/cover_score.py)
 
 ### web_source_pending_integration
@@ -511,7 +511,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 ### QC judge
 
 - **Met in:** code, rules
-- **Meaning:** The stage-2 audio model of **mp.qc/1**: the provider alias named by `[music] qc_judge_alias`, an audio-capable llama-server alias (Music Flamingo with `mmproj_kind: audio`), asked one take at a time with its flow's rubric prompt and answering one JSON object. It runs only on the `judge_music_take` command, never when a take arrives; an answer that does not parse is a `failed` judge with the reason and stage 1 stays. With no alias configured the judge is `absent`, and takes are ranked only when an alias is set and `[music] qc_ranking` is on.
+- **Meaning:** The stage-2 audio model of **mp.qc/1**: the provider alias named by `[music] qc_judge_alias`, an audio-capable llama-server alias (Music Flamingo with `mmproj_kind: audio`), asked one take at a time with its flow's rubric prompt and answering one JSON object. On llama-server the answer is held to a JSON schema (`response_format`, a grammar the server enforces), so no verdict markers are used; a provider without constrained output keeps the nonce-marked verdict block. It runs only on the `judge_music_take` command, never when a take arrives; an answer that does not parse is a `failed` judge with the reason and stage 1 stays. With no alias configured the judge is `absent`, and takes are ranked only when an alias is set and `[music] qc_ranking` is on.
 - **Defined in:** [music/qc.py — the judge and ranking](../dpc-client/core/dpc_client_core/music/qc.py), [music/qc_commands.py](../dpc-client/core/dpc_client_core/music/qc_commands.py)
 
 ### `mmproj_kind`
