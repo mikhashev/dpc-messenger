@@ -322,6 +322,56 @@ def test_a_record_already_in_the_id3_chunk_is_written_once_and_the_file_is_left_
     assert not list(tmp_path.glob("*.tagging"))
 
 
+@pytest.mark.parametrize("record_in", ["first", "second"])
+def test_a_record_in_any_of_two_id3_chunks_stops_a_write_and_the_reader_calls_the_file_ambiguous(tmp_path,
+                                                                                                record_in):
+    """Zcode #191 P4: the writer only checked the first ID3 chunk, so a record in a second `ID3 `
+    chunk let the file be written twice, and the reader silently took the first chunk."""
+    frames = {"first": [text_frame("TIT2", "T")], "second": [text_frame("TIT2", "T")]}
+    frames[record_in] = [txxx_frame("DPC_PROVENANCE", '{"theirs":1}')]
+    wav = put_before_data(make_wav(tmp_path / "a.wav"), id3_chunk(b"id3 ", frames["first"]))
+    put_before_data(wav, id3_chunk(b"ID3 ", frames["second"]))
+    before = wav.read_bytes()
+    with pytest.raises(at.AlreadyTagged):
+        at.wav_add_provenance(wav, '{"ours":2}')
+    assert wav.read_bytes() == before and not list(tmp_path.glob("*.tagging"))
+    state = at.wav_provenance_state(wav)
+    assert state["status"] == "ambiguous" and state["text"] is None
+    assert "2 ID3 chunks" in state["reason"] and "1 of them holding DPC_PROVENANCE" in state["reason"]
+    assert at.wav_read_provenance(wav) is None                          # no chunk is chosen silently
+
+
+def test_two_id3_chunks_with_a_record_each_are_ambiguous_and_two_without_one_refuse_a_write(tmp_path):
+    wav = put_before_data(make_wav(tmp_path / "a.wav"), id3_chunk(b"id3 ", [txxx_frame("DPC_PROVENANCE", "one")]))
+    put_before_data(wav, id3_chunk(b"id3 ", [txxx_frame("DPC_PROVENANCE", "two")]))
+    state = at.wav_provenance_state(wav)
+    assert state["status"] == "ambiguous" and "2 of them holding" in state["reason"]
+    assert at.wav_read_provenance(wav) is None
+    # two chunks and no record yet: writing into one would make an ambiguous file, so nothing is written
+    bare = put_before_data(make_wav(tmp_path / "b.wav"), id3_chunk(b"id3 ", [text_frame("TIT2", "T")]))
+    put_before_data(bare, id3_chunk(b"ID3 ", [text_frame("TPE1", "A")]))
+    before = bare.read_bytes()
+    with pytest.raises(at.TagError, match="2 ID3 chunks"):
+        at.wav_add_provenance(bare, "x")
+    assert bare.read_bytes() == before
+    # a migration of an old INFO record refuses the same file rather than guess
+    old = make_wav(tmp_path / "c.wav", info={"DPCP": '{"old":1}'})
+    put_before_data(old, id3_chunk(b"id3 ", [text_frame("TIT2", "T")]))
+    put_before_data(old, id3_chunk(b"ID3 ", [text_frame("TPE1", "A")]))
+    before = old.read_bytes()
+    with pytest.raises(at.TagError, match="no chunk is chosen"):
+        at.wav_migrate_provenance(old)
+    assert old.read_bytes() == before
+    # the re-tag script says so and leaves the file alone
+    from dpc_client_core.music.provenance_retag import retag_file
+    res = retag_file(old, dry_run=False, dpc_home=tmp_path)
+    assert res.status == "error" and "no chunk is chosen" in res.reason and old.read_bytes() == before
+    # one chunk stays the plain case
+    single = make_wav(tmp_path / "d.wav")
+    at.wav_add_provenance(single, "rec")
+    assert at.wav_provenance_state(single) == {"status": "present", "text": "rec", "where": "id3", "reason": None}
+
+
 def test_an_id3_chunk_that_is_not_a_plain_v24_tag_is_refused_and_the_file_is_left_alone(tmp_path):
     wav = put_before_data(make_wav(tmp_path / "a.wav"), id3_chunk(b"id3 ", [text_frame("TIT2", "T")], version=3))
     before = wav.read_bytes()

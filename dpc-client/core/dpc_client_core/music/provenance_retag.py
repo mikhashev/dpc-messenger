@@ -47,9 +47,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import provenance as prov
-from .audio_tags import (WAV_INFO_PROVENANCE_KEY, AlreadyTagged, TagError, flac_add_comments, flac_read_comments,
-                         wav_add_provenance, wav_migrate_provenance, wav_read_id3, wav_read_info,
-                         wav_read_provenance)
+from .audio_tags import (AlreadyTagged, TagError, flac_add_comments, flac_read_comments, wav_add_provenance,
+                         wav_migrate_provenance, wav_provenance_state)
 from .identity import MediaTools, file_sha256, read_flac_streaminfo
 from .runner import pcm_md5_and_sha256, read_wav_info
 from .store import atomic_write_text
@@ -410,8 +409,13 @@ def retag_file(path: Path, *, dry_run: bool, dpc_home: Optional[Path] = None, no
     now = now or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     try:
         if container == "wav":
-            has = bool(wav_read_provenance(path))
-            if has and not wav_read_id3(path).get(prov.TAG) and wav_read_info(path).get(WAV_INFO_PROVENANCE_KEY):
+            state = wav_provenance_state(path)
+            if state["status"] == "ambiguous":
+                # more than one ID3 chunk: which one is the record would be a guess, so nothing is written
+                res.reason = state["reason"]
+                return res
+            has = state["status"] == "present"
+            if has and state["where"] == "info":
                 # an old-form record (LIST/INFO DPCP): move it to the id3 chunk as it is, never rebuild it
                 if dry_run:
                     res.status, res.reason = "would_migrate", "the record moves from LIST/INFO DPCP to the id3 chunk"

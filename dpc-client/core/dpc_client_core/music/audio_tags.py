@@ -23,7 +23,10 @@ unless they are equal.
   of the PCM packets) is the same. The `LIST/INFO` text items (title and so on) stay as they are.
 
 **Write once** (PROVENANCE rule 7): a file that already holds the key is never changed;
-`AlreadyTagged` is raised and the file is left as it was. The new file is written next to the
+`AlreadyTagged` is raised and the file is left as it was. In a WAV every `id3 ` / `ID3 ` chunk is
+checked, not only the first; a WAV with more than one ID3 chunk is not written at all and its
+record reads as `ambiguous` with the reason (`wav_provenance_state`), never as the first chunk's
+(Zcode #191). The new file is written next to the
 old one under a name that is not an audio extension and moved over it only when complete and
 verified.
 
@@ -34,12 +37,15 @@ never loaded, and a malformed file gives `{}`, not an exception.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import struct
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 from .id3 import ID3_PADDING, build_id3v24, id3v24_frames, parse_id3_txxx, txxx_frame
+
+logger = logging.getLogger(__name__)
 
 _COPY_CHUNK = 4 * 1024 * 1024
 FLAC_VORBIS_COMMENT = 4
@@ -420,14 +426,56 @@ def wav_read_id3(path: Path, max_item_bytes: int = 256 * 1024) -> Dict[str, str]
         return {}
 
 
+def _wav_id3_records(path: Path, max_item_bytes: int) -> Tuple[int, List[str]]:
+    """`(ID3 chunks, records)`: every `id3 ` / `ID3 ` chunk of the WAV is looked at, not only the
+    first, and each non-empty `TXXX:DPC_PROVENANCE` within the caps is one record."""
+    size = Path(path).stat().st_size
+    records: List[str] = []
+    with open(path, "rb") as f:
+        chunks = _riff_chunks(f, size)
+        at = _wav_id3_chunks(chunks)
+        for i in at:
+            _cid, off, csize = chunks[i]
+            if csize < 10 or csize > max_item_bytes + _ID3_SLACK or csize > _WAV_CHUNK_READ_MAX:
+                continue
+            f.seek(off)
+            tag = f.read(csize)
+            value = parse_id3_txxx(tag[:10], tag[10:]).get(PROVENANCE_TAG)
+            if value and value.strip() and len(value.encode("utf-8")) <= max_item_bytes:
+                records.append(value)
+    return len(at), records
+
+
+def wav_provenance_state(path: Path, max_item_bytes: int = 256 * 1024) -> Dict[str, Optional[str]]:
+    """`{status, text, where, reason}` for a WAV's provenance record. `status` is `present` (`where`
+    is `id3`, or `info` for the old `LIST/INFO` item `DPCP`), `absent`, or `ambiguous`: the WAV has
+    more than one `id3 ` / `ID3 ` chunk, so which one is the record would be a guess (Zcode #191: the
+    reader used to take the first chunk silently, and a second chunk got past write-once). An
+    ambiguous file gives no text: no chunk is chosen. Defensive (rule 6): never raises."""
+    try:
+        chunks, records = _wav_id3_records(path, max_item_bytes)
+    except (OSError, TagError, struct.error):
+        return {"status": "absent", "text": None, "where": None, "reason": "not a readable WAV"}
+    if chunks > 1:
+        return {"status": "ambiguous", "text": None, "where": None,
+                "reason": f"the WAV has {chunks} ID3 chunks, {len(records)} of them holding {PROVENANCE_TAG}; "
+                          "no chunk is chosen"}
+    if records:
+        return {"status": "present", "text": records[0], "where": "id3", "reason": None}
+    legacy = wav_read_info(path, max_item_bytes=max_item_bytes).get(WAV_INFO_PROVENANCE_KEY)
+    if legacy and legacy.strip():
+        return {"status": "present", "text": legacy, "where": "info", "reason": None}
+    return {"status": "absent", "text": None, "where": None, "reason": None}
+
+
 def wav_read_provenance(path: Path, max_item_bytes: int = 256 * 1024) -> Optional[str]:
     """The provenance record text of a WAV: the `TXXX:DPC_PROVENANCE` frame of its `id3 ` chunk, else
-    the old `LIST/INFO` item `DPCP`, else None. Defensive (rule 6): never raises."""
-    text = wav_read_id3(path, max_item_bytes).get(PROVENANCE_TAG)
-    if text and text.strip():
-        return text
-    legacy = wav_read_info(path, max_item_bytes=max_item_bytes).get(WAV_INFO_PROVENANCE_KEY)
-    return legacy if legacy and legacy.strip() else None
+    the old `LIST/INFO` item `DPCP`, else None. An ambiguous file (`wav_provenance_state`) gives None
+    and a log line with the reason. Defensive (rule 6): never raises."""
+    state = wav_provenance_state(path, max_item_bytes)
+    if state["status"] == "ambiguous":
+        logger.info("music: ignoring the provenance record of %s: %s", Path(path).name, state["reason"])
+    return state["text"]
 
 
 def _info_without_legacy(src, chunks: List[Tuple[bytes, int, int]]) -> Dict[int, Optional[bytes]]:
@@ -451,9 +499,11 @@ def wav_add_provenance(path: Path, text: str) -> None:
     `id3 ` chunk, before `data` (an `id3 ` / `ID3 ` chunk already there keeps its place, its case and
     its other frames). The old `LIST/INFO` item `DPCP` is dropped; the other INFO items stay. Every
     other chunk is copied byte for byte and the PCM is verified equal before the file is replaced
-    (atomic, temp then `os.replace`). Raises `AlreadyTagged` when an `id3 ` chunk already holds the
-    record (rule 7), `TagError` for a WAV it cannot rebuild safely, including an `id3 ` chunk that
-    is not a plain ID3v2.4 tag. The file is left as it was in both cases."""
+    (atomic, temp then `os.replace`). Raises `AlreadyTagged` when any `id3 ` / `ID3 ` chunk already
+    holds the record (rule 7; every chunk is checked, not only the first), `TagError` for a WAV it
+    cannot rebuild safely: an `id3 ` chunk that is not a plain ID3v2.4 tag or is too big to check,
+    or more than one ID3 chunk (writing into one would leave a file whose record is ambiguous,
+    Zcode #191). The file is left as it was in every case."""
     path = Path(path)
     new_frame = txxx_frame(PROVENANCE_TAG, text)
 
@@ -462,13 +512,20 @@ def wav_add_provenance(path: Path, text: str) -> None:
         at = _wav_id3_chunks(chunks)
         if not at:
             return replace, _riff_chunk(WAV_ID3_WRITE_ID, build_id3v24([new_frame], ID3_PADDING))
-        cid, off, n = chunks[at[0]]
-        if n > _WAV_CHUNK_READ_MAX:
-            raise TagError("the WAV's ID3 chunk is too big to rebuild")
-        src.seek(off)
-        old = src.read(n)
-        if parse_id3_txxx(old[:10], old[10:]).get(PROVENANCE_TAG):
-            raise AlreadyTagged(f"{path.name} already holds {PROVENANCE_TAG}")
+        tags: Dict[int, bytes] = {}
+        for i in at:
+            _c, off, n = chunks[i]
+            if n > _WAV_CHUNK_READ_MAX:
+                raise TagError("the WAV's ID3 chunk is too big to check or rebuild")
+            src.seek(off)
+            tags[i] = src.read(n)
+            if parse_id3_txxx(tags[i][:10], tags[i][10:]).get(PROVENANCE_TAG):
+                raise AlreadyTagged(f"{path.name} already holds {PROVENANCE_TAG}")
+        if len(at) > 1:
+            raise TagError(f"the WAV has {len(at)} ID3 chunks; a record in one of them would be ambiguous, so "
+                           "the file is left as it is")
+        cid = chunks[at[0]][0]
+        old = tags[at[0]]
         frames = id3v24_frames(old)
         if frames is None:
             raise TagError("the WAV's ID3 chunk is not a plain ID3v2.4 tag; it is left as it is")
@@ -481,12 +538,16 @@ def wav_add_provenance(path: Path, text: str) -> None:
 def wav_migrate_provenance(path: Path, max_item_bytes: int = 2 * 1024 * 1024) -> bool:
     """Move a record held in the old `LIST/INFO` item `DPCP` into the `id3 ` chunk, verbatim, and drop
     the old item. True when the file changed; False when there was no old item. When the `id3 ` chunk
-    already holds a record the old item is only dropped (the new form wins). Never rewrites a record."""
+    already holds a record the old item is only dropped (the new form wins). Never rewrites a record.
+    Raises `TagError` for a WAV whose ID3 record is ambiguous (more than one ID3 chunk)."""
     path = Path(path)
     legacy = wav_read_info(path, max_item_bytes=max_item_bytes).get(WAV_INFO_PROVENANCE_KEY)
     if legacy is None:
         return False
-    if wav_read_id3(path, max_item_bytes).get(PROVENANCE_TAG):
+    state = wav_provenance_state(path, max_item_bytes)
+    if state["status"] == "ambiguous":
+        raise TagError(state["reason"] or "the WAV's provenance record is ambiguous")
+    if state["where"] == "id3":
         _wav_rewrite(path, lambda src, chunks: (_info_without_legacy(src, chunks), None))
         return True
     wav_add_provenance(path, legacy)
