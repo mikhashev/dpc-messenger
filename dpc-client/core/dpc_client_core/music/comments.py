@@ -31,6 +31,7 @@ import asyncio
 import copy
 import logging
 import secrets
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -44,6 +45,9 @@ logger = logging.getLogger(__name__)
 
 COMMENTS_DIR = "comments"
 MAX_TEXT_CHARS = 2000
+# The most comments one track holds. The `add_music_comment` command is reachable by an agent, and
+# every add rewrites the whole file, so the count is bounded (error `too_many_comments`).
+MAX_COMMENTS_PER_TRACK = 500
 # SPEC §4 requires a version id; versions do not exist in the core yet, so every comment is
 # on "the original": `ver_` + 16 zeros.
 ORIGINAL_VERSION_ID = "ver_" + "0" * 16
@@ -123,7 +127,11 @@ class MusicComments:
     def __init__(self, dpc_home_dir: Path, library: MusicLibrary):
         self.library = library
         self.root = music_dir_of(dpc_home_dir) / COMMENTS_DIR
+        # Orders the coroutines of one loop. It cannot guard `merge`, which the library calls
+        # synchronously (from the loop or a worker thread), so every read-modify-write of a comments
+        # file also runs under `_file_lock`, a thread lock `merge` takes too.
         self._lock = asyncio.Lock()
+        self._file_lock = threading.RLock()
 
     def comments_path(self, track_id: str) -> Path:
         if not isinstance(track_id, str) or not schemas.TRACK_ID_RE.match(track_id):
@@ -170,63 +178,91 @@ class MusicComments:
             "updated_at": now,
         }
         schemas.validate_comment(comment)
+        def append() -> None:
+            with self._file_lock:
+                self._duration(track_id)   # still in the library: a merge may have folded it away
+                comments = self._read(track_id)
+                if len(comments) >= MAX_COMMENTS_PER_TRACK:
+                    raise MusicLibraryError(
+                        "too_many_comments", f"this track already has {len(comments)} comments; the limit is "
+                                             f"{MAX_COMMENTS_PER_TRACK}. Delete some before adding more")
+                comments.append(comment)
+                self._write(track_id, comments)
         async with self._lock:
-            comments = await asyncio.to_thread(self._read, track_id)
-            comments.append(comment)
-            await asyncio.to_thread(self._write, track_id, comments)
+            await asyncio.to_thread(append)
         return copy.deepcopy(comment)
 
     async def update(self, track_id: str, comment_id: Any, **fields: Any) -> dict:
         """Change `start_s`, `end_s`, `text` and/or `action` of one comment; a field that is
         not passed stays. `end_s=None` passed explicitly makes the comment a point."""
-        duration = self._duration(track_id)
+        def change() -> dict:
+            with self._file_lock:
+                duration = self._duration(track_id)   # still in the library: a merge may have folded it away
+                comments = self._read(track_id)
+                comment = next((c for c in comments if c["id"] == comment_id), None)
+                if comment is None:
+                    raise MusicLibraryError("unknown_comment", f"no comment {comment_id!r} on {track_id}")
+                start = fields["start_s"] if "start_s" in fields else comment["t_start"]
+                end = fields["end_s"] if "end_s" in fields else comment["t_end"]
+                t_start, t_end = check_range(start, end, duration)
+                updated = dict(comment)
+                updated.update(t_start=t_start, t_end=t_end, kind="point" if t_end is None else "region")
+                if "text" in fields:
+                    updated["text"] = check_text(fields["text"])
+                if "action" in fields:
+                    updated["action"] = check_action(fields["action"])
+                check_action_range(updated["action"], t_end)
+                updated["updated_at"] = _now()
+                schemas.validate_comment(updated)
+                comments[comments.index(comment)] = updated
+                self._write(track_id, comments)
+                return updated
         async with self._lock:
-            comments = await asyncio.to_thread(self._read, track_id)
-            comment = next((c for c in comments if c["id"] == comment_id), None)
-            if comment is None:
-                raise MusicLibraryError("unknown_comment", f"no comment {comment_id!r} on {track_id}")
-            start = fields["start_s"] if "start_s" in fields else comment["t_start"]
-            end = fields["end_s"] if "end_s" in fields else comment["t_end"]
-            t_start, t_end = check_range(start, end, duration)
-            updated = dict(comment)
-            updated.update(t_start=t_start, t_end=t_end, kind="point" if t_end is None else "region")
-            if "text" in fields:
-                updated["text"] = check_text(fields["text"])
-            if "action" in fields:
-                updated["action"] = check_action(fields["action"])
-            check_action_range(updated["action"], t_end)
-            updated["updated_at"] = _now()
-            schemas.validate_comment(updated)
-            comments[comments.index(comment)] = updated
-            await asyncio.to_thread(self._write, track_id, comments)
+            updated = await asyncio.to_thread(change)
         return copy.deepcopy(updated)
 
     async def delete(self, track_id: str, comment_id: Any) -> None:
         self._duration(track_id)
+
+        def remove() -> None:
+            with self._file_lock:
+                self._duration(track_id)
+                comments = self._read(track_id)
+                kept = [c for c in comments if c["id"] != comment_id]
+                if len(kept) == len(comments):
+                    raise MusicLibraryError("unknown_comment", f"no comment {comment_id!r} on {track_id}")
+                self._write(track_id, kept)
         async with self._lock:
-            comments = await asyncio.to_thread(self._read, track_id)
-            kept = [c for c in comments if c["id"] != comment_id]
-            if len(kept) == len(comments):
-                raise MusicLibraryError("unknown_comment", f"no comment {comment_id!r} on {track_id}")
-            await asyncio.to_thread(self._write, track_id, kept)
+            await asyncio.to_thread(remove)
 
     def merge(self, from_id: str, to_id: str) -> None:
         """The library folded entry `from_id` into `to_id`: its comments move to `to_id`
-        (re-keyed) and its file goes. Synchronous: the library calls it from `_delete_entry`."""
+        (re-keyed) and its file goes. Synchronous: the library calls it from `_delete_entry`,
+        on the loop or in a worker thread, so it cannot wait on the asyncio lock; it takes the
+        thread lock every comment write holds, so an add that is writing `from_id` finishes
+        first and its comment moves with the rest. The moved comments are capped like an add
+        (the surplus stays in `from_id`'s file, which is then kept)."""
         if from_id == to_id:
             return
         src = self.comments_path(from_id)
-        if not src.exists():
-            return
-        moved = self._read(from_id)
-        if moved:
-            existing = self._read(to_id)
-            have = {c["id"] for c in existing}
-            for c in moved:
-                if c["id"] not in have:
-                    existing.append({**c, "track_id": to_id})
-            self._write(to_id, existing)
-        try:
-            src.unlink()
-        except OSError:
-            logger.warning("music: could not remove %s after moving its comments to %s", src.name, to_id)
+        with self._file_lock:
+            if not src.exists():
+                return
+            moved = self._read(from_id)
+            if moved:
+                existing = self._read(to_id)
+                have = {c["id"] for c in existing}
+                fresh = [c for c in moved if c["id"] not in have]
+                room = max(0, MAX_COMMENTS_PER_TRACK - len(existing))
+                take, left = fresh[:room], fresh[room:]
+                existing.extend({**c, "track_id": to_id} for c in take)
+                self._write(to_id, existing)
+                if left:
+                    # Never lose a comment to the cap: the surplus stays in the file it came from.
+                    logger.warning("music: %s is full, %d comment(s) of %s stay in its file", to_id, len(left), from_id)
+                    self._write(from_id, left)
+                    return
+            try:
+                src.unlink()
+            except OSError:
+                logger.warning("music: could not remove %s after moving its comments to %s", src.name, to_id)

@@ -194,6 +194,11 @@ YUE2_COT_DEFAULT = "full"
 YUE2_STEPS = 32
 YUE2_PEAK_CLIP = 10
 YUE2_ADAPTERS_MAX = 4
+# The lyrics and the style of a text job together, in UTF-8 bytes. Both go into the engine request
+# that is written to disk before it is sent (`jobs.MAX_PAYLOAD_BYTES`, 8 MiB); JSON turns a control
+# character into six bytes, so a text under this bound always fits (6 x 1 MiB is under 8 MiB). A real
+# song is a few thousand characters: the door refuses an absurd one before a job exists.
+MAX_SONG_TEXT_BYTES = 1024 * 1024
 YUE2_ADAPTER_SCALE_MIN, YUE2_ADAPTER_SCALE_MAX = 0.0, 2.0
 # Per half: Ruach's voice README begins near music 0.45 / sound 0.35, and with a planned
 # score keeps the music half at 0.5 or less.
@@ -496,6 +501,13 @@ def normalize_params_from_text(params: Any, *, missing_engine: str = DEFAULT_FRO
     if not _is_str(style) or not style.strip():
         raise ParamsError("style", "style is required: a non-empty description of the sound")
     out["style"] = style
+    try:
+        text_bytes = len((lyrics or "").encode("utf-8")) + len(style.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ParamsError("lyrics", "the lyrics or the style hold a character that is not valid text (a lone surrogate)")
+    if text_bytes > MAX_SONG_TEXT_BYTES:
+        raise ParamsError("lyrics", f"the lyrics and style are {text_bytes} bytes together; the limit is "
+                                    f"{MAX_SONG_TEXT_BYTES} bytes (about a megabyte of text): shorten them")
 
     variants = params.get("variants", VARIANTS_DEFAULT)
     if not _is_int(variants) or not VARIANTS_MIN <= variants <= VARIANTS_MAX:

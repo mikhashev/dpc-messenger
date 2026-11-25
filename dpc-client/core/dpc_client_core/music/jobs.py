@@ -895,7 +895,9 @@ class MusicJobStore:
             raise MusicJobError("invalid_params", "a payload is bytes, exactly as sent", field="body")
         body = bytes(body)
         if len(body) > MAX_PAYLOAD_BYTES:
-            raise MusicJobError("invalid_params", f"a payload is at most {MAX_PAYLOAD_BYTES} bytes", field="body")
+            raise MusicJobError(
+                "payload_too_large", f"payload {name!r} is {len(body)} bytes and a payload is at most "
+                                     f"{MAX_PAYLOAD_BYTES} bytes: shorten the lyrics or the style", field="body")
         if endpoint is not None and not isinstance(endpoint, str):
             raise MusicJobError("invalid_params", "endpoint must be text", field="endpoint")
         with self._lock:

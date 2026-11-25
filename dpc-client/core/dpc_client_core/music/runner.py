@@ -848,8 +848,10 @@ class MusicJobRunner:
             if engine_job[0] is not None and engine.alive():
                 await engine.cancel(engine_job[0])
             logger.info("music: job %s cancelled", job_id)
-        except (_JobFailure, MusicEngineError) as exc:
-            reason = exc.message if isinstance(exc, MusicEngineError) else str(exc)
+        except (_JobFailure, MusicEngineError, MusicJobError) as exc:
+            # A MusicJobError here is the store refusing a write of this run (a payload over the limit
+            # or an earlier file that differs): a named failure, not "internal error".
+            reason = exc.message if isinstance(exc, (MusicEngineError, MusicJobError)) else str(exc)
             logger.warning("music: job %s failed: %s", job_id, reason)
             if await self._cancelled(job_id):
                 return

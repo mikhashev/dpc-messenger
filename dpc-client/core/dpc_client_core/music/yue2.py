@@ -474,8 +474,8 @@ def scan_adapters(folder: Optional[Path]) -> List[Dict[str, Any]]:
         layout: Optional[str] = None
         try:
             layout, halves, problem = adapter_layout(_cached_header(path))
-        except (OSError, ValueError) as exc:
-            problem = f"not a readable safetensors file: {exc}"
+        except Exception as exc:  # a header that parses as JSON but is not shaped like safetensors (TypeError, KeyError, ...)
+            problem = f"not a readable safetensors file: {type(exc).__name__}: {exc}"
         if layout == "whole" and (path.parent / "adapter_config.json").is_file():
             layout, halves, problem = None, [], ("an adapter_config.json beside it sets its alpha, which DPC's "
                                                  "cache copy would not carry")
@@ -623,11 +623,37 @@ class Yue2Server(SupervisedEngine):
     def prepare_adapters(self) -> Dict[str, Any]:
         """Bring the split cache up to date with the source folder (see "adapters" above):
         split a new or changed source, reuse an unchanged one (same sha256 and size, split
-        files of the recorded sizes present), remove what no source accounts for. Returns
+        files present with the recorded size and content hash), remove what no source accounts for. Returns
         the manifest entries by adapter name. Blocking: hashes sources the identity cache
         does not hold, and writes the splits."""
         with self._split_lock:
             return self._prepare_adapters()
+
+    def _split_file_intact(self, half: Any) -> bool:
+        """Whether a cached split file is the one the manifest recorded: its size and its content
+        hash (not the size alone: a same-size file that was changed or half rewritten fails). The
+        hash comes from the identity cache by size and mtime, so a file the cache has seen is not
+        read again."""
+        name = half.get("file") if isinstance(half, Mapping) else None
+        if not isinstance(name, str) or not name or Path(name).name != name:
+            return False
+        path = self.split_dir / name
+        if not path.is_file():
+            return False
+        ident = self._file_identity(path, with_sha=True)
+        return ident["bytes"] == half.get("bytes") and ident["sha256"] == half.get("sha256")
+
+    def _remember_split_hashes(self, halves: Mapping[str, Mapping[str, Any]]) -> None:
+        """Put the hash of each split file just written into the identity cache, so the next
+        start's check (`_split_file_intact`) does not read it again."""
+        for h in halves.values():
+            try:
+                path = self.split_dir / h["file"]
+                st = path.stat()
+                if st.st_size == h.get("bytes") and h.get("sha256"):
+                    self._hashes.store(path, st.st_size, st.st_mtime_ns, h["sha256"])
+            except (OSError, KeyError, TypeError):
+                logger.debug("yue2.cpp: could not cache the hash of a split file", exc_info=True)
 
     def _prepare_adapters(self) -> Dict[str, Any]:
         offered = self.offered_adapters()
@@ -642,9 +668,7 @@ class Yue2Server(SupervisedEngine):
                 fresh = (isinstance(entry, dict) and entry.get("source_sha256") == ident["sha256"]
                          and entry.get("layout", "split") == a["layout"]
                          and entry.get("source_bytes") == ident["bytes"]
-                         and all((self.split_dir / h.get("file", "")).is_file()
-                                 and (self.split_dir / h["file"]).stat().st_size == h.get("bytes")
-                                 for h in (entry.get("halves") or {}).values())
+                         and all(self._split_file_intact(h) for h in (entry.get("halves") or {}).values())
                          and sorted((entry.get("halves") or {})) == sorted(a["halves"]))
                 if not fresh:
                     try:
@@ -659,6 +683,7 @@ class Yue2Server(SupervisedEngine):
                         logger.warning("yue2.cpp: adapter %s could not be split: %s", a["name"], exc)
                         self.skipped_adapters[a["name"]] = f"{type(exc).__name__}: {exc}"
                         continue
+                    self._remember_split_hashes(halves)
                     entry = {"source_file": source.name, "source_bytes": ident["bytes"],
                              "source_sha256": ident["sha256"], "layout": a["layout"], "halves": halves}
                 entries[a["name"]] = entry

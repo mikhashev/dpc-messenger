@@ -668,6 +668,17 @@ class MusicCommandsMixin:
             return None
         return runner.current_job_id
 
+    async def _music_job_holds_the_card(self, job_id: str) -> bool:
+        """Whether job `job_id` has the card and is using its engine: not while it is still `queued`
+        (it waits in the card line, so it holds nothing), and not while a running job asks for the
+        card again (its `card_wait` is set). An unreadable job counts as holding it."""
+        try:
+            store = await self._music_jobs()
+            job = await asyncio.to_thread(store.get_job, job_id)
+        except Exception:
+            return True
+        return job.get("state") != js.QUEUED and not job.get("card_wait")
+
     async def get_music_engine_status(self, engine: Any = None) -> Dict[str, Any]:
         """An engine's state (`engine`: yue2 or acestep; the default when omitted), where its
         files are, every engine's state under `engines`, and the job the runner holds. Who
@@ -739,11 +750,12 @@ class MusicCommandsMixin:
     async def stop_music_engine(self, engine: Any = None, force: Any = False) -> Dict[str, Any]:
         """Stop an engine by hand to free the card (`engine`: yue2 or acestep; the default
         when omitted). Refused (`engine_busy`) while a job runs on it, unless `force` (the
-        job then fails)."""
+        job then fails). A job that only waits for the card holds nothing on the engine, so it
+        does not block the stop (the idle engine it waits behind is what the person stops)."""
         try:
             chosen = self._music_engine(engine)
             busy = self._music_engine_job(chosen.KEY)
-            if busy and force is not True:
+            if busy and force is not True and await self._music_job_holds_the_card(busy):
                 return {"status": "error", "code": "engine_busy",
                         "message": f"music job {busy} is using {chosen.DISPLAY}; cancel it first, or pass force"}
             stopped = await chosen.stop("ui_stop")
@@ -770,7 +782,8 @@ class MusicCommandsMixin:
     async def get_music_capabilities(self) -> Dict[str, Any]:
         try:
             store = await self._music_jobs()
-            return {"status": "ok", "capabilities": store.capabilities.report()}
+            # The report probes the engines and reads their files: off the loop.
+            return {"status": "ok", "capabilities": await asyncio.to_thread(store.capabilities.report)}
         except Exception as exc:
             return _error(exc)
 

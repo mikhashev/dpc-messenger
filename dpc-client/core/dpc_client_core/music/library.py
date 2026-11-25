@@ -375,6 +375,7 @@ class MusicLibrary:
         self._entries = {e["id"]: e for e in entries}
         self._folders = {f["id"]: f for f in folders}
         self._playlists = {p["id"]: p for p in playlists if p.get("kind") == "user"}
+        anchored = self._anchor_relative_paths()
         self._by_hash = {}
         for e in self._entries.values():
             self._index_add(e)
@@ -382,9 +383,44 @@ class MusicLibrary:
         for key in list(self._by_hash):
             merged += self._merge_missing_twins(key)
         limited = self._apply_folder_limit()
-        if merged or limited:
+        if merged or limited or anchored:
             self._dirty = True  # `open()` schedules the save
         self._loaded = True
+
+    def _anchor_relative_paths(self) -> bool:
+        """Make every entry's `path` absolute. DPC writes only absolute paths; a relative one comes
+        from a hand-edited `library.json`, and left alone it would resolve from the process's
+        working directory, wherever the backend was started (and could land inside `generated/`,
+        which DPC may delete from). It is resolved against the library's own folder
+        (`<DPC home>/music/`) instead. A path that leaves that folder, or that falls inside
+        `generated/` on an entry that is not a generated take, is refused: the entry stays, marked
+        missing, and its file is never served or deleted. Returns whether a record changed."""
+        changed = False
+        base = _realpath(self.root)
+        generated = _realpath(self.root / "generated")
+        for e in self._entries.values():
+            raw = e.get("path")
+            if not isinstance(raw, str) or not raw or Path(raw).is_absolute() or _is_unc_text(raw):
+                continue
+            target = _realpath(base / raw)
+            inside = target != base and target.is_relative_to(base)
+            in_generated = target.is_relative_to(generated)
+            refuse = None
+            if not inside:
+                refuse = "leaves the library folder"
+            elif in_generated and e.get("origin") != "generated":
+                refuse = "points into the folder DPC generates into, which only a generated take may do"
+            e["path"] = str(target)
+            if refuse and not e.get("missing"):
+                e["missing"] = True
+            if refuse:
+                logger.warning("music: the relative path %r of %s %s; the entry is kept as missing",
+                               raw, e.get("id"), refuse)
+            else:
+                logger.info("music: the relative path %r of %s is taken from the library folder: %s",
+                            raw, e.get("id"), target)
+            changed = True
+        return changed
 
     def _create_root_and_load(self) -> None:
         """Make `<DPC home>/music/` if it is missing, then `load()`. Blocking; `open()`
@@ -1381,7 +1417,10 @@ class MusicLibrary:
         e = self._entries.get(track_id)
         if e is None or e.get("missing") or not e.get("path"):
             return None
-        return Path(e["path"])
+        path = Path(e["path"])
+        # `load()` anchors a hand-edited relative path; one that is still relative is not served
+        # from whatever the working directory is.
+        return path if path.is_absolute() else None
 
     async def get_track(self, track_id: str) -> dict:
         """The entry and, when its duration is known, its `mp.track/1` (native rate
@@ -1462,6 +1501,8 @@ class MusicLibrary:
         raw = e.get("path")
         if not raw or e.get("missing"):
             raise MusicLibraryError("file_missing", "the file is already gone: use Remove from library")
+        if not Path(raw).is_absolute():
+            raise MusicLibraryError("invalid_path", "the path is not absolute, so DPC does not own the file")
         try:
             target = Path(raw).resolve()
             owned = self._generated_root()
