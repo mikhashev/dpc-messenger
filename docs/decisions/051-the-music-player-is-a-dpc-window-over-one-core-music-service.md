@@ -823,8 +823,8 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   names this agent's own queued or running job asks nothing) and `64b793ac` (`_get_allowed_tools`
   adds `schedule_task` wherever a music tool is left after the owner_only filter, so an owner
   turn is offered it and an `other_node` turn is not); not observed live.**
-  - **Music-return-only (follow-up 12; Zcode #67 P1, Mike's answer M pending, Zcode
-    recommends the same).** A music tool does not open the whole `schedule_task`: Mike enabled
+  - **Music-return-only (follow-up 12; Zcode #67 P1; decided by Mike, AI Studio group #83,
+    2026-11-25: keep it, a switched-off `schedule_task` must not work around the switch).** A music tool does not open the whole `schedule_task`: Mike enabled
     music tools, not `chat` tasks or reminders. When `schedule_task` is in a turn's tools only
     because a music tool is (the firewall does not grant it), the turn's `schedule_task` is
     music-return-only (`ToolContext.schedule_task_music_return_only`, set by
@@ -842,9 +842,11 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   **Music-return-only and the bound return built at `94a6710b`, not observed live.**
 - **D50. Three narrowings of the first cut** (Mike #46). **C:** the agent posts a take into
   the chat only when the person asks. **F:** no LRCLIB lookups by agents (they send data off
-  the machine). **G:** posting into groups comes later, groups of own nodes first; it is
-  separate work, because in groups `_record_answer` is not called (`send_group_agent_message`
-  takes no attachment). **Built at `29383864` (F: `music_get_lyrics` reads stored and local
+  the machine). **G:** posting into groups comes later; it is separate work, because in
+  groups `_record_answer` is not called (`send_group_agent_message` takes no attachment).
+  Licence is not a reason to hold it back (Mike, AI Studio group #88, 2026-11-25): the owner
+  makes the group and chooses who joins, and what members do with a take is theirs to answer
+  for. **Built at `29383864` (F: `music_get_lyrics` reads stored and local
   lyrics only) and `e3b0ea6c` (G: `chat_post_file` refuses a group turn); C is said in the
   tool's description. Not observed live.**
 - **D51. `music_wait` and the self-wait rule** (Zcode #51 correction 1, accepted in #46 and
