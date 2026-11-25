@@ -364,37 +364,34 @@ def estimate_yue2_seconds(lyrics: Optional[str]) -> float:
     return YUE2_INTRO_S + YUE2_SECONDS_PER_LINE * len(sung)
 
 
-# YuE2's factor by song length (ADR-052 L10; slice S4 records it): AUDIO seconds per wall second, so
-# "about 3.5x real time" (the trial card, ai-studio experiments/music-player/engine/yue2-cpp/trial.md:40)
-# means faster than real time: a 240 s song took 80.5 s of wall time and a 30 s one 8.9 s (trial.md rows),
-# which is 3.0 and 3.4. Wall seconds are the song's length divided by the factor, never multiplied by it.
-# Straight between the two lengths, the end value beyond either end. A start value, tuned from
-# operation (Mike #11).
-YUE2_FACTOR_BY_LENGTH = ((30.0, 3.5), (240.0, 3.0))
+# YuE2's wall time for a song: a fixed overhead plus the audio divided by a rate (ADR-052 L10; slice S4
+# records it): `yue2_wall_s = YUE2_OVERHEAD_S + audio_s / YUE2_AUDIO_S_PER_WALL_S`. The job's wall time is
+# not proportional to the song: it has a fixed cost (model load, prompt, codec) that dominates a short song,
+# so the old "audio seconds per wall second" factor that fell with length (3.5 at 30 s to 3.0 at 240 s, from
+# the trial card) had the wrong shape: the measured factor RISES with length.
+# Five live points, job wall seconds (queued -> running -> review) for the song's audio seconds:
+#   30 s -> 16.48, 120 s -> 33.73, 162.7 s -> 43.11 (2026-11-24 ADR-052 live run, measurements section 4d)
+#   30 s -> 18 (instrumental, 2026-11-25 04:25:52 -> 04:26:10), 60 s -> 21 (instrumental, 04:29:42 -> 04:30:03)
+# Least-squares line through them: 10.76 s + audio / 5.13 (slope 0.195 wall s per audio s). Residuals
+# (measured minus fit, s): -0.13, -0.43, +0.62, +1.39, -1.46: all within 1.5 s. A start value, tuned from
+# operation (Mike #11). An instrumental counts its duration cap as the audio (`music_expected_s`), so what
+# is shown for YuE2 is an upper bound ("up to"), not a promise.
+YUE2_OVERHEAD_S = 10.76
+YUE2_AUDIO_S_PER_WALL_S = 5.13
 
 
-def yue2_factor(audio_s: float) -> float:
-    """YuE2's factor for a song of `audio_s` seconds (`YUE2_FACTOR_BY_LENGTH`)."""
-    (short_s, short_f), (long_s, long_f) = YUE2_FACTOR_BY_LENGTH
-    if audio_s <= short_s:
-        return short_f
-    if audio_s >= long_s:
-        return long_f
-    return short_f + (long_f - short_f) * (audio_s - short_s) / (long_s - short_s)
-
-
-def yue2_wall_s(audio_s: float, *, factor: Optional[float] = None) -> float:
-    """Wall seconds YuE2 takes for `audio_s` seconds of song: audio seconds divided by the factor (audio
-    seconds per wall second, so a factor of 3.5 is faster than real time), by default the factor for that
-    length."""
-    return audio_s / (yue2_factor(audio_s) if factor is None else factor)
+def yue2_wall_s(audio_s: float) -> float:
+    """Wall seconds YuE2 takes for `audio_s` seconds of song: `YUE2_OVERHEAD_S` plus the audio seconds
+    divided by `YUE2_AUDIO_S_PER_WALL_S` (audio seconds per wall second, so above 1 is faster than real
+    time)."""
+    return YUE2_OVERHEAD_S + audio_s / YUE2_AUDIO_S_PER_WALL_S
 
 
 def music_expected_s(params: Any) -> Optional[float]:
     """How long a `generate_from_text` job that has not started will hold the card, in wall seconds,
     an estimate, or None for unknown (ADR-052 L10, "a job that has not started"): YuE2's text estimate
     per variant (`estimate_yue2_seconds`, never more than the duration cap, which the song cannot
-    outrun), divided by the factor for that length (audio seconds per wall second), times the variants.
+    outrun), as wall time by `yue2_wall_s` (a fixed overhead plus the audio over a rate), times the variants.
     An instrumental (no lyrics) has no lines to count: its song is the nominal length, the cap the job
     carries (`duration_s`, the form's value, `YUE2_DURATION_DEFAULT_S` = 180 s when absent; the
     instrumental adapter's README says "3-5 minutes"), not the intro alone (Mike, 2026-11-24, group #33).

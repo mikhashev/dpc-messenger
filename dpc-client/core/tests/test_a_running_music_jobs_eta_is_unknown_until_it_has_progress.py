@@ -1,12 +1,11 @@
 """ADR-052, Confirmation test 34 (Ark #64 §5; L10 "Music"; slice S4 records YuE2's factor by length).
 
 A music job that has not started yet is counted by the waiters behind it with its text estimate:
-`estimate_yue2_seconds` per variant (audio seconds, never more than the job's duration cap), divided by
-YuE2's factor for that length, times the variants, marked as an estimate. The factor is
-AUDIO seconds per wall second (faster than real time), from the trial card: 3.5 for a 30 s song, 3.0 for
-a 4-minute one, straight between, and the end value beyond either end; wall time is length / factor. The
-expectations below are literal numbers, worked out by hand from the trial card (240 s took 80.5 s, 30 s
-took 8.9 s), not computed with the functions under test. acestep.cpp has no measured factor: unknown. A
+`estimate_yue2_seconds` per variant (audio seconds, never more than the job's duration cap), turned into
+wall seconds by `yue2_wall_s` (a fixed overhead plus the audio over a rate, fit to five live points: 10.76 s +
+audio / 5.13), times the variants, marked as an estimate. An instrumental counts its cap, so the figure
+for YuE2 is an upper bound and is labelled "up to". The expectations below are literal numbers worked
+out by hand, not computed with the functions under test. acestep.cpp has no measured factor: unknown. A
 running job has only per-variant progress, so its ETA is unknown (long for L12), and an instrumental
 never reads as "almost done".
 """
@@ -25,43 +24,53 @@ from tests._yue2_helpers import DualRig, install_both, yue2_env, yue2_params
 pytestmark = pytest.mark.usefixtures("fast")
 
 
-def test_eighty_audio_seconds_at_factor_three_and_a_half_read_22_9_s_not_280_s():
-    # 80 / 3.5 = 22.857: faster than real time, as "3.5x real time" says.
-    assert js.yue2_wall_s(80, factor=3.5) == pytest.approx(22.857, abs=0.001)
+# The five live points: (audio s, job wall s). 2026-11-24 ADR-052 live run, section 4d, and two instrumentals
+# of 2026-11-25.
+LIVE_POINTS = [(30, 16.48), (120, 33.73), (162.7, 43.11), (30, 18.0), (60, 21.0)]
 
 
-def test_the_trial_cards_two_songs_read_their_measured_wall_time():
-    # trial.md: the 240 s song took 80.5 s of wall time, the 30 s one 8.9 s. The estimate is within 5 %.
-    assert js.yue2_wall_s(240) == pytest.approx(80.5, rel=0.05)
-    assert js.yue2_wall_s(30) == pytest.approx(8.9, rel=0.05)
-    # And it is a figure for the song, never an overestimate of the order of 10x (the old reading: 720 s).
+@pytest.mark.parametrize("audio_s, wall_s", LIVE_POINTS)
+def test_the_formula_reads_each_live_point_within_a_second_and_a_half(audio_s, wall_s):
+    assert js.yue2_wall_s(audio_s) == pytest.approx(wall_s, abs=1.5)
+
+
+def test_wall_time_is_an_overhead_plus_audio_over_a_rate_and_a_longer_song_is_faster_per_audio_second():
+    assert js.yue2_wall_s(0) == pytest.approx(10.76)
+    assert js.yue2_wall_s(80) == pytest.approx(26.354, abs=0.001)
+    assert js.yue2_wall_s(240) == pytest.approx(57.55, abs=0.01)
+    # The factor (audio per wall second) rises with length: the old table had it falling.
+    assert 30 / js.yue2_wall_s(30) < 120 / js.yue2_wall_s(120) < 240 / js.yue2_wall_s(240)
+    # And never the order of 10x off (the first reading: 720 s for a 240 s song).
     assert js.yue2_wall_s(240) < 100
 
 
-@pytest.mark.parametrize("audio_s, factor", [(10, 3.5), (30, 3.5), (135, 3.25), (240, 3.0), (360, 3.0)])
-def test_the_factor_follows_the_songs_length(audio_s, factor):
-    assert js.yue2_factor(audio_s) == pytest.approx(factor)
-
-
-def test_a_queued_jobs_estimate_is_the_text_estimate_divided_by_the_factor_times_the_variants():
+def test_a_queued_jobs_estimate_is_the_wall_time_of_the_text_estimate_times_the_variants():
     lyrics = "[verse]\n" + "\n".join(f"line {i}" for i in range(6)) + "\n"
     params = {"engine": "yue2", "lyrics": lyrics, "duration_s": 360, "variants": 2}
-    # 20 s intro + 6 sung lines x 10 s = 80 s of song; the factor at 80 s is 3.5 - 0.5 x 50/210 = 3.381;
-    # 80 / 3.381 = 23.66 s per variant, two variants.
-    assert js.music_expected_s(params) == pytest.approx(47.32, abs=0.01)
-    # The cap bounds the song: a 30 s cap never reads as a longer one (30 / 3.5 = 8.571 s, two variants).
+    # 20 s intro + 6 sung lines x 10 s = 80 s of song: 10.76 + 80 / 5.13 = 26.354 s per variant, two variants.
+    assert js.music_expected_s(params) == pytest.approx(52.71, abs=0.01)
+    # The cap bounds the song: a 30 s cap never reads as a longer one (16.608 s, two variants).
     capped = {**params, "duration_s": 30}
-    assert js.music_expected_s(capped) == pytest.approx(17.143, abs=0.001)
+    assert js.music_expected_s(capped) == pytest.approx(33.22, abs=0.01)
     # An instrumental has no lines to count: its song is the nominal length, the job's cap (Mike, 2026-11-24,
-    # group #33), not the intro alone (which was 20 s at factor 3.5 = 5.714 s). A 360 s cap at factor 3.0
-    # is 120 s; the form's default cap of 180 s at factor 3.143 is 57.27 s; with no cap in the params, the
-    # default one. The text estimate itself (the short-cap warning's) is unchanged.
-    assert js.music_expected_s({**params, "lyrics": None, "variants": 1}) == pytest.approx(120.0, abs=0.001)
-    assert js.music_expected_s({**params, "lyrics": None, "variants": 1, "duration_s": 180}) ==         pytest.approx(57.27, abs=0.01)
-    assert js.music_expected_s({"engine": "yue2", "lyrics": None, "variants": 1}) == pytest.approx(57.27, abs=0.01)
-    assert js.music_expected_s({**params, "lyrics": None, "variants": 2, "duration_s": 180}) ==         pytest.approx(114.55, abs=0.01)
+    # group #33), not the intro alone. A 360 s cap is 10.76 + 360 / 5.13 = 80.94 s; the form's default cap of
+    # 180 s is 45.85 s; with no cap in the params, the default one. The text estimate itself (the short-cap
+    # warning's) is unchanged.
+    assert js.music_expected_s({**params, "lyrics": None, "variants": 1}) == pytest.approx(80.94, abs=0.01)
+    assert js.music_expected_s({**params, "lyrics": None, "variants": 1, "duration_s": 180}) == pytest.approx(45.85, abs=0.01)
+    assert js.music_expected_s({"engine": "yue2", "lyrics": None, "variants": 1}) == pytest.approx(45.85, abs=0.01)
+    assert js.music_expected_s({**params, "lyrics": None, "variants": 2, "duration_s": 180}) == pytest.approx(91.70, abs=0.01)
     assert js.estimate_yue2_seconds(None) == js.YUE2_INTRO_S
     assert js.music_expected_s({"engine": "acestep", "lyrics": lyrics, "duration_s": 30, "variants": 2}) is None
+
+
+def test_an_instrumentals_figure_is_its_caps_wall_time_and_is_labelled_an_upper_bound():
+    from dpc_client_core.dpc_agent.tools import music as music_tools
+    inst = {"engine": "yue2", "style": "piano", "lyrics": None, "variants": 1, "duration_s": 180}
+    assert js.music_expected_s(inst) == pytest.approx(js.yue2_wall_s(180))
+    assert "up to 46 s on the GPU" in music_tools._approval_about(js.GENERATE_FROM_TEXT, inst)
+    parts = music_tools._approval_parts(js.GENERATE_FROM_TEXT, inst)
+    assert parts["eta_seconds"] == 46 and parts["eta_is_upper_bound"] is True
 
 
 @pytest.mark.asyncio
@@ -75,8 +84,8 @@ async def test_a_waiting_job_is_counted_by_the_waiter_behind_it_and_a_running_on
     await until(lambda: first.lease.granted)
     params = yue2_params(variants=2)
     expected = js.music_expected_s({**params, "engine": "yue2"})
-    # Two sung lines: 20 s intro + 20 s = 40 s of song, factor 3.476, 11.51 s per variant, two variants.
-    assert expected == pytest.approx(23.01, abs=0.01)
+    # Two sung lines: 20 s intro + 20 s = 40 s of song: 10.76 + 40 / 5.13 = 18.56 s per variant, two variants.
+    assert expected == pytest.approx(37.12, abs=0.01)
     async with DualRig(home) as rig:
         job = rig.propose(params)
         await wait_until(lambda: rig.store.get_job(job["id"]).get("card_wait") is not None)

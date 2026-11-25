@@ -704,8 +704,9 @@ strings], "where": "busy_holder"|"yielding"|"lease_line"|"card_queue"|"foreign"}
     unknown (Johnny E, Forge #21-6); it had no caller and was removed in S3 follow-up 4 (Ark
     #40-3), and `audio_seconds`, the one probe, reads 0 as unknown.
   - Music, **a job that has not started:** the text estimate (`estimate_yue2_seconds`
-    per variant, `music/job_schemas.py:271-279`, audio seconds) divided by the YuE2 factor for that
-    length (audio seconds per wall second, `YUE2_FACTOR_BY_LENGTH`: 3.5 at 30 s to 3.0 at 240 s) and
+    per variant, `music/job_schemas.py:271-279`, audio seconds) turned into wall time by `yue2_wall_s`
+    (an overhead plus audio over a rate: 10.76 s + audio / 5.13, a least-squares fit to five live points,
+    2026-11-25; the earlier factor table, 3.5 at 30 s to 3.0 at 240 s, had the wrong shape) and
     times the variants, marked as an estimate; it may route (L12), never refuse.
   - Music, **a running job** (Ark #64 §5): the remaining time must come from the job's own
     progress, not from the text estimate, which counts sung lines only and gives an
