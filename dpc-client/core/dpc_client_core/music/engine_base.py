@@ -68,6 +68,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Mapping, Optional, 
 from .. import process_registry as _procreg
 from ..managers.card_lease import CardLease, LeaseRefusal
 from .capabilities import EngineStatus
+from .engine_build import read_engine_build
 from .store import atomic_write_text, music_dir_of
 
 logger = logging.getLogger(__name__)
@@ -327,6 +328,8 @@ class SupervisedEngine:
         self._last_exit: Optional[Dict[str, Any]] = None
         self._props: Optional[Dict[str, Any]] = None
         self._version: Optional[str] = None
+        # `build.json` beside the binary, read once per engine start (`build_identity`).
+        self._build: Optional[Dict[str, Any]] = None
         self._lock: Optional[asyncio.Lock] = None
         self._stopping = False
         self._busy = 0
@@ -371,6 +374,14 @@ class SupervisedEngine:
 
     def identity(self, *, model_sha256: bool = True) -> Dict[str, Any]:
         raise NotImplementedError
+
+    def build_identity(self) -> Dict[str, Any]:
+        """`{"build": {...}}` from the `build.json` beside the binary (`engine_build`, validated and size
+        capped), else `{"build_note": why}`. Read once per engine start and kept until the next one.
+        Blocking, but a few `stat`s and one small read."""
+        if self._build is None:
+            self._build = read_engine_build(self.config.binary, engine=self.ENGINE)
+        return dict(self._build)
 
     # -- configuration -------------------------------------------------------------
 
@@ -599,6 +610,7 @@ class SupervisedEngine:
             self._set_state("stopped", f"{self.DISPLAY} start was cancelled before its child came up")
             raise
         self._proc = proc
+        self._build = None  # a new start reads `build.json` again
         try:
             await self._wait_healthy(proc, port)
             props = await self._get_json("/props")

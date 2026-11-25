@@ -936,4 +936,5 @@ class Yue2Server(SupervisedEngine):
             "server_args": self.server_args(),
             "models": {"backbone": bb, "vae": self._file_identity(self.vae_path(), with_sha=model_sha256)},
             "adapters": used,
+            **self.build_identity(),
         }

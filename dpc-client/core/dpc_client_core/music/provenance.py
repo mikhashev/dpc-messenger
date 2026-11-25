@@ -72,8 +72,11 @@ into the library entry, so takes that must stay non-commercial can be told apart
 - `node_id` is this node's public id (`dpc-node-...`, `p2p_manager.node_id`: the id peers see, never key or
   token material), set through `set_node_id_source`; `not_stored` when no source is set or `[music]
   provenance_node_id` is off. The lossy export replaces it by `withheld_on_export` (`withhold_node_id`).
-- `build` stays `not_stored` with `build_note` giving the reason: the engine reports no build, compiler or CUDA
-  architecture on `/health` or `/props`. The device's `compute_capability` is recorded beside the driver.
+- `build` is the engine's `build.json` (`engine_build.py`, schema `dpc.engine-build/1`: source commit and
+  whether the tree was dirty, CUDA architectures, CUDA version, compiler, build type, build time), written
+  by `tools/music/write_engine_build_json.py` after a build, validated and size capped, read once per engine
+  start. Without that file, or with one that does not validate, it stays `not_stored` with a `build_note` that
+  names the file: the engine reports no build, compiler or CUDA architecture on `/health` or `/props`. The device's `compute_capability` is recorded beside the driver.
 
 **Legacy records.** Until 2026-11-22 `genome_sha256` was the hash of the whole genotype bucket
 (the wide definition), and 55 re-tagged files carry that value. A record **without
@@ -98,6 +101,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from .engine_build import SCHEMA as BUILD_SCHEMA, validate_build
 
 logger = logging.getLogger(__name__)
 
@@ -437,10 +442,25 @@ def withhold_node_id(rec: Mapping[str, Any]) -> Dict[str, Any]:
 
 # -- the builders -------------------------------------------------------------------------------
 
-BUILD_NOTE = ("not reported: the engine answers /health with a status and /props with its version, models and "
-              "defaults, neither names the build, the compiler or the CUDA architecture, and DPC does not read them "
-              "from the binary; the binary is named by sha256 in engine_binaries")
+BUILD_NOTE = ("no build.json was read: the engine answers /health with a status and /props with its version, models "
+              "and defaults, neither names the build, the compiler or the CUDA architecture, and DPC does not read "
+              "them from the binary; the binary is named by sha256 in engine_binaries")
 BUILD_NOTE_NO_ENGINE = "DPC's own sample work, no engine binary"
+
+
+def _build_fields(engine: str, identity: Mapping[str, Any]) -> Dict[str, Any]:
+    """`build` from the engine's `build.json` (`engine_build`: validated again here and size capped, so
+    a record never takes an unchecked object), else `not_stored` with `build_note` saying why and, for an
+    engine whose binary has no such file, naming it."""
+    if engine == EDIT_ENGINE_LOCAL:
+        return {"build": NOT_STORED, "build_note": BUILD_NOTE_NO_ENGINE}
+    build, why = validate_build(identity.get("build"), engine=engine) if identity.get("build") is not None else (None, None)
+    if build is not None:
+        return {"build": build}
+    note = identity.get("build_note")
+    if why:
+        note = f"build.json is not a valid {BUILD_SCHEMA}: {why}"
+    return {"build": NOT_STORED, "build_note": note if isinstance(note, str) and note else BUILD_NOTE}
 
 
 def _base(*, engine: str, job_id: Optional[str], variant: Optional[int], created_at: str, identity: Mapping[str, Any],
@@ -456,8 +476,7 @@ def _base(*, engine: str, job_id: Optional[str], variant: Optional[int], created
         "engine_version": _ns(version),
         "engine_commit": _ns(identity.get("commit") or _commit_of(version)),
         "engine_binaries": _binaries_list(identity.get("binaries")),
-        "build": NOT_STORED,
-        "build_note": BUILD_NOTE_NO_ENGINE if engine == EDIT_ENGINE_LOCAL else BUILD_NOTE,
+        **_build_fields(engine, identity),
         "node_id": node_identity(),
         "device": dict(device) if device else {"gpu": NOT_STORED, "driver": NOT_STORED},
         "backend": server_args.get("device") or NOT_STORED,

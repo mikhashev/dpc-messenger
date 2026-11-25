@@ -244,4 +244,5 @@ class AceStepServer(SupervisedEngine):
             "binaries": self._binaries_identity(),
             "server_args": self.server_args(),
             "models": models,
+            **self.build_identity(),
         }
