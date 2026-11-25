@@ -148,7 +148,7 @@ def _music_agent(tmp_path, provider):
 
 
 @pytest.mark.asyncio
-async def test_an_owner_turn_with_music_tools_is_offered_schedule_task_and_an_other_node_turn_is_not(agent_home):
+async def test_an_owner_turn_with_music_tools_is_offered_schedule_task_and_so_is_an_other_node_turn(agent_home):
     provider = _Provider()
     agent = _music_agent(agent_home, provider)
     # The firewall alone does not enable it: the music tools bring it.
@@ -158,11 +158,13 @@ async def test_an_owner_turn_with_music_tools_is_offered_schedule_task_and_an_ot
     assert music_tools.MUSIC_TOOL_NAMES <= set(provider.offered), provider.offered
     assert "schedule_task" in provider.offered
 
+    # ADR-053: the music tools are offered on every turn and ask the owner on a foreign
+    # request, so a mixed group's turn gets them, and schedule_task for the return with them.
     provider.offered = None
     assert await asyncio.wait_for(
         agent.process("make a song", "group-mixed", message_source="group"), 30) == "the answer"
-    assert not music_tools.MUSIC_TOOL_NAMES & set(provider.offered), provider.offered
-    assert "schedule_task" not in provider.offered
+    assert music_tools.MUSIC_TOOL_NAMES <= set(provider.offered), provider.offered
+    assert "schedule_task" in provider.offered
 
 
 # -- 2. a job waiting for the card behind this turn ------------------------------------------

@@ -8,7 +8,8 @@ answer record: the tool collects it on `ToolContext.posted_attachments`,
 `DpcAgent.process` hands the list to the agent manager, and `_record_answer` writes it.
 
 Limits (D41):
-- only the owner's turns (`owner_only`, checked by the registry; checked again here);
+- the owner's requests, or a call the owner approved (ADR-053 `owner_approval_for_others`, checked
+  by the registry's gate; checked again here, per call);
 - only the agent's own 1:1 chat (`agent_*`): a group, a Telegram or a Discord turn is
   refused with its reason (posting into groups comes later, decision G);
 - the path is resolved as `read_file` resolves it (`_resolve_file_path`: the "Extended
@@ -36,7 +37,7 @@ from typing import Any, Dict, List, Optional
 
 from ...music import job_schemas as js
 from .core import _dpc_home, _resolve_file_path
-from .registry import ToolContext, ToolEntry, is_owner_turn
+from .registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
 
@@ -100,12 +101,24 @@ def _refusal(text: str) -> str:
 def turn_refusal(ctx: ToolContext) -> Optional[str]:
     """Why this turn may not post a file into a chat, in one line, or None when it may.
 
-    The registry refuses a turn that is not the owner's before the body runs
-    (`owner_only`); this is the second line, plus what only this tool knows: the turn
-    must be in the agent's own 1:1 chat and not come from Telegram or Discord."""
-    if not is_owner_turn(ctx):
-        cls = getattr(ctx, "turn_class", None) or "unknown"
-        return _refusal(f"this turn is not the owner's (class '{cls}').")
+    The registry's gate asks the owner first when someone else asked for the turn
+    (ADR-053, `owner_approval_for_others`); this is the second line, per call, plus what
+    only this tool knows: the turn must be in the agent's own 1:1 chat and not come from
+    Telegram or Discord."""
+    from ..owner_approval import may_run_owner_tool, turn_asker
+    where = place_refusal(ctx)
+    if where:
+        return where
+    if not may_run_owner_tool(ctx):
+        return _refusal(f"{turn_asker(ctx).label()} asked for this turn and is not the owner, "
+                        f"and the owner did not approve this call.")
+    return None
+
+
+def place_refusal(ctx: ToolContext) -> Optional[str]:
+    """Why this turn's chat is not one a file is posted into (Telegram, Discord, a group, any
+    chat but the agent's own 1:1), or None. Read before the owner check, so the reason the
+    tool can never run here is the one given, and the gate raises no card for it."""
     source = getattr(ctx, "message_source", None)
     where = _REFUSED_SOURCES.get(source or "")
     if where is None and getattr(ctx, "reply_telegram_chat_id", None):
@@ -332,6 +345,27 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=CHAT_POST_FILE_TIMEOUT_SEC,
             is_core=False,
             default_enabled=False,
-            owner_only=True,
+            owner_approval_for_others=True,  # ADR-053: was owner_only (ADR-051 D43)
         ),
     ]
+
+
+# ADR-053: chat_post_file asks the owner when someone else asked for the turn (it was
+# owner_only, ADR-051 D43). The card names the file or the take.
+def _chat_post_file_approval(ctx: ToolContext, args: Dict[str, Any]):
+    from ..owner_approval import Ask, Exempt, clip
+    if place_refusal(ctx):
+        return Exempt("a chat the tool never posts into; it refuses with its reason")
+    what = (f"take {args['take_id']}" if args.get("take_id")
+            else f"the file {args.get('path') or '(none named)'}")
+    caption = str(args.get("caption") or "")
+    return Ask(clip(f"post {what} into the chat" + (f", with the caption: {caption}" if caption else "")))
+
+
+_get_chat_file_tools_unflagged = get_tools
+
+
+def get_tools() -> List[ToolEntry]:  # noqa: F811
+    from .registry import mark_owner_approval
+    return mark_owner_approval(_get_chat_file_tools_unflagged(),
+                               {"chat_post_file": _chat_post_file_approval})

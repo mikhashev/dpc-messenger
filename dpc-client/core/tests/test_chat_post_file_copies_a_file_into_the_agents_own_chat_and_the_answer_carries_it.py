@@ -462,11 +462,15 @@ async def test_a_turn_that_is_not_the_owners_is_not_offered_the_tool_and_a_force
     await w.turn([{"path": str(_take(home))}], conv=conv, source=source)
 
     turn = w.provider.turns[0]
-    assert "chat_post_file" not in turn["offered"], turn["offered"]
+    # ADR-053: offered on every turn but Discord's read-only one; a group or a Telegram chat is
+    # never posted into, and the tool says so with no card.
+    if source == "discord":
+        assert "chat_post_file" not in turn["offered"], turn["offered"]
+    else:
+        assert "chat_post_file" in turn["offered"], turn["offered"]
     out = _tool_results(w)
-    # The firewall's per-turn list leaves it out first; without that, owner_only refuses it.
     assert ("'chat_post_file' is not in the allowed tools list" in out
-            or "runs only on the owner's own turns" in out), out[-1500:]
+            or "chat_post_file refused" in out), out[-1500:]
     assert "Posted" not in out
     assert w.all_chat_files() == []
     assert not any(a.get("attachments") for a in w.answers(CID))
@@ -498,8 +502,9 @@ async def test_a_turn_that_is_not_the_owners_names_owner_only_tools_as_such_not_
     await w.turn([], conv="group-mixed", source="group")
 
     system = w.provider.turns[0]["system"] + w.provider.turns[0]["messages"]
-    owner_line = next(line for line in system.split("\\n") if "Owner-only, not available in this turn" in line)
-    assert "chat_post_file" in owner_line and "comfyui_submit" in owner_line
+    # ADR-053: no tool is owner_only, so a mixed group's turn lists none as withheld; the
+    # former ones ask the owner on a foreign request instead.
+    assert "Owner-only, not available in this turn" not in system
     disabled = [line for line in system.split("\\n") if "Disabled by firewall" in line]
     assert not any("chat_post_file" in line or "comfyui_submit" in line for line in disabled), disabled
 
@@ -601,9 +606,10 @@ def test_the_paperclip_copy_is_not_deduplicated(tmp_path):
     assert "duration_seconds" not in first, "a PDF has no length"
 
 
-def test_the_tool_is_owner_only_and_off_by_default():
+def test_the_tool_asks_the_owner_on_a_foreign_request_and_is_off_by_default():
     (entry,) = chat_files.get_tools()
-    assert entry.name == "chat_post_file" and entry.owner_only and not entry.default_enabled
+    assert entry.name == "chat_post_file" and not entry.default_enabled
+    assert entry.owner_approval_for_others and not entry.owner_only
 
 
 # --- a music take by its id (D41, D44) ---------------------------------------------------------

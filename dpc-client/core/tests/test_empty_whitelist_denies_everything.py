@@ -53,11 +53,11 @@ def test_no_whitelist_at_all_still_means_no_gate(registry, tmp_path):
 
 
 def test_no_whitelist_and_no_turn_class_hides_only_the_owner_only_tools(registry, tmp_path):
-    """owner_only fails closed on an unknown turn class; a `None` whitelist adds no other gate."""
+    """owner_only fails closed on an unknown turn class; a `None` whitelist adds no other gate.
+    Since ADR-053 no tool is owner_only, so nothing is hidden."""
     registry.set_context(ToolContext(agent_root=tmp_path, tool_whitelist=None))
     hidden = set(registry._entries) - _names(registry)
-    assert hidden == registry.owner_only_names()
-    assert hidden
+    assert hidden == registry.owner_only_names() == set()
 
 
 def test_a_named_whitelist_admits_exactly_what_it_names(registry, tmp_path):

@@ -180,20 +180,26 @@ async def test_a_refused_approval_leaves_no_job_and_no_job_file(home):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("turn_class", ["other_node", "stranger", None])
-async def test_a_turn_that_is_not_the_owners_is_not_offered_the_tools_and_makes_no_job(home, turn_class):
+async def test_a_turn_someone_else_asked_for_is_offered_the_tools_and_a_refused_card_makes_no_job(
+        home, turn_class):
+    """ADR-053: the room's class no longer withholds the music tools; who asked decides. A
+    foreign asker's job waits for the owner's card, which names him, and a refusal makes none."""
+    from dpc_client_core.dpc_agent.agent import ASKER_HUMAN, Asker
     async with Rig(home, start_runner=False) as rig:
-        person = Person(True)
+        person = Person(False)
         ctx = make_ctx(home, MusicService(home, rig, person), turn_class=turn_class)
+        ctx.asker = Asker(ASKER_HUMAN, "Miron", "dpc-node-friend", is_owner=False, verified=True)
         reg = registry_for(ctx)
         offered = {s["function"]["name"] for s in reg.schemas(include_restricted=True)}
-        assert not offered & music_tools.MUSIC_TOOL_NAMES
-        assert music_tools.MUSIC_TOOL_NAMES <= reg.owner_only_names()
+        assert music_tools.MUSIC_TOOL_NAMES <= offered
+        assert reg.owner_only_names() == set()
 
         out = await call(reg, ctx, "music_propose_job", params=from_text())
-        assert "runs only on the owner's own turns" in out
-        # The tool's own second line refuses as well, called past the registry.
-        assert "runs only on the owner's own turns" in music_tools.music_propose_job(ctx, params=from_text())
-        assert person.asked == [] and rig.store.list_jobs() == []
+        assert "No job was made" in out
+        assert len(person.asked) == 1 and person.asked[0]["asker"]["name"] == "Miron"
+        # The tool's own second line refuses a call nobody approved, called past the registry.
+        assert "only after the owner approves" in music_tools.music_propose_job(ctx, params=from_text())
+        assert rig.store.list_jobs() == []
         assert files_under(home / "music" / "generated") == []
 
 
@@ -425,6 +431,7 @@ def test_the_music_poll_tools_are_judged_by_their_output_and_their_timeouts_are_
     assert {"music_wait", "music_check"} <= guards._OUTPUT_KEYED_TOOLS
     entries = {e.name: e for e in music_tools.get_tools()}
     assert set(entries) == music_tools.MUSIC_TOOL_NAMES
-    assert all(e.owner_only and not e.default_enabled and not e.is_core for e in entries.values())
+    assert all(e.owner_approval_for_others and not e.owner_only and not e.default_enabled
+               and not e.is_core for e in entries.values())
     assert entries["music_wait"].timeout_sec == music_tools.WAIT_MAX_S + music_tools.WAIT_MARGIN_S == 915
     assert entries["music_propose_job"].timeout_sec > core_tools._SCHEDULE_APPROVAL_TTL_SECONDS

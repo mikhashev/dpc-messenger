@@ -1,4 +1,12 @@
-"""A tool marked `owner_only` is neither offered nor run outside an owner turn; ComfyUI is owner_only.
+"""ComfyUI asks the owner on a foreign request (ADR-053); a tool marked `owner_only` is still neither
+offered nor run outside an owner turn.
+
+ADR-053 (Mike, 2026-11-25) moved ComfyUI from `owner_only` to `owner_approval_for_others`: it is offered
+on every turn, runs at once when the owner asked, and on anyone else's request waits for the owner's
+card. Here no desktop client is attached, so a foreign request is refused at once and no request
+reaches ComfyUI. The `owner_only` field and its refusal stay, for a tool that may carry it later.
+
+What follows is the record of ADR-051 D43, kept for the history of the flag:
 
 Card AGENT-TOOLS-ARE-OFFERED-IN-ANY-TURN-CLASS-SO-A-PEER-CAN-MAKE-THE-OWNERS-AGENT-RUN-COMFYUI-JOBS-
 ON-THE-OWNERS-GPU; Zcode's review #51, section 3 [6]; Mike's decisions A and B/L, 2026-11-24. The rule
@@ -173,11 +181,17 @@ async def _turn(tmp_path, monkeypatch, source, conversation_id, firewall=False):
     return provider, comfy
 
 
-def _refused(provider, comfy):
-    assert "comfyui_submit" not in provider.offered, provider.offered
-    assert not set(COMFYUI) & set(provider.offered), "no ComfyUI schema is offered"
+def _refused(provider, comfy, offered=True):
+    """ADR-053: offered on every turn (Discord keeps its read-only list); a foreign call waits for the
+    owner's card, and with no desktop client attached nobody could be asked, so it is refused before
+    any request leaves."""
+    if offered:
+        assert set(COMFYUI) <= set(provider.offered), provider.offered
+    else:
+        assert not set(COMFYUI) & set(provider.offered), provider.offered
     assert "pid-7" not in provider.after_call, "the tool body never ran"
     assert comfy.requests == [], [str(r.url) for r in comfy.requests]
+    assert "nobody could be asked" in provider.after_call
 
 
 NOT_THE_OWNER = [
@@ -196,11 +210,16 @@ class TestNotTheOwnersTurn:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("firewall", [False, True], ids=["no-firewall", "firewall-allows-it"])
     @pytest.mark.parametrize("source,conversation_id", NOT_THE_OWNER)
-    async def test_comfyui_is_not_offered_and_a_forced_call_is_refused_with_no_http_request(
+    async def test_comfyui_is_offered_and_a_foreign_call_with_nobody_to_ask_makes_no_http_request(
         self, tmp_path, monkeypatch, source, conversation_id, firewall,
     ):
         provider, comfy = await _turn(tmp_path, monkeypatch, source, conversation_id, firewall)
-        _refused(provider, comfy)
+        if source == "discord":
+            # Discord's read-only whitelist offers none of it, and the forced call is refused there.
+            assert not set(COMFYUI) & set(provider.offered)
+            assert comfy.requests == [] and "pid-7" not in provider.after_call
+        else:
+            _refused(provider, comfy)
         assert "comfyui_submit" in provider.after_call and "⚠️" in provider.after_call
 
 
@@ -208,8 +227,6 @@ OWNER = [
     ("ui", "conv-ui"),
     ("external_agent", "conv-bridge"),
     ("telegram_owner", "telegram-1"),
-    # a group of this node alone is the owner's
-    ("group", "group-own"),
 ]
 
 
@@ -226,17 +243,24 @@ class TestTheOwnersTurn:
         assert "Queued. prompt_id=pid-7" in provider.after_call
 
 
-class TestAnUnknownClass:
+class TestTheRoomDoesNotDecide:
+    """ADR-053: the room (the turn class) decides what the agent may say, the asker what it may do."""
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("cls", [None, "", "owner ", "OWNER", "guest"])
-    async def test_a_turn_of_a_class_nobody_named_is_refused(self, tmp_path, monkeypatch, cls):
-        # The owner's door, but the class came back as something that is not OWNER_TURN.
+    async def test_the_owners_door_runs_comfyui_whatever_class_the_room_got(self, tmp_path, monkeypatch, cls):
         monkeypatch.setattr(DpcAgent, "turn_audience", lambda self, s, c: (cls, frozenset()))
         provider, comfy = await _turn(tmp_path, monkeypatch, "ui", "conv-ui")
+        assert [str(r.url) for r in comfy.requests] == [f"{cf.DEFAULT_API_URL}/prompt"]
+
+    @pytest.mark.asyncio
+    async def test_a_group_of_own_nodes_with_no_asker_is_foreign(self, tmp_path, monkeypatch):
+        # Owner class for memory, but a group turn nobody routed has no asker (D-g).
+        provider, comfy = await _turn(tmp_path, monkeypatch, "group", "group-own")
         _refused(provider, comfy)
 
     @pytest.mark.asyncio
-    async def test_a_classification_that_fails_is_not_the_owners(self, tmp_path, monkeypatch):
+    async def test_a_classification_that_fails_withholds_no_comfyui_tool(self, tmp_path, monkeypatch):
         agent = _agent(tmp_path, _Provider(), _firewall(tmp_path))
 
         def broken(self, source, conversation_id):
@@ -244,22 +268,12 @@ class TestAnUnknownClass:
 
         monkeypatch.setattr(DpcAgent, "turn_audience", broken)
         allowed = agent._get_allowed_tools(message_source="ui", conversation_id="conv-ui")
-        assert allowed is not None and not set(COMFYUI) & allowed
-
-    def test_a_bare_context_runs_no_owner_only_tool(self, tmp_path, monkeypatch):
-        comfy = _ComfyUI(monkeypatch)
-        registry = ToolRegistry(agent_root=tmp_path / "agents" / PROFILE)
-        ctx = ToolContext(agent_root=tmp_path / "agents" / PROFILE)  # no class: a probe, not a turn
-        answer = registry.execute("comfyui_submit", {"workflow_json": WORKFLOW}, ctx=ctx)
-        assert answer.startswith("⚠️") and "owner" in answer and "\n" not in answer, answer
-        assert comfy.requests == []
-        registry.set_context(ctx)
-        assert not set(COMFYUI) & set(_names(registry.schemas(include_restricted=True)))
+        assert allowed is not None and set(COMFYUI) <= allowed
 
 
 class TestTheFlag:
-    def test_every_comfyui_tool_is_owner_only(self):
-        assert COMFYUI and all(e.owner_only for e in cf.get_tools())
+    def test_every_comfyui_tool_asks_the_owner_and_none_is_owner_only(self):
+        assert COMFYUI and all(e.owner_approval_for_others and not e.owner_only for e in cf.get_tools())
 
     def test_a_tool_is_not_owner_only_unless_it_says_so(self):
         entry = ToolEntry(name="t", schema={"name": "t"}, handler=lambda ctx: "ran")
@@ -270,7 +284,7 @@ class TestTheFlag:
         registry.override_handler("comfyui_submit", lambda ctx, **kw: "the override ran")
         ctx = ToolContext(agent_root=tmp_path, turn_class="other_node", message_source="group")
         answer = registry.execute("comfyui_submit", {}, ctx=ctx)
-        assert answer.startswith("⚠️") and "the override ran" not in answer
+        assert answer.startswith("⚠️ comfyui_submit was not run") and "the override ran" not in answer
 
     def test_the_refusal_names_the_tool_and_the_turn_class(self, tmp_path):
         registry = ToolRegistry(agent_root=tmp_path / "agents" / PROFILE)

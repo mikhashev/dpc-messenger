@@ -1121,7 +1121,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=45,
             is_core=False,
             default_enabled=False,
-            owner_only=True,
+            owner_approval_for_others=True,  # ADR-053: was owner_only (ADR-051 D43)
         ),
         ToolEntry(
             name="comfyui_check",
@@ -1152,7 +1152,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=15,
             is_core=False,
             default_enabled=False,
-            owner_only=True,
+            owner_approval_for_others=True,  # ADR-053: was owner_only (ADR-051 D43)
         ),
         ToolEntry(
             name="comfyui_wait",
@@ -1188,7 +1188,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=610,
             is_core=False,
             default_enabled=False,
-            owner_only=True,
+            owner_approval_for_others=True,  # ADR-053: was owner_only (ADR-051 D43)
         ),
         ToolEntry(
             name="comfyui_queue_status",
@@ -1214,7 +1214,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=10,
             is_core=False,
             default_enabled=False,
-            owner_only=True,
+            owner_approval_for_others=True,  # ADR-053: was owner_only (ADR-051 D43)
         ),
         ToolEntry(
             name="comfyui_progress",
@@ -1252,7 +1252,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=80,
             is_core=False,
             default_enabled=False,
-            owner_only=True,
+            owner_approval_for_others=True,  # ADR-053: was owner_only (ADR-051 D43)
         ),
         ToolEntry(
             name="comfyui_convert",
@@ -1291,7 +1291,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=120,
             is_core=False,
             default_enabled=False,
-            owner_only=True,
+            owner_approval_for_others=True,  # ADR-053: was owner_only (ADR-051 D43)
         ),
         ToolEntry(
             name="comfyui_diagnose",
@@ -1332,6 +1332,80 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=30,
             is_core=False,
             default_enabled=False,
-            owner_only=True,
+            owner_approval_for_others=True,  # ADR-053: was owner_only (ADR-051 D43)
         ),
     ]
+
+
+# ADR-053: the ComfyUI tools ask the owner when someone else asked for the turn (they were
+# owner_only, ADR-051 D43). owner_only was their only guard, and they take paths and a server
+# URL as given (Zcode's review): on a foreign request every path goes through the file
+# tools' own gate first (`tools.core._resolve_file_path`: the sandbox, the profile's grants
+# and what is closed to the turn) and only the default local server is spoken to, before
+# any card. A submit runs a workflow on the GPU, so its card states the cost.
+def _comfyui_foreign_refusal(ctx: ToolContext, args: Dict[str, Any]) -> Optional[str]:
+    """Why this foreign-request call is refused before any card, or None."""
+    import os
+    from .core import _resolve_file_path
+    api_url = args.get("api_url")
+    if api_url and api_url != DEFAULT_API_URL:
+        return (f"⚠️ Not run: on a request of someone who is not the owner only the local "
+                f"ComfyUI server ({DEFAULT_API_URL}) is used, not {api_url}.")
+    paths = []
+    if args.get("workflow"):
+        found = _resolve_workflow_path(ctx, str(args["workflow"]))
+        if found is not None:
+            paths.append((str(found.resolve()), False))
+    if args.get("input_path"):
+        paths.append((str(args["input_path"]), False))
+    if args.get("output_path"):
+        paths.append((str(args["output_path"]), True))
+    root = pathlib.Path(ctx.agent_root).resolve()
+    for path, write in paths:
+        try:
+            # A path inside the sandbox is checked as the relative path it is, not as an
+            # extended one (the extended-read switch does not govern the sandbox).
+            # The tools read a relative path against the process's directory, as resolve() does.
+            absolute = pathlib.Path(path).expanduser().resolve()
+            try:
+                path = absolute.relative_to(root).as_posix()
+            except ValueError:
+                path = str(absolute)
+            _resolve_file_path(ctx, path, require_write=write and os.path.isabs(path))
+        except PermissionError as e:
+            return f"⚠️ Not run: {e}"
+        except (OSError, ValueError) as e:
+            return f"⚠️ Not run: the path {path} could not be checked ({e})."
+    return None
+
+
+def _comfyui_approval(cost: str = ""):
+    def check(ctx: ToolContext, args: Dict[str, Any]):
+        from ..owner_approval import Ask, Refuse, default_details
+        refusal = _comfyui_foreign_refusal(ctx, args)
+        if refusal:
+            return Refuse(refusal)
+        return Ask(default_details(args), cost=cost)
+    return check
+
+
+def _comfyui_submit_approval(ctx: ToolContext, args: Dict[str, Any]):
+    from ..owner_approval import Ask, GPU_CARD_COST_LINE, Refuse, clip
+    refusal = _comfyui_foreign_refusal(ctx, args)
+    if refusal:
+        return Refuse(refusal)
+    what = args.get("workflow") or ("a raw workflow" if args.get("workflow_json") else "(no workflow)")
+    prompt = str(args.get("prompt") or "")
+    return Ask(clip(f"run ComfyUI workflow {what}" + (f" with the prompt: {prompt}" if prompt else "")),
+               cost=GPU_CARD_COST_LINE)
+
+
+_get_comfyui_tools_unflagged = get_tools
+
+
+def get_tools() -> List[ToolEntry]:  # noqa: F811
+    from .registry import mark_owner_approval
+    entries = _get_comfyui_tools_unflagged()
+    checks: Dict[str, Any] = {e.name: _comfyui_approval() for e in entries}
+    checks["comfyui_submit"] = _comfyui_submit_approval
+    return mark_owner_approval(entries, checks)

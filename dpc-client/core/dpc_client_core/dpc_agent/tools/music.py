@@ -4,8 +4,9 @@ DPC Agent — music tools for the owner's agent (ADR-051 D42-D51; ADR-052 sectio
 Nine tools over the core music service: `music_capabilities`, `music_propose_job`,
 `music_check`, `music_wait`, `music_cancel_job`, `music_list_takes`, `music_list_library`,
 `music_get_lyrics`, `music_playlist_add` (`chat_post_file`, the tenth name of D42, is its own
-module). Each is off by default and `owner_only` (D43): outside the owner's turn it is neither
-offered nor run, and each tool checks the turn class again as a second line.
+module). Each is off by default. They were `owner_only` (D43); since ADR-053 each asks the
+owner when someone other than the owner asked for the turn (`owner_approval_for_others`, the
+registry's gate), and each checks again, per call, as a second line (`_not_owner`).
 
 Every call goes to the CoreService command on the service loop (`ctx.agent_event_loop`), so
 broadcasts, the job store's lock and the card lease stay in one place. The tools return text,
@@ -48,7 +49,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from ...managers.llama_server_supervisor import current_card_hold
 from ...music import job_schemas as js
 from ...process_registry import SPAWN_ORIGIN
-from .registry import ToolContext, ToolEntry, is_owner_turn
+from .registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
 
@@ -97,11 +98,15 @@ class _Unavailable(Exception):
 # ---------------------------------------------------------------------------
 
 def _not_owner(ctx: ToolContext, name: str) -> Optional[str]:
-    """The second line of D43: the registry refuses first; this refuses again."""
-    if is_owner_turn(ctx):
+    """The second line (ADR-051 D43 as ADR-053 changed it): the registry's gate asks the owner
+    first when someone else asked for the turn; this lets the call run only when the owner
+    asked, or approved this very call, or the call is on its way to the tool's own card.
+    Per call: an approval is never carried to the next call."""
+    from ..owner_approval import may_run_owner_tool, turn_asker
+    if may_run_owner_tool(ctx):
         return None
-    cls = getattr(ctx, "turn_class", None) or "unknown"
-    return f"⚠️ {name} runs only on the owner's own turns; this turn's class is '{cls}'. Nothing was run."
+    return (f"⚠️ {name} runs on a request of {turn_asker(ctx).label()}, who is not the owner, "
+            f"only after the owner approves it. Nothing was run.")
 
 
 def _service_call(ctx: ToolContext, method: str, **kwargs: Any) -> Dict[str, Any]:
@@ -465,9 +470,11 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     # The person's consent first, through schedule_task's machinery (D47). Stop while the card
     # is up withdraws it: a "yes" after Stop makes no job (follow-up 12, Zcode #68 P3).
     from .core import _await_schedule_approval
+    from ..owner_approval import GPU_CARD_COST_LINE
     approved, reason = _await_schedule_approval(
         ctx, task_type="music_job", when="now", about=_approval_about(type, final),
-        music=_approval_parts(type, final), void_on_stop=True)
+        music=_approval_parts(type, final), void_on_stop=True,
+        card={"cost": GPU_CARD_COST_LINE})  # ADR-053 2.6: the card states the cost
     if not approved:
         return f"⚠️ The music job was not proposed: {reason}. No job was made."
     if _turn_stopped(ctx):
@@ -833,7 +840,7 @@ def _entry(name: str, description: str, properties: Dict[str, Any], required: Li
         timeout_sec=timeout_sec,
         is_core=False,
         default_enabled=False,
-        owner_only=True,
+        owner_approval_for_others=True,  # ADR-053: was owner_only (ADR-051 D43)
     )
 
 
@@ -902,3 +909,22 @@ def get_tools() -> List[ToolEntry]:
                 "take_id": {"type": "string", "description": "A take whose library track to add."}},
                ["playlist_id"], music_playlist_add),
     ]
+
+
+# ADR-053: the music tools ask the owner when someone else asked for the turn (they were
+# owner_only, ADR-051 D43). music_propose_job asks on its own card, which names the asker
+# and states the cost; its budget already holds the card's 60 s (D-b, D-c).
+def _music_propose_approval(ctx: ToolContext, args: Dict[str, Any]):
+    from ..owner_approval import ToolAsks
+    return ToolAsks()
+
+
+_get_music_tools_unflagged = get_tools
+
+
+def get_tools() -> List[ToolEntry]:  # noqa: F811
+    from .registry import mark_owner_approval
+    checks: Dict[str, Any] = {name: None for name in MUSIC_TOOL_NAMES}
+    checks["music_propose_job"] = _music_propose_approval
+    return mark_owner_approval(_get_music_tools_unflagged(), checks,
+                               budget_holds_approval=("music_propose_job",))
