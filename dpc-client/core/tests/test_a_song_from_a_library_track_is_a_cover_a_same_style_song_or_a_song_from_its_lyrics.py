@@ -335,6 +335,38 @@ async def test_a_song_from_the_lyrics_on_acestep_sings_the_lines_and_a_changed_s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("job_type, params", [
+    ("cover", {"caption": "punk", "lyrics_mode": "none"}),
+    ("generate_similar", {"caption": "synthwave", "reference": "audio", "lyrics_mode": "none", "variants": 1}),
+])
+async def test_a_source_whose_bytes_changed_behind_the_librarys_back_is_refused_before_it_is_decoded_or_sent(
+        tmp_path, monkeypatch, job_type, params):
+    """Follow-up 15 (review #180 1.1 carried to song jobs): the source was decoded and sent as `audio` /
+    `ref_audio` on the library's stored hash alone; a rewrite the library had not polled yet went through."""
+    record = tmp_path / "posts"
+    free_env(monkeypatch, record=record)
+    install_fake_engine(tmp_path)
+    async with SongRig(tmp_path) as rig:
+        entry, path = await rig.source()
+        decoded = []
+        real = rig.runner._decode_control
+        rig.runner._decode_control = lambda src, dest: (decoded.append(src), real(src, dest))
+        t = np.arange(12 * RATE) / RATE
+        x = np.round(0.2 * np.sin(2 * np.pi * 330 * t) * 32767).astype("<i2")
+        with wave.open(str(path), "wb") as w:                 # other audio, the library not told
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(RATE)
+            w.writeframes(np.stack([x, x], axis=1).tobytes())
+        assert rig.library.get_entry(entry["id"])["content_hash"] == entry["content_hash"]
+        job = rig.propose(job_type, entry, params)
+        done = await rig.wait_for(job["id"], DONE)
+        assert done["state"] == js.UNSUPPORTED and done["state_reason"].startswith("hash_mismatch"), done
+        assert "hashed again" in done["state_reason"] and decoded == []
+        assert not list(record.glob("*-synth-parts.json")) and not rig.engine.alive()
+
+
+@pytest.mark.asyncio
 async def test_a_yue2_cover_transcribes_the_source_to_a_score_and_sings_it_with_the_lyrics(tmp_path, monkeypatch):
     record = tmp_path / "posts"
     monkeypatch.setenv("FAKE_YUE2_MODE", "")

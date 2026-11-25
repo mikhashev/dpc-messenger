@@ -280,6 +280,17 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
         path = library.get_track_path(track_id)
         if path is None or not Path(path).is_file():
             raise _JobFailure("the source track's file is missing; relink or rescan it and propose the job again")
+        # The library's hash can lag the file: the bytes are hashed again now, by the library's own identity
+        # function, before anything is decoded or sent (as a region edit's base is, runner._edit_prepare).
+        expected = want or entry.get("content_hash")
+        if expected and hasattr(library, "content_hash_of"):
+            try:
+                now = await library.content_hash_of(Path(path))
+            except OSError as exc:
+                raise _JobFailure(f"the source track's file cannot be read to check its hash: {exc}")
+            if now != expected:
+                raise _JobFailure("hash_mismatch: the source track's file holds other audio than when the job was "
+                                  "proposed (its bytes were hashed again at run start); propose it again")
         out_dir.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(runner._decode_control, Path(path), source_wav)
         try:
