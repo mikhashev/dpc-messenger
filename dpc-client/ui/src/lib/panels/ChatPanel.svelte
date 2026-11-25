@@ -40,7 +40,10 @@
     userMessageConfirmed,
     coreMessages,
     agentsList,
+    providersList,
+    peerProviders,
   } from '$lib/coreService';
+  import { aiChatWindow, selectedModelRow } from '$lib/utils/chatEffort';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
   import { showNotificationIfBackground } from '$lib/notificationService';
   import { offerOpensDialog, offerQuestion } from '$lib/fileTransferPermission';
@@ -249,9 +252,15 @@
       ?.voice_provider_alias || ''
   );
   let currentTokenUsage = $derived(tokenUsageMap.get(activeChatId) || { used: 0, limit: 0 });
+  // Same window as the header's counter (+page.svelte aiChatLimit).
+  let aiChatLimit = $derived(
+    $aiChats.has(activeChatId) && !isAgentChat && !activeChatId.startsWith('telegram-')
+      ? aiChatWindow(selectedModelRow(selectedTextProvider, $providersList as any[], $peerProviders as any), currentTokenUsage.limit)
+      : currentTokenUsage.limit
+  );
   let effectiveTokenUsage = $derived({
     used: currentTokenUsage.used,
-    limit: currentTokenUsage.limit > 0 ? currentTokenUsage.limit : DEFAULT_TOKEN_LIMIT,
+    limit: aiChatLimit > 0 ? aiChatLimit : DEFAULT_TOKEN_LIMIT,
     historyTokens: currentTokenUsage.historyTokens ?? 0,
     tokensAfterLastResponse: currentTokenUsage.tokensAfterLastResponse ?? 0,
     tokensAfterLastResponseAt: currentTokenUsage.tokensAfterLastResponseAt ?? null,

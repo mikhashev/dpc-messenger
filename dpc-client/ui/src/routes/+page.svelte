@@ -29,6 +29,7 @@
   import { musicWindowRequests } from "$lib/services/music";
   import ScheduleApprovalDialog from "$lib/components/ScheduleApprovalDialog.svelte";
   import ProviderSelector from "$lib/components/ProviderSelector.svelte";
+  import { aiChatWindow, chatEffortOptions, selectedModelRow } from "$lib/utils/chatEffort";
   import Toast from "$lib/components/Toast.svelte";
   import ChatMessageList from "$lib/components/ChatMessageList.svelte";
   import SessionControls from "$lib/components/SessionControls.svelte";
@@ -520,26 +521,6 @@
   // Session proposal/result/reset effects moved to SessionEventsPanel.svelte
 
 
-  // Reactive: Get current chat's token usage
-  const DEFAULT_TOKEN_LIMIT = 16384; // Default limit for new AI chats (before first message)
-  let currentTokenUsage = $derived(tokenUsageMap.get(activeChatId) || {used: 0, limit: 0});
-
-  // Use effective limit (default if not yet set by backend)
-  let effectiveTokenUsage = $derived({
-    used: currentTokenUsage.used,
-    limit: currentTokenUsage.limit > 0 ? currentTokenUsage.limit : DEFAULT_TOKEN_LIMIT,
-    historyTokens: currentTokenUsage.historyTokens ?? 0,
-    tokensAfterLastResponse: currentTokenUsage.tokensAfterLastResponse ?? 0,
-    tokensAfterLastResponseAt: currentTokenUsage.tokensAfterLastResponseAt ?? null,
-    contextBreakdown: currentTokenUsage.contextBreakdown ?? null,
-    contextAgent: currentTokenUsage.contextAgent ?? '',
-    contextAgents: currentTokenUsage.contextAgents ?? null,
-  });
-
-  // Reactive: Estimate token usage including current input (real-time feedback in SessionControls)
-  let estimatedUsage = $derived(
-    estimateConversationUsage(effectiveTokenUsage, currentInput)
-  );
 
   // Reactive: Check if current peer/group is connected (for enabling/disabling send controls)
   let isPeerConnected = $derived(
@@ -581,6 +562,36 @@
 
   // Reactive: Check if current chat is a group chat (v0.19.0)
   let isGroupChat = $derived(activeChatId.startsWith('group-'));
+
+  // Reactive: Get current chat's token usage
+  const DEFAULT_TOKEN_LIMIT = 16384; // Default limit for new AI chats (before first message)
+  let currentTokenUsage = $derived(tokenUsageMap.get(activeChatId) || {used: 0, limit: 0});
+
+  // The selected Text model of a plain AI chat: its reasoning words and its window.
+  let aiChatModelRow = $derived(
+    isActuallyAIChat && !isAgentChatHeader
+      ? selectedModelRow(selectedTextProvider, $providersList as any[], $peerProviders as any)
+      : null
+  );
+  let aiChatEfforts = $derived(chatEffortOptions(aiChatModelRow, $chatEfforts.get(activeChatId) || ''));
+  let aiChatLimit = $derived(aiChatModelRow ? aiChatWindow(aiChatModelRow, currentTokenUsage.limit) : currentTokenUsage.limit);
+
+  // Use effective limit (default if not yet set by backend)
+  let effectiveTokenUsage = $derived({
+    used: currentTokenUsage.used,
+    limit: aiChatLimit > 0 ? aiChatLimit : DEFAULT_TOKEN_LIMIT,
+    historyTokens: currentTokenUsage.historyTokens ?? 0,
+    tokensAfterLastResponse: currentTokenUsage.tokensAfterLastResponse ?? 0,
+    tokensAfterLastResponseAt: currentTokenUsage.tokensAfterLastResponseAt ?? null,
+    contextBreakdown: currentTokenUsage.contextBreakdown ?? null,
+    contextAgent: currentTokenUsage.contextAgent ?? '',
+    contextAgents: currentTokenUsage.contextAgents ?? null,
+  });
+
+  // Reactive: Estimate token usage including current input (real-time feedback in SessionControls)
+  let estimatedUsage = $derived(
+    estimateConversationUsage(effectiveTokenUsage, currentInput)
+  );
 
   // Chat history sync on chat switch moved to ChatHistorySyncPanel.svelte
 
@@ -1195,7 +1206,30 @@
             </div>
           {/if}
 
-          {#if !chatHeaderCollapsed && isActuallyAIChat}
+          {#if !chatHeaderCollapsed && isActuallyAIChat && !isAgentChatHeader}
+            <!-- A plain AI chat: the selected Text model's own levels (chatEffort.ts). -->
+            <div class="group-effort">
+              <span class="group-effort-label">Reasoning:</span>
+              <select
+                class="group-effort-select"
+                title={aiChatEfforts.fromModel
+                  ? `How hard the model reasons before answering. The levels listed are the ones ${aiChatModelRow?.alias ?? 'this model'} accepts, read from the model itself; change the Text model and the list changes with it. Model default sends nothing, so the model applies its own default. Off turns thinking off and every provider takes it. A level this chat already had that the model does not know stays on the list, marked.`
+                  : "How hard the model reasons before answering. This model names no levels of its own, so the list is the shared scale and the provider folds it onto what its model can do. Model default sends nothing, so the model applies its own default. Off turns thinking off and every provider takes it."}
+                value={$chatEfforts.get(activeChatId) || ''}
+                onchange={(e: Event) => {
+                  const level = (e.currentTarget as HTMLSelectElement).value;
+                  chatEfforts.update(m => new Map(m).set(activeChatId, level));
+                }}
+              >
+                <option value="">{aiChatEfforts.emptyLabel}</option>
+                {#each aiChatEfforts.options as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
+
+          {#if !chatHeaderCollapsed && isActuallyAIChat && isAgentChatHeader}
             <div class="group-effort">
               <span class="group-effort-label">Reasoning:</span>
               <select
