@@ -26,6 +26,12 @@ export type ScheduleApprovalRequest = {
   /** A music_job request, structured (type, style, variants, eta_seconds). Not sent by
    *  the backend yet: the card then shows `about`, which is already a sentence. */
   music?: import('$lib/utils/scheduleApprovalText').MusicJobRequest | null;
+  /** ADR-053: who asked, present only when it was not the owner. */
+  asker?: import('$lib/utils/scheduleApprovalText').AskerFields | null;
+  /** ADR-053: an owner card's tool, what exactly, and the GPU cost line. */
+  tool?: string | null;
+  details?: string | null;
+  cost?: string | null;
 };
 
 /**

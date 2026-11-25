@@ -2296,6 +2296,7 @@
               onResetToGlobal={selectedAgentId !== 'default' && !agentUsesInheritedSettings ? resetAgentToGlobal : undefined}
               archiveInfo={selectedAgentId !== 'default' ? archiveInfo : null}
               conversationId={selectedAgentId !== 'default' ? selectedAgentId : ''}
+              nodeGroups={(editMode ? editedRules : rules)?.node_groups ?? null}
             />
           </div>
         {:else if selectedTab === 'peers'}

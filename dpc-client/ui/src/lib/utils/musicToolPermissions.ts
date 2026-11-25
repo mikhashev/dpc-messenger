@@ -3,9 +3,9 @@
  * `music_*` tools and `chat_post_file`, with their names as the backend registers them
  * (`dpc_agent/tools/music.py`, `tools/chat_files.py`).
  *
- * Each is off by default (`default_enabled=False`) and owner-only: it is neither offered
- * nor run outside the owner's turn, so a peer, or a group with a foreign node in it,
- * never gets one even when the toggle is on. The panel draws that as a badge.
+ * Each is off by default (`default_enabled=False`). Since ADR-053 each asks the owner when
+ * someone else asked for the turn (`owner_approval_for_others`); they were owner-only before
+ * (ADR-051 D43). The panel draws that as a badge.
  */
 
 export interface PermissionTool {
@@ -17,7 +17,8 @@ export interface PermissionTool {
 
 export interface PermissionCategory {
   name: string;
-  /** Offered and run only in the owner's turns (the registry's `owner_only`). */
+  /** Asks the owner on someone else's request (the registry's `owner_approval_for_others`;
+   *  before ADR-053, `owner_only`). */
   ownerOnly?: boolean;
   isDanger?: boolean;
   tools: PermissionTool[];
@@ -40,10 +41,10 @@ export const MUSIC_TOOL_CATEGORY: PermissionCategory = {
   ],
 };
 
-/** The badge beside an owner-only category, and what it means. */
-export const OWNER_ONLY_BADGE = 'owner-only';
+/** The badge beside such a category, and what it means (ADR-053). */
+export const OWNER_ONLY_BADGE = 'asks you for others';
 export const OWNER_ONLY_HINT =
-  'Offered and run only in your own turns. A peer, or a group with another node in it, never gets these tools, even when they are on.';
+  'Runs as switched on when you ask. When anyone else asks (a peer, a friend in a group, a Telegram stranger), every call waits for your approval card first; no answer in 60 s is a refusal.';
 
 /** The tool keys of the Music category, in the order the panel lists them. */
 export function musicToolKeys(): string[] {
@@ -51,19 +52,22 @@ export function musicToolKeys(): string[] {
 }
 
 /**
- * Whether a category's badge shows. The backend's `list_all_tools` carries `owner_only`
- * per tool: when it does for any of the category's tools, the category is owner-only if
- * every tool the backend reports for it is. When the field is missing (an older backend)
- * or none of the tools is listed, the category's own hardcoded `ownerOnly` stands.
+ * Whether a category's badge shows. The backend's `list_all_tools` carries
+ * `owner_approval_for_others` per tool (ADR-053; `owner_only` on an older backend): when it
+ * does for any of the category's tools, the badge shows if every tool the backend reports
+ * for it carries it. When neither field is there or none of the tools is listed, the
+ * category's own hardcoded `ownerOnly` stands.
  */
 export function categoryOwnerOnly(
   category: PermissionCategory,
-  registered: ReadonlyArray<{ name: string; owner_only?: boolean }>,
+  registered: ReadonlyArray<{ name: string; owner_only?: boolean; owner_approval_for_others?: boolean }>,
 ): boolean {
   const keys = new Set(category.tools.map((t) => t.key));
+  const flagOf = (t: { owner_only?: boolean; owner_approval_for_others?: boolean }) =>
+    typeof t.owner_approval_for_others === 'boolean' ? t.owner_approval_for_others : t.owner_only;
   const flags = registered
-    .filter((t) => keys.has(t.name) && typeof t.owner_only === 'boolean')
-    .map((t) => t.owner_only as boolean);
+    .filter((t) => keys.has(t.name) && typeof flagOf(t) === 'boolean')
+    .map((t) => flagOf(t) as boolean);
   if (flags.length === 0) return !!category.ownerOnly;
   return flags.every(Boolean);
 }

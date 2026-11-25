@@ -35,11 +35,55 @@ export interface MusicJobRequest {
   eta_seconds?: number;
 }
 
+export const OWNER_APPROVAL_TASK_TYPE = 'owner_approval';
+export const KNOWLEDGE_COMMIT_TASK_TYPE = 'knowledge_commit';
+
+/** Who asked, when it was not the owner (ADR-053 2.4): name, node id, human or agent. */
+export interface AskerFields {
+  name?: string;
+  node_id?: string;
+  /** "human", "agent" or "unknown" (a peer post whose signature did not verify). */
+  kind?: string;
+  verified?: boolean;
+  /** The own agents that relayed the request, oldest first ("Miron via Ark"). */
+  via?: string[];
+  /** The backend's own one-line name for the asker, e.g. "Miron via Ark". */
+  label?: string;
+}
+
 export interface ApprovalRequestLike {
   task_type: string;
   when: string;
   about: string;
   music?: MusicJobRequest | null;
+  /** ADR-053: present only when someone other than the owner asked. */
+  asker?: AskerFields | null;
+  /** ADR-053: the tool, what exactly, and the GPU cost line of an owner card. */
+  tool?: string | null;
+  details?: string | null;
+  cost?: string | null;
+}
+
+/** "Miron · human · node dpc-node-1234abcd…", or "" when nobody but the owner asked. */
+export function askerLine(asker: AskerFields | null | undefined): string {
+  if (!asker) return '';
+  const name = (asker.label || asker.name || '').trim() || 'someone unknown';
+  const kind = asker.kind === 'agent' ? 'agent' : asker.kind === 'human' ? 'human' : 'not verified';
+  const node = (asker.node_id || '').trim();
+  const parts = [name, kind];
+  if (node) parts.push(`node ${node.length > 24 ? node.slice(0, 24) + '…' : node}`);
+  return parts.join(' · ');
+}
+
+/** The rows ADR-053 adds to any card: who asked, the tool, what exactly, the cost. */
+export function ownerCardRows(request: ApprovalRequestLike, includeTool = true): ApprovalRow[] {
+  const rows: ApprovalRow[] = [];
+  const who = askerLine(request.asker);
+  if (who) rows.push({ label: 'Asked by', value: who });
+  if (includeTool && request.tool) rows.push({ label: 'Tool', value: request.tool });
+  if (includeTool && request.details) rows.push({ label: 'What exactly', value: request.details, long: true });
+  if (request.cost) rows.push({ label: 'Cost', value: request.cost, long: true });
+  return rows;
 }
 
 export interface ApprovalRow {
@@ -99,14 +143,41 @@ function lyricsRow(m: MusicJobRequest | null | undefined): ApprovalRow[] {
 }
 
 export function approvalView(request: ApprovalRequestLike): ApprovalView {
+  if (request.task_type === OWNER_APPROVAL_TASK_TYPE) {
+    // ADR-053: a flagged tool someone other than the owner asked for.
+    const tool = request.tool || 'a tool';
+    return {
+      isMusicJob: false,
+      ariaLabel: `Agent asks to run ${tool} for someone who is not the owner`,
+      headText: `asks to run ${tool} for someone who is not the owner`,
+      rows: ownerCardRows(request),
+      approveLabel: 'Approve',
+      refuseLabel: 'Refuse',
+    };
+  }
+  if (request.task_type === KNOWLEDGE_COMMIT_TASK_TYPE) {
+    return {
+      isMusicJob: false,
+      ariaLabel: 'A peer asks to apply a knowledge commit this node did not vote on',
+      headText: 'asks to apply a knowledge commit this node did not vote on',
+      rows: [
+        ...ownerCardRows(request, false),
+        { label: 'Commit', value: request.details || request.about || '(no description given)', long: true },
+      ],
+      approveLabel: 'Apply',
+      refuseLabel: 'Refuse',
+    };
+  }
   if (request.task_type === MUSIC_JOB_TASK_TYPE) {
     return {
       isMusicJob: true,
       ariaLabel: 'Agent asks to run a music job on the GPU',
       headText: 'asks to run a music job',
       rows: [
+        ...ownerCardRows(request, false).filter((r) => r.label === 'Asked by'),
         { label: 'Request', value: musicJobSentence(request), long: true },
         ...lyricsRow(request.music),
+        ...ownerCardRows(request, false).filter((r) => r.label === 'Cost'),
       ],
       approveLabel: 'Approve',
       refuseLabel: 'Refuse',
@@ -117,6 +188,7 @@ export function approvalView(request: ApprovalRequestLike): ApprovalView {
     ariaLabel: 'Agent wants to schedule a task',
     headText: 'wants to come back to this later',
     rows: [
+      ...ownerCardRows(request, false),
       { label: 'When', value: request.when },
       { label: 'What it will do', value: request.about || '(no description given)', long: true },
     ],

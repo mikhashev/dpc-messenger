@@ -19,6 +19,11 @@ export interface ShellApprovalRequest {
   /** That chat under a name a person recognises — a group name, "Johnny (1:1)",
    *  a peer name, or the id itself when nothing could name it. */
   conversation_title?: string;
+  /** ADR-053 D-b: who asked, present only when it was not the owner; the card is the
+   *  call's one card and names them. */
+  asker?: import('$lib/utils/scheduleApprovalText').AskerFields | null;
+  /** ADR-053: where the command runs, resolved; sent with `asker`. */
+  cwd?: string | null;
 }
 
 export interface ShellExecutionResult {

@@ -26,7 +26,7 @@ describe('the Music category', () => {
     expect(panel).toContain('MUSIC_TOOL_CATEGORY,');
     expect(panel).toContain('{#if categoryOwnerOnly(category, allRegisteredTools)}');
     expect(panel).toContain('{OWNER_ONLY_BADGE}');
-    expect(OWNER_ONLY_BADGE).toBe('owner-only');
+    expect(OWNER_ONLY_BADGE).toBe('asks you for others');
     // A tool is on only through the person's toggle (the registry default is off).
     expect(panel).not.toMatch(/music_[a-z_]+\s*:\s*true/);
   });
@@ -55,6 +55,12 @@ describe('categoryOwnerOnly', () => {
   it('is not owner-only when one reported tool is not', () => {
     const mixed = all(true); mixed[2].owner_only = false;
     expect(categoryOwnerOnly(MUSIC_TOOL_CATEGORY, mixed)).toBe(false);
+  });
+  it('reads owner_approval_for_others (ADR-053) before owner_only', () => {
+    const flagged = NAMES.map((name) => ({ name, owner_only: false, owner_approval_for_others: true }));
+    expect(categoryOwnerOnly(MUSIC_TOOL_CATEGORY, flagged)).toBe(true);
+    const unflagged = NAMES.map((name) => ({ name, owner_only: true, owner_approval_for_others: false }));
+    expect(categoryOwnerOnly(MUSIC_TOOL_CATEGORY, unflagged)).toBe(false);
   });
   it('falls back to the hardcoded flag when the field or the tools are missing', () => {
     expect(categoryOwnerOnly(MUSIC_TOOL_CATEGORY, all(undefined))).toBe(true);

@@ -8,6 +8,7 @@
      */
     import { pendingShellApprovals, shellExecutionResults } from "$lib/services/shellApproval";
     import { sendCommand } from "$lib/coreService";
+    import { askerLine } from "$lib/utils/scheduleApprovalText";
 
     const MAX_VISIBLE_CARDS = 3;
     const RESULT_DISPLAY_MS = 8000;
@@ -87,9 +88,17 @@
                         >
                     {/if}
                 </div>
+                {#if request.asker}
+                    <!-- ADR-053 D-b: someone other than the owner asked; this is the
+                         call's one card, and it says who and where it runs. -->
+                    <div class="approval-asker">Asked by {askerLine(request.asker)}</div>
+                {/if}
                 <div class="approval-command">
                     <code>{request.command}</code>
                 </div>
+                {#if request.cwd}
+                    <div class="approval-cwd">in <code>{request.cwd}</code></div>
+                {/if}
                 <div class="approval-reason">
                     {request.reason}
                 </div>
@@ -100,12 +109,15 @@
                     >
                         ✓ Approve
                     </button>
-                    <button
-                        class="btn-whitelist"
-                        on:click={() => approve(request.request_id, true)}
-                    >
-                        ✓ Approve + Whitelist
-                    </button>
+                    {#if !request.asker}
+                        <!-- A stranger's request does not widen what runs unasked. -->
+                        <button
+                            class="btn-whitelist"
+                            on:click={() => approve(request.request_id, true)}
+                        >
+                            ✓ Approve + Whitelist
+                        </button>
+                    {/if}
                     <button
                         class="btn-reject"
                         on:click={() => reject(request.request_id)}
@@ -328,4 +340,15 @@
     .btn-approve:hover { opacity: 0.9; }
     .btn-whitelist:hover { opacity: 0.9; }
     .btn-reject:hover { opacity: 0.9; }
+    .approval-asker {
+        font-weight: 600;
+        margin: 4px 0;
+        word-break: break-word;
+    }
+    .approval-cwd {
+        font-size: 0.85em;
+        opacity: 0.85;
+        margin: 2px 0 6px;
+        word-break: break-all;
+    }
 </style>

@@ -6,6 +6,7 @@
   import { nodeStatus, sendCommand } from '$lib/coreService';
   import { voiceMemoryNote } from '$lib/utils/voiceMemoryExtra';
   import { MUSIC_TOOL_CATEGORY, categoryOwnerOnly, OWNER_ONLY_BADGE, OWNER_ONLY_HINT, type PermissionCategory } from '$lib/utils/musicToolPermissions';
+  import { ownNodeGroupOptions, withOwnNodeGroup, ownNodeGroupLabel } from '$lib/utils/ownNodeGroup';
   import { openPath } from '@tauri-apps/plugin-opener';
   import { onMount } from 'svelte';
 
@@ -19,12 +20,20 @@
   // Archive status passed from FirewallEditor after get_session_archive_info
   export let archiveInfo: { count: number; max_sessions: number; archive_path: string; sessions: any[] } | null = null;
   export let conversationId: string = '';  // agent_id used as conversation_id for archive commands
+  // The firewall's top-level node_groups, for the own_node_group picker (ADR-053 step 7).
+  export let nodeGroups: Record<string, string[]> | null = null;
+
+  function chooseOwnNodeGroup(name: string) {
+    if (!editSettings) return;
+    editSettings.memory = withOwnNodeGroup(editSettings.memory, name);
+    editSettings = editSettings;  // Trigger reactivity
+  }
 
   // Backend-discovered registry tools (populated on mount via list_all_tools).
   // Lets the panel surface tools that exist in code but aren't in any
   // hardcoded category below — closes the AGENT-TOOL-FIREWALL-DEFAULT-DRIFT
   // gap from S145 backlog (Mike picked Option 2 in S147 chat).
-  let allRegisteredTools: Array<{name: string; description: string; default_enabled: boolean; is_restricted: boolean; owner_only?: boolean}> = [];
+  let allRegisteredTools: Array<{name: string; description: string; default_enabled: boolean; is_restricted: boolean; owner_only?: boolean; owner_approval_for_others?: boolean}> = [];
 
   // Tool modules the backend could not import. Their tools are absent from the
   // list above and from every agent, and until now the only trace was a line in
@@ -714,6 +723,32 @@
               <span>Active Recall</span>
             </label>
             <p class="help-text-small">Inject relevant memory hints into agent context automatically</p>
+          </div>
+
+          <!-- ADR-053 step 7: which node group holds this agent's own nodes. -->
+          <div class="setting-item">
+            <label for="agent-own-node-group">
+              <span>Own node group</span>
+            </label>
+            {#if editMode && editSettings?.memory}
+              <select
+                id="agent-own-node-group"
+                value={editSettings.memory.own_node_group || ''}
+                on:change={(e) => chooseOwnNodeGroup(e.currentTarget.value)}
+              >
+                <option value="">None (only this node is the owner)</option>
+                {#each ownNodeGroupOptions(nodeGroups) as groupName}
+                  <option value={groupName}>{groupName}</option>
+                {/each}
+              </select>
+            {:else}
+              <span class="help-text-small">{ownNodeGroupLabel(displaySettings?.memory)}</span>
+            {/if}
+            <p class="help-text-small">
+              Requests from the nodes in this group count as yours: their tool calls run without an approval card.
+              Anyone else's request asks you first. A group with only these nodes also counts as private for memory.
+              The group grants no file rights by itself. Groups are listed under Firewall Rules, Node Groups.
+            </p>
           </div>
         </div>
       {/if}
