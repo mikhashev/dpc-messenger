@@ -13,9 +13,7 @@ take arrives. It sends the take's audio and the flow's rubric prompt (`RUBRICS`,
 audio-capable alias (`generate_with_audio`, the llama-server provider with `mmproj_kind: audio`)
 and parses one JSON object into the six scores, issues with times, reasons and confidence
 (`parse_judge_answer`). An answer that does not parse is a `failed` judge with the reason, never
-a guessed score; a failed judge leaves stage 1 as it was. A failed re-judge does not overwrite a
-good verdict either: the last `done` judge result stays and the failure is recorded beside it as
-`last_attempt` `{status, error, at, alias}`; the next good verdict clears it.
+a guessed score; a failed judge leaves stage 1 as it was.
 
 **Untrusted text in the prompt.** The style and the lyrics come from whoever asked for the job,
 so they are quoted between data markers (`<<<DATA_BEGIN kind nonce>>>` ... `<<<DATA_END kind
@@ -177,23 +175,8 @@ def absent_judge(flow: str) -> Dict[str, Any]:
 
 def _judge_part_of(previous: Optional[Mapping[str, Any]], flow: str) -> Dict[str, Any]:
     if isinstance(previous, Mapping) and isinstance(previous.get("judge"), Mapping) and previous.get("flow") == flow:
-        part = {k: previous[k] for k in ("judge", "scores", "issues", "reasons", "confidence")}
-        if isinstance(previous.get("last_attempt"), Mapping):
-            part["last_attempt"] = dict(previous["last_attempt"])
-        return part
+        return {k: previous[k] for k in ("judge", "scores", "issues", "reasons", "confidence")}
     return absent_judge(flow)
-
-
-def _stage_two(judge: Mapping[str, Any], previous: Optional[Mapping[str, Any]], flow: str) -> Dict[str, Any]:
-    """The stage-2 part for a new judge result: a failed one next to an earlier `done` verdict keeps
-    that verdict and records the failure as `last_attempt`; anything else replaces what was there."""
-    kept = _judge_part_of(previous, flow)
-    if (judge.get("judge") or {}).get("status") == js.JUDGE_FAILED and kept["judge"].get("status") == js.JUDGE_DONE:
-        failed = judge["judge"]
-        kept["last_attempt"] = {"status": js.JUDGE_FAILED, "error": failed.get("error") or "the judge failed",
-                                "at": failed.get("judged_at") or _now(), "alias": failed.get("alias")}
-        return kept
-    return dict(judge)
 
 
 def assemble(take: Mapping[str, Any], job: Mapping[str, Any], *,
@@ -210,7 +193,7 @@ def assemble(take: Mapping[str, Any], job: Mapping[str, Any], *,
     if deterministic is not None and wer["status"] == "measured":
         deterministic["lyrics_wer"] = wer["value"]
     summary = qa_summary(take)
-    stage2 = _stage_two(judge, take.get("qc"), flow) if judge is not None else (
+    stage2 = dict(judge) if judge is not None else (
         _judge_part_of(take.get("qc"), flow) if keep_judge else absent_judge(flow))
     record: Dict[str, Any] = {
         "schema": js.QC, "take_id": take["id"], "flow": flow,

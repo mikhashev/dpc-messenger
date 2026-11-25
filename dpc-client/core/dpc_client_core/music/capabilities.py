@@ -70,11 +70,9 @@ AVAILABLE_ENGINE_STATES = frozenset({"stopped", "starting", "running"})
 SUPPORTED, PLANNED, UNSUPPORTED = "supported", "planned", "unsupported"
 
 # The job types that are not built in DPC, with why (SPEC §7, §7.1; ADR-051 Implementation
-# Status). `generate_from_text` is missing on purpose: its status follows the engine.
+# Status). `generate_from_text` and the song types (`job_schemas.SONG_TYPES`) are missing on purpose:
+# their status follows the engines (`song_type_status`).
 _NOT_BUILT_JOB_TYPES: Dict[str, Dict[str, str]] = {
-    "generate_similar": {"status": PLANNED, "reason": "same-style generation is not built in DPC"},
-    "generate_from_lyrics": {"status": PLANNED, "reason": "song from a track's lyrics is not built in DPC"},
-    "cover": {"status": PLANNED, "reason": "cover is not built in DPC (YuE2-Studio or ACE-Step cover)"},
     "transcribe": {"status": PLANNED, "reason": "transcribe runs as the lyrics command, not as a job yet"},
     "qc": {"status": PLANNED, "reason": "QC is folded into the take (mp.qc/1, qc.py, judge_music_take); no qc child job"},
     "generate_from_melody": {"status": PLANNED, "reason": "musician mode is not built in DPC"},
@@ -90,6 +88,21 @@ _FIXED_EDIT_ACTIONS: Dict[str, Dict[str, str]] = {
 _REPAINT_WORDS = ("acestep.cpp repaint (POST /synth, task_type repaint) of the region, spliced back into the track "
                   "with a crossfade, length kept; built, to be checked live on a real track (decision 28)")
 _REMOVE_WORDS = "the region faded to silence in DPC, length kept (decision 23); no model, no card"
+
+# The song job types (music/similar.py): what each engine does for them, in the words the report gives.
+ENGINE_WORDS = {"acestep": "acestep.cpp", "yue2": "yue2.cpp"}
+SONG_WORDS = {
+    ("generate_similar", "acestep"): "acestep.cpp text2music (/lm, then /synth): the caption with the kept attributes; "
+                                     "kept BPM, key and time signature go to the LM as metadata",
+    ("generate_from_lyrics", "acestep"): "acestep.cpp text2music with the track's lyrics (/lm, then /synth)",
+    ("generate_from_lyrics", "yue2"): "yue2.cpp text-to-song with the track's lyrics (one /synth per variant)",
+    ("cover", "acestep"): "acestep.cpp task cover: the source's audio and the target caption in one /synth, no LM; "
+                          "the take is as long as the source",
+    ("cover", "yue2"): "yue2.cpp: SheetSage2 /transcribe makes the source's ABC score, then /synth sings it with the "
+                       "lyrics in the target style",
+}
+AUDIO_REFERENCE_WORDS = ("; the source's audio goes as acestep.cpp's ref_audio, a timbre reference (whether it steers "
+                         "the style beyond timbre is not verified)")
 
 # SPEC §7 / §8: the canonical stage-1 list of mp.qa/1, and the advisory ones (decision 29).
 QA_FIELDS = ("integrated_lufs", "true_peak_dbtp", "loudness_delta_lu", "seam_start_jump_db", "seam_end_jump_db",
@@ -117,8 +130,6 @@ QA_FIELD_STATUS: Dict[str, Dict[str, str]] = {
 }
 
 _FEATURES: Dict[str, Dict[str, str]] = {
-    "audio_reference": {"status": PLANNED, "reason": "reference audio for a new song is not built in DPC"},
-    "cover": {"status": PLANNED, "reason": "not built in DPC"},
     "auto_caption": {"status": PLANNED, "reason": "not built in DPC"},
     "transcribe": {"status": SUPPORTED, "reason": "DPC local Whisper through transcribe_music_lyrics; segment timestamps"},
     "lyrics_tags": {"status": SUPPORTED, "reason": "sidecar .lrc and file tags through ffprobe; ID3 SYLT is not read"},
@@ -291,6 +302,66 @@ class MusicCapabilities:
             return {"status": SUPPORTED, "reason": f"region edits: {', '.join(built)} (see actions)"}
         return {"status": UNSUPPORTED, "reason": "; ".join(f"{a}: {actions[a]['reason']}" for a in re_.BUILT_ACTIONS)}
 
+    # -- song jobs from a source track (music/similar.py) ---------------------------------------
+
+    def _yue2_transcriber_problem(self) -> Optional[str]:
+        """Why yue2.cpp cannot transcribe a source to a score (`--transcriber`), or None. A stand-in
+        engine that does not say (a single test probe) cannot."""
+        engine = self._engines.get(js.ENGINE_YUE2)
+        ask = getattr(engine, "transcriber_problem", None)
+        if not callable(ask):
+            return "this yue2.cpp supervisor does not report the SheetSage2 transcriber"
+        try:
+            return ask()
+        except Exception as exc:
+            return f"checking the SheetSage2 transcriber failed: {exc}"
+
+    def song_engine_status(self, job_type: str, key: str, *, needs_audio: bool,
+                           statuses: Optional[Mapping[str, EngineStatus]] = None) -> Dict[str, str]:
+        """`{status, reason}` of one song job type on one engine (`job_schemas.SONG_ENGINES`)."""
+        engine = (statuses or {}).get(key) or self.engine_status(key)
+        if not engine.available:
+            return {"status": UNSUPPORTED, "reason": f"{ENGINE_WORDS.get(key, key)}: {engine.reason}"}
+        if needs_audio and not self._ffmpeg():
+            return {"status": UNSUPPORTED, "reason": "ffmpeg is not on PATH; the source is decoded with it for the "
+                                                     "engine (install ffmpeg)"}
+        if job_type == js.COVER and key == js.ENGINE_YUE2:
+            problem = self._yue2_transcriber_problem()
+            if problem:
+                return {"status": UNSUPPORTED, "reason": f"yue2.cpp cover: {problem}"}
+        return {"status": SUPPORTED, "reason": SONG_WORDS[(job_type, key)]
+                + (AUDIO_REFERENCE_WORDS if needs_audio and job_type != js.COVER else "")}
+
+    def song_type_status(self, job_type: str, params: Optional[Mapping[str, Any]] = None,
+                         statuses: Optional[Mapping[str, EngineStatus]] = None) -> Dict[str, str]:
+        """`{status, reason}` of a song job type: with `params`, on the engine they name (and its
+        reference); without, supported when one of its engines is."""
+        keys = [params["engine"]] if params and params.get("engine") in js.SONG_ENGINES[job_type] \
+            else list(js.SONG_ENGINES[job_type])
+        needs_audio = job_type == js.COVER or bool(params and params.get("reference") == "audio")
+        reasons = []
+        for key in keys:
+            st = self.song_engine_status(job_type, key, needs_audio=needs_audio, statuses=statuses)
+            if st["status"] == SUPPORTED:
+                return st
+            reasons.append(st["reason"])
+        return {"status": UNSUPPORTED, "reason": "; ".join(reasons)}
+
+    def song_features(self, statuses: Optional[Mapping[str, EngineStatus]] = None) -> Dict[str, Dict[str, str]]:
+        """`features.audio_reference` (a same-style song with the source as acestep.cpp's timbre
+        reference) and `features.cover`, per engine for the cover (`cover_engines`)."""
+        ref = self.song_engine_status(js.GENERATE_SIMILAR, js.ENGINE_ACESTEP, needs_audio=True, statuses=statuses)
+        cover = {k: self.song_engine_status(js.COVER, k, needs_audio=True, statuses=statuses)
+                 for k in js.SONG_ENGINES[js.COVER]}
+        any_cover = next((v for v in cover.values() if v["status"] == SUPPORTED), None)
+        return {
+            "audio_reference": ref if ref["status"] != SUPPORTED else {
+                "status": SUPPORTED, "reason": AUDIO_REFERENCE_WORDS.lstrip("; "), "verified": False},
+            "cover": {**(any_cover or {"status": UNSUPPORTED,
+                                       "reason": "; ".join(v["reason"] for v in cover.values())}),
+                      "cover_engines": cover},
+        }
+
     def job_type_status(self, job_type: str, engine: Optional[EngineStatus] = None,
                         params: Optional[Mapping[str, Any]] = None, action: Optional[str] = None) -> Dict[str, str]:
         """`{status, reason}` of one job type; for `generate_from_text` with `params`, of
@@ -303,6 +374,8 @@ class MusicCapabilities:
             if params is not None:
                 return self._from_text_status(self.engine_status(js.engine_of(params)))
             return self._from_text_any(self.engine_statuses())
+        if job_type in js.SONG_TYPES:
+            return self.song_type_status(job_type, params)
         if job_type in _NOT_BUILT_JOB_TYPES:
             return dict(_NOT_BUILT_JOB_TYPES[job_type])
         return {"status": UNSUPPORTED, "reason": f"{job_type!r} is not a job type"}
@@ -425,6 +498,7 @@ class MusicCapabilities:
         from_text = self._from_text_any(statuses)
         features = copy.deepcopy(_FEATURES)
         features["text2music"] = dict(from_text)
+        features.update(self.song_features(statuses))
         engines: Dict[str, Any] = {}
         for k, st in statuses.items():
             engines[k] = {**st.as_dict(), "key": k, "default": k == self.default_engine,
@@ -432,7 +506,8 @@ class MusicCapabilities:
         dmin, dmax, ddefault = js.DURATION_LIMITS[self.default_engine]
         actions = self.action_statuses(statuses.get(js.ENGINE_ACESTEP))
         job_types = {t: dict(from_text) if t == js.GENERATE_FROM_TEXT
-                     else self._edit_status(None, actions) if t == "edit" else self.job_type_status(t)
+                     else self._edit_status(None, actions) if t == "edit"
+                     else self.song_type_status(t, statuses=statuses) if t in js.SONG_TYPES else self.job_type_status(t)
                      for t in js.JOB_TYPES}
         return {
             "schema": js.CAPABILITIES,
@@ -469,6 +544,17 @@ class MusicCapabilities:
                     "engines": {k: self._engine_limits(k) for k in js.FROM_TEXT_ENGINES},
                     "engine_output": js.ENGINE_OUTPUT_FORMAT,
                     "library_format": js.LIBRARY_FORMAT,
+                },
+                "song": {
+                    "engines": {t: list(js.SONG_ENGINES[t]) for t in js.SONG_TYPES},
+                    "default_engine": dict(js.SONG_DEFAULT_ENGINE),
+                    "lyrics_modes": {t: list(js.SONG_LYRICS_MODES[t]) for t in js.SONG_TYPES},
+                    "relations": dict(js.SONG_RELATIONS),
+                    "keep": list(js.KEEP_KEYS),
+                    "variants": {"min": js.VARIANTS_MIN, "max": js.VARIANTS_MAX, "default": js.VARIANTS_DEFAULT},
+                    "duration_s": {k: {"min": v[0], "max": v[1]} for k, v in js.DURATION_LIMITS.items()},
+                    "cover_strength": {"min": 0.0, "max": 1.0, "default": js.COVER_STRENGTH_DEFAULT},
+                    "cover_length": "acestep: the source's length; yue2: a cap",
                 },
             },
             "qa": {"tool": "ffmpeg", "fields": list(QA_FIELDS),

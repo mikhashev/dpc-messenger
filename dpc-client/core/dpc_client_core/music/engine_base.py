@@ -63,7 +63,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .. import process_registry as _procreg
 from ..managers.card_lease import CardLease, LeaseRefusal
@@ -917,10 +917,12 @@ class SupervisedEngine:
             raise MusicEngineError("engine_refused", f"POST {path} answered without a job id: {resp.text[:200]}")
         return str(job_id)
 
-    async def submit_form(self, path: str, request: bytes, files: List[Tuple[str, Path, str]]) -> str:
+    async def submit_form(self, path: str, request: bytes, files: List[Tuple[str, Path, str]],
+                          fields: Optional[Mapping[str, str]] = None) -> str:
         """POST a multipart job (`/synth` with source audio): part `request` holds the JSON body and
         each `(part name, file, content type)` streams a file from disk (acestep.cpp `handle_synth`
-        reads parts `request`, `audio`, `ref_audio`, `src_latents`). The engine's job id."""
+        reads parts `request`, `audio`, `ref_audio`, `src_latents`); `fields` are plain form fields
+        (yue2.cpp `/transcribe` reads `melody_only` as one). The engine's job id."""
         import httpx
         self._last_used = time.monotonic()
         handles = []
@@ -932,7 +934,7 @@ class SupervisedEngine:
                 parts.append((name, (Path(file).name, fh, ctype)))
             try:
                 async with self._client(300.0) as client:
-                    resp = await client.post(self.base_url + path, files=parts)
+                    resp = await client.post(self.base_url + path, files=parts, data=dict(fields or {}))
             except httpx.HTTPError as exc:
                 raise self._unreachable(exc, f"POST {path}") from exc
         finally:

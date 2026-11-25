@@ -430,6 +430,8 @@ def music_expected_s(params: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     lyrics = params.get("lyrics")
+    if isinstance(lyrics, list):   # a song job's lines (`normalize_params_song`)
+        lyrics = "\n".join(str(x) for x in lyrics)
     audio_s = min(estimate_yue2_seconds(lyrics), cap) if lyrics else cap
     return yue2_wall_s(audio_s) * variants
 
@@ -575,6 +577,282 @@ def fallback_params_from_text(params: Mapping[str, Any], engine: str) -> Dict[st
     return normalize_params_from_text(kept)
 
 
+# -- song jobs from a source track (SPEC §4 `params_song`; engines in music/similar.py) --------------
+# DPC adds, filled at the door from the library: `source_title`, `source_content_hash` (null for a web
+# track), `source_duration_s`; `seed`; per engine `cover_strength` (acestep cover) or `backbone`, `cot`
+# (yue2). Engine words are DPC's (`acestep`, `yue2`); `reference_uri` is `dpc-library:<id>`, never a path.
+
+GENERATE_SIMILAR, COVER, GENERATE_FROM_LYRICS = "generate_similar", "cover", "generate_from_lyrics"
+SONG_TYPES = (GENERATE_SIMILAR, COVER, GENERATE_FROM_LYRICS)
+SONG_ENGINES = {GENERATE_SIMILAR: (ENGINE_ACESTEP,), GENERATE_FROM_LYRICS: (ENGINE_YUE2, ENGINE_ACESTEP),
+                COVER: (ENGINE_ACESTEP, ENGINE_YUE2)}
+SONG_DEFAULT_ENGINE = {GENERATE_SIMILAR: ENGINE_ACESTEP, GENERATE_FROM_LYRICS: ENGINE_YUE2, COVER: ENGINE_ACESTEP}
+SONG_RELATIONS = {GENERATE_SIMILAR: "same style as", COVER: "cover of",
+                  GENERATE_FROM_LYRICS: "new song from the lyrics of"}
+SONG_DEFAULT_LYRICS_MODE = {GENERATE_SIMILAR: "none", GENERATE_FROM_LYRICS: "reuse", COVER: "reuse"}
+LYRICS_MODES = ("none", "new", "reuse")
+SONG_LYRICS_MODES = {GENERATE_SIMILAR: LYRICS_MODES, GENERATE_FROM_LYRICS: ("reuse",), COVER: ("reuse", "none")}
+REFERENCES = ("description", "audio")
+KEEP_KEYS = ("genre", "bpm", "key", "timesig", "mood", "structure", "vocals")
+KEEP_VOCALS = ("vocals", "instrumental")
+KEEP_BPM_MAX = 400
+MELODY_SOURCES = {ENGINE_ACESTEP: "source_audio", ENGINE_YUE2: "sheetsage2:abc"}
+COVER_STRENGTH_DEFAULT = 1.0     # acestep.cpp's `audio_cover_strength` default (src/request.h)
+COVER_COT_MODES = ("full", "melody")
+SOURCE_URI_PREFIX = "dpc-library:"
+SONG_TEXT_MAX_CHARS = 4000          # one keep value, the caption basis, the source caption, the theme
+_SONG_KEYS = ("source_track_id", "source_kind", "source_title", "source_content_hash", "source_duration_s",
+              "keep", "caption", "caption_basis", "source_caption", "lyrics_mode", "lyrics", "lyrics_theme",
+              "reference", "reference_uri", "variants", "duration_s", "engine", "seed")
+_SONG_COVER_KEYS = ("kept", "melody_source", "cover_strength")
+_SONG_SOURCE_KINDS = ("local", "web", "generated")
+
+
+class SongParamsError(ParamsError):
+    """Song-job params refused with a code of their own (`missing_lyrics`, `track_not_ready`)."""
+
+    def __init__(self, code: str, field: str, message: str):
+        super().__init__(field, message)
+        self.code = code
+
+
+def song_source_uri(track_id: str) -> str:
+    return f"{SOURCE_URI_PREFIX}{track_id}"
+
+
+def song_needs_audio(job_type: str, params: Mapping[str, Any]) -> bool:
+    """Whether a song job sends the source's audio to the engine: every cover, and a reference."""
+    return job_type == COVER or params.get("reference") == "audio"
+
+
+def _short_text(params: Mapping[str, Any], key: str, default: Optional[str]) -> Optional[str]:
+    value = params.get(key, default)
+    if value is None:
+        return None
+    if not _is_str(value) or len(value) > SONG_TEXT_MAX_CHARS:
+        raise ParamsError(key, f"{key} must be text of at most {SONG_TEXT_MAX_CHARS} characters")
+    return value
+
+
+def _normalize_keep(raw: Any) -> Dict[str, Any]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ParamsError("keep", "keep must be an object of the kept attributes and their values")
+    extra = sorted(set(raw) - set(KEEP_KEYS))
+    if extra:
+        raise ParamsError("keep", f"keep has unknown attribute(s) {', '.join(extra)}; one of {', '.join(KEEP_KEYS)}")
+    out: Dict[str, Any] = {}
+    for k in KEEP_KEYS:
+        if k not in raw:
+            continue
+        v = raw[k]
+        if k == "bpm":
+            if not _is_int(v) or not 1 <= v <= KEEP_BPM_MAX:
+                raise ParamsError("keep", f"keep.bpm must be a whole number from 1 to {KEEP_BPM_MAX}, got {v!r}")
+        elif k == "vocals":
+            if v not in KEEP_VOCALS:
+                raise ParamsError("keep", f"keep.vocals must be one of {', '.join(KEEP_VOCALS)}, got {v!r}")
+        elif not _is_str(v) or not v.strip() or len(v) > SONG_TEXT_MAX_CHARS:
+            raise ParamsError("keep", f"keep.{k} must be non-empty text")
+        out[k] = v
+    return out
+
+
+def _normalize_lines(raw: Any) -> Optional[list]:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.splitlines()
+    if not isinstance(raw, list) or not all(_is_str(x) for x in raw):
+        raise ParamsError("lyrics", "lyrics must be a list of line texts (no timings), or null")
+    lines = [x.rstrip("\r\n") for x in raw]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return lines or None
+
+
+def _song_source(params: Mapping[str, Any], track_id: Optional[str],
+                 source: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    tid = params.get("source_track_id", track_id)
+    if track_id is not None and tid != track_id:
+        raise ParamsError("source_track_id", "source_track_id must be the job's track_id")
+    if not _is_str(tid) or not tid:
+        raise ParamsError("source_track_id", "a song job needs its source track (track_id)")
+    facts = dict(source) if isinstance(source, Mapping) else {
+        "kind": params.get("source_kind"), "content_hash": params.get("source_content_hash"),
+        "duration_s": params.get("source_duration_s"), "title": params.get("source_title")}
+    kind = facts.get("kind")
+    if kind not in _SONG_SOURCE_KINDS:
+        raise ParamsError("source_kind", f"the source's kind must be one of {', '.join(_SONG_SOURCE_KINDS)}")
+    if source is not None and params.get("source_kind") not in (None, kind):
+        raise ParamsError("source_kind", f"the source track is a {kind} track, not {params.get('source_kind')!r}")
+    title, ch, dur = facts.get("title"), facts.get("content_hash"), facts.get("duration_s")
+    return {"source_track_id": tid, "source_kind": kind,
+            "source_title": " ".join(title.split())[:200] if _is_str(title) and title.strip() else tid,
+            "source_content_hash": ch if _is_str(ch) and ch else None,
+            "source_duration_s": float(dur) if _is_number(dur) and dur > 0 else None}
+
+
+def _song_lyrics(job_type: str, engine: str, params: Mapping[str, Any]) -> Dict[str, Any]:
+    mode = params.get("lyrics_mode", SONG_DEFAULT_LYRICS_MODE[job_type])
+    if mode not in SONG_LYRICS_MODES[job_type]:
+        raise ParamsError("lyrics_mode", f"lyrics_mode of a {job_type} job must be one of "
+                                         f"{', '.join(SONG_LYRICS_MODES[job_type])}, got {mode!r}")
+    lines = _normalize_lines(params.get("lyrics"))
+    theme = _short_text(params, "lyrics_theme", None)
+    if mode == "none":
+        if lines is not None:
+            raise ParamsError("lyrics", "lyrics_mode none sends no lyrics; leave lyrics null")
+        if job_type == COVER and engine == ENGINE_YUE2:
+            raise SongParamsError("missing_lyrics", "lyrics", "a cover on yue2.cpp sings the source's melody "
+                                  "from its score with the original lyrics: without them it cannot run (a technical "
+                                  "limit; a cover on acestep.cpp works without lyrics)")
+    elif mode == "reuse" and lines is None:
+        raise ParamsError("lyrics", "lyrics_mode reuse needs the track's lyrics lines; the track has none stored")
+    if mode != "new" and theme is not None:
+        raise ParamsError("lyrics_theme", "lyrics_theme goes with lyrics_mode new only")
+    return {"lyrics_mode": mode, "lyrics": lines, "lyrics_theme": (theme.strip() or None) if theme else None}
+
+
+def _song_duration(job_type: str, engine: str, params: Mapping[str, Any], src_s: Optional[float]) -> float:
+    dmin, dmax, ddefault = DURATION_LIMITS[engine]
+    if job_type == COVER and engine == ENGINE_ACESTEP:
+        # acestep.cpp docs/ARCHITECTURE.md, Cover: "Duration is determined by the source audio".
+        if src_s is None:
+            raise SongParamsError("track_not_ready", "track_id", "the source's length is not known yet; propose the "
+                                  "cover again once the track is read")
+        if not dmin <= src_s <= dmax:
+            raise ParamsError("duration_s", f"a cover on acestep.cpp is as long as its source, which is {src_s:g} s; "
+                                            f"the engine takes {dmin} to {dmax} s")
+        return round(src_s, 3)
+    fallback = min(max(math.ceil(src_s), dmin), dmax) if src_s is not None else ddefault
+    duration = params.get("duration_s", fallback)
+    if not _is_number(duration) or not dmin <= duration <= dmax:
+        what = "a cap in seconds" if engine == ENGINE_YUE2 else "a number of seconds"
+        raise ParamsError("duration_s", f"duration_s must be {what} from {dmin} to {dmax} for {engine}, "
+                                        f"got {duration!r}")
+    return duration
+
+
+def _song_cover(engine: str, mode: str, params: Mapping[str, Any]) -> Dict[str, Any]:
+    kept = ["melody", "lyrics"] if mode == "reuse" else ["melody"]
+    if params.get("kept") not in (None, kept):
+        raise ParamsError("kept", f"a cover with lyrics_mode {mode} keeps {kept}")
+    melody = MELODY_SOURCES[engine]
+    if params.get("melody_source") not in (None, melody):
+        raise ParamsError("melody_source", f"a cover on {engine} takes its melody from {melody}")
+    out: Dict[str, Any] = {"kept": kept, "melody_source": melody}
+    if engine == ENGINE_ACESTEP:
+        strength = params.get("cover_strength", COVER_STRENGTH_DEFAULT)
+        if not _is_number(strength) or not 0.0 <= strength <= 1.0:
+            raise ParamsError("cover_strength", "cover_strength must be a number from 0 to 1 (the share of "
+                                                "the engine's steps that hear the source)")
+        out["cover_strength"] = strength
+    return out
+
+
+def _song_yue2(job_type: str, params: Mapping[str, Any]) -> Dict[str, Any]:
+    backbone = params.get("backbone", YUE2_BACKBONE_DEFAULT)
+    if backbone not in YUE2_BACKBONES:
+        raise ParamsError("backbone", f"backbone must be one of {', '.join(YUE2_BACKBONES)}, got {backbone!r}")
+    modes = COVER_COT_MODES if job_type == COVER else YUE2_COT_MODES
+    cot = params.get("cot", YUE2_COT_DEFAULT)
+    if cot not in modes:
+        raise ParamsError("cot", f"cot must be one of {', '.join(modes)}, got {cot!r}")
+    return {"backbone": backbone, "cot": cot}
+
+
+def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str] = None,
+                          source: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """The params of a `generate_similar`, `cover` or `generate_from_lyrics` job with every key filled
+    in, or `ParamsError` naming the first param that breaks a rule (`SongParamsError` for
+    `missing_lyrics` and `track_not_ready`). `source` is the library's `{kind, content_hash,
+    duration_s, title}` of the track (the door looks it up); without it the params' own `source_*`
+    keys are read, so a normalized record normalizes to itself. Per type, the engines are
+    `SONG_ENGINES`, the lyrics modes `SONG_LYRICS_MODES`; a cover always uses the source's audio, and
+    on acestep it is as long as its source."""
+    if job_type not in SONG_TYPES:
+        raise ParamsError("type", f"{job_type!r} is not a song job type")
+    if not isinstance(params, Mapping):
+        raise ParamsError("params", "params must be an object")
+    extra = sorted(set(params) - set(_SONG_KEYS) - set(_SONG_COVER_KEYS) - set(_YUE2_ONLY_KEYS))
+    if extra:
+        raise ParamsError(extra[0], f"unknown param(s) for {job_type}: {', '.join(extra)}")
+    out = _song_source(params, track_id, source)
+    out["keep"] = _normalize_keep(params.get("keep"))
+    caption = params.get("caption")
+    if not _is_str(caption) or not caption.strip():
+        what = "the target style" if job_type == COVER else "the style description"
+        raise ParamsError("caption", f"caption is required: {what}")
+    out["caption"] = caption
+    out["caption_basis"] = _short_text(params, "caption_basis", "typed") or "typed"
+    out["source_caption"] = _short_text(params, "source_caption", "") or ""
+
+    engine = params.get("engine", SONG_DEFAULT_ENGINE[job_type])
+    if engine not in SONG_ENGINES[job_type]:
+        raise ParamsError("engine", f"a {job_type} job runs on {' or '.join(SONG_ENGINES[job_type])}, got {engine!r}")
+    out["engine"] = engine
+    out.update(_song_lyrics(job_type, engine, params))
+    # The text that goes into the engine body: the same bound as a text job's (`MAX_SONG_TEXT_BYTES`).
+    try:
+        text_bytes = sum(len(x.encode("utf-8")) for x in [caption, out["lyrics_theme"] or "", *(out["lyrics"] or [])])
+    except UnicodeEncodeError:
+        raise ParamsError("lyrics", "the caption or the lyrics hold a character that is not valid text (a lone surrogate)")
+    if text_bytes > MAX_SONG_TEXT_BYTES:
+        raise ParamsError("lyrics", f"the caption, theme and lyrics are {text_bytes} bytes together; the limit is "
+                                    f"{MAX_SONG_TEXT_BYTES} bytes (about a megabyte of text): shorten them")
+
+    reference = "audio" if job_type == COVER else params.get("reference", "description")
+    if job_type == COVER and params.get("reference", "audio") != "audio":
+        raise ParamsError("reference", "a cover always uses the source's audio (reference audio)")
+    if reference not in REFERENCES:
+        raise ParamsError("reference", f"reference must be one of {', '.join(REFERENCES)}, got {reference!r}")
+    if reference == "audio" and engine == ENGINE_YUE2 and job_type != COVER:
+        raise ParamsError("reference", "yue2.cpp takes no reference audio for a new song; use acestep or "
+                                       "reference description")
+    out["reference"] = reference
+    out["reference_uri"] = song_source_uri(out["source_track_id"]) if reference == "audio" else None
+    if params.get("reference_uri") not in (None, out["reference_uri"]):
+        raise ParamsError("reference_uri", f"reference_uri is the source, {out['reference_uri']}, or null")
+
+    variants = params.get("variants", VARIANTS_DEFAULT)
+    if not _is_int(variants) or not VARIANTS_MIN <= variants <= VARIANTS_MAX:
+        raise ParamsError("variants", f"variants must be a whole number from {VARIANTS_MIN} to {VARIANTS_MAX}, "
+                                      f"got {variants!r}")
+    out["variants"] = variants
+    out["duration_s"] = _song_duration(job_type, engine, params, out["source_duration_s"])
+    seed = params.get("seed")
+    if seed is not None and (not _is_int(seed) or not SEED_MIN <= seed <= SEED_MAX):
+        raise ParamsError("seed", f"seed must be a whole number from {SEED_MIN} to {SEED_MAX}, or null to draw one")
+    out["seed"] = seed
+    if job_type == COVER:
+        out.update(_song_cover(engine, out["lyrics_mode"], params))
+    for k in _SONG_COVER_KEYS:
+        if k not in out and k in params:
+            raise ParamsError(k, f"{k} is a cover param" + (" on acestep" if k == "cover_strength" else ""))
+    if engine == ENGINE_YUE2:
+        out.update(_song_yue2(job_type, params))
+    else:
+        given = [k for k in ("backbone", "cot") if k in params]
+        if given:
+            raise ParamsError(given[0], f"{given[0]} is a yue2 param")
+    if "adapters" in params:
+        raise ParamsError("adapters", f"a {job_type} job takes no adapters")
+    return out
+
+
+def check_params_song(job_type: str, params: Any) -> Optional[str]:
+    """Why stored song-job params are not a normalized record, or None (`validate_job`)."""
+    try:
+        normalized = normalize_params_song(job_type, params)
+    except ParamsError as exc:
+        return exc.message
+    return None if normalized == dict(params) else f"params of {job_type} must carry every key, normalized"
+
+
 def _check_engine_choice(s: str, job: Mapping[str, Any]) -> None:
     ch = job["engine_choice"]
     _expect(s, isinstance(ch, Mapping) and set(ch) == _ENGINE_CHOICE_KEYS,
@@ -646,6 +924,11 @@ def validate_job(job: Any) -> None:
     else:
         _expect(s, _is_str(job["track_id"]) and _is_str(job["base_version_id"]),
                 f"a {job['type']} job has string track_id and base_version_id")
+    if job["type"] in SONG_TYPES:
+        problem = check_params_song(job["type"], job["params"])
+        _expect(s, problem is None, f"params: {problem}")
+        _expect(s, job["params"].get("source_track_id") == job["track_id"],
+                "params.source_track_id must be the job's track_id")
     if job["type"] == "edit":
         _expect(s, _is_str(job["comment_id"]), "an edit job has a comment_id")
         _expect(s, job["action"] in EDIT_ACTIONS, f"'action' must be one of {EDIT_ACTIONS}")

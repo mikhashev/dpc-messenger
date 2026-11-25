@@ -127,6 +127,11 @@ BACKBONE_FILES: Dict[str, Sequence[str]] = {
     "rs-tw": ("rs-tw/YuE2-3B-RS-TW-2.0x0.75-Q8_0.gguf", "YuE2-3B-RS-TW-2.0x0.75-Q8_0.gguf"),
 }
 VAE_FILES: Sequence[str] = ("serveurperso/YuE2-Vae-F32.gguf", "converted/YuE2-Vae-F32.gguf", "YuE2-Vae-F32.gguf")
+# The SheetSage2 transcriber (a cover's score, `--transcriber`); yue2.cpp loads the MERT GGUF of the same
+# quant from beside it (its src/mert.h), so a head without that file is not offered.
+TRANSCRIBER_FILES: Sequence[str] = ("serveurperso/SheetSage2-Q8_0.gguf", "converted/SheetSage2-Q8_0.gguf",
+                                    "SheetSage2-Q8_0.gguf")
+MERT_NAME = "MERT-v2-FullSong-{quant}.gguf"
 
 ADAPTER_NOTE = ("Voice adapters are trained on real readers' voices without stated consent: "
                 "for local listening only.")
@@ -765,8 +770,31 @@ class Yue2Server(SupervisedEngine):
             cmd += ["--device", self.config.device]
         if self.config.max_seq:
             cmd += ["--max-seq", str(self.config.max_seq)]
+        transcriber = self.transcriber_path()
+        if transcriber is not None:
+            cmd += ["--transcriber", str(transcriber)]
+        self._transcriber_arg = transcriber
         self._backbone = choice
         return cmd
+
+    def transcriber_path(self) -> Optional[Path]:
+        """The SheetSage2 GGUF with its MERT GGUF beside it, or None (`TRANSCRIBER_FILES`)."""
+        for rel in TRANSCRIBER_FILES:
+            path = self.config.models_dir / rel
+            quant = path.stem.rsplit("-", 1)[-1]
+            if path.is_file() and (path.parent / MERT_NAME.format(quant=quant)).is_file():
+                return path
+        return None
+
+    def transcriber_problem(self) -> Optional[str]:
+        """Why this server cannot serve `/transcribe` (a cover's score), or None: the files are missing,
+        or the running child was started without them."""
+        if self.transcriber_path() is None:
+            return (f"the SheetSage2 transcriber is missing in {self.config.models_dir} (looked for "
+                    f"{', '.join(TRANSCRIBER_FILES)} with {MERT_NAME.format(quant='Q8_0')} beside it)")
+        if self.alive() and getattr(self, "_transcriber_arg", None) is None:
+            return "the running yue2.cpp server was started without --transcriber; stop it and the next job starts it"
+        return None
 
     def installed_problem(self, backbone: Optional[str] = None) -> Optional[str]:
         """Why the engine cannot be started, naming what is missing; None when it can. With

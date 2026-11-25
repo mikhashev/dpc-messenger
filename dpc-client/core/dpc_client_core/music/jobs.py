@@ -110,6 +110,9 @@ DEFAULT_TURN_JOBS_MAX = 1     # an agent's jobs per turn
 WAITING_FOR_CARD = "waiting for the card"
 MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 
+# The job types whose capability answer depends on their params (the engine they name).
+_PARAMS_CHECKED = (js.GENERATE_FROM_TEXT,) + js.SONG_TYPES
+
 _REPLACE_TRIES = 20
 _REPLACE_RETRY_S = 0.05
 
@@ -563,6 +566,9 @@ class MusicJobStore:
                 region = dict(region) if region is not None else None
                 if job_type == "edit" and action in re_.BUILT_ACTIONS:
                     params = self._edit_params(action, params, region, source, requester)
+                elif job_type in js.SONG_TYPES:
+                    params = self._song_params(job_type, params, track_id, source)
+                    prompt = params["caption"]
 
             if is_agent and idempotency_key is None and requester.get("turn_id") is not None:
                 idempotency_key = self._derived_key(requester, job_type, params, track_id)
@@ -581,7 +587,7 @@ class MusicJobStore:
                                          self.turn_jobs_max if turn_jobs_max is None else turn_jobs_max)
             if _check_only:
                 reason = self.capabilities.unsupported_reason(
-                    job_type, params if job_type == js.GENERATE_FROM_TEXT else None, action=action)
+                    job_type, params if job_type in _PARAMS_CHECKED else None, action=action)
                 if reason is not None:
                     raise MusicJobError("unsupported", reason)
                 return {"repeat": None, "params": copy.deepcopy(params)}
@@ -590,7 +596,7 @@ class MusicJobStore:
                                 idempotency_key=idempotency_key, requested_by=requester)
             job["engine_choice"] = engine_choice
             reason = self.capabilities.unsupported_reason(
-                job_type, params if job_type == js.GENERATE_FROM_TEXT else None, action=action)
+                job_type, params if job_type in _PARAMS_CHECKED else None, action=action)
             if reason is not None:
                 self._move(job, js.UNSUPPORTED, reason)
             self._jobs[job["id"]] = job
@@ -675,6 +681,33 @@ class MusicJobStore:
         except re_.EditError as exc:
             code = "track_not_ready" if exc.field == "track_id" else "invalid_params"
             raise MusicJobError(code, exc.message, field=exc.field)
+
+    @staticmethod
+    def _song_params(job_type: str, params: dict, track_id: Optional[str],
+                     source: Optional[Mapping[str, Any]]) -> dict:
+        """The checked params of a song job from a source track (`job_schemas.normalize_params_song`),
+        against what the library knows of it. A job that sends the source's audio (a cover, a
+        reference) needs its file: a web track has none here (`listen_only_source`: DPC does not
+        download a web source yet), a file still being hashed is `track_not_ready`."""
+        if not isinstance(source, Mapping):
+            raise MusicJobError("invalid_source", f"a {job_type} job needs the library track it starts from (track_id)",
+                                field="track_id")
+        try:
+            out = js.normalize_params_song(job_type, params, track_id=track_id, source=source)
+        except js.SongParamsError as exc:
+            raise MusicJobError(exc.code, exc.message, field=exc.field)
+        except js.ParamsError as exc:
+            raise MusicJobError("invalid_params", exc.message, field=exc.field)
+        if js.song_needs_audio(job_type, out):
+            if out["source_kind"] == "web":
+                raise MusicJobError("listen_only_source", "a web track is listen-only here: DPC does not download a "
+                                                          "web source yet, so its audio cannot go to the engine (a cover "
+                                                          "or a reference); a same-style song from its description works",
+                                    field="track_id")
+            if not out["source_content_hash"]:
+                raise MusicJobError("track_not_ready", "the track's audio is still being hashed; propose the job again "
+                                                       "in a moment", field="track_id")
+        return out
 
     def find_take_by_library_track(self, library_track_id: str) -> Optional[dict]:
         """The take whose file is library entry `library_track_id`, or None: an edit of a take names its
@@ -1011,7 +1044,7 @@ class MusicJobStore:
             if job["state"] != js.RUNNING:
                 raise MusicJobError("illegal_transition", f"job {job_id} is {job['state']}; takes arrive while it runs")
             is_edit = job["type"] == "edit" and job.get("action") in re_.BUILT_ACTIONS
-            if job["type"] != js.GENERATE_FROM_TEXT and not is_edit:
+            if job["type"] != js.GENERATE_FROM_TEXT and job["type"] not in js.SONG_TYPES and not is_edit:
                 raise MusicJobError("invalid_type", f"takes of {job['type']} jobs are not built")
             takes = self._takes[job_id]
             wanted = job["params"]["takes"] if is_edit else job["params"]["variants"]
@@ -1033,7 +1066,7 @@ class MusicJobStore:
                 "job_id": job_id,
                 "track_id": job["track_id"] if is_edit else None,
                 "base_version_id": job["base_version_id"] if is_edit else None,
-                "source_track_id": job["track_id"] if is_edit else None,
+                "source_track_id": job["track_id"] if is_edit or job["type"] in js.SONG_TYPES else None,
                 "title": title,
                 "region": dict(job["region"]) if is_edit else None,
                 "file": file,

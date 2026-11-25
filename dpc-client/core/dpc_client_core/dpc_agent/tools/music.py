@@ -19,7 +19,9 @@ gives the take's own file and nothing of the job's request (D44).
   job and asks nothing. Type `generate_from_text`, or `edit` (ADR-051 row B4: `track_id`, `action`
   regenerate_region / fix_seam / remove_region, `region`, `text` in params; core makes the
   region comment); the card names the action and the region. An agent cannot ask for a
-  `cut_with_shift` removal (the person's word only, decision 27).
+  `cut_with_shift` removal (the person's word only, decision 27). A song from a library track
+  (ADR-051 row B5: `generate_similar`, `cover`, `generate_from_lyrics`) names its `track_id` in
+  params beside the song params; the card names the source, the mode and the engine.
 - `music_wait` polls every `POLL_INTERVAL_S` and follows the self-wait rule (D51): when this
   turn holds a live card hold on a local alias and the job is `queued`, or the job's `card_wait`
   names that alias among its holders (a running job whose engine ended and waits for the card
@@ -322,6 +324,8 @@ def music_capabilities(ctx: ToolContext) -> str:
         "edit": (report.get("job_types") or {}).get(EDIT),
         "edit_actions": report.get("actions"),
         "edit_limits": (report.get("limits") or {}).get("edit"),
+        "song_jobs": {t: (report.get("job_types") or {}).get(t) for t in js.SONG_TYPES},
+        "song_limits": (report.get("limits") or {}).get("song"),
     }
     return json.dumps(view, ensure_ascii=False, default=str)
 
@@ -413,6 +417,54 @@ def _edit_parts(args: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
             "style": " ".join(str(params.get("caption") or "").split()) or None}
 
 
+SONG_MODE_WORDS = {js.GENERATE_SIMILAR: "a new song in the same style as",
+                   js.COVER: "a cover (same melody, new arrangement) of",
+                   js.GENERATE_FROM_LYRICS: "a new song from the lyrics of"}
+_ENGINE_WORDS = {js.ENGINE_ACESTEP: "acestep.cpp", js.ENGINE_YUE2: "yue2.cpp"}
+
+
+def _song_split(params: Dict[str, Any]) -> tuple:
+    """`(service args, the song's own params, refusal or None)` of a song request whose params carry
+    `track_id` beside the song params."""
+    rest = {k: v for k, v in params.items() if k != "track_id"}
+    tid = params.get("track_id")
+    if not isinstance(tid, str) or not tid:
+        return {}, rest, "params.track_id (the source: a library track id, see music_list_library) is required"
+    return {"track_id": tid}, rest, None
+
+
+def _song_about(job_type: str, params: Dict[str, Any]) -> str:
+    """The card's line for a song job: the mode, the source by title and id, what of the source goes
+    in, the caption, the takes and the engine."""
+    style = " ".join(str(params.get("caption") or "").split())
+    if len(style) > APPROVAL_STYLE_CHARS:
+        style = style[:APPROVAL_STYLE_CHARS - 1].rstrip() + "…"
+    variants = params.get("variants") or js.VARIANTS_DEFAULT
+    uses = []
+    if job_type == js.COVER:
+        uses.append("its audio (melody" + (" and lyrics" if params.get("lyrics_mode") == "reuse" else "") + ")")
+    elif params.get("reference") == "audio":
+        uses.append("its audio as a timbre reference")
+    if job_type != js.COVER and params.get("lyrics_mode") == "reuse":
+        uses.append("its lyrics")
+    used = f", using {' and '.join(uses)}" if uses else ""
+    engine = _ENGINE_WORDS.get(params.get("engine"), params.get("engine") or "default engine")
+    return (f"Run a music job on the GPU: {SONG_MODE_WORDS.get(job_type, job_type)} \"{params.get('source_title')}\" "
+            f"(library track {params.get('source_track_id')}){used}; style \"{style or '(none)'}\", "
+            f"{variants} take{'' if variants == 1 else 's'}, {engine}")
+
+
+def _song_parts(job_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """The same request in parts for the interface's card: the from-text parts plus the source and mode."""
+    lyrics = params.get("lyrics") or []
+    parts = _approval_parts(job_type, {**params, "style": params.get("caption"),
+                                       "lyrics": "\n".join(lyrics) if lyrics else None})
+    parts.update({"source_track_id": params.get("source_track_id"), "source_title": params.get("source_title"),
+                  "mode": job_type, "relation": js.SONG_RELATIONS.get(job_type),
+                  "lyrics_mode": params.get("lyrics_mode"), "reference": params.get("reference")})
+    return parts
+
+
 def _approval_parts(job_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """The same request in parts, for the interface's card (`music` on schedule_approval_request):
     type, style, variants, instrumental and its twin has_lyrics, engine, duration_s, eta_seconds,
@@ -484,8 +536,9 @@ def _after_propose_hint(job: Dict[str, Any]) -> str:
 def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, params: Any = None,
                       idempotency_key: Optional[str] = None) -> str:
     """Propose one music job, after the person approves it."""
-    if type not in (js.GENERATE_FROM_TEXT, EDIT):
-        return f"⚠️ music_propose_job: type must be '{js.GENERATE_FROM_TEXT}' or '{EDIT}'; nothing was proposed."
+    if type not in (js.GENERATE_FROM_TEXT, EDIT) + js.SONG_TYPES:
+        return (f"⚠️ music_propose_job: type must be one of {', '.join((js.GENERATE_FROM_TEXT, EDIT) + js.SONG_TYPES)}; "
+                "nothing was proposed.")
     if isinstance(params, str):
         try:
             params = json.loads(params)
@@ -496,6 +549,10 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     edit_args: Dict[str, Any] = {}
     if type == EDIT:
         edit_args, params, problem = _split_edit(params)
+        if problem:
+            return f"⚠️ music_propose_job: {problem}; nothing was proposed."
+    elif type in js.SONG_TYPES:
+        edit_args, params, problem = _song_split(params)
         if problem:
             return f"⚠️ music_propose_job: {problem}; nothing was proposed."
     who = _requested_by(ctx)
@@ -548,6 +605,8 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     if type == EDIT:
         about, parts = _edit_about(edit_args, final), _edit_parts(edit_args, final)
         card = {"cost": GPU_CARD_COST_LINE} if edit_args["action"] in re_.REPAINT_ACTIONS else {}
+    elif type in js.SONG_TYPES:
+        about, parts, card = _song_about(type, final), _song_parts(type, final), {"cost": GPU_CARD_COST_LINE}
     else:
         about, parts, card = _approval_about(type, final), _approval_parts(type, final), {"cost": GPU_CARD_COST_LINE}
     approved, reason = _await_schedule_approval(
@@ -956,13 +1015,16 @@ def get_tools() -> List[ToolEntry]:
                "limits, and the params a generate_from_text job takes.",
                {}, [], music_capabilities),
         _entry("music_propose_job",
-               "Propose ONE music job: a new song (type generate_from_text) or a region edit of a library "
-               "track (type edit). The person is asked to "
+               "Propose ONE music job: a new song (type generate_from_text), a region edit of a library "
+               "track (type edit), or a new song from a library track: same style (generate_similar), a cover "
+               "(cover) or a song from its lyrics (generate_from_lyrics). The person is asked to "
                "approve it first; refused, no job is made. One job per turn: a repeat in the same turn "
                "returns the turn's job. On a local model the job starts only after this turn ends: do "
                "not wait for it, schedule a check_back with task_data {\"music_job_id\": ...}." + CHECK_BACK_ONLY_LINE,
-               {"type": {"type": "string", "enum": [js.GENERATE_FROM_TEXT, EDIT],
-                         "description": "generate_from_text (a new song) or edit (a region of a library track)."},
+               {"type": {"type": "string", "enum": [js.GENERATE_FROM_TEXT, EDIT, *js.SONG_TYPES],
+                         "description": "generate_from_text (a new song), edit (a region of a library track), "
+                                        "generate_similar, cover or generate_from_lyrics (a new song from a "
+                                        "library track)."},
                 "params": {"type": "object",
                            "description": "generate_from_text: style (text, required), lyrics (text with "
                                           "[verse]/[chorus] tags; null for an instrumental), variants (1-4), "
@@ -973,6 +1035,15 @@ def get_tools() -> List[ToolEntry]:
                                           "track's style; needed when the track is not a DPC take), lyrics, "
                                           "seed, allowed_zone, splice_bounds, crossfade_ms. A repaint makes 2 "
                                           "takes, a removal 1, each a new file; the track is never changed. "
+                                          "generate_similar / cover / generate_from_lyrics: track_id (the "
+                                          "source), caption (the style; for a cover the target style, "
+                                          "required), keep {genre, bpm, key, timesig, mood, structure, vocals} "
+                                          "(the kept attributes with their values), lyrics_mode (none, new, "
+                                          "reuse; reuse fills the track's stored lyrics), lyrics_theme, "
+                                          "reference (description or audio: the source as a timbre "
+                                          "reference, unverified), engine (acestep or yue2, see "
+                                          "music_capabilities song_jobs), variants, duration_s, seed; a cover "
+                                          "also cover_strength (acestep, 0-1). "
                                           "Params core would refuse are refused before the person is asked."},
                 "idempotency_key": {"type": "string",
                                     "description": "Optional; the default comes from the turn."}},

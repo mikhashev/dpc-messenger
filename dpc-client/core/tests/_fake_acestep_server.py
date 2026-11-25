@@ -3,13 +3,15 @@ tests: the same CLI flags, `/health`, `/props`, `POST /lm`, `POST /synth`, `GET 
 `POST /job?cancel=1`, with canned audio codes and a short generated wav24 per variant
 (WAVE_FORMAT_EXTENSIBLE, as the real server writes). A multipart `/synth` (parts `request` and
 `audio`, as acestep.cpp's `handle_synth` reads them) is a repaint: the source back as wav32 with a
-tone per variant inside the window. No GPU.
+tone per variant inside the window. A multipart `task_type: cover` needs the `audio` part and a caption,
+and a multipart text2music takes an optional `ref_audio` part (the timbre reference); both answer a
+short wav24 per variant, as a plain `/synth` does. No GPU.
 
 `FAKE_ACESTEP_MODE` (comma-separated) picks a misbehaviour:
 `exit_at_start`, `missing_model`, `crash_on_lm`, `fail_synth`, `slow_synth` (stays running
 until cancelled), `short_batch` (one audio part fewer than asked).
 `FAKE_ACESTEP_RECORD`, when set, is a folder where each POST body is written as
-`<n>-<lm|synth>.json`. SIGTERM (POSIX) or SIGBREAK (Windows) stops it with exit code 0.
+`<n>-<lm|synth>.json`, and the part names of a multipart `/synth` as `<n>-synth-parts.json`. SIGTERM (POSIX) or SIGBREAK (Windows) stops it with exit code 0.
 """
 
 import argparse
@@ -116,15 +118,20 @@ def main():
         what came from where. Without `audio` or a caption it fails, as the real server refuses."""
         import numpy as np
         reader = await req.multipart()
-        request_body, audio = None, None
+        request_body, audio, names, sizes = None, None, [], {}
         async for part in reader:
             data = await part.read(decode=False)
+            names.append(part.name)
+            sizes[part.name] = len(data)
             if part.name == "request":
                 request_body = bytes(data)
             elif part.name == "audio":
                 audio = bytes(data)
         recorded("synth", request_body or b"")
+        recorded("synth-parts", json.dumps({"parts": names, "sizes": sizes}).encode("utf-8"))
         r = json.loads(request_body)
+        if r.get("task_type") in ("cover", "text2music"):
+            return batch_answer(r, needs_source=r.get("task_type") == "cover", has_source=audio is not None)
         jid = new_job()
         if r.get("task_type") != "repaint" or audio is None or not r.get("caption") or "fail_synth" in modes:
             jobs[jid]["status"] = "failed"
@@ -180,8 +187,16 @@ def main():
             return await repaint(req)
         body = await req.read()
         recorded("synth", body)
-        r = json.loads(body)
+        return batch_answer(json.loads(body))
+
+    def batch_answer(r, needs_source=False, has_source=False):
+        """One short wav24 and one latent per variant; a cover without its source or a caption fails,
+        as acestep.cpp's run_cover and handle_synth refuse."""
         jid = new_job()
+        if needs_source and (not has_source or not r.get("caption")):
+            jobs[jid]["status"] = "failed"
+            log("cover without a source audio part or a caption")
+            return web.json_response({"id": jid})
         if "fail_synth" in modes:
             jobs[jid]["status"] = "failed"
             log("synth failed on purpose")

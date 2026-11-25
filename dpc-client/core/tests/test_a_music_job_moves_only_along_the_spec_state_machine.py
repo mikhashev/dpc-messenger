@@ -84,7 +84,7 @@ def test_a_running_job_fails_only_with_a_reason(tmp_path):
 def test_a_final_job_refuses_every_move(tmp_path, final):
     store = store_at(tmp_path)
     if final == "unsupported":
-        job = store.create_job("cover", {}, track_id="trk_0123456789abcdef", base_version_id="ver_1")
+        job = store.create_job("generate_from_melody", {}, track_id="trk_0123456789abcdef", base_version_id="ver_1")
     elif final in ("accepted", "rejected"):
         job, takes = job_in_review(store, variants=1)
         if final == "accepted":
@@ -234,9 +234,9 @@ def test_list_jobs_is_oldest_first_and_filters_by_state_and_type(tmp_path):
     a = store.create_job("generate_from_text", from_text_params())
     b = store.create_job("generate_from_text", from_text_params())
     store.cancel_job(b["id"])
-    c = store.create_job("cover", {}, track_id="trk_0123456789abcdef", base_version_id="ver_1")
+    c = store.create_job("generate_from_melody", {}, track_id="trk_0123456789abcdef", base_version_id="ver_1")
     assert [j["id"] for j in store.list_jobs()] == [a["id"], b["id"], c["id"]]
     assert [j["id"] for j in store.list_jobs(states=["queued"])] == [a["id"]]
-    assert [j["id"] for j in store.list_jobs(job_type="cover")] == [c["id"]]
+    assert [j["id"] for j in store.list_jobs(job_type="generate_from_melody")] == [c["id"]]
     with pytest.raises(MusicJobError):
         store.list_jobs(states=["waiting"])

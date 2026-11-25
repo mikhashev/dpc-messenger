@@ -148,6 +148,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 from . import job_schemas as js
 from . import provenance as prov
 from . import region_edit as re_
+from . import similar as song_jobs
 from .acestep import MODEL_FILES
 from .audio_tags import AlreadyTagged, TagError, flac_add_comments, flac_read_comments
 from .engine_base import MusicEngineError
@@ -583,6 +584,8 @@ class MusicJobRunner:
         self._wakes = 0
         self.current_job_id: Optional[str] = None
         self.current_engine: Optional[str] = None
+        # job id -> `similar.SongDress` while a song job's takes are made (`_store_take` wears it)
+        self._song_dress: Dict[str, Any] = {}
 
     @property
     def engine(self) -> Any:
@@ -619,9 +622,10 @@ class MusicJobRunner:
 
     @staticmethod
     def runs(job: Mapping[str, Any]) -> bool:
-        """Whether this runner runs a job of this kind: `generate_from_text`, and an `edit` with a
-        built action (`region_edit.BUILT_ACTIONS`)."""
-        return job.get("type") == js.GENERATE_FROM_TEXT or (
+        """Whether this runner runs a job of this kind: `generate_from_text`, the song types
+        (`job_schemas.SONG_TYPES`, `similar.py`), and an `edit` with a built action
+        (`region_edit.BUILT_ACTIONS`)."""
+        return job.get("type") in (js.GENERATE_FROM_TEXT,) + js.SONG_TYPES or (
             job.get("type") == "edit" and job.get("action") in re_.BUILT_ACTIONS)
 
     def _next_queued(self) -> Optional[str]:
@@ -723,6 +727,9 @@ class MusicJobRunner:
             return
         if job["type"] == "edit":
             await self._run_edit(job)
+            return
+        if job["type"] in js.SONG_TYPES:
+            await song_jobs.run_song_job(self, job)
             return
         started = False
         while True:
@@ -949,7 +956,8 @@ class MusicJobRunner:
     # -- acestep.cpp: one /lm, then one /synth with every variant -------------------------
 
     async def _produce(self, job_id: str, params: Mapping[str, Any], lm_body: bytes, seed: int,
-                       engine_job: List[Optional[str]], engine: Any) -> None:
+                       engine_job: List[Optional[str]], engine: Any,
+                       synth_files: Optional[List[Tuple[str, Path, str]]] = None) -> None:
         variants = int(params["variants"])
         await self._progress(job_id, 0.05)
         await self._check(job_id)
@@ -981,7 +989,8 @@ class MusicJobRunner:
         out_dir.mkdir(parents=True, exist_ok=True)
         multipart = out_dir / "synth.multipart.part"
         try:
-            ctype, _ = await self._engine_job(job_id, engine, "/synth", synth_body, engine_job, dest=multipart)
+            ctype, _ = await self._engine_job(job_id, engine, "/synth", synth_body, engine_job, dest=multipart,
+                                              files=synth_files)
             await self._check(job_id)
             parts = await asyncio.to_thread(split_multipart_file, multipart, multipart_boundary(ctype))
             audio = [(h, s, e) for h, s, e in parts if "audio/" in h.lower()]
@@ -1554,6 +1563,9 @@ class MusicJobRunner:
         loudness measurement, a library entry and a take. An edit take passes its `title`, its
         library `lineage`, its QA terms (`qa_override`: `requested_s`, `length_mode`, `edit`) and a
         hook run once the library entry exists, whose answer joins the sidecar."""
+        dress = self._song_dress.get(job_id)
+        if dress is not None:   # a song job's take (`similar.SongDress`): its title, lineage and record
+            title, lineage, provenance, record = dress.apply(variant, title, lineage, provenance, record)
         stem = f"{slug}_v{variant}"
         wav_part = out_dir / f"{stem}.wav.part"
         flac_part = out_dir / f"{stem}.flac.part"

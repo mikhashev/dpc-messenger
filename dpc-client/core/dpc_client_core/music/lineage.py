@@ -15,16 +15,19 @@ writes two files beside a job's generated folder.
   summary with `genome_sha256` / `intent_sha256` / `render_sha256`), or None.
 
 **Nodes.** `intent`: the request of a `generate_from_text` job (generation zero of that branch; style
-and the shape of the lyrics, never their text). `take`: one file a job made (a new song variant, or an
-edit sibling). `source`: a library track an edit started from that no stored take explains (an imported
-file). **Edges** are derived-from: `generate` (intent to take) and `edit` (parent to take, `op` the edit
-action, `region` its span; the takes of one edit job are siblings and share `group`). An edge into a
+and the shape of the lyrics, never their text), or of a song job from a source track (`generate_similar`,
+`cover`, `generate_from_lyrics`: its caption, relation and what it kept). `take`: one file a job made (a
+new song variant, or an edit sibling). `source`: a library track an edit or a song job started from that
+no stored take explains (an imported file). **Edges** are derived-from: `generate` (intent to take),
+`edit` (parent to take, `op` the edit action, `region` its span; the takes of one edit job are siblings
+and share `group`) and `derive` (the source track, a take or a `source` node, to a song job's intent;
+`op` the lineage relation, "cover of", "same style as" or "new song from the lyrics of"). An edge into a
 discarded take carries `rejected` and the `reason`, so a dead branch says why. **Events** are the
 person's selections read from the takes: `keep` (with `over_take_ids`, the siblings it was picked over,
 which is the A/B pick) and `discard` (with its reason text and failure class).
 
-**The parent of an edit** is the take whose library entry is the job's `track_id`, else the take whose
-file hash is the job's `params.source_content_hash`, else a `source` node. Region-edit takes record that
+**The parent of an edit or a song job** is the take whose library entry is the job's `track_id`, else the
+take whose file hash is the job's `params.source_content_hash`, else a `source` node. Region-edit takes record that
 parent the same way (`parents[0].take_id` in their `mp.provenance/1`, written from the same lookup).
 
 **Not recorded yet** (EVOLUTION.md §13, §14): `prefer` events of a plain A/B without a Keep, the
@@ -39,13 +42,13 @@ schema        "mp.lineage/1"
 generated_at  ISO time
 root          {track_id, job_id, node_id}   what was asked for; node_id is the node to focus
 nodes[]       {id, kind: intent|source|take, label, generation, created_at, ...}
-                intent: job_id, engine, params, job_state, state_reason
+                intent: job_id, engine, params, job_state, state_reason (a song job's also relation)
                 source: library_track_id, title
                 take:   job_id, variant, take_kind new_track|edit, title, engine, params, qa
                         {verdict, failed[], not_measured[], text}, decision pending|keep|discard,
                         reason {text, class}|null, decided_at, library_track_id, content_hash,
                         duration_s, lufs_i, simulated, on_kept_path, ids{}|null
-edges[]       {id, from, to, kind: generate|edit, op, job_id, group, region{t_start,t_end}|null,
+edges[]       {id, from, to, kind: generate|edit|derive, op, job_id, group, region{t_start,t_end}|null,
                rejected, reason{text, class}|null}
 events[]      {id, at, kind: keep|discard, take_id, job_id, over_take_ids[], ab, reason|null,
                decided_by: {kind: "person"}}
@@ -69,6 +72,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from . import job_schemas as js
 from .qa import qa_summary
 from .schemas import SchemaError
 
@@ -79,13 +83,14 @@ LINEAGE_JSON = "lineage.json"
 LINEAGE_HTML = "lineage.html"
 
 NODE_KINDS = ("intent", "source", "take")
-EDGE_KINDS = ("generate", "edit")
+EDGE_KINDS = ("generate", "edit", "derive")
 DECISIONS = ("pending", "keep", "discard")
 EVENT_KINDS = ("keep", "discard")
 TAKE_KINDS = ("new_track", "edit")
 
 GENERATE_TYPE = "generate_from_text"
 EDIT_TYPE = "edit"
+SONG_TYPES = js.SONG_TYPES      # a new song from a source track (music/similar.py)
 NOTE_ACTION = "note"            # a comment-only edit job: it makes no audio, so it has no place in the graph
 STYLE_MAX = 200
 NOTES = [
@@ -116,6 +121,8 @@ def _now() -> str:
 def _is_graph_job(job: Mapping[str, Any]) -> bool:
     if job.get("type") == GENERATE_TYPE:
         return True
+    if job.get("type") in SONG_TYPES:
+        return bool(job.get("track_id"))
     return job.get("type") == EDIT_TYPE and bool(job.get("track_id")) and job.get("action") not in (None, NOTE_ACTION)
 
 
@@ -160,6 +167,20 @@ def _intent_params(job: Mapping[str, Any]) -> Dict[str, Any]:
         "lyrics": _lyrics_shape(p),
         "variants": p.get("variants"), "duration_s": p.get("duration_s"), "seed": p.get("seed"),
         "backbone": p.get("backbone"), "cot": p.get("cot"), "adapters": _adapter_names(p),
+    })
+
+
+def _song_intent_params(job: Mapping[str, Any]) -> Dict[str, Any]:
+    p = job.get("params") or {}
+    lines = p.get("lyrics") if isinstance(p.get("lyrics"), list) else []
+    return _drop_none({
+        "caption": _clip(p.get("caption"), STYLE_MAX) or None, "relation": js.SONG_RELATIONS.get(job.get("type")),
+        "keep": copy.deepcopy(p.get("keep")) or None, "lyrics_mode": p.get("lyrics_mode"),
+        "lyrics": {"instrumental": not lines, "lines": sum(1 for ln in lines if str(ln).strip()
+                                                           and not str(ln).strip().startswith("["))},
+        "reference": p.get("reference"), "kept": p.get("kept"), "melody_source": p.get("melody_source"),
+        "variants": p.get("variants"), "duration_s": p.get("duration_s"), "seed": p.get("seed"),
+        "backbone": p.get("backbone"), "cot": p.get("cot"), "cover_strength": p.get("cover_strength"),
     })
 
 
@@ -221,8 +242,8 @@ class _Index:
                 self.by_hash.setdefault(h, []).append(t)
 
     def parent_of(self, job: Mapping[str, Any]) -> Optional[Tuple[str, str]]:
-        """`("take", take_id)` or `("source", library_track_id)` for an edit job, None for any other."""
-        if job.get("type") != EDIT_TYPE:
+        """`("take", take_id)` or `("source", library_track_id)` for an edit or a song job, None for any other."""
+        if job.get("type") != EDIT_TYPE and job.get("type") not in SONG_TYPES:
             return None
         lib = job.get("track_id")
         hit = self.by_library.get(lib) if lib else None
@@ -328,6 +349,20 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
                       "engine": _engine_of(None, job), "params": _intent_params(job),
                       "job_state": job.get("state"), "state_reason": job.get("state_reason")})
             edge_kind, op = "generate", GENERATE_TYPE
+        elif job["type"] in SONG_TYPES:
+            parent = idx.parent_of(job)
+            from_id = parent[1] if parent[0] == "take" else source_node(parent[1])
+            parent_id = f"intent:{jid}"
+            relation = js.SONG_RELATIONS[job["type"]]
+            add_node({"id": parent_id, "kind": "intent",
+                      "label": _clip((job.get("params") or {}).get("caption"), 60) or relation,
+                      "generation": 0, "created_at": job.get("created_at"), "job_id": jid,
+                      "engine": _engine_of(None, job), "params": _song_intent_params(job), "relation": relation,
+                      "job_state": job.get("state"), "state_reason": job.get("state_reason")})
+            edges.append({"id": f"{from_id}>{parent_id}", "from": from_id, "to": parent_id, "kind": "derive",
+                          "op": relation, "job_id": jid, "group": jid, "region": None, "rejected": False,
+                          "reason": None})
+            edge_kind, op = "generate", job["type"]
         else:
             parent = idx.parent_of(job)
             parent_id = parent[1] if parent[0] == "take" else source_node(parent[1])

@@ -2,7 +2,9 @@
 the same CLI flags, `/health`, `/props`, `POST /synth`, `GET /job`, `POST /job?cancel=1`,
 the server's own request checks (a 400 for `lm_batch_size` over `--max-batch`, a
 `synth_batch_size` outside 1-9, an adapter not in `--adapters`), and a multipart result per
-track (the replay request as JSON, a short wav24, the latents). No GPU.
+track (the replay request as JSON, a short wav24, the latents). With `--transcriber`, `POST
+/transcribe` (multipart `audio`, optional field `melody_only`) answers a canned ABC score, as SheetSage2
+would; the replay request echoes a sent `abc`. No GPU.
 
 `FAKE_YUE2_MODE` (comma-separated) picks a misbehaviour: `exit_at_start`, `wrong_model`
 (`/props` names another backbone), `fail_synth`, `slow_synth` (stays running until
@@ -64,6 +66,7 @@ def main():
     ap.add_argument("--adapters")
     ap.add_argument("--device")
     ap.add_argument("--max-seq", type=int)
+    ap.add_argument("--transcriber")
     args = ap.parse_args()
     modes = set(filter(None, os.environ.get("FAKE_YUE2_MODE", "").split(",")))
     record = os.environ.get("FAKE_YUE2_RECORD")
@@ -126,7 +129,7 @@ def main():
         n = int(r.get("lm_batch_size", 1)) * int(r.get("synth_batch_size", 1))
         for i in range(n):
             replay = dict(r, seed=seed + i, lm_seed=lm_seed, lm_batch_size=1, synth_batch_size=1,
-                          abc="X:1\nK:Em\n|E2 G2|", semantic_tokens=",".join(str(100 + k) for k in range(25)))
+                          abc=r.get("abc") or "X:1\nK:Em\n|E2 G2|", semantic_tokens=",".join(str(100 + k) for k in range(25)))
             parts += (f"--{BOUNDARY}\r\nContent-Type: application/json\r\n\r\n".encode()
                       + json.dumps(replay, ensure_ascii=False).encode("utf-8") + b"\r\n")
             audio = wav24(0.05, 300 + 15 * ((seed + i) % 10))
@@ -135,6 +138,24 @@ def main():
             parts += (f"--{BOUNDARY}\r\nContent-Type: application/octet-stream\r\n\r\n".encode() + latent + b"\r\n")
         parts += f"--{BOUNDARY}--\r\n".encode()
         jobs[jid].update(status="done", body=parts, mime=f"multipart/mixed; boundary={BOUNDARY}")
+        return web.json_response({"id": jid})
+
+    async def transcribe(req):
+        reader = await req.multipart()
+        audio, melody_only = None, False
+        async for part in reader:
+            data = await part.read(decode=False)
+            if part.name == "audio":
+                audio = bytes(data)
+            elif part.name == "melody_only":
+                melody_only = True
+        recorded("transcribe.json", json.dumps({"melody_only": melody_only,
+                                                "audio_bytes": len(audio or b"")}).encode("utf-8"))
+        if audio is None:
+            return bad("multipart audio part required")
+        jid = secrets.token_hex(8)
+        abc = "X:1\nT:fake transcription\nK:C\n" + ("|C D E F|" if melody_only else '|"C"C D "G"E F|')
+        jobs[jid] = {"status": "done", "body": json.dumps({"abc": abc}).encode("utf-8"), "mime": "application/json"}
         return web.json_response({"id": jid})
 
     async def job_get(req):
@@ -164,6 +185,8 @@ def main():
         app = web.Application(client_max_size=256 * 1024 * 1024)
         app.add_routes([web.get("/health", health), web.get("/props", props), web.post("/synth", synth),
                         web.get("/job", job_get), web.post("/job", job_post)])
+        if args.transcriber:
+            app.add_routes([web.post("/transcribe", transcribe)])
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, args.host, args.port)

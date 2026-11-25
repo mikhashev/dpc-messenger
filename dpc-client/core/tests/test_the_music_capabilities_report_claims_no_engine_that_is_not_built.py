@@ -43,8 +43,11 @@ def test_every_job_type_and_edit_action_is_listed_with_a_status_and_a_reason():
             assert st["reason"].strip(), name
     assert report["job_types"]["generate_from_text"]["status"] == "supported"
     assert report["job_types"]["edit"]["status"] == "supported"
-    for planned in ("generate_similar", "generate_from_lyrics", "cover", "transcribe", "qc", "generate_from_melody"):
+    for planned in ("transcribe", "qc", "generate_from_melody"):
         assert report["job_types"][planned]["status"] == "planned"
+    # the song types follow their engines (similar.py): a single installed probe answers for acestep
+    for song in ("generate_similar", "generate_from_lyrics", "cover"):
+        assert report["job_types"][song]["status"] == "supported", song
     assert report["job_types"]["voice_clone"]["status"] == "unsupported"
     # QC is not a child job: it is folded into the take (mp.qc/1), so the job type stays planned and the
     # feature is supported, each with its own reason
@@ -130,7 +133,7 @@ def test_a_job_proposed_while_the_engine_is_not_built_comes_back_unsupported(tmp
 
 
 def test_a_planned_job_type_comes_back_unsupported_with_planned_in_the_reason(tmp_path):
-    job = store_at(tmp_path).create_job("cover", {"caption": "punk"}, track_id="trk_0123456789abcdef",
+    job = store_at(tmp_path).create_job("generate_from_melody", {"caption": "punk"}, track_id="trk_0123456789abcdef",
                                         base_version_id="ver_0123456789abcdef")
     assert job["state"] == "unsupported" and job["state_reason"].startswith("planned, not built:")
 

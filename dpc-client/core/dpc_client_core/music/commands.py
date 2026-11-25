@@ -842,6 +842,23 @@ class MusicCommandsMixin:
         lyrics = answer.get("lyrics") if isinstance(answer, dict) else None
         return lyrics if isinstance(lyrics, dict) else None
 
+    async def _music_song_params(self, job_type: str, params: Dict[str, Any], track_id: Optional[str]) -> Dict[str, Any]:
+        """A song job's params with the track's stored lyrics filled in where they are reused and not
+        given (an agent may name `lyrics_mode: reuse` alone). A cover that does not name its lyrics mode
+        reuses them when the track has some, else goes without (the core refuses `missing_lyrics` where
+        the engine needs them)."""
+        out = dict(params)
+        mode = out.get("lyrics_mode", js.SONG_DEFAULT_LYRICS_MODE.get(job_type))
+        if mode != "reuse" or out.get("lyrics") is not None or not track_id:
+            return out
+        stored = await self._music_stored_lyrics(track_id)
+        lines = [str(ln.get("text") or "") for ln in (stored or {}).get("lines") or [] if isinstance(ln, dict)]
+        if any(t.strip() for t in lines):
+            out["lyrics"] = lines
+        elif job_type == js.COVER and "lyrics_mode" not in out:
+            out["lyrics_mode"] = "none"
+        return out
+
     async def _music_save_take_lyrics(self, track_id: str, lrc_text: str) -> None:
         """A cut-with-shift take's re-timed lyrics, stored as its own (decision 27)."""
         await (await self._music_lyrics()).save_manual(track_id, lrc_text)
@@ -859,7 +876,9 @@ class MusicCommandsMixin:
 
         An `edit` (`track_id`, `action`, `region`, `prompt`) is checked against the library track
         (`listen_only_source`, `track_not_ready`); without a `comment_id` the region comment is made
-        first, and `base_version_id` defaults to the original version."""
+        first, and `base_version_id` defaults to the original version. A song job (`generate_similar`,
+        `cover`, `generate_from_lyrics`: `similar.py`) names its source `track_id`; the library's facts
+        and, where they are reused, the stored lyrics fill its params."""
         try:
             job_type = _need_str(type, "type", "invalid_type")
             if not isinstance(params, dict):
@@ -886,6 +905,10 @@ class MusicCommandsMixin:
                     if checked.get("repeat"):
                         return {"status": "ok", "job": checked["repeat"]}
                 await self._music_edit_comment(strs, region, requested_by)
+            elif job_type in js.SONG_TYPES:
+                source = await self._music_edit_source(strs.get("track_id"))
+                strs["base_version_id"] = strs.get("base_version_id") or ORIGINAL_VERSION_ID
+                params = await self._music_song_params(job_type, params, strs.get("track_id"))
             job = await asyncio.to_thread(lambda: store.create_job(
                 job_type, params, region=region, requested_by=requested_by, source=source,
                 agent_queue_max=queue_max, turn_jobs_max=turn_max, **strs))
@@ -923,6 +946,11 @@ class MusicCommandsMixin:
                         "prompt": _opt_str(prompt, "prompt", "invalid_params"),
                         "comment_id": "cmt_" + "0" * 16, "base_version_id": ORIGINAL_VERSION_ID,
                         "source": await self._music_edit_source(tid)}
+            elif job_type in js.SONG_TYPES:
+                tid = _opt_str(track_id, "track_id", "invalid_params")
+                edit = {"track_id": tid, "base_version_id": ORIGINAL_VERSION_ID,
+                        "source": await self._music_edit_source(tid)}
+                params = await self._music_song_params(job_type, params, tid)
             answer = await asyncio.to_thread(lambda: store.check_job(
                 job_type, params, idempotency_key=key, requested_by=requested_by,
                 agent_queue_max=queue_max, turn_jobs_max=turn_max, **edit))
