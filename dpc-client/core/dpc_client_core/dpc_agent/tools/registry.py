@@ -375,6 +375,10 @@ class ToolContext:
     # The paths of those files this turn copied anew (not reused): removed again when the
     # turn fails before its answer is written (chat_files.remove_posted_copies).
     posted_new_copies: List[str] = field(default_factory=list)
+    # The sources chat_post_file posted into this turn's group (ADR-051 D50 G): each is a
+    # group message of its own the moment it is sent, so it never rides on the answer and
+    # is never removed; the list only counts the turn's files against MAX_FILES_PER_TURN.
+    posted_group_files: List[str] = field(default_factory=list)
 
     # -----------------------------------------------------------------------
     # Path helpers (all sandboxed to agent_root)

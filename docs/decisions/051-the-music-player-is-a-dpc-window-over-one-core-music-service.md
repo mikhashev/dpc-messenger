@@ -674,7 +674,8 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   - **The file-transfer size cap**, `file_transfer_cap_mb(rules)` (100 MB by default), checked
     before the copy. The file is copied, never moved.
   - **1:1 agent chats only** (`agent_*`). Groups, Telegram and Discord turns are refused with
-    a reason (posting into groups: D50).
+    a reason (posting into groups: D50). *Since D50 G was built, a group turn posts into that
+    group; Telegram and Discord are still refused.*
   - **The path is resolved like `read_file`**, through `_resolve_file_path`
     (`tools/core.py`, around line 247), never through a bare `validate_extended_path`: the
     first checks the "Extended path read" switch and the audience gate of the turn, the second
@@ -770,8 +771,8 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   `music_propose_job` keeps its own card, which now names the asker and states the cost. The
   second line in each tool (`music._not_owner`, `chat_files.turn_refusal`) accepts the owner or
   a call the owner approved, per call. On a foreign request the ComfyUI tools take only paths
-  the file tools' gate opens and only the local server. `chat_post_file` still refuses every
-  group: posting into groups is decision G (D50), separate work. `list_all_tools` carries
+  the file tools' gate opens and only the local server. `chat_post_file` refused every group
+  then; posting into groups is decision G (D50), built since (see D50). `list_all_tools` carries
   `owner_approval_for_others`, and the panel's badge reads "asks you for others".
 - **D44. The agent gets a take by `take_id`, resolved by core, and no directory access**
   (letter D, **revised**: first decided in #46 as "the agent reads `~/.dpc/music/generated/`
@@ -881,8 +882,53 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   Licence is not a reason to hold it back (Mike, AI Studio group #88, 2026-11-25): the owner
   makes the group and chooses who joins, and what members do with a take is theirs to answer
   for. **Built at `29383864` (F: `music_get_lyrics` reads stored and local
-  lyrics only) and `e3b0ea6c` (G: `chat_post_file` refuses a group turn); C is said in the
+  lyrics only) and `e3b0ea6c` (G: `chat_post_file` refused a group turn then); C is said in the
   tool's description. Not observed live.**
+
+  **G built (Mike #166, 2026-11-25; on `dev`, not observed live).** `chat_post_file` in a group
+  posts into the group the turn is in. It does not ride on the answer (no `_record_answer` in
+  groups): the file goes through the person's group file path, `_send_group_file`, which the
+  person's `send_group_file` and the new `send_group_agent_file` share (`service.py`). That is
+  the copy in the group's `files/`, the sender's record, one signed file description
+  (`dptp-file-v1`, ADR-047 phase 1) and the chunked offer to every connected member, so members
+  receive it as any group file. Only the author differs: the record is the agent's, as its text
+  posts are: `sender_type` "agent", the name checked as `send_group_agent_message` checks it
+  (`agent_post_name`, now shared), `agent_owner` this node, all inside the record's signature.
+  The words posted with the file are the record's text and wake no agent; the agent's answer,
+  posted after the turn, routes its own mentions. `send_group_agent_file` is not a local API
+  command.
+  - **Who may (ADR-053).** The owner asking posts, under the profile's `chat_post_file` switch
+    and its `group_allowed` setting (`_firewall_allowed_tools`: unset means allowed for every
+    tool but `run_shell`). A foreign asker gets the owner's card; in a group its "what exactly"
+    names the file, its size in MB and bytes, its type, and the group by name and id
+    (`chat_files._group_post_card`). What the tool would refuse anyway (a closed store, a type
+    off the allow-list, a file over the cap, a take that is not postable) is refused before any
+    card.
+  - **The room (ADR-048).** A path goes through `_resolve_file_path`, whose audience gate is the
+    room's: in a mixed group the agent's private memory, its mixed stores and the extended
+    paths not marked for the group are refused, whoever asked. A take by `take_id` is the
+    owner's generated music and is posted as before (D41, D44).
+  - **Limits.** The follow-up 13 allow-list by content, the 4 files per turn (counted on
+    `ToolContext.posted_group_files`; a second post of one file in a turn is refused) and the
+    size cap: the group file-transfer cap `file_transfer_cap_mb(rules, SENDER_FILE_DEFAULT_MAX_MB)`
+    held to D41's cap, so 100 MB when the rules name none, else `file_transfer.max_size_mb`.
+    The refusal names the group file-transfer limit; `_send_group_file` refuses an oversized
+    file too. The source is first copied to a temporary folder under the DPC temp dir and that
+    copy's content is checked again, so a file changed after the check is never offered; the
+    temporary copy is removed after the send.
+  - **A take's music block** goes on this node's record (the sender sees "Open in player", its
+    library holds the track). It never crosses: not on the offer, and `_exported_attachments`
+    drops `music` from every attachment a history export sends, since a peer's library has no
+    such entry. On a peer the take plays inline as a plain audio attachment (`audio/*`).
+  - **How a peer sees it now.** The file arrives as any group file of this node: its live record
+    names the node by its display name (the receiver's note is built from `peer_metadata`), not
+    the agent, until the author's signed record arrives with the next group history sync and
+    takes the note's place (`_drop_local_file_note`). Carrying the agent's name on the offer is
+    a wire change (DPTP §4.4) and is not made here.
+  - **The UI.** The live bubble on this node is drawn as the agent's
+    (`groupFileAgentFields` in `musicAttachment.ts`, spread by `MessageRouterPanel`).
+
+  Pinned by `tests/test_chat_post_file_posts_into_the_group_it_answers_in_as_the_agent.py`.
 - **D51. `music_wait` and the self-wait rule** (Zcode #51 correction 1, accepted in #46 and
   #53-#57; the rule itself is written in ADR-052 section 3.5). An agent turn on a local alias
   holds the card for all its tool rounds (`card_held_for`). `music_wait` answers "queued,

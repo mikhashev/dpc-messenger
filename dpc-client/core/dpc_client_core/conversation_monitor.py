@@ -3390,7 +3390,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         return file_description_verdict(description, conversation)
 
     def _exported_attachments(self, attachments: Any) -> Any:
-        """The attachments as they travel: a `file_description` only when it verifies here.
+        """The attachments as they travel: a `file_description` only when it verifies here,
+        and never a take's `music` block.
 
         One kept `unverified` (it came before its author's certificate, or with
         a synced record) may be junk under the author's name; exported, it
@@ -3412,6 +3413,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     att["file_verdict"] = FILE_VERIFIED
                 else:
                     att = {k: v for k, v in att.items() if k != "file_description"}
+            if isinstance(att, dict) and "music" in att:
+                # A take's block names this node's music library entry (ADR-051 D50 G); a
+                # peer has no such entry, so its copy plays as a plain audio file.
+                att = {k: v for k, v in att.items() if k != "music"}
             out.append(att)
         return out
 

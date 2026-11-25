@@ -1,5 +1,6 @@
 """
-DPC Agent — chat_post_file: the agent posts a file into its own 1:1 chat.
+DPC Agent — chat_post_file: the agent posts a file into its own 1:1 chat, or into the group
+it is answering in (ADR-051 D50 G).
 
 ADR-051 D40, D41 and D43, as ADR-053 changed D43 (Mike #46, #53-#57; Zcode #51 corrections 4-6).
 The file is copied, never moved, into the chat's `files/` folder by the same keeper the paperclip
@@ -11,8 +12,8 @@ Limits (D41):
 - the owner's requests, or a call the owner approved (ADR-053 `owner_approval_for_others`: the
   registry's gate asks the owner's card when someone else asked for the turn; this module checks
   again, per call, `turn_refusal`; D43's `owner_only` refusal is gone);
-- only the agent's own 1:1 chat (`agent_*`): a group, a Telegram or a Discord turn is
-  refused with its reason (posting into groups comes later, decision G);
+- only the agent's own 1:1 chat (`agent_*`) or the group the turn is in: a Telegram or a
+  Discord turn is refused with its reason;
 - the path is resolved as `read_file` resolves it (`_resolve_file_path`: the "Extended
   path read" switch, the extended paths and the turn's audience gate), and nothing of
   the DPC home outside the agent's own directory and its chats' files is posted, even
@@ -24,6 +25,15 @@ Limits (D41):
   `song.flac` or `notes.txt` is refused (`content_refusal`; the copy is read again after it is made);
 - at most MAX_FILES_PER_TURN files per turn;
 - a file whose bytes are already in the chat's `files/` is not copied again.
+
+In a group (D50 G) the file does not ride on the answer: it goes through the person's group
+file path (`service.send_group_agent_file` over `_send_group_file`: the copy in the group's
+`files/`, the signed record, the signed file description and the chunked offer to every
+connected member), authored by the agent, as a group message of its own sent when the tool
+runs. The same limits hold, the size cap being the group's file-transfer cap. The source is
+first copied to a temporary file whose content is checked again, so a file changed after the
+check is not offered. The room axis is `_resolve_file_path`'s audience gate (ADR-048): a store
+closed to the group's audience is refused, and on a foreign request before any card.
 
 A music take is posted by its `take_id` instead of a path (D41, D44): core resolves the id
 through `get_music_take` into the take's own file, so the agent needs no access to
@@ -38,10 +48,14 @@ in the library). `path` and `take_id` are given one at a time.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import mimetypes
+import shutil
 import threading
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ...music import job_schemas as js
 from .core import _dpc_home, _resolve_file_path
@@ -55,6 +69,9 @@ MAX_FILES_PER_TURN = 4
 CHAT_POST_FILE_TIMEOUT_SEC = 120
 # A caption longer than this is cut: it is a line under a file, not a message.
 MAX_CAPTION_CHARS = 500
+# The group send (the copy into the group's files, the one hash, the offers), within the
+# tool's CHAT_POST_FILE_TIMEOUT_SEC after the checked temporary copy.
+GROUP_SEND_TIMEOUT_SEC = 90
 
 # Sources whose turns never post a file into the DPC chat (D41): the answer goes back
 # to Telegram or Discord, where a copy in the DPC folder would reach nobody.
@@ -213,8 +230,8 @@ def turn_refusal(ctx: ToolContext) -> Optional[str]:
 
     The registry's gate asks the owner first when someone else asked for the turn
     (ADR-053, `owner_approval_for_others`); this is the second line, per call, plus what
-    only this tool knows: the turn must be in the agent's own 1:1 chat and not come from
-    Telegram or Discord."""
+    only this tool knows: the turn must be in the agent's own 1:1 chat or in a group, and
+    not come from Telegram or Discord."""
     from ..owner_approval import may_run_owner_tool, turn_asker
     where = place_refusal(ctx)
     if where:
@@ -225,21 +242,25 @@ def turn_refusal(ctx: ToolContext) -> Optional[str]:
     return None
 
 
+def in_group(ctx: ToolContext) -> bool:
+    """Is this turn in a group chat (the file goes to the group, D50 G)?"""
+    return (getattr(ctx, "conversation_id", None) or "").startswith("group-")
+
+
 def place_refusal(ctx: ToolContext) -> Optional[str]:
-    """Why this turn's chat is not one a file is posted into (Telegram, Discord, a group, any
-    chat but the agent's own 1:1), or None. Read before the owner check, so the reason the
+    """Why this turn's chat is not one a file is posted into (Telegram, Discord, any chat but
+    the agent's own 1:1 and a group), or None. Read before the owner check, so the reason the
     tool can never run here is the one given, and the gate raises no card for it."""
     source = getattr(ctx, "message_source", None)
     where = _REFUSED_SOURCES.get(source or "")
     if where is None and getattr(ctx, "reply_telegram_chat_id", None):
         where = "Telegram"
     if where:
-        return _refusal(f"this turn came from {where}; a file is posted only into the agent's "
-                        f"own chat in DPC, from a turn in that chat.")
+        return _refusal(f"this turn came from {where}; a file is posted only into a chat in DPC "
+                        f"(the agent's own chat or a group), from a turn in that chat.")
     conversation_id = getattr(ctx, "conversation_id", None) or ""
-    if conversation_id.startswith("group-"):
-        return _refusal("this turn is in a group; posting a file into a group is not available "
-                        "yet, only into the agent's own 1:1 chat.")
+    if in_group(ctx):
+        return None
     if not conversation_id.startswith("agent_") or conversation_id != ctx.agent_root.name:
         return _refusal(f"this turn is not in the agent's own 1:1 chat "
                         f"({conversation_id or 'no chat'}).")
@@ -303,6 +324,8 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None,
     refusal = turn_refusal(ctx)
     if refusal:
         return refusal
+    if in_group(ctx):
+        return _post_into_group(ctx, source, caption, music)
     if not source.is_file():
         return _refusal(f"'{source}' is not a file.")
     bad = content_refusal(source)
@@ -374,10 +397,173 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None,
             f"answer in this chat. {count} of {MAX_FILES_PER_TURN} files this turn.")
 
 
-def _post_take(ctx: ToolContext, take_id: str, caption: Optional[str]) -> str:
-    """Post a music take by its id: core gives the take's own file (`get_music_take`, D44),
-    so neither `_resolve_file_path` nor the DPC-home rule applies to a path the agent never
-    named; every other limit does (post_file)."""
+def _group_cap_mb(ctx: ToolContext) -> float:
+    """The cap on a file posted into a group: the group file-transfer cap
+    (`file_transfer_cap_mb` with the group sender's default) and D41's cap on any posted file
+    (its default, 100 MB, is what CHAT_POST_FILE_TIMEOUT_SEC was set for); one value when the
+    rules name `file_transfer.max_size_mb`."""
+    from dpc_client_core import service as service_mod
+    rules = _rules(ctx)
+    return min(service_mod.file_transfer_cap_mb(rules),
+               service_mod.file_transfer_cap_mb(rules, service_mod.SENDER_FILE_DEFAULT_MAX_MB))
+
+
+def _group_size_refusal(ctx: ToolContext, size_bytes: int) -> Optional[str]:
+    from dpc_client_core import service as service_mod
+    max_mb = _group_cap_mb(ctx)
+    too_large = service_mod.file_transfer_cap_refusal(size_bytes, max_mb)
+    if too_large:
+        return (f"{too_large}; a file posted into a group is held to the group file-transfer "
+                f"limit of {max_mb:g} MB.")
+    return None
+
+
+def _group_name(ctx: ToolContext) -> str:
+    """The group as a card or a line names it: its name and id."""
+    group_id = getattr(ctx, "conversation_id", None) or ""
+    name = ""
+    manager = getattr(getattr(ctx, "dpc_service", None), "group_manager", None)
+    try:
+        group = manager.get_group(group_id) if manager is not None else None
+        name = (getattr(group, "name", "") or "") if group is not None else ""
+    except Exception:
+        name = ""
+    name = name or getattr(ctx, "conversation_title", None) or ""
+    return f"'{name}' ({group_id})" if name and name != group_id else group_id
+
+
+def _caption_text(caption: Optional[str]) -> str:
+    return " ".join(caption.split())[:MAX_CAPTION_CHARS] if caption and caption.strip() else ""
+
+
+def _checked_temp_copy(source: Path) -> Tuple[Optional[Path], Optional[str]]:
+    """(a copy of `source` under its own name in a fresh folder of the DPC temp dir, None),
+    or (None, refusal). The copy is what the group is sent, and its content is checked again:
+    the source may change after the first check, and the group send offers what it copied at
+    once, with no second look."""
+    from dpc_client_core import service as service_mod
+    folder = Path(service_mod.DPC_HOME_DIR) / "temp" / f"chat_post_file_{uuid.uuid4().hex[:12]}"
+    try:
+        folder.mkdir(parents=True, exist_ok=False)
+        copy = folder / source.name
+        shutil.copyfile(source, copy)
+    except OSError as e:
+        shutil.rmtree(folder, ignore_errors=True)
+        return None, _refusal(f"the file could not be copied to be checked ({e.__class__.__name__}).")
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    changed = content_refusal(copy)
+    if changed:
+        shutil.rmtree(folder, ignore_errors=True)
+        return None, _refusal(changed)
+    return copy, None
+
+
+class _GroupSendUnavailable(Exception):
+    """No service loop to send the group file on (a test, a probe)."""
+
+
+def _send_into_group(ctx: ToolContext, file_path: Path, text: str,
+                     music: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """`send_group_agent_file` on the service loop; raises _GroupSendUnavailable or
+    TimeoutError."""
+    service = getattr(ctx, "dpc_service", None)
+    loop = getattr(ctx, "agent_event_loop", None)
+    send = getattr(service, "send_group_agent_file", None) if service is not None else None
+    if send is None or loop is None or loop.is_closed():
+        raise _GroupSendUnavailable("the group file send is not available in this context")
+    future = asyncio.run_coroutine_threadsafe(send(
+        group_id=ctx.conversation_id, agent_name=ctx.agent_root.name, file_path=str(file_path),
+        text=text, music=dict(music) if music else None), loop)
+    try:
+        return future.result(timeout=GROUP_SEND_TIMEOUT_SEC)
+    except BaseException:
+        future.cancel()
+        raise
+
+
+def _post_into_group(ctx: ToolContext, source: Path, caption: Optional[str],
+                     music: Optional[Dict[str, Any]]) -> str:
+    """Post `source`, already resolved and admitted, into the group this turn is in (D50 G):
+    the allow-list, the group size cap and the per-turn count, then the checked temporary
+    copy goes through the person's group file path, authored by this agent."""
+    if not source.is_file():
+        return _refusal(f"'{source}' is not a file.")
+    bad = content_refusal(source)
+    if bad:
+        return _refusal(bad)
+    too_large = _group_size_refusal(ctx, source.stat().st_size)
+    if too_large:
+        return _refusal(too_large)
+    key = str(source)
+    with _post_lock:
+        posted = ctx.posted_group_files
+        if key in posted:
+            return (f"{source.name} was already posted into this group in this turn; it is "
+                    f"posted once. {len(posted)} of {MAX_FILES_PER_TURN} files this turn.")
+        if len(posted) >= MAX_FILES_PER_TURN:
+            return _refusal(f"this turn already posted {MAX_FILES_PER_TURN} files, the most one "
+                            f"turn may post.")
+        posted.append(key)  # the slot is held while the file is sent
+
+    def release() -> None:
+        with _post_lock:
+            if key in ctx.posted_group_files:
+                ctx.posted_group_files.remove(key)
+
+    copy = None
+    try:
+        copy, refusal = _checked_temp_copy(source)
+        if refusal:
+            release()
+            return refusal
+        too_large = _group_size_refusal(ctx, copy.stat().st_size)
+        if too_large:
+            release()
+            return _refusal(too_large)
+        try:
+            answer = _send_into_group(ctx, copy, _caption_text(caption), music)
+        except _GroupSendUnavailable as e:
+            release()
+            return _refusal(f"{e}.")
+        except TimeoutError:
+            # The send may still finish: the slot stays taken, so a retry cannot post twice.
+            return (f"⚠️ chat_post_file: the group send of {source.name} did not answer within "
+                    f"{GROUP_SEND_TIMEOUT_SEC} s; it may still appear in the group. Do not post it "
+                    f"again in this turn.")
+        except BaseException:
+            release()
+            raise
+    finally:
+        if copy is not None:
+            shutil.rmtree(copy.parent, ignore_errors=True)
+    if not isinstance(answer, dict) or answer.get("status") != "success":
+        release()
+        message = answer.get("message", "error") if isinstance(answer, dict) else str(answer)
+        return f"⚠️ chat_post_file refused: the group send refused the file: {message}"
+    with _post_lock:
+        count = len(ctx.posted_group_files)
+    offered = len(answer.get("transfer_ids") or [])
+    offline = len(answer.get("offline_members") or [])
+    size_mb = round(int(answer.get("size_bytes") or 0) / (1024 * 1024), 2)
+    who = answer.get("sender_name") or ctx.agent_root.name
+    log.info("chat_post_file: %s posted %s into group %s (%s, %s bytes), offered to %d member(s)",
+             who, source.name, ctx.conversation_id, answer.get("mime_type"),
+             answer.get("size_bytes"), offered)
+    reach = f"offered to {offered} connected member(s)"
+    if offline:
+        reach += f"; {offline} member(s) not connected were not offered it"
+    name = Path(answer.get("file_path") or source.name).name
+    return (f"Posted {name} ({answer.get('mime_type')}, {size_mb} MB) into the group "
+            f"{_group_name(ctx)} as {who}: kept in the group's files and {reach}. It is a group "
+            f"message of its own, already shown; it is not attached to your answer. "
+            f"{count} of {MAX_FILES_PER_TURN} files this turn.")
+
+
+def _take_source(ctx: ToolContext, take_id: str) -> Union[str, Tuple[Path, Dict[str, Any]]]:
+    """(the take's own file, its music block), or the refusal: core resolves the id through
+    `get_music_take` (D44), and only a finished take the person has not discarded is posted."""
     from .music import SERVICE_CALL_TIMEOUT_S, _service_call, _Unavailable
     try:
         answer = _service_call(ctx, "get_music_take", take_id=take_id)
@@ -405,7 +591,18 @@ def _post_take(ctx: ToolContext, take_id: str, caption: Optional[str]) -> str:
         return _refusal(f"take '{take_id}' has no file on this computer.")
     music = {"track_id": take.get("library_track_id") or None,
              "take_id": take.get("take_id") or take_id, "job_id": take.get("job_id")}
-    return post_file(ctx, Path(take["path"]), caption, music=music)
+    return Path(take["path"]), music
+
+
+def _post_take(ctx: ToolContext, take_id: str, caption: Optional[str]) -> str:
+    """Post a music take by its id: core gives the take's own file (`get_music_take`, D44),
+    so neither `_resolve_file_path` nor the DPC-home rule applies to a path the agent never
+    named; every other limit does (post_file)."""
+    found = _take_source(ctx, take_id)
+    if isinstance(found, str):
+        return found
+    source, music = found
+    return post_file(ctx, source, caption, music=music)
 
 
 def _chat_post_file(ctx: ToolContext, path: Optional[str] = None, caption: Optional[str] = None,
@@ -437,12 +634,15 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "chat_post_file",
                 "description": (
-                    "Post a file into your own 1:1 chat with the person, attached to your answer "
-                    "(an audio file plays in the message). Use it only when the person asks for "
-                    "the file. The file is copied, never moved. Limits: at most "
+                    "Post a file into the chat you are answering in: in your own 1:1 chat it is "
+                    "attached to your answer (an audio file plays in the message); in a group it "
+                    "is sent to every member as a group file message of its own, under your name, "
+                    "right away. Use it only when the person asks for the file. The file is "
+                    "copied, never moved. Limits: at most "
                     f"{MAX_FILES_PER_TURN} files per turn; the file-transfer size cap "
-                    "(file_transfer.max_size_mb, 100 MB by default); only in your 1:1 chat in "
-                    "DPC (a group, Telegram or Discord turn is refused); the path is resolved as "
+                    "(file_transfer.max_size_mb, 100 MB by default); only in DPC (a Telegram or "
+                    "Discord turn is refused); in a group, a file from a store the group may not "
+                    "see (your private memory, for one) is refused; the path is resolved as "
                     "read_file resolves it (relative to your sandbox, or an absolute path your "
                     "extended read access reaches). Only these file types are posted, checked by their content as "
                     f"well as their name: {ALLOWED_TYPES_TEXT}; anything else is refused. A music take is posted by its take_id "
@@ -481,13 +681,58 @@ def get_tools() -> List[ToolEntry]:
 # ADR-053: chat_post_file asks the owner when someone else asked for the turn (it was
 # owner_only, ADR-051 D43). The card names the file or the take.
 def _chat_post_file_approval(ctx: ToolContext, args: Dict[str, Any]):
-    from ..owner_approval import Ask, Exempt, clip
+    from ..owner_approval import Ask, Exempt, Refuse, clip
     if place_refusal(ctx):
         return Exempt("a chat the tool never posts into; it refuses with its reason")
+    caption = str(args.get("caption") or "")
+    if in_group(ctx):
+        # D50 G: the card says what reaches every member: the file, its size and type, the group.
+        described = _group_post_card(ctx, args)
+        if described.startswith("⚠️"):
+            return Refuse(described)
+        return Ask(clip(described + (f", with the caption: {caption}" if caption else "")))
     what = (f"take {args['take_id']}" if args.get("take_id")
             else f"the file {args.get('path') or '(none named)'}")
-    caption = str(args.get("caption") or "")
     return Ask(clip(f"post {what} into the chat" + (f", with the caption: {caption}" if caption else "")))
+
+
+def _group_post_card(ctx: ToolContext, args: Dict[str, Any]) -> str:
+    """"What exactly" for a foreign request to post into a group, or the refusal the tool would
+    give anyway (then no card is raised): a store closed to the group's audience, a type off
+    the allow-list, a file over the group cap, a take that is not postable."""
+    path = args.get("path").strip() if isinstance(args.get("path"), str) else args.get("path")
+    take_id = args.get("take_id").strip() if isinstance(args.get("take_id"), str) else args.get("take_id")
+    if path and take_id:
+        return _refusal("give either path or take_id, not both.")
+    if take_id:
+        found = _take_source(ctx, take_id)
+        if isinstance(found, str):
+            return found
+        source, _music = found
+        what = f"take {take_id}, the file {source.name}"
+    elif path:
+        try:
+            source = _resolve_file_path(ctx, path)
+        except PermissionError as e:
+            return _refusal(f"{e}.")
+        home_refusal = _dpc_home_refusal(ctx, source)
+        if home_refusal:
+            return home_refusal
+        what = f"the file {source.name} ({source})"
+    else:
+        return _refusal("give path (a file) or take_id (a music take).")
+    if not source.is_file():
+        return _refusal(f"'{source}' is not a file.")
+    bad = content_refusal(source)
+    if bad:
+        return _refusal(bad)
+    size = source.stat().st_size
+    too_large = _group_size_refusal(ctx, size)
+    if too_large:
+        return _refusal(too_large)
+    mime = mimetypes.guess_type(str(source))[0] or "application/octet-stream"
+    return (f"post {what}, {round(size / (1024 * 1024), 2)} MB ({size} bytes), {mime}, into the group "
+            f"{_group_name(ctx)}, where every member receives it")
 
 
 _get_chat_file_tools_unflagged = get_tools

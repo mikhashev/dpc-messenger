@@ -446,7 +446,11 @@ async def test_the_fifth_file_in_a_turn_is_refused(tmp_path, home, monkeypatch):
 
 NOT_OFFERED = [
     # (source, conversation): the registry's owner_only gate; the schema is not offered
-    ("group", "group-mixed"),   # other_node: a group with a foreign node
+    # other_node: a group with a foreign node. Since ADR-051 D50 G the tool posts into a group;
+    # here nobody the agent knows asked, and the take is on an extended path the room may not
+    # see, so it is refused before any card (the group cases: test_chat_post_file_posts_into_
+    # the_group_it_answers_in_as_the_agent.py).
+    ("group", "group-mixed"),
     ("discord", CID),           # a stranger, even in the agent's own chat
     ("telegram", CID),          # Telegram that is not the owner's private chat
 ]
@@ -462,8 +466,8 @@ async def test_a_turn_that_is_not_the_owners_is_not_offered_the_tool_and_a_force
     await w.turn([{"path": str(_take(home))}], conv=conv, source=source)
 
     turn = w.provider.turns[0]
-    # ADR-053: offered on every turn but Discord's read-only one; a group or a Telegram chat is
-    # never posted into, and the tool says so with no card.
+    # ADR-053: offered on every turn but Discord's read-only one; a Telegram chat is never posted
+    # into, and the tool says so with no card.
     if source == "discord":
         assert "chat_post_file" not in turn["offered"], turn["offered"]
     else:
@@ -479,7 +483,7 @@ async def test_a_turn_that_is_not_the_owners_is_not_offered_the_tool_and_a_force
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source,conv,why", [
     ("telegram_owner", CID, "came from Telegram"),
-    ("group", "group-own", "in a group"),
+    # A group is posted into since ADR-051 D50 G (test_chat_post_file_posts_into_the_group_...).
 ])
 async def test_an_owner_turn_outside_the_dpc_one_to_one_chat_is_refused_with_its_reason(
     tmp_path, home, monkeypatch, source, conv, why,

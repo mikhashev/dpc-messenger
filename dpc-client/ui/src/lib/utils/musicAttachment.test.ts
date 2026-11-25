@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   audioLengthLabel, attachmentCaption, musicTrackIdOf, showsOpenInPlayer, audioMetaParts,
-  renderableAttachments, recordHasContent, openTrackPlan,
+  renderableAttachments, recordHasContent, openTrackPlan, groupFileAgentFields,
 } from './musicAttachment';
 import { mapBackendMessage } from './messageMapper';
 import chatList from '../components/ChatMessageList.svelte?raw';
 import page from '../../routes/+page.svelte?raw';
 import service from '../services/music.ts?raw';
+import router from '../panels/MessageRouterPanel.svelte?raw';
 
 // The record chat_post_file writes (ADR-051 D40, D41): a `file` attachment with
 // keep_agent_chat_attachment's sha256 and duration_seconds, a caption, and the
@@ -146,5 +147,27 @@ describe('the wiring', () => {
     const open = service.slice(service.indexOf('export async function openTrackInPlayer'));
     expect(open).toContain('enqueue(get(musicPlayback).queue, [trackId], true)');
     expect(open).toContain('return startAt(q, index, true);');
+  });
+});
+
+// ADR-051 D50 G: an agent of this node posts a take into a group (chat_post_file). The live
+// event names the agent; a person's file and a peer's file carry no sender_type.
+describe('a file an agent posted into a group', () => {
+  it("is drawn as the agent's, owned by this node", () => {
+    expect(groupFileAgentFields({ sender_type: 'agent', agent_owner: 'dpc-node-this' }))
+      .toEqual({ isAgent: true, agentOwner: 'dpc-node-this' });
+  });
+  it("a person's or a peer's file adds nothing", () => {
+    expect(groupFileAgentFields({ sender_type: 'human' })).toEqual({});
+    expect(groupFileAgentFields({})).toEqual({});
+    expect(groupFileAgentFields(null)).toEqual({});
+  });
+  it('the router spreads the fields onto the live group file bubble', () => {
+    expect(router).toContain('...groupFileAgentFields(msg),');
+  });
+  it('a take received on a peer (no music block) plays and offers no Open in player', () => {
+    const received = { ...take, music: undefined, caption: undefined };
+    expect(showsOpenInPlayer(received)).toBe(false);
+    expect(showsOpenInPlayer(take)).toBe(true);
   });
 });

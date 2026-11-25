@@ -75,3 +75,14 @@ export function openTrackPlan(
     if (loadedId === entry.id && playing) return 'already-playing';
     return 'play';
 }
+
+/** The agent fields of a live group file bubble (ADR-051 D50 G): a file an agent of this
+ *  node posted into a group (`chat_post_file`) arrives as `group_file_received` with
+ *  `sender_type: "agent"` and `agent_owner`, and is drawn as the agent's, as its text posts
+ *  are (`mapBackendMessage`). A person's file, or a peer's, adds nothing. */
+export function groupFileAgentFields(
+    event: { sender_type?: string | null; agent_owner?: string | null } | null | undefined,
+): { isAgent?: true; agentOwner?: string | null } {
+    if (event?.sender_type !== 'agent') return {};
+    return { isAgent: true, agentOwner: event.agent_owner || null };
+}

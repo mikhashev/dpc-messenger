@@ -356,6 +356,36 @@ def roster_refusal(group_manager, requester_node_id: str, group_id: str, node_id
     return {"status": "error", "message": f"Cannot {verb} {node_id}: {reason}"}
 
 
+def agent_post_name(service, group, group_id: str, agent_name: str,
+                    caller: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """(the name an agent post of this node carries in `group`, None), or (name, refusal)
+    when this node did not register that name for the group.
+
+    A registered folder id resolves to the name it was registered under: the
+    check_back delivery passed `agent_forge_7244b181` and was refused, and the
+    report never reached the chat. The record and the wire carry the display
+    name, never the id. Shared by the agent's text posts and its file posts
+    (`send_group_agent_file`, ADR-051 D50 G)."""
+    node_id = service.p2p_manager.node_id
+    registered_ids = (getattr(group, "agents", None) or {}).get(node_id) or []
+    if agent_name in registered_ids and not agent_name.startswith(EXTERNAL_AGENT_PREFIX):
+        names = (getattr(group, "agent_names", None) or {}).get(node_id) or {}
+        resolved = names.get(agent_name) or service._get_agent_display_name(agent_name)
+        logger.info("%s: agent id %r posts as %r in group %s",
+                    caller, agent_name, resolved, group_id)
+        agent_name = resolved
+
+    allowed = service._names_this_node_may_post_as(group)
+    if (agent_name or "").lower() not in allowed:
+        logger.warning(
+            "%s: %r is not a name this node registered for "
+            "group %s (registered: %s) — refused",
+            caller, agent_name, group_id, sorted(allowed))
+        return agent_name, {"status": "error", "message":
+                            f"agent name not registered for this node in this group: {agent_name}"}
+    return agent_name, None
+
+
 def group_post_refusal(service, group, what: str) -> Optional[Dict[str, Any]]:
     """The error a group sender returns when this node may not post into `group`, else None.
 
@@ -8317,27 +8347,11 @@ class CoreService(MusicCommandsMixin):
         if refusal:
             return refusal
 
-        # A registered folder id resolves to the name it was registered under:
-        # the check_back delivery passed `agent_forge_7244b181` and was refused,
-        # and the report never reached the chat. The record and the wire carry
-        # the display name, never the id.
         node_id = self.p2p_manager.node_id
-        registered_ids = (getattr(group, "agents", None) or {}).get(node_id) or []
-        if agent_name in registered_ids and not agent_name.startswith(EXTERNAL_AGENT_PREFIX):
-            resolved = ((getattr(group, "agent_names", None) or {}).get(node_id) or {}).get(agent_name) \
-                or self._get_agent_display_name(agent_name)
-            logger.info("send_group_agent_message: agent id %r posts as %r in group %s",
-                        agent_name, resolved, group_id)
-            agent_name = resolved
-
-        allowed = self._names_this_node_may_post_as(group)
-        if (agent_name or "").lower() not in allowed:
-            logger.warning(
-                "send_group_agent_message: %r is not a name this node registered for "
-                "group %s (registered: %s) — refused",
-                agent_name, group_id, sorted(allowed))
-            return {"status": "error", "message":
-                    f"agent name not registered for this node in this group: {agent_name}"}
+        agent_name, refusal = agent_post_name(self, group, group_id, agent_name,
+                                              "send_group_agent_message")
+        if refusal:
+            return refusal
 
         # A bridge's value arrives through the local API too; an unknown one is
         # an answer, as on the 1:1 record (agent_manager._record_answer).
@@ -8785,6 +8799,27 @@ class CoreService(MusicCommandsMixin):
     async def send_group_file(
         self, group_id: str, file_path: str, file_size_bytes: int = None, text: str = ""
     ) -> Dict[str, Any]:
+        """The person sends a file to a group (`_send_group_file`). `file_size_bytes` is the
+        size the UI measured; it only sizes the UI's command timeout. The body is named on
+        the class, so a stand-in service that borrows only this method still sends."""
+        return await CoreService._send_group_file(self, group_id, file_path, text)
+
+    async def send_group_agent_file(
+        self, group_id: str, agent_name: str, file_path: str, text: str = "",
+        music: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """An agent of this node posts a file into a group (ADR-051 D50 G, `chat_post_file`).
+
+        The person's path, with the agent as the record's signed author: `sender_type`
+        "agent", the name checked as `send_group_agent_message` checks it, `agent_owner`
+        this node. Not a local API command (ALLOWED_COMMANDS): the tool calls it."""
+        return await CoreService._send_group_file(self, group_id, file_path, text,
+                                                  agent_name=agent_name, music=music)
+
+    async def _send_group_file(
+        self, group_id: str, file_path: str, text: str = "",
+        agent_name: Optional[str] = None, music: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Send a file to a group: keep it here first, then offer it to the connected members.
 
         Local-first, like send_group_image and send_group_voice_message (ADR-032
@@ -8802,12 +8837,15 @@ class CoreService(MusicCommandsMixin):
         Args:
             group_id: Target group ID
             file_path: Path to file to send
-            file_size_bytes: Size the UI measured; it only sizes the UI's command timeout
             text: What the person wrote with the file. It is the text of the one
                 message the file is (the sender's record, the broadcast, every
                 member's copy through the offer's `text`), and its @mentions wake
                 the group's agents as a screenshot's caption does. Empty keeps
                 "Sent file: <name> (<MB> MB)" as the record's text.
+            agent_name: None for the person; an agent of this node posting the file
+                (`send_group_agent_file`): the record is the agent's, and the words
+                wake nobody.
+            music: The take's `{track_id, take_id, job_id}`, on this node's record only.
 
         Returns:
             On success: `saved_locally` (the copy and the record exist), `file_path`
@@ -8827,6 +8865,11 @@ class CoreService(MusicCommandsMixin):
             refusal = group_post_refusal(self, group, "send_group_file")
             if refusal:
                 return refusal
+            if agent_name is not None:
+                agent_name, refusal = agent_post_name(self, group, group_id, agent_name,
+                                                      "send_group_agent_file")
+                if refusal:
+                    return refusal
 
             path = Path(file_path)
             if not path.exists():
@@ -8874,6 +8917,8 @@ class CoreService(MusicCommandsMixin):
                     "status": "completed",
                     "file_path": str(local_path),
                 }
+                if music:
+                    attachment["music"] = dict(music)
 
                 # One id for the record, the broadcast and the whole fan-out: every
                 # member's copy, and every relay of it, is this one message. The clock
@@ -8891,12 +8936,17 @@ class CoreService(MusicCommandsMixin):
                 # `saved_locally` with no `msg_index`. Seeded, never consulted.
                 self._processed_message_ids.add(group_file_ui_key(group_id, final_filename))
                 # Store, then read the index, then announce (as send_group_image).
+                if agent_name is None:
+                    author = {"sender_name": self.p2p_manager.get_display_name() or "User",
+                              "sender_type": "human"}
+                else:
+                    author = {"sender_name": agent_name, "sender_type": "agent",
+                              "agent_owner": self.p2p_manager.node_id}
                 _group_monitor.add_message(
                     "user", caption or f"Sent file: {final_filename} ({size_mb} MB)", [attachment],
                     sender_node_id=self.p2p_manager.node_id,
-                    sender_name=(self.p2p_manager.get_display_name() or "User"),
                     message_id=message_id,
-                    sender_type="human",
+                    **author,
                 )
             except BaseException:
                 # No record names the copy yet: it would be a file nothing points at.
@@ -8910,9 +8960,11 @@ class CoreService(MusicCommandsMixin):
                 logger.warning("Group file %s recorded in %s but the history was not saved yet",
                                final_filename, group_id)
             msg_index = _group_monitor.get_last_msg_index()
+            # The agent's post shows as its text posts do: its name, this node, an agent.
+            shown_as = ({"sender_node_id": "user", "sender_name": "You"} if agent_name is None
+                        else {"sender_node_id": self.p2p_manager.node_id, **author})
             await self.local_api.broadcast_event("group_file_received", {
-                "sender_node_id": "user",
-                "sender_name": "You",
+                **shown_as,
                 "text": caption,
                 "message_id": message_id,
                 "msg_index": msg_index,
@@ -8991,8 +9043,9 @@ class CoreService(MusicCommandsMixin):
             # The words written with the file reach the group's agents as a
             # screenshot's caption does (send_group_image): its @mentions decide
             # who answers. The record is already stored, so the woken agent reads
-            # the file's marker beside the words.
-            if caption:
+            # the file's marker beside the words. An agent's words wake nobody: its
+            # answer, posted after the turn, routes its mentions under the depth bound.
+            if caption and agent_name is None:
                 try:
                     sender_display = self.p2p_manager.get_display_name() or "User"
                     await self._handle_group_agent_mentions(group_id, caption, sender_display)
@@ -9011,6 +9064,7 @@ class CoreService(MusicCommandsMixin):
                 "msg_index": msg_index,
                 "size_bytes": size_bytes,
                 "mime_type": mime_type,
+                **({"sender_name": agent_name} if agent_name is not None else {}),
                 "transfer_ids": transfer_ids,
                 "offline_members": offline_members,
                 **not_offered.fields(),

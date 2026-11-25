@@ -573,6 +573,9 @@ export interface GroupFileEvent {
     msg_index?: number;
     sender_node_id?: string;
     sender_name?: string;
+    /** "agent" for a file an agent of this node posted into the group (chat_post_file, ADR-051 D50 G). */
+    sender_type?: string;
+    agent_owner?: string;
     filename: string;
     transfer_id?: string;
     size_bytes?: number;

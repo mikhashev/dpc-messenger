@@ -10,6 +10,7 @@
   import { stopNotesOf } from '$lib/utils/stopNotes';
   import { imageAnswerBubble } from '$lib/utils/imageAnswerBubble';
   import { liveBubbleId } from '$lib/utils/liveMessageIdentity';
+  import { groupFileAgentFields } from '$lib/utils/musicAttachment';
   import {
     p2pMessages,
     groupTextReceived,
@@ -261,7 +262,9 @@
             // message showed no index until the page was reloaded and the
             // history came back off disk with one.
             msg_index: msg.msg_index,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            // A file this node's agent posted (chat_post_file) is drawn as the agent's.
+            ...groupFileAgentFields(msg),
           };
           if (msg.attachments && msg.attachments.length > 0) {
             messageData.attachments = msg.attachments;
