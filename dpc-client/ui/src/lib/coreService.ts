@@ -152,6 +152,7 @@ import type { PrepReport } from './utils/musicLyricsPrep';
 import type { RawTranscriptAnswer } from './utils/musicLyricsFilter';
 import { callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
 import type { DiscardReason, MusicCapabilities, MusicEngine, MusicJob, MusicTake } from './utils/musicCreate';
+import type { JobQc, TakeQc } from './utils/musicQc';
 import type { DeleteExportAnswer, MusicExportInfo, PlaylistExportAnswer, TrackExportAnswer } from './utils/musicExport';
 
 // ADR-052 L4: a dictation may wait in line for the GPU up to the dictation bound
@@ -1530,6 +1531,10 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     // its adapters and stop the other engine), a stop drains a running generation,
                     // and ebur128 reads a whole take (up to 10 minutes of audio).
                     timeout = 180000;
+                } else if (command === 'judge_music_take' || command === 'backfill_music_qa') {
+                    // 600s: the judge waits for the card a running engine holds and starts the audio model;
+                    // a backfill runs ffmpeg over each take in turn.
+                    timeout = 600000;
                 } else if (command === 'export_music_track') {
                     // 600s: an MP3 or Opus encode of a long track, its ebur128 check and, when it overshoots
                     // -1 dBTP, up to three more encodes (music/export.py MAX_ENCODES).
@@ -2278,6 +2283,23 @@ export function listMusicDiscardReasons(prefix?: string, limit = 8): Promise<Mus
 /** Measure a take's loudness with ffmpeg ebur128 (answered as stored unless `force`). */
 export function measureMusicTakeLoudness(takeId: string, force = false): Promise<MusicAnswer<{ take: MusicTake; measured: boolean }>> {
     return callMusic(sendCommand, 'measure_music_take_loudness', force ? { take_id: takeId, force: true } : { take_id: takeId });
+}
+
+/** The on-demand audio judge for one take (core music/qc_commands.py); the answer holds its new `qc` and the ranking state. */
+export function judgeMusicTake(takeId: string): Promise<MusicAnswer<{ take_id: string; qc: TakeQc; ranking: JobQc['ranking'] }>> {
+    return callMusic(sendCommand, 'judge_music_take', { take_id: takeId });
+}
+
+/** Each take's QC record, the ranking state, the configured judge alias and the display order. */
+export function getMusicJobQc(jobId: string): Promise<MusicAnswer<JobQc & { job_id: string; takes: { take_id: string; variant: number; qc: TakeQc | null }[] }>> {
+    return callMusic(sendCommand, 'get_music_job_qc', { job_id: jobId });
+}
+
+/** Measure stage-1 QA for takes that have none (one take, one job, or all of them; `force` measures again). */
+export function backfillMusicQa(args: { take_id?: string; job_id?: string; force?: boolean }): Promise<MusicAnswer<{
+    counts: Record<string, number>;
+    takes: { take_id: string; job_id: string; variant?: number; outcome: string; verdict?: string; error?: string }[] }>> {
+    return callMusic(sendCommand, 'backfill_music_qa', args);
 }
 
 /** An engine's status (`engine`: 'yue2' or 'acestep'; the default engine, yue2, when

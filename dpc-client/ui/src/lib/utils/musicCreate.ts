@@ -21,6 +21,7 @@
 //   short for the lyrics (an estimate: ~10 s per sung line plus a ~20 s intro).
 
 import { lyricsPrepFor, type LyricsPrepState } from './musicLyricsPrep';
+import type { TakeQc } from './musicQc';
 
 // -- records from the core (music/job_schemas.py, capabilities.py) -----------------
 
@@ -107,6 +108,8 @@ export interface MusicTake {
     /** The stage-1 `mp.qa/1`, or null when it could not be filled (the report says why). */
     qa?: Record<string, unknown> | null;
     qa_report?: TakeQaReport | null;
+    /** The take's `mp.qc/1` (stage-1 summary beside the judge's result), absent on a take made before QC. */
+    qc?: TakeQc | null;
     engine?: string | null;
     lm_seed?: number | null;
 }

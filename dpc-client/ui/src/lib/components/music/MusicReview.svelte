@@ -16,6 +16,12 @@
   from the queue while it plays and gives it back, paused where it was, when the view
   closes (`endReview`).
 
+  QC (core music/qc.py, `mp.qc/1`): each take shows its stage-1 badge, and the judge's overall score,
+  scores and issues once a judge has run. **Judge** (only when the core has a judge alias configured,
+  `get_music_job_qc.judge_alias`) asks the audio judge on demand; **Measure QA** measures stage 1 for a
+  take that is "not measured" (a take made before QA). Takes are shown in the core's display order only
+  when ranking is on, otherwise in variant order. QC is advice: it never blocks Keep or Discard.
+
   Keep marks the take accepted, with an optional add-to-playlist (there is no track rename
   in the library yet). Discard and "None of these" need a reason (MusicReasonBox).
 
@@ -54,7 +60,19 @@
     reviewTogglePlay,
     setPlaylistTracks,
   } from '$lib/services/music';
-  import { discardTake, fetchTakes, keepTake, measureTakeLoudness, musicTakes, rejectAllTakes } from '$lib/services/musicJobs';
+  import {
+    discardTake,
+    fetchJobQc,
+    fetchTakes,
+    judgeTake,
+    keepTake,
+    measureTakeLoudness,
+    measureTakeQa,
+    musicJobQc,
+    musicTakes,
+    rejectAllTakes,
+  } from '$lib/services/musicJobs';
+  import { judgeOffered, measureQaOffered, orderTakes, qcIssueCount, qcLine } from '$lib/utils/musicQc';
   import MusicReasonBox from './MusicReasonBox.svelte';
   import MusicComments from './MusicComments.svelte';
   import MusicWaveform from './MusicWaveform.svelte';
@@ -63,7 +81,10 @@
 
   let { job, classes = [], onclose }: { job: MusicJob; classes?: FailureClass[]; onclose: () => void } = $props();
 
-  let takes = $derived<MusicTake[]>($musicTakes[job.id] ?? []);
+  let rawTakes = $derived<MusicTake[]>($musicTakes[job.id] ?? []);
+  let jobQc = $derived($musicJobQc[job.id] ?? null);
+  // Variant order, or the core's ranked order when ranking is on.
+  let takes = $derived(orderTakes(rawTakes, jobQc));
   let loadError = $state('');
   let actionError = $state('');
   let notice = $state('');
@@ -77,11 +98,13 @@
     if (openedFor) void endReview();
     openedFor = id;
     loadError = '';
-    current = 0;
-    previous = null;
+    currentId = null;
+    previousId = null;
+    qcError = {};
     fetchTakes(id).then(a => {
       if (!a.ok) loadError = a.message;
     });
+    void fetchJobQc(id);
   });
 
   // A take with no loudness is measured once (the core answers it as stored when it has one).
@@ -101,8 +124,12 @@
 
   // -- the transport ----------------------------------------------------------------
 
-  let current = $state(0);
-  let previous = $state<number | null>(null);
+  // The picked take is kept by id: a new display order (a judge ranked them) moves the letters, not the pick.
+  let currentId = $state<string | null>(null);
+  let previousId = $state<string | null>(null);
+  let current = $derived(Math.max(0, takes.findIndex(t => t.id === currentId)));
+  let previousIndex = $derived(previousId === null ? -1 : takes.findIndex(t => t.id === previousId));
+  let previous = $derived<number | null>(previousIndex >= 0 ? previousIndex : null);
   let rv = $derived($musicReview);
   let take = $derived<MusicTake | null>(takes[current] ?? null);
   let loaded = $derived(!!take?.library_track_id && rv.active && rv.trackId === take.library_track_id);
@@ -151,8 +178,8 @@
     if (i === current && (loaded || !rv.active)) return;
     const at = loaded ? reviewPosition() : parked;
     const wasPlaying = loaded && rv.playing;
-    previous = current;
-    current = i;
+    previousId = takes[current]?.id ?? null;
+    currentId = takes[i].id;
     parked = abSwitchPosition(at, takes[i]?.file?.duration_s ?? null);
     // Nothing is loaded yet: only pick it; the queue is not stopped until Play.
     if (!rv.active) return;
@@ -198,6 +225,41 @@
         e.preventDefault();
         switchTo(target);
       }
+    }
+  }
+
+  // -- QC: the judge and the stage-1 measurement ------------------------------------
+
+  let qcBusy = $state<Record<string, 'judge' | 'measure'>>({});
+  let qcError = $state<Record<string, string>>({});
+
+  function qcSet(id: string, kind: 'judge' | 'measure' | null, error = '') {
+    const busy = { ...qcBusy };
+    if (kind) busy[id] = kind;
+    else delete busy[id];
+    qcBusy = busy;
+    qcError = { ...qcError, [id]: error };
+  }
+
+  async function runJudge(t: MusicTake) {
+    if (qcBusy[t.id]) return;
+    qcSet(t.id, 'judge');
+    try {
+      const a = await judgeTake(t);
+      qcSet(t.id, null, a.ok ? '' : `Judge: ${a.message}`);
+    } catch (e) {
+      qcSet(t.id, null, `Judge: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async function runMeasure(t: MusicTake) {
+    if (qcBusy[t.id]) return;
+    qcSet(t.id, 'measure');
+    try {
+      const a = await measureTakeQa(t);
+      qcSet(t.id, null, a.ok ? '' : a.message);
+    } catch (e) {
+      qcSet(t.id, null, `Measure QA: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -384,7 +446,29 @@
               {#each qa.details.slice(0, 4) as d}<li>{d}</li>{/each}
             </ul>
           {/if}
+          {#if qcLine(t.qc)}
+            {@const ql = qcLine(t.qc)!}
+            <p class="qc-line" class:fail={ql.kind === 'failed'} title={ql.details.join(' | ')}>
+              <span class="qc-main">{ql.text}</span>
+              {#each ql.scores as sc (sc.name)}<span class="qc-score">{sc.name} {sc.value}</span>{/each}
+              {#if qcIssueCount(t.qc) > 0}<span class="qc-score">{qcIssueCount(t.qc)} issue{qcIssueCount(t.qc) === 1 ? '' : 's'}</span>{/if}
+            </p>
+            {#if ql.kind === 'done' && t.qc?.reasons}<p class="muted tiny qc-reasons">{t.qc.reasons}</p>{/if}
+          {/if}
           <p class="muted tiny">{takeInfo(t)}</p>
+          {#if judgeOffered(jobQc) || measureQaOffered(qa.kind)}
+            <div class="take-actions qc-actions">
+              {#if measureQaOffered(qa.kind)}
+                <button type="button" class="small-btn" onclick={() => runMeasure(t)} disabled={qcBusy[t.id] !== undefined}
+                  title="Measure this take's stage-1 QA (length, clipping, true peak, silence) from its file">{qcBusy[t.id] === 'measure' ? 'Measuring…' : 'Measure QA'}</button>
+              {/if}
+              {#if judgeOffered(jobQc)}
+                <button type="button" class="small-btn" onclick={() => runJudge(t)} disabled={qcBusy[t.id] !== undefined || !t.library_track_id}
+                  title="Ask the audio judge ({jobQc?.judge_alias}) to listen to this take; it can take a while, it waits for the GPU card">{qcBusy[t.id] === 'judge' ? 'Judging…' : t.qc?.judge?.status === 'done' ? 'Judge again' : 'Judge'}</button>
+              {/if}
+            </div>
+          {/if}
+          {#if qcError[t.id]}<p class="field-error" role="alert">{qcError[t.id]}</p>{/if}
           {#if !t.library_track_id}<p class="muted tiny">Not in the library: it cannot play here.</p>{/if}
           {#if takeDecidable(job, t)}
             <div class="take-actions">
@@ -448,3 +532,13 @@
     <p class="muted tiny">The queue is paused while you review; it comes back where it was when the review closes.</p>
   {/if}
 </section>
+
+<style>
+  /* The judge line under a take's QA badge (the other review classes live in MusicCreate.svelte). */
+  .qc-line { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; margin: 2px 0 0; font-size: 12px; color: #c9d1d9; }
+  .qc-line.fail { color: #f0c674; }
+  .qc-main { font-weight: 600; }
+  .qc-score { font-size: 11px; color: #9aa4af; white-space: nowrap; }
+  .qc-reasons { margin: 2px 0 0; }
+  .qc-actions { margin-top: 4px; }
+</style>

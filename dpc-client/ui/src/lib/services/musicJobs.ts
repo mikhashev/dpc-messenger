@@ -16,11 +16,14 @@
 
 import { get, writable } from 'svelte/store';
 import {
+    backfillMusicQa,
     cancelMusicJob,
     discardMusicTake,
     getMusicCapabilities,
     getMusicEngineStatus,
     getMusicJob,
+    getMusicJobQc,
+    judgeMusicTake,
     keepMusicTake,
     listMusicDiscardReasons,
     listMusicJobs,
@@ -34,6 +37,7 @@ import {
     stopMusicEngine,
 } from '$lib/coreService';
 import { MUSIC_UNAVAILABLE_TEXT, type MusicAnswer } from '$lib/utils/musicPlayer';
+import { backfillProblem, type JobQc } from '$lib/utils/musicQc';
 import {
     JOB_POLL_TICK_MS,
     emptyFromTextForm,
@@ -73,6 +77,9 @@ export const musicJobs = writable<MusicJobsState>({ status: 'idle', message: '',
 
 /** The takes of the jobs the panel has opened, by job id. */
 export const musicTakes = writable<Record<string, MusicTake[]>>({});
+
+/** Each reviewed job's QC view (`get_music_job_qc`): ranking state, judge alias, display order. */
+export const musicJobQc = writable<Record<string, JobQc>>({});
 
 /** The Create form, kept while the panel or the window is closed. */
 export const musicCreateDraft = writable<FromTextForm>(emptyFromTextForm());
@@ -331,4 +338,38 @@ export async function stopEngine(engine?: string): Promise<MusicAnswer<{ engine:
     const a = await stopMusicEngine(engine);
     if (a.ok) putEngine(a.data.engine);
     return a;
+}
+
+// -- QC of a take (core music/qc_commands.py): the judge and the stage-1 measurement -------------
+
+/** Read a job's QC view (ranking state, judge alias, display order); the takes keep their own `qc`. */
+export async function fetchJobQc(jobId: string): Promise<void> {
+    const a = await getMusicJobQc(jobId);
+    if (a.ok) {
+        const { ranking, judge_alias, order, caveat } = a.data;
+        musicJobQc.update(m => ({ ...m, [jobId]: { ranking, judge_alias: judge_alias ?? null, order, caveat } }));
+    }
+}
+
+/** Judge one take with the configured audio judge. A judge that ran and failed is an ok answer whose
+ *  `qc.judge.status` is `failed` (the take shows the reason); a refusal (no alias, no file) is not ok. */
+export async function judgeTake(take: MusicTake): Promise<MusicAnswer<{ take_id: string; qc: any }>> {
+    const a = await judgeMusicTake(take.id);
+    if (a.ok) {
+        putTake({ ...take, qc: a.data.qc });
+        await fetchJobQc(take.job_id);
+    }
+    return a;
+}
+
+/** Measure a take's stage-1 QA (the backfill of a take made before QA, or whose measurement could not
+ *  run). `ok: false` with the line to show when the core did not measure it. */
+export async function measureTakeQa(take: MusicTake): Promise<{ ok: true } | { ok: false; message: string }> {
+    const a = await backfillMusicQa({ take_id: take.id });
+    if (!a.ok) return { ok: false, message: a.message };
+    const problem = backfillProblem(a.data.takes.find(t => t.take_id === take.id));
+    if (problem) return { ok: false, message: problem };
+    await fetchTakes(take.job_id);
+    await fetchJobQc(take.job_id);
+    return { ok: true };
 }
