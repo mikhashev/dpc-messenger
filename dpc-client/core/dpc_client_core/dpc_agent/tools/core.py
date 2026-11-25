@@ -1012,9 +1012,11 @@ This file tracks the agent's self-understanding and evolving identity.
         return f"⚠️ Error updating identity: {e}"
 
 
-# chat_history with include_tool_calls and no limit reads at most this many messages and shows
-# at most this many tool calls in all (follow-up 14, Zcode #176): a long session's calls were
-# all printed at once. The newest are kept (the oldest from an offset); the output says so.
+# chat_history with include_tool_calls reads at most this many messages and shows at most this
+# many tool calls in all (follow-up 14, Zcode #176): a long session's calls were all printed at
+# once. Zcode #184 P4: the caps hold for any `limit` too, a limit above them is lowered to them
+# (limit=5000 used to read 5000 messages with all their calls). The newest are kept (the oldest
+# from an offset); the output says so.
 CHAT_HISTORY_TOOL_CALLS_MESSAGES = 200
 CHAT_HISTORY_TOOL_CALLS_TOTAL = 2000
 
@@ -1038,9 +1040,10 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
                 20 calls per message, each cut stated. They are the calls of this
                 node's agents in this chat: in a group of several of this node's
                 agents, one agent sees the others' calls too (Mike's decision: the
-                node is the boundary). With limit=0, at most
+                node is the boundary). With include_tool_calls, at most
                 CHAT_HISTORY_TOOL_CALLS_MESSAGES messages and
-                CHAT_HISTORY_TOOL_CALLS_TOTAL calls, stated in the output.
+                CHAT_HISTORY_TOOL_CALLS_TOTAL calls whatever `limit` is (a larger
+                limit, and 0, are lowered to that), stated in the output.
 
     Examples:
         chat_history()                    → all messages (full session review)
@@ -1070,6 +1073,12 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
             selected = history[-limit:] if limit > 0 else history
 
         capped = []
+        if include_tool_calls and limit > CHAT_HISTORY_TOOL_CALLS_MESSAGES:
+            capped.append(f"limit {limit} lowered to {CHAT_HISTORY_TOOL_CALLS_MESSAGES}: with "
+                          f"include_tool_calls, at most {CHAT_HISTORY_TOOL_CALLS_MESSAGES} "
+                          f"messages are read")
+            limit = CHAT_HISTORY_TOOL_CALLS_MESSAGES
+            selected = history[offset:offset + limit] if offset >= 0 else history[-limit:]
         if include_tool_calls and limit <= 0 and len(selected) > CHAT_HISTORY_TOOL_CALLS_MESSAGES:
             dropped = len(selected) - CHAT_HISTORY_TOOL_CALLS_MESSAGES
             if offset >= 0:
@@ -1078,11 +1087,11 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
             else:
                 selected = selected[-CHAT_HISTORY_TOOL_CALLS_MESSAGES:]
                 which = "older"
-            capped.append(f"{dropped} {which} messages not read: with include_tool_calls and no "
-                          f"limit, at most {CHAT_HISTORY_TOOL_CALLS_MESSAGES} messages are read")
+            capped.append(f"{dropped} {which} messages not read: with include_tool_calls, at most "
+                          f"{CHAT_HISTORY_TOOL_CALLS_MESSAGES} messages are read")
         calls_by_index: Dict[int, List[str]] = {}
         if include_tool_calls:
-            budget = CHAT_HISTORY_TOOL_CALLS_TOTAL if limit <= 0 else None
+            budget = CHAT_HISTORY_TOOL_CALLS_TOTAL
             # The newest messages' calls first, unless the read starts from an offset.
             order = range(len(selected)) if offset >= 0 else range(len(selected) - 1, -1, -1)
             withheld = 0
@@ -1097,7 +1106,7 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
                 calls_by_index[i] = lines
             if withheld:
                 capped.append(f"{withheld} tool calls of {'later' if offset >= 0 else 'older'} "
-                              f"messages not shown: with no limit, at most "
+                              f"messages not shown: with include_tool_calls, at most "
                               f"{CHAT_HISTORY_TOOL_CALLS_TOTAL} tool calls are shown")
         header = f"Conversation ({len(selected)} of {len(history)} total messages)"
         if capped:
@@ -3114,9 +3123,10 @@ def get_tools() -> List[ToolEntry]:
                                 "(yours, and in a group those of this node's other agents) under "
                                 "each assistant message: tool name, arguments, a short output "
                                 "and the round. Arguments and output are cut to 300 chars, at "
-                                "most 20 calls per message; every cut is stated. With no limit, "
+                                "most 20 calls per message; every cut is stated. Whatever the limit, "
                                 f"at most {CHAT_HISTORY_TOOL_CALLS_MESSAGES} messages and "
-                                f"{CHAT_HISTORY_TOOL_CALLS_TOTAL} calls are read, the newest."
+                                f"{CHAT_HISTORY_TOOL_CALLS_TOTAL} calls are read, the newest; "
+                                f"a larger limit is lowered to that and the output says so."
                             ),
                             "default": False
                         }

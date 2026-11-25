@@ -230,12 +230,53 @@ def test_an_unbounded_read_shows_at_most_the_session_cap_of_calls_newest_first(t
     assert "2 tool calls of older messages not shown" in out
 
 
-def test_a_bounded_read_is_not_capped(tmp_path, monkeypatch):
-    from dpc_client_core.dpc_agent.tools import core
-    monkeypatch.setattr(core, "CHAT_HISTORY_TOOL_CALLS_TOTAL", 1)
+def test_a_read_within_the_caps_is_not_capped(tmp_path):
     ctx = _ctx(tmp_path, tmp_path)
     out = chat_history(ctx, limit=10, include_tool_calls=True)
-    assert "read_file(" in out and "run_shell(" in out and "not shown" not in out
+    assert "read_file(" in out and "run_shell(" in out
+    assert "not shown" not in out and "lowered" not in out
+
+
+def test_a_limit_above_the_message_cap_is_lowered_to_it_and_the_header_says_so(tmp_path, monkeypatch):
+    """Zcode #184 P4: limit=5000 used to read 5000 messages with all their calls."""
+    from dpc_client_core.dpc_agent.tools import core
+    monkeypatch.setattr(core, "CHAT_HISTORY_TOOL_CALLS_MESSAGES", 3)
+    ctx = _ctx(tmp_path, tmp_path)
+    ctx.conversation_monitor.message_history = [
+        {"role": "assistant", "content": f"message {i}",
+         "tool_calls": [_call("list_dir", {"path": f"p{i}"}, "x")]} for i in range(6)]
+    out = chat_history(ctx, limit=5000, include_tool_calls=True)
+    assert "(3 of 6 total messages)" in out
+    assert "limit 5000 lowered to 3" in out and "at most 3 messages" in out
+    assert "message 5" in out and "message 3" in out and "message 2" not in out
+    assert 'list_dir({"path": "p2"})' not in out
+    # from an offset the first messages are kept
+    out = chat_history(ctx, limit=5000, offset=1, include_tool_calls=True)
+    assert "message 1" in out and "message 3" in out and "message 4" not in out
+    # without the flag a limit is the caller's own
+    plain = chat_history(ctx, limit=5000)
+    assert "(6 of 6 total messages)" in plain and "lowered" not in plain
+
+
+def test_the_call_budget_holds_for_a_limit_too(tmp_path, monkeypatch):
+    from dpc_client_core.dpc_agent.tools import core
+    monkeypatch.setattr(core, "CHAT_HISTORY_TOOL_CALLS_TOTAL", 3)
+    ctx = _ctx(tmp_path, tmp_path)
+    ctx.conversation_monitor.message_history = [
+        {"role": "assistant", "content": "old", "tool_calls": [_call("list_dir", {"path": "old"}, "x")] * 2},
+        {"role": "assistant", "content": "new", "tool_calls": [_call("list_dir", {"path": "new"}, "x")] * 2},
+    ]
+    out = chat_history(ctx, limit=10, include_tool_calls=True)
+    assert out.count('list_dir({"path": "new"})') == 2 and 'list_dir({"path": "old"})' not in out
+    assert "2 tool calls of older messages not shown" in out
+
+
+def test_the_tool_description_says_a_larger_limit_is_lowered():
+    from dpc_client_core.dpc_agent.tools import core
+    entry = next(e for e in core.get_tools() if e.name == "chat_history")
+    words = entry.schema["parameters"]["properties"]["include_tool_calls"]["description"]
+    assert "Whatever the limit" in words and "lowered" in words
+    assert "lowered" in core.chat_history.__doc__
 
 
 def test_the_voice_alias_check_has_one_entry_point():
