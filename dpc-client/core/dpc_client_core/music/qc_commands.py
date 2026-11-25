@@ -36,7 +36,7 @@ from ..local_api import slow_command
 from . import job_schemas as js
 from . import qc as qc_
 from . import region_edit as re_
-from .qa import LENGTH_CAP, LENGTH_EXACT, LENGTH_SAME, ffmpeg_qa_meter
+from .qa import LENGTH_CAP, LENGTH_EXACT, LENGTH_SAME, ffmpeg_qa_meter, not_measured_record
 from .commands import _FALSE, _TRUE, _error, _need_str, path_of_file_uri
 from .jobs import MusicJobError
 
@@ -48,8 +48,25 @@ BACKFILL_NOTE = "measured after the take was made (backfill_music_qa)"
 # A take whose backfill still ends `not_measured` is marked `qa_report.unmeasurable` (follow-up 16, Zcode #188
 # finding 6) and is skipped by later runs without `force`: at once when its length cannot be recovered (nothing
 # a later run could add), after `UNMEASURABLE_ATTEMPTS` runs for any other reason. A new file hash measures again.
+# A meter that raises (ffmpeg could not decode the file) is such a run too (follow-up 17, Zcode #193): the take
+# gets the same mark, with the error as its reason, and the attempt counts toward the same limit.
 UNMEASURABLE_ATTEMPTS = 3
 LENGTH_UNRECOVERABLE = "the requested length of the take cannot be recovered, so the length gate cannot be measured"
+
+
+def _positive(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def _next_mark(report: Any, file_hash: Any, reason: str) -> Dict[str, Any]:
+    """The `qa_report.unmeasurable` mark of this run: the attempts of an earlier mark on the same
+    file hash plus one (a new file starts at one)."""
+    prior = report.get("unmeasurable") if isinstance(report, dict) else None
+    same_file = isinstance(prior, dict) and prior.get("file_hash") == file_hash
+    return {"reason": (str(reason).strip() or "stage-1 QA could not be measured")[:300],
+            "attempts": (int(prior.get("attempts") or 0) if same_file else 0) + 1,
+            "last_attempt_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "file_hash": file_hash}
 
 
 class MusicQcCommandsMixin:
@@ -165,7 +182,14 @@ class MusicQcCommandsMixin:
             action = job.get("action")
             cut = bool(params.get("cut_with_shift"))
             zone = None if cut else (zones["intent"] if action == re_.REMOVE_REGION else zones["splice"])
-            return {"requested_s": take.get("duration_requested_s"), "length_mode": LENGTH_SAME,
+            requested = take.get("duration_requested_s")
+            if not cut and not _positive(requested):
+                # An edit keeps the control's length, which is the base track's: the job's params hold it
+                # (`source_duration_s`, what `region_edit.normalize_params_edit` read from the library).
+                # A cut shortens the take by its splice in whole frames, which nothing stored says, so a
+                # cut take with no stored length stays unrecoverable (Zcode #193).
+                requested = params.get("source_duration_s")
+            return {"requested_s": float(requested) if _positive(requested) else None, "length_mode": LENGTH_SAME,
                     "edit": {"action": action, "zone": zone, "expects_silence": action == re_.REMOVE_REGION,
                              "seams": {}}}
         requested = take.get("duration_requested_s")
@@ -194,25 +218,32 @@ class MusicQcCommandsMixin:
         path = path_of_file_uri((take.get("file") or {}).get("uri"))
         if path is None or not await asyncio.to_thread(path.is_file):
             return {**entry, "outcome": "no_file", "error": f"take {tid} has no local file to measure"}
+        terms: Optional[Dict[str, Any]] = None
         try:
             terms = self._backfill_terms(take, job)
             meter = getattr(self, "_music_qa_meter", None) or ffmpeg_qa_meter()
             record = await asyncio.to_thread(
                 meter, path, duration_s=(take.get("file") or {}).get("duration_s"),
                 loudness=take.get("loudness"), **terms)
+        except Exception as exc:
+            # The meter itself raised (ffmpeg rc != 0 on a file it cannot decode, a QaError): marked like a
+            # run that ended not_measured, so the next run does not measure the whole file again (Zcode #193).
+            logger.warning("music: QA backfill of take %s failed", tid, exc_info=True)
+            error = f"{type(exc).__name__}: {exc}"[:300]
+            out = {**entry, "outcome": "failed", "error": error}
+            mark = await self._mark_meter_failure(store, take, job, report, file_hash, terms, error)
+            if mark is not None:
+                out.update(unmeasurable=mark["reason"], attempts=mark["attempts"])
+            return out
+        try:
             new_report = dict(record["qa_report"])
             new_report["note"] = BACKFILL_NOTE + ("; the seam metrics of an edit cannot be measured again"
                                                   if "edit" in terms else "")
             if new_report["verdict"] == js.QA_NOT_MEASURED:
-                prior = (report or {}).get("unmeasurable") if isinstance(report, dict) else None
-                same_file = isinstance(prior, dict) and prior.get("file_hash") == file_hash
                 gate = (new_report.get("gates") or {}).get("length") or {}
-                new_report["unmeasurable"] = {
-                    "reason": LENGTH_UNRECOVERABLE if terms["requested_s"] is None
-                    else str(gate.get("detail") or new_report.get("note") or "stage-1 QA could not be measured")[:300],
-                    "attempts": (int(prior.get("attempts") or 0) if same_file else 0) + 1,
-                    "last_attempt_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    "file_hash": file_hash}
+                new_report["unmeasurable"] = _next_mark(
+                    report, file_hash, LENGTH_UNRECOVERABLE if terms["requested_s"] is None
+                    else str(gate.get("detail") or new_report.get("note") or "stage-1 QA could not be measured"))
             js.check_qa_report(new_report)
             qc_record = None
             if qc_.FLOW_OF_JOB_TYPE.get(job.get("type")) is not None:
@@ -223,6 +254,32 @@ class MusicQcCommandsMixin:
             logger.warning("music: QA backfill of take %s failed", tid, exc_info=True)
             return {**entry, "outcome": "failed", "error": f"{type(exc).__name__}: {exc}"[:300]}
         return {**entry, "outcome": "measured", "verdict": stored["qa_report"]["verdict"]}
+
+    async def _mark_meter_failure(self, store: Any, take: Dict[str, Any], job: Dict[str, Any],
+                                  report: Any, file_hash: Any, terms: Optional[Dict[str, Any]],
+                                  error: str) -> Optional[Dict[str, Any]]:
+        """Store a `not_measured` report carrying the `unmeasurable` mark for a take whose meter
+        raised, and answer the mark; None when nothing was stored. A take that already holds a
+        measured report (a `force` run) keeps it: a failed re-measure never replaces a measurement."""
+        if isinstance(report, dict) and report.get("verdict") != js.QA_NOT_MEASURED:
+            return None
+        why = f"the meter failed: {error}"
+        try:
+            record = not_measured_record(why, requested_s=(terms or {}).get("requested_s"),
+                                         length_mode=(terms or {}).get("length_mode") or LENGTH_EXACT)
+            new_report = dict(record["qa_report"])
+            new_report["note"] = f"{BACKFILL_NOTE}; {why}"[:300]
+            new_report["unmeasurable"] = _next_mark(report, file_hash, why)
+            js.check_qa_report(new_report)
+            qc_record = None
+            if qc_.FLOW_OF_JOB_TYPE.get(job.get("type")) is not None:
+                qc_record = qc_.assemble({**take, "qa": None, "qa_report": new_report}, job,
+                                         lyrics_wer=await self._music_qc_wer(take, job))
+            await asyncio.to_thread(store.set_take_qa, take["id"], None, new_report, qc_record)
+        except Exception:
+            logger.warning("music: the unmeasurable mark of take %s could not be stored", take["id"], exc_info=True)
+            return None
+        return new_report["unmeasurable"]
 
     @slow_command
     async def backfill_music_qa(self, job_id: Any = None, take_id: Any = None, force: Any = False) -> Dict[str, Any]:

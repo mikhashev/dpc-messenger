@@ -298,3 +298,84 @@ def test_the_unmeasurable_mark_has_its_schema_shape():
                 {"reason": "", "attempts": 1, "last_attempt_at": "t", "file_hash": None}):
         with pytest.raises(js.SchemaError):
             js.check_qa_report({**rec["qa_report"], "unmeasurable": bad})
+
+
+# -- follow-up 17 (Zcode #193) ----------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_meter_that_raises_marks_the_take_and_counts_toward_the_same_limit(tmp_path):
+    """Item 10: a raising meter (ffmpeg rc != 0 on an undecodable file) left no mark, so every library
+    run measured the file again from the start."""
+    from dpc_client_core.music import qc_commands
+
+    def meter(path, **kwargs):
+        service.calls.append((Path(path).name, kwargs))
+        raise qa.QaError("ffmpeg exited with rc=1: Invalid data found when processing input")
+    service = _Service(tmp_path / "dpc", meter=meter)
+    store = service._music_jobs_instance
+    job, takes = _old_job(store, tmp_path, files=(True,))
+    first = await service.backfill_music_qa()
+    entry = first["takes"][0]
+    assert entry["outcome"] == "failed" and "rc=1" in entry["error"] and entry["attempts"] == 1
+    report = store.get_take(takes[0]["id"])["qa_report"]
+    js.check_qa_report(report)
+    assert report["verdict"] == "not_measured"
+    mark = report["unmeasurable"]
+    assert mark["attempts"] == 1 and mark["file_hash"] == f"sha256:{1:064x}" and "the meter failed" in mark["reason"]
+    for _ in range(qc_commands.UNMEASURABLE_ATTEMPTS + 2):
+        await service.backfill_music_qa()
+    assert len(service.calls) == qc_commands.UNMEASURABLE_ATTEMPTS
+    last = await service.backfill_music_qa()
+    assert last["takes"][0]["outcome"] == "skipped" and "the meter failed" in last["takes"][0]["unmeasurable"]
+    assert store.get_take(takes[0]["id"])["qa_report"]["unmeasurable"]["attempts"] == qc_commands.UNMEASURABLE_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_a_raise_after_a_not_measured_run_adds_to_its_count_and_never_replaces_a_measurement(tmp_path):
+    from dpc_client_core.music import qc_commands
+    answers = []
+
+    def meter(path, **kwargs):
+        service.calls.append(Path(path).name)
+        what = answers.pop(0)
+        if isinstance(what, Exception):
+            raise what
+        return what(path, **kwargs)
+    service = _Service(tmp_path / "dpc", meter=meter)
+    store = service._music_jobs_instance
+    job, takes = _old_job(store, tmp_path, files=(True,))
+    answers[:] = [lambda p, **k: qa.not_measured_record("no astats", requested_s=k["requested_s"]),
+                  qa.QaError("ffmpeg exited with rc=1")]
+    await service.backfill_music_qa()
+    await service.backfill_music_qa()
+    assert store.get_take(takes[0]["id"])["qa_report"]["unmeasurable"]["attempts"] == 2
+    assert qc_commands.UNMEASURABLE_ATTEMPTS > 2
+    # a measured take re-measured by force keeps its measurement when the meter raises
+    answers[:] = [_fake_record, qa.QaError("ffmpeg exited with rc=1")]
+    await service.backfill_music_qa(take_id=takes[0]["id"], force=True)
+    measured = store.get_take(takes[0]["id"])["qa_report"]
+    assert measured["verdict"] == "passed"
+    out = await service.backfill_music_qa(take_id=takes[0]["id"], force=True)
+    assert out["takes"][0]["outcome"] == "failed" and "unmeasurable" not in out["takes"][0]
+    assert store.get_take(takes[0]["id"])["qa_report"] == measured
+
+
+def test_an_edit_take_with_no_stored_length_takes_the_base_length_from_its_job():
+    """Item 11: an edit take with no `duration_requested_s` got the permanent skip after one attempt;
+    the job's params hold the base track's length (`source_duration_s`)."""
+    job = {"type": "edit", "action": "regenerate_region", "region": {"t_start": 10.0, "t_end": 14.0},
+           "params": {"allowed_zone": None, "splice_bounds": None, "source_duration_s": 61.25}}
+    take = {"kind": "edit"}
+    terms = MusicQcCommandsMixin._backfill_terms(take, job)
+    assert terms["requested_s"] == 61.25 and terms["length_mode"] == qa.LENGTH_SAME
+    removal = MusicQcCommandsMixin._backfill_terms(take, {**job, "action": "remove_region"})
+    assert removal["requested_s"] == 61.25
+    # a cut is shorter by its splice in whole frames, which nothing stored says: unrecoverable
+    cut = MusicQcCommandsMixin._backfill_terms(
+        take, {**job, "action": "remove_region", "params": {**job["params"], "cut_with_shift": True}})
+    assert cut["requested_s"] is None
+    # neither the take nor the job knows the length: unrecoverable, as before
+    bare = MusicQcCommandsMixin._backfill_terms(take, {**job, "params": {"allowed_zone": None, "splice_bounds": None}})
+    assert bare["requested_s"] is None
+    # the take's own stored length still wins
+    assert MusicQcCommandsMixin._backfill_terms({"kind": "edit", "duration_requested_s": 60.0}, job)["requested_s"] == 60.0
