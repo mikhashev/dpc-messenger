@@ -928,13 +928,15 @@ export const musicWindowRequests = writable(0);
  *  The track plays next in the current queue (what is queued stays), and a track that
  *  is already playing is left playing. Resolves true when the track is playing or
  *  loading; false when the window opened with a notice saying why not. */
-export async function openTrackInPlayer(trackId: string): Promise<boolean> {
+/** Open a track in the player and play it. `allowHidden` plays a hidden track without
+ *  unhiding it (the Evolution card's discarded takes); otherwise a hidden track is refused. */
+export async function openTrackInPlayer(trackId: string, opts: { allowHidden?: boolean } = {}): Promise<boolean> {
     if (!entryOf(trackId)) await loadMusicLibrary(true);
     // The window opens whatever follows: the notice is shown there.
     musicWindowRequests.update(n => n + 1);
     const entry = entryOf(trackId);
     const s0 = get(musicPlayback);
-    const plan = openTrackPlan(entry, s0.loadedId, s0.playing);
+    const plan = openTrackPlan(entry, s0.loadedId, s0.playing, !!opts.allowHidden);
     if (plan === 'missing') {
         say('This track is not in the library (yet). If it is a take still in review, keep it first.');
         return false;

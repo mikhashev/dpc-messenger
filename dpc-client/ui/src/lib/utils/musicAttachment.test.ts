@@ -90,6 +90,12 @@ describe('what the button does', () => {
   it('does not play a hidden track', () => {
     expect(openTrackPlan({ id: 'trk-1', hidden: true }, null, false)).toBe('hidden');
   });
+  it('plays a hidden track when the asker allows it, and it stays hidden (the Evolution card, review #180 4.1)', () => {
+    const hidden = { id: 'trk-1', hidden: true };
+    expect(openTrackPlan(hidden, null, false, true)).toBe('play');
+    expect(openTrackPlan(hidden, 'trk-1', true, true)).toBe('already-playing');
+    expect(hidden.hidden).toBe(true);
+  });
 });
 
 describe('an assistant record with a file and no text', () => {

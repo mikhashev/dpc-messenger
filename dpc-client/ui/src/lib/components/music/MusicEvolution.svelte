@@ -42,7 +42,15 @@
     type MusicLineage,
   } from '$lib/utils/musicLineage';
   import { fetchMusicLineage, writeMusicLineageFiles } from '$lib/services/musicLineage';
-  import { endReview, musicReview, openTrackInPlayer, reviewPlay, reviewTogglePlay } from '$lib/services/music';
+  import {
+    endReview,
+    musicEntriesById,
+    musicReview,
+    openTrackInPlayer,
+    reviewPlay,
+    reviewTogglePlay,
+    unhideTrack,
+  } from '$lib/services/music';
   import { musicJobs } from '$lib/services/musicJobs';
 
   let { trackId = null }: { trackId?: string | null } = $props();
@@ -58,6 +66,9 @@
   let layout = $derived(doc ? layoutLineage(doc) : null);
   let selected = $derived<LineageNode | null>(doc ? (doc.nodes.find(n => n.id === selectedId) ?? null) : null);
   let rv = $derived($musicReview);
+  // A discarded take's library entry is hidden (Discard hides it); the card still plays it and can restore it.
+  let selectedLib = $derived(selected ? playableNode(selected) : null);
+  let selectedHidden = $derived(!!selectedLib && !!$musicEntriesById.get(selectedLib)?.hidden);
   // What changed in the jobs: a Keep, a Discard or a new take re-reads the graph while the card is open.
   let jobsSignature = $derived($musicJobs.jobs.map(j => `${j.id}:${j.state}:${j.updated_at ?? ''}`).join('|'));
 
@@ -138,7 +149,14 @@
     const lib = playableNode(node);
     if (!lib) return;
     await stopOwnPlayback();
-    await openTrackInPlayer(lib);
+    await openTrackInPlayer(lib, { allowHidden: true });
+  }
+
+  async function restoreToLibrary(node: LineageNode) {
+    const lib = playableNode(node);
+    if (!lib) return;
+    const a = await unhideTrack(lib);
+    notice = a.ok ? 'Restored to the library: the take shows in the library again.' : a.message;
   }
 
   async function saveFiles() {
@@ -245,6 +263,10 @@
             {#if playableNode(selected)}
               <button type="button" class="small-btn" onclick={() => (isPlaying(selected!) ? reviewTogglePlay() : pick(selected!))}>{isPlaying(selected) ? 'Pause' : 'Play'}</button>
               <button type="button" class="small-btn" onclick={() => openInPlayer(selected!)}>Open in player</button>
+              {#if selectedHidden}
+                <button type="button" class="small-btn" onclick={() => restoreToLibrary(selected!)}
+                  title="Unhide this take's library entry; it stays hidden unless you choose this">Restore to library</button>
+              {/if}
             {:else if selected.kind === 'take'}
               <span class="muted small">This take has no library entry to play.</span>
             {/if}

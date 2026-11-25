@@ -64,14 +64,17 @@ export function recordHasContent(record: { text?: string | null; attachments?: r
 export type OpenTrackPlan = 'missing' | 'hidden' | 'already-playing' | 'play';
 
 /** What "Open in player" does for a track: `entry` is the library entry (null when
- *  the library does not hold it), `loadedId` the track now loaded in the player. */
+ *  the library does not hold it), `loadedId` the track now loaded in the player.
+ *  `allowHidden`: the asker plays a hidden track as it is, without unhiding it (the
+ *  Evolution card opens a discarded take; Discard hides its entry and that stays). */
 export function openTrackPlan(
     entry: { id: string; hidden?: boolean } | null | undefined,
     loadedId: string | null | undefined,
     playing: boolean,
+    allowHidden = false,
 ): OpenTrackPlan {
     if (!entry) return 'missing';
-    if (entry.hidden) return 'hidden';
+    if (entry.hidden && !allowHidden) return 'hidden';
     if (loadedId === entry.id && playing) return 'already-playing';
     return 'play';
 }
