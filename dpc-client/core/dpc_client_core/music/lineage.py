@@ -29,7 +29,9 @@ which is the A/B pick) and `discard` (with its reason text and failure class).
 **The parent of an edit or a song job** is the take whose library entry is the job's stored source track
 (`params.source_track_id`, else the `source_track_id` its takes recorded when they were made, else the
 job's `track_id`), else the take whose file hash is the job's `params.source_content_hash`, else a
-`source` node. Region-edit takes record that
+`source` node. The hash fallback is accepted only when exactly one take has that hash and its job is
+already in the graph being built (Zcode #191): a relinked, deleted or cleaned track otherwise stays a
+`source` node with a note naming the take it matched, never a take of another song. Region-edit takes record that
 parent the same way (`parents[0].take_id` in their `mp.provenance/1`, written from the same lookup).
 
 **Not recorded yet** (EVOLUTION.md §13, §14): `prefer` events of a plain A/B without a Keep, the
@@ -256,21 +258,55 @@ class _Index:
 
     def parent_of(self, job: Mapping[str, Any]) -> Optional[Tuple[str, str]]:
         """`("take", take_id)` or `("source", library_track_id)` for an edit or a song job, None for any other:
-        by the stored source track first, the content hash only when no take holds that track."""
+        by the stored source track only. The content-hash fallback is not here: it is store-global, so
+        `build_lineage` accepts it only inside the graph it is building (`hash_candidates`)."""
         if job.get("type") != EDIT_TYPE and job.get("type") not in SONG_TYPES:
             return None
         lib = self.source_track_of(job)
         hit = self.by_library.get(lib) if lib else None
         if hit is None and job.get("track_id") and job.get("track_id") != lib:
             hit = self.by_library.get(job["track_id"])
-        if hit is None:
-            h = (job.get("params") or {}).get("source_content_hash")
-            found = self.by_hash.get(h) if isinstance(h, str) else None
-            if found and len(found) == 1:
-                hit = found[0]
         if hit is not None:
             return ("take", hit["id"])
         return ("source", str(lib))
+
+    def hash_candidates(self, job: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+        """The takes of other jobs whose file hash is the job's `params.source_content_hash`."""
+        h = (job.get("params") or {}).get("source_content_hash")
+        found = self.by_hash.get(h) if isinstance(h, str) and h else None
+        return [t for t in (found or []) if t.get("job_id") != job.get("id")]
+
+
+HASH_NOTE = "A source found by content hash only was not joined:"
+
+
+def _hash_parents(idx: _Index, members: Sequence[str]) -> Tuple[Dict[str, Tuple[str, str]], List[str]]:
+    """The content-hash fallback for the jobs of one graph whose source track no take holds (Zcode
+    #191 on 4.2): accepted only when exactly one take of the store has the hash and that take's job is
+    in this graph already. Otherwise the branch stays rooted at its `source` node and a note says
+    why, so a relinked, deleted or cleaned track never pulls in a take of another song, and never
+    moves a branch out of the graph its own track asks for."""
+    inside = set(members)
+    parents: Dict[str, Tuple[str, str]] = {}
+    notes: List[str] = []
+    for jid in members:
+        job = idx.jobs[jid]
+        parent = idx.parent_of(job)
+        if parent is None or parent[0] != "source":
+            continue
+        found = idx.hash_candidates(job)
+        if not found:
+            continue
+        if len(found) > 1:
+            notes.append(f"{HASH_NOTE} the source of job {jid} matches {len(found)} takes by content hash "
+                         f"({', '.join(sorted(t['id'] for t in found))}), so its branch starts at a source node.")
+        elif found[0].get("job_id") not in inside:
+            notes.append(f"{HASH_NOTE} the source of job {jid} matches take {found[0]['id']} by content hash, but "
+                         f"that take's job {found[0].get('job_id')} is outside this graph, so the branch starts at "
+                         "a source node.")
+        else:
+            parents[jid] = ("take", found[0]["id"])
+    return parents, notes
 
 
 def _component(idx: _Index, seeds: Sequence[str]) -> List[str]:
@@ -340,6 +376,10 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
                 seeds.append(jid)
     members = _component(idx, seeds)
     members.sort(key=lambda j: (idx.jobs[j].get("created_at") or "", j))
+    by_hash, hash_notes = _hash_parents(idx, members)
+
+    def parent_in_graph(job: Mapping[str, Any]) -> Tuple[str, str]:
+        return by_hash.get(job["id"]) or idx.parent_of(job)
 
     nodes: Dict[str, Dict[str, Any]] = {}
     edges: List[Dict[str, Any]] = []
@@ -366,7 +406,7 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
                       "job_state": job.get("state"), "state_reason": job.get("state_reason")})
             edge_kind, op = "generate", GENERATE_TYPE
         elif job["type"] in SONG_TYPES:
-            parent = idx.parent_of(job)
+            parent = parent_in_graph(job)
             from_id = parent[1] if parent[0] == "take" else source_node(parent[1])
             parent_id = f"intent:{jid}"
             relation = js.SONG_RELATIONS[job["type"]]
@@ -380,7 +420,7 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
                           "reason": None})
             edge_kind, op = "generate", job["type"]
         else:
-            parent = idx.parent_of(job)
+            parent = parent_in_graph(job)
             parent_id = parent[1] if parent[0] == "take" else source_node(parent[1])
             edge_kind, op = "edit", str(job.get("action"))
         for t in jtakes:
@@ -436,7 +476,7 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
             "branches": sum(1 for n in nodes.values() if n["id"] not in has_out and n["kind"] == "take"),
             "max_generation": max((n["generation"] for n in nodes.values()), default=0),
         },
-        "notes": list(NOTES) + broken,
+        "notes": list(NOTES) + hash_notes + broken,
     }
     validate_lineage(doc)
     return doc
