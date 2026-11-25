@@ -382,7 +382,8 @@ class KnowledgeService:
 
         None unless this node and the sender share that chat: a group whose
         roster here lists both, or the 1:1 chat with exactly that sender (the
-        proposer names it by our node id, as we name it by theirs). AI, agent,
+        proposer names it by our node id, as we name it by theirs) when that
+        sender is one of the owner's own nodes (ADR-053 point 3). AI, agent,
         Telegram and unknown chats are this node's own and a peer has no say
         in them.
         """
@@ -397,8 +398,36 @@ class KnowledgeService:
                 return members
             return None
         if conversation_id == me:
-            return [sender_node_id, me]
+            # ADR-053 point 3: a 1:1 proposal counts only from one of the owner's own nodes
+            # (the node groups the agents name as `own_node_group`); any other peer's 1:1
+            # chat opens no vote and applies no commit here.
+            if sender_node_id in self._own_nodes():
+                return [sender_node_id, me]
+            logger.info("A 1:1 knowledge proposal or commit from %s is not counted: that node is "
+                        "not in any agent's own_node_group (ADR-053)", sender_node_id[:20])
+            return None
         return None
+
+    def _own_nodes(self) -> frozenset:
+        """The owner's own nodes, for the node's knowledge: every node of every group an
+        agent profile names as its `memory.own_node_group` (ADR-048 item 2, ADR-053 point 3).
+        Read now, so a save applies to the next proposal. None configured, none."""
+        firewall = getattr(self, "firewall", None)
+        if firewall is None:
+            return frozenset()
+        try:
+            groups = getattr(firewall, "node_groups", None) or {}
+            profiles = (getattr(firewall, "rules", None) or {}).get("agent_profiles") or {}
+            own = set()
+            for profile in profiles.values():
+                mem = (profile or {}).get("memory") if isinstance(profile, dict) else None
+                name = mem.get("own_node_group") if isinstance(mem, dict) else None
+                if isinstance(name, str) and name in groups:
+                    own.update(groups.get(name) or ())
+            return frozenset(own)
+        except Exception:
+            logger.warning("Own nodes for knowledge could not be read; none counted", exc_info=True)
+            return frozenset()
 
     def _announce_history_after_repair(self, group_id: str) -> None:
         """Tell connected members that this node's copy of a group just changed.
@@ -1969,12 +1998,26 @@ class KnowledgeService:
             # introspection (ARCH-9 / S23). Same rationale as the voting bypass
             # at line 397-399 (#20/#10/#16) — synthetic prompts must not appear
             # as user turns in conversation history.
+            # The comments are pasted into the turn verbatim, so whoever wrote them asked for
+            # it too (ADR-053, Zcode's review): with a comment from a node that is not one of
+            # the owner's own, that node is the turn's asker, and a flagged tool the revision
+            # reaches for asks the owner first.
+            me = getattr(self.p2p_manager, "node_id", None)
+            own = set(self._own_nodes()) | ({me} if me else set())
+            foreign = [cr.get("node_id") for cr in change_requests
+                       if cr.get("node_id") and cr.get("node_id") not in own]
+            revise_asker = None
+            if foreign:
+                from .dpc_agent.agent import ASKER_UNKNOWN, Asker
+                revise_asker = Asker(ASKER_UNKNOWN, str(foreign[0])[:16], str(foreign[0]),
+                                     is_owner=False, verified=False)
             response = await agent_mgr.process_message(
                 message=revision_prompt,
                 conversation_id=proposal.conversation_id,
                 include_context=False,
                 _skip_history=True,
                 message_source="ui",  # the owner's proposal, revised on this node
+                **({"asker": revise_asker} if revise_asker is not None else {}),
             )
 
             if not response:

@@ -280,13 +280,26 @@ async def test_a_peers_group_proposal_is_approved_with_our_vote_and_recorded_as_
 
 @pytest.mark.asyncio
 async def test_a_1to1_proposal_from_that_peer_is_accepted():
-    """The peer names its chat with us by our node id, as we name it by theirs."""
-    _svc, consensus = _node()
+    """The peer names its chat with us by our node id, as we name it by theirs. Since ADR-053
+    point 3 only when that peer is one of the owner's own nodes (an agent's own_node_group)."""
+    svc, consensus = _node()
+    svc.firewall = SimpleNamespace(
+        node_groups={"my_machines": [PEER]},
+        rules={"agent_profiles": {"agent_ark": {"memory": {"own_node_group": "my_machines"}}}})
 
     payload = _proposal(conversation_id=ME, participants=(PEER, ME)).to_dict()
 
     assert await consensus.handle_proposal_message(PEER, payload) is True
     assert set(consensus.sessions["proposal-0001"].proposal.participants) == {ME, PEER}
+
+
+@pytest.mark.asyncio
+async def test_a_1to1_proposal_from_a_peer_outside_every_own_node_group_opens_no_vote():
+    """ADR-053 point 3."""
+    _svc, consensus = _node()
+    payload = _proposal(conversation_id=ME, participants=(PEER, ME)).to_dict()
+    assert await consensus.handle_proposal_message(PEER, payload) is not True
+    assert "proposal-0001" not in consensus.sessions
 
 
 @pytest.mark.asyncio

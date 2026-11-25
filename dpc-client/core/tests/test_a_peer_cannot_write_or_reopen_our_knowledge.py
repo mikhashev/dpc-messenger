@@ -81,6 +81,9 @@ def _apply_handler(groups=None, resolver=True):
         consensus.peer_proposal_roster = _roster(groups if groups is not None else {GROUP: [ME, PEER]})
     service = SimpleNamespace(
         consensus_manager=consensus,
+        # A commit this node voted on: an unjudged one waits for an owner card (ADR-053 point 3,
+        # tests/test_knowledge_from_a_peer_waits_for_the_owner_...).
+        knowledge_service=SimpleNamespace(judged_proposal=lambda proposal_id: True),
         pcm_core=SimpleNamespace(load_context=lambda: SimpleNamespace(commit_history=[])),
         pending_certificate_requests=set(),
         p2p_manager=SimpleNamespace(node_id=ME, peers={PEER: object()},

@@ -98,6 +98,8 @@ class _Applied:
 def _handler(applied, sent):
     service = SimpleNamespace(
         consensus_manager=applied,
+        # A commit this node voted on; an unjudged one waits for an owner card (ADR-053 point 3).
+        knowledge_service=SimpleNamespace(judged_proposal=lambda proposal_id: True),
         pcm_core=SimpleNamespace(load_context=lambda: SimpleNamespace(commit_history=[])),
         pending_certificate_requests=set(),
         p2p_manager=SimpleNamespace(

@@ -316,6 +316,11 @@ class CommitAckHandler(MessageHandler):
         return None
 
 
+# The peers with an owner card up for an unjudged commit: one card per sender at a time,
+# so a peer cannot stack cards by retransmitting (ADR-053 point 3).
+_COMMIT_CARDS_PENDING: set = set()
+
+
 class ApplyKnowledgeCommitHandler(MessageHandler):
     """Handles APPLY_KNOWLEDGE_COMMIT — the recovery/retransmit path (Gap 3 + Gap 5).
 
@@ -334,6 +339,62 @@ class ApplyKnowledgeCommitHandler(MessageHandler):
     @property
     def command_name(self) -> str:
         return "APPLY_KNOWLEDGE_COMMIT"
+
+    async def _owner_approves_unjudged_commit(self, commit: Any, sender_node_id: str) -> bool:
+        """Ask the owner before applying a commit this node never voted on (ADR-053 point 3).
+
+        The card is the schedule card's machinery, as the agents' owner cards are: it names
+        the sending node, the chat, the topic and the summary, waits 60 s, and refuses at
+        once when no interface client could show it. The wait runs on a worker thread, so
+        the service loop keeps serving."""
+        import asyncio
+        import functools
+        import pathlib
+        from types import SimpleNamespace
+        from ..dpc_agent.agent import ASKER_UNKNOWN, Asker
+        from ..dpc_agent.tools.core import _await_schedule_approval
+
+        commit_id = (getattr(commit, "commit_id", "") or "")[:12]
+        if sender_node_id in _COMMIT_CARDS_PENDING:
+            self.logger.warning(
+                "APPLY_KNOWLEDGE_COMMIT %s from %s not applied: a card for this node's earlier "
+                "commit is still waiting for the owner", commit_id, sender_node_id[:20])
+            return False
+        peer_name = ""
+        name_of = getattr(self.service, "_peer_name", None)
+        if callable(name_of):
+            try:
+                peer_name = name_of(sender_node_id) or ""
+            except Exception:
+                peer_name = ""
+        peer_name = peer_name or sender_node_id[:16]
+        loop = asyncio.get_running_loop()
+        ctx = SimpleNamespace(
+            dpc_service=self.service, _event_loop=loop,
+            agent_root=pathlib.Path("knowledge"),
+            _agent=SimpleNamespace(display_name=f"{peer_name}'s node", _run_gate=None),
+            reply_telegram_chat_id="", conversation_id=getattr(commit, "conversation_id", "") or "",
+            conversation_title="", current_task_id=None, turn_stop_event=None,
+            asker=Asker(ASKER_UNKNOWN, peer_name, sender_node_id, is_owner=False, verified=True),
+        )
+        topic = getattr(commit, "topic", "") or "(no topic)"
+        summary = getattr(commit, "summary", "") or ""
+        details = f"topic {topic}" + (f": {summary}" if summary else "") + f" (commit {commit_id})"
+        _COMMIT_CARDS_PENDING.add(sender_node_id)
+        try:
+            approved, reason = await loop.run_in_executor(None, functools.partial(
+                _await_schedule_approval, ctx, task_type="knowledge_commit", when="now",
+                about=f"{peer_name} sent a knowledge commit this node did not vote on: {details}",
+                card={"tool": "APPLY_KNOWLEDGE_COMMIT", "details": details}))
+        except Exception as e:
+            approved, reason = False, f"the card could not be shown: {e}"
+        finally:
+            _COMMIT_CARDS_PENDING.discard(sender_node_id)
+        if not approved:
+            self.logger.warning(
+                "APPLY_KNOWLEDGE_COMMIT %s from %s not applied: this node did not vote on it and "
+                "the owner did not approve it (%s)", commit_id, sender_node_id[:20], reason)
+        return bool(approved)
 
     async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
         """
@@ -399,6 +460,12 @@ class ApplyKnowledgeCommitHandler(MessageHandler):
                 knowledge_service
                 and knowledge_service.judged_proposal(getattr(commit, "proposal_id", "") or "")
             )
+            # ADR-053 point 3: a commit this node never voted on is applied only after the
+            # owner says so; a refusal, no answer or nobody to ask leaves it unapplied, and
+            # the peer may send it again.
+            if not judged_here and not await self._owner_approves_unjudged_commit(
+                    commit, sender_node_id):
+                return None
             await self.service.consensus_manager._apply_commit(
                 commit, origin=provenance.verdict, judged_here=judged_here
             )
