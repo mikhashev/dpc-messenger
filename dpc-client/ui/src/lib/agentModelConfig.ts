@@ -23,8 +23,6 @@ export type AgentModelConfigState = {
   retrievalVector: 'native' | 'grafeo';
   retrievalText: 'native' | 'grafeo';
   reasoningEffort: string;
-  /** The agent's own Vision model; '' = the global vision provider. */
-  visionProvider?: string;
   /** The agent's own Voice (transcription) model; '' = the global voice provider. */
   voiceProvider?: string;
   /**
@@ -47,7 +45,6 @@ export type AgentModelConfigPayload = {
   retrieval_vector: 'native' | 'grafeo';
   retrieval_text: 'native' | 'grafeo';
   reasoning_effort: string;
-  vision_provider_alias?: string;
   voice_provider_alias?: string;
 };
 
@@ -76,7 +73,6 @@ export function buildAgentModelConfigPayload(
     // clears the agent's own level rather than leaving it untouched.
     reasoning_effort: state.reasoningEffort,
     // '' carries through like the provider fields above; absent = not this call's business.
-    ...(state.visionProvider !== undefined ? { vision_provider_alias: state.visionProvider } : {}),
     ...(state.voiceProvider !== undefined ? { voice_provider_alias: state.voiceProvider } : {}),
   };
 }

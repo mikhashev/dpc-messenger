@@ -2,9 +2,9 @@
 //
 // Mike's rule, 2026-09-18: if the model the agent runs supports vision, the
 // image goes to it; otherwise to the global vision_provider. The backend
-// decides on its own (llm_adapter, tools/vision.py) and ignores the header's
-// Vision dropdown for agent chats, so the header states the outcome instead of
-// offering a choice nothing reads.
+// decides on its own (llm_adapter, tools/vision.py); an agent has no Vision
+// setting of its own (the per-agent field of follow-up 13 was removed, Mike,
+// 2026-11-25).
 
 export type VisionRow = { alias: string; model?: string; supports_vision?: boolean };
 

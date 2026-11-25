@@ -247,10 +247,6 @@ class DpcLlmAdapter:
         self._llm_manager = llm_manager
         self._provider_alias = provider_alias  # Per-agent provider override
         self._compute_host = compute_host  # Per-agent remote peer override
-        # The agent's own Vision model (its config's vision_provider_alias): who
-        # describes an image when the Main LLM cannot see. None = the node's global
-        # vision_provider. Set per turn by the agent manager.
-        self.vision_alias: Optional[str] = None
         self._default_model: Optional[str] = None
         self._caller = caller
         self._caller_kind = caller_kind
@@ -795,7 +791,7 @@ class DpcLlmAdapter:
                     else:
                         log.info("Agent provider does not support vision - pre-analyzing image")
                     messages = await self._describe_images_into_messages(
-                        messages, user_images, local_alias if sees else self.local_vision_alias()
+                        messages, user_images, local_alias if sees else None
                     )
                     # Continue with normal text-based agent flow
 
@@ -1592,18 +1588,6 @@ class DpcLlmAdapter:
                             text_parts.append(block.get("text", ""))
                     return "\n".join(text_parts)
         return ""
-
-    def local_vision_alias(self) -> Optional[str]:
-        """The agent's own Vision model when this node holds it; None (the global
-        vision_provider) otherwise, said in the log."""
-        alias = self.vision_alias
-        if not alias:
-            return None
-        if alias in (getattr(self._llm_manager, "providers", None) or {}):
-            return alias
-        log.warning("Agent vision model '%s' is not a provider on this node; "
-                    "using the global vision provider", alias)
-        return None
 
     async def _describe_images_into_messages(
         self,

@@ -30,9 +30,7 @@ AGENT_CONFIG_KEYS = (
     "sleep_provider_alias",
     "snapshot_summarize_provider",
     "compaction_provider",
-    # Who looks at images when the Main LLM cannot, and who transcribes the
-    # person's voice for this agent; both run on this node (follow-up 13).
-    "vision_provider_alias",
+    # Who transcribes the person's voice for this agent; runs on this node.
     "voice_provider_alias",
 )
 
@@ -447,13 +445,12 @@ def unresolved_references(known_aliases, home: Path) -> List[str]:
 
 # What the agents list says about an agent's model keys, under the words the
 # configuration dialog prints for its selects (Main, Sleep, Snapshot, Compaction,
-# Vision, Voice).
+# Voice).
 AGENT_ROLE_NAMES = {
     "provider_alias": "main",
     "sleep_provider_alias": "sleep",
     "snapshot_summarize_provider": "snapshot",
     "compaction_provider": "compaction",
-    "vision_provider_alias": "vision",
     "voice_provider_alias": "voice",
 }
 

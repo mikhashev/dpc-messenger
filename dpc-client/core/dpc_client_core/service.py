@@ -12202,7 +12202,6 @@ class CoreService(MusicCommandsMixin):
         retrieval_vector: str = None,
         retrieval_text: str = None,
         reasoning_effort: str = None,
-        vision_provider_alias: str = None,
         voice_provider_alias: str = None,
     ) -> Dict[str, Any]:
         """Delegated to AgentService."""
@@ -12222,7 +12221,6 @@ class CoreService(MusicCommandsMixin):
             retrieval_vector=retrieval_vector,
             retrieval_text=retrieval_text,
             reasoning_effort=reasoning_effort,
-            vision_provider_alias=vision_provider_alias,
             voice_provider_alias=voice_provider_alias,
             providers_getter=self.get_providers_list,
         )

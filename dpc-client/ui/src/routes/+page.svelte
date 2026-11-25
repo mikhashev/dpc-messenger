@@ -555,7 +555,7 @@
     (agentChatToAgentId.get(activeChatId) ?? activeChatId).startsWith('agent_')
   );
 
-  // The agents-list row of the agent behind this chat: its level, Vision and Voice.
+  // The agents-list row of the agent behind this chat: its level and Voice.
   let activeAgentRow = $derived(
     $agentsList.find((a: any) => a.agent_id === (agentChatToAgentId.get(activeChatId) ?? activeChatId)) as any
   );
@@ -1279,7 +1279,6 @@
             isAgentChat={isAgentChatHeader}
             agentComputeHost={$aiChats.get(activeChatId)?.compute_host || ""}
             agentReasoning={activeAgentRow?.reasoning_effort || ""}
-            agentVisionAlias={activeAgentRow?.vision_provider_alias || ""}
             agentVoiceAlias={activeAgentRow?.voice_provider_alias || ""}
           />
           {/if}

@@ -2033,16 +2033,10 @@ class DpcAgentManager:
             getattr(self, "_chat_aliases", {}).pop(conversation_id, None)
 
     def _apply_media_aliases(self, agent: Any) -> None:
-        """The agent's own Vision and Voice models (config vision_provider_alias,
-        voice_provider_alias; '' or absent = the node's global) onto the agent
-        about to run, read from the config this manager holds."""
+        """The agent's own Voice model (config voice_provider_alias; '' or absent =
+        the node's global) onto the agent about to run, read from the config this
+        manager holds."""
         config = getattr(self, "config", None) or {}
-        llm = getattr(agent, "llm", None)
-        if llm is not None:
-            try:
-                llm.vision_alias = config.get("vision_provider_alias") or None
-            except Exception:
-                pass
         try:
             agent.voice_provider_alias = config.get("voice_provider_alias") or None
         except Exception:

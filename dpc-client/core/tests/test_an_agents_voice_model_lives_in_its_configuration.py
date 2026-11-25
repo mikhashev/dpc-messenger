@@ -1,15 +1,12 @@
-"""An agent's Vision and Voice models live in its configuration, not in a chat header
+"""An agent's Voice model lives in its configuration, not in a chat header
 (THE-CHAT-MODEL-DROPDOWN-CALLS-CLOUD-MODELS-LOCAL-AND-OFFERS-AGENT-CHATS-A-CHOICE-THE-AGENT-
 CONFIG-ALREADY-MADE, 2026-11-25 addendum; follow-up 13).
 
-Traced before the header selectors went: an agent turn ignored the header's Vision (an
-image went to the agent's own model when it sees, else to the global vision_provider),
-and the header's Voice reached only dictation in that chat; the agent's Telegram voice
-and its transcribe_audio_file tool used the node's automatic choice. Agent Configuration
-now carries `vision_provider_alias` (who describes an image when the Main LLM cannot see;
-the Main LLM's own vision keeps priority, Mike's 2026-09-18 rule) and
-`voice_provider_alias` (who transcribes the person's voice for this agent). Both run on
-this node; '' is «Default (global)», None leaves a field alone.
+Agent Configuration carries `voice_provider_alias` (who transcribes the person's voice for
+this agent; runs on this node; '' is «Default (global)», None leaves the field alone).
+There is no per-agent Vision model (Mike, 2026-11-25): where an image goes is his
+2026-09-18 rule, pinned below: the model the agent runs, when it sees, else the global
+vision_provider.
 """
 
 from __future__ import annotations
@@ -93,29 +90,30 @@ def saver(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_dialog_saves_and_reads_back_vision_and_voice(saver):
-    result = await saver.save(vision_provider_alias="qwen-vl", voice_provider_alias="whisper-b")
+async def test_the_dialog_saves_and_reads_back_voice(saver):
+    result = await saver.save(voice_provider_alias="whisper-b")
     assert result["status"] == "ok"
-    assert (saver.read()["vision_provider_alias"], saver.read()["voice_provider_alias"]) == (
-        "qwen-vl", "whisper-b")
+    assert saver.read()["voice_provider_alias"] == "whisper-b"
     got = await saver.get()
-    assert (got["vision_provider_alias"], got["voice_provider_alias"]) == ("qwen-vl", "whisper-b")
+    assert got["voice_provider_alias"] == "whisper-b"
     # What «Default (global)» means, for the dialog to say.
-    assert (got["global_vision_provider"], got["global_voice_provider"]) == ("qwen-vl", "whisper-a")
+    assert got["global_voice_provider"] == "whisper-a"
+    # There is no per-agent Vision model any more.
+    assert "vision_provider_alias" not in got and "global_vision_provider" not in got
 
 
 @pytest.mark.asyncio
 async def test_an_empty_choice_clears_and_an_omitted_one_is_left_alone(saver):
-    await saver.save(vision_provider_alias="qwen-vl", voice_provider_alias="whisper-b")
-    await saver.save(vision_provider_alias="")
-    cfg = saver.read()
-    assert cfg["vision_provider_alias"] == "" and cfg["voice_provider_alias"] == "whisper-b"
+    await saver.save(voice_provider_alias="whisper-b")
+    await saver.save(reasoning_effort="high")
+    assert saver.read()["voice_provider_alias"] == "whisper-b"
+    await saver.save(voice_provider_alias="")
+    assert saver.read()["voice_provider_alias"] == ""
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kwargs, word", [
-    ({"vision_provider_alias": "nowhere"}, "not a provider on this node"),
-    ({"vision_provider_alias": "text-only"}, "does not read images"),
+    ({"voice_provider_alias": "nowhere"}, "not a provider on this node"),
     ({"voice_provider_alias": "qwen-vl"}, "does not transcribe"),
 ])
 async def test_a_model_that_cannot_do_the_job_is_refused_and_nothing_is_written(saver, kwargs, word):
@@ -124,28 +122,30 @@ async def test_a_model_that_cannot_do_the_job_is_refused_and_nothing_is_written(
     assert saver.read() == {"provider_alias": "text-only"}
 
 
-def test_vision_and_voice_are_listed_roles_so_a_rename_and_a_delete_follow_them():
-    assert refs.AGENT_ROLE_NAMES["vision_provider_alias"] == "vision"
+def test_voice_is_a_listed_role_so_a_rename_and_a_delete_follow_it():
     assert refs.AGENT_ROLE_NAMES["voice_provider_alias"] == "voice"
-    assert {"vision_provider_alias", "voice_provider_alias"} <= set(refs.AGENT_CONFIG_KEYS)
+    assert "voice_provider_alias" in refs.AGENT_CONFIG_KEYS
+    assert "vision_provider_alias" not in refs.AGENT_CONFIG_KEYS
+    assert "vision_provider_alias" not in refs.AGENT_ROLE_NAMES
 
 
-def test_the_manager_hands_the_configured_models_to_the_agent_about_to_run():
+def test_the_manager_hands_the_configured_voice_model_to_the_agent_about_to_run():
     manager = am.DpcAgentManager.__new__(am.DpcAgentManager)
-    manager.config = {"vision_provider_alias": "qwen-vl", "voice_provider_alias": ""}
-    agent = SimpleNamespace(llm=SimpleNamespace(vision_alias=None), voice_provider_alias="x")
+    manager.config = {"voice_provider_alias": "whisper-b"}
+    agent = SimpleNamespace(llm=SimpleNamespace(), voice_provider_alias=None)
     manager._apply_media_aliases(agent)
-    assert agent.llm.vision_alias == "qwen-vl"
+    assert agent.voice_provider_alias == "whisper-b"
+    manager.config = {"voice_provider_alias": ""}
+    manager._apply_media_aliases(agent)
     assert agent.voice_provider_alias is None
 
 
-def test_the_adapter_uses_its_vision_model_only_when_this_node_holds_it():
-    adapter = DpcLlmAdapter(SimpleNamespace(providers=PROVIDERS))
-    assert adapter.local_vision_alias() is None
-    adapter.vision_alias = "qwen-vl"
-    assert adapter.local_vision_alias() == "qwen-vl"
-    adapter.vision_alias = "gone"
-    assert adapter.local_vision_alias() is None
+def test_a_stored_vision_provider_alias_is_ignored():
+    manager = am.DpcAgentManager.__new__(am.DpcAgentManager)
+    manager.config = {"vision_provider_alias": "qwen-vl"}
+    agent = SimpleNamespace(llm=SimpleNamespace(), voice_provider_alias=None)
+    manager._apply_media_aliases(agent)
+    assert vars(agent.llm) == {}
 
 
 class _LLM:
@@ -158,30 +158,29 @@ class _LLM:
         return {"response": "a cat", "model": "m"} if return_metadata else "a cat"
 
 
-def _vision_ctx(tmp_path, main_alias, vision_alias):
+def _vision_ctx(tmp_path, main_alias):
     root = tmp_path / "agent_001"
     root.mkdir()
     (root / "render.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
     llm = _LLM()
     ctx = ToolContext(agent_root=root, dpc_service=SimpleNamespace(llm_manager=llm))
     adapter = DpcLlmAdapter(llm, provider_alias=main_alias)
-    adapter.vision_alias = vision_alias
     ctx._agent = SimpleNamespace(llm=adapter)
     return ctx, llm
 
 
 @pytest.mark.asyncio
-async def test_describe_image_goes_to_the_agents_vision_model_when_its_main_llm_cannot_see(tmp_path):
-    ctx, llm = _vision_ctx(tmp_path, "text-only", "qwen-vl")
+async def test_an_agent_whose_main_model_cannot_see_sends_the_image_to_the_global_vision_provider(tmp_path):
+    ctx, llm = _vision_ctx(tmp_path, "text-only")
     await describe_image(ctx, "render.png")
-    assert llm.calls == ["qwen-vl"]
+    assert llm.calls == [None]  # None = the node's global vision_provider
 
 
 @pytest.mark.asyncio
-async def test_describe_image_with_no_vision_model_set_goes_to_the_global_one(tmp_path):
-    ctx, llm = _vision_ctx(tmp_path, "text-only", None)
+async def test_an_agent_whose_main_model_sees_gets_the_image_itself(tmp_path):
+    ctx, llm = _vision_ctx(tmp_path, "qwen-vl")
     await describe_image(ctx, "render.png")
-    assert llm.calls == [None]
+    assert llm.calls == ["qwen-vl"]
 
 
 def test_transcribe_audio_file_defaults_to_the_agents_voice_model():

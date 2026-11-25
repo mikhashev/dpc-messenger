@@ -47,8 +47,7 @@ def _resolve_vision_alias(ctx: ToolContext, llm_manager) -> Optional[str]:
     """Which provider gets the picture when the caller named no model.
 
     Mike's rule, 2026-09-18: if the model the agent runs can see, the image goes
-    to it; otherwise to the agent's own Vision model (Agent Configuration,
-    follow-up 13), else to the global vision_provider. None means "global".
+    to it; otherwise to the global vision_provider. None means "global".
     A remote agent (compute_host or a dpc_agent peer) also returns None — this
     tool reads a local file and calls locally, and a peer's alias is not in the
     local registry.
@@ -75,11 +74,6 @@ def _resolve_vision_alias(ctx: ToolContext, llm_manager) -> Optional[str]:
     if can_see:
         log.info("describe_image: agent provider '%s' supports vision, sending the image to it", alias)
         return alias
-    own_vision = adapter.local_vision_alias() if hasattr(adapter, "local_vision_alias") else None
-    if own_vision:
-        log.info("describe_image: agent provider '%s' has no vision, using the agent's "
-                 "vision model '%s'", alias or "(none)", own_vision)
-        return own_vision
     log.info(
         "describe_image: agent provider '%s' has no vision, using the global vision provider",
         alias or "(none)",

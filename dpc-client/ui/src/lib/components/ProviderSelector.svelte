@@ -57,8 +57,8 @@
     // For agent chats with remote compute host: the LLM provider alias used by the agent
     agentLlmProvider = "",
 
-    // An agent chat picks its own vision model (see agentVisionModel.ts), so the
-    // dropdown becomes a read-only statement of what will happen.
+    // An agent chat shows no model controls (see agentVisionModel.ts for where an
+    // image goes: the agent's model if it sees, else the global vision_provider).
     isAgentChat = false,
 
     // The agent chat's own `compute_host` (peer node_id; empty = this node). For
@@ -68,7 +68,6 @@
     // An agent chat's model, reasoning level, Vision and Voice are set in Agent
     // Configuration (Mike, 2026-11-25): the header states them and opens it.
     agentReasoning = "",
-    agentVisionAlias = "",
     agentVoiceAlias = "",
   }: {
     selectedComputeHost?: string;
@@ -86,7 +85,6 @@
     isAgentChat?: boolean;
     agentComputeHost?: string;
     agentReasoning?: string;
-    agentVisionAlias?: string;
     agentVoiceAlias?: string;
   } = $props();
 
