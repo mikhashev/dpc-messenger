@@ -744,7 +744,10 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
 
   **Built at `8c73b1ba` (part 0: `ToolEntry.owner_only`, `registry.execute`, the offered list;
   ComfyUI is owner_only), each tool's second line at `29383864` and `e3b0ea6c`; not observed
-  live.**
+  live.** *Follow-up 12:* `list_all_tools`, what the Agent Permissions panel renders, carries
+  each tool's `owner_only`, so the badge can read the registry (`784e1298`); the sandbox check
+  under every file tool compares path components, so `<agent root>2` or `<agent root>-backup`
+  is no longer inside the agent's folder (`16573047`, Zcode #68 P2). Not observed live.
 - **D44. The agent gets a take by `take_id`, resolved by core, and no directory access**
   (letter D, **revised**: first decided in #46 as "the agent reads `~/.dpc/music/generated/`
   without a `sandbox_extensions` entry"; revised by Mike in #53-#57 on Zcode #51). A read path
