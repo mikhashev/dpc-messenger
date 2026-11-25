@@ -382,6 +382,8 @@ export function nextPlaylistName(playlists: readonly Playlist[]): string {
  *   `[music] stream_ranges_linux` turns Range back on): WebKitGTK plays no audio from
  *   `asset:`, treats a `blob:` as a live stream (duration 0, no seeking forward), and on a
  *   Range source reports duration 0 and refuses forward seeks it has not buffered.
+ *   Whether 36a4777a (wait for a duration before play) made the no-Range mode redundant is not
+ *   proven; it stays the default until a Linux run with `stream_ranges_linux = true` says so.
  * - **Windows and macOS** keep `convertFileSrc` (`asset:`) for a file under `~/.dpc`, the
  *   asset scope; a file elsewhere uses the stream.
  * - Fallback when the stream info cannot be had: Linux reads a file under `~/.dpc` into

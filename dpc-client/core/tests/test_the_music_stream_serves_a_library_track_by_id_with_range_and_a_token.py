@@ -484,3 +484,10 @@ async def test_ranges_1_headers_are_unchanged(server):
     _, headers, _ = await _raw(server, [f"GET /music/track/trk_abc?t={TOKEN}&ranges=1 HTTP/1.1"])
     assert headers["cache-control"] == "no-store" and headers["x-content-type-options"] == "nosniff"
     assert "etag" in headers and "last-modified" in headers and headers["accept-ranges"] == "bytes"
+
+
+def test_the_no_range_mode_stays_the_linux_default_until_a_linux_run_proves_it_redundant(tmp_path):
+    """The mode was kept on purpose (stream.py, "Not proven redundant"): the setting that turns Range
+    back on for Linux is off by default."""
+    from dpc_client_core.settings import Settings
+    assert Settings(tmp_path).get("music", "stream_ranges_linux") == "false"

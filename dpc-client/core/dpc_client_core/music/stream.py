@@ -41,6 +41,11 @@ The one route is ``GET`` / ``HEAD`` ``/music/track/{track_id}?t=<token>``:
   progressively, reports `duration` 0, and rejects a forward seek beyond what it has
   buffered, while on a plain 200 source it fetches the whole file and knows the duration
   and a full `seekable`. HEAD answers the same headers without a body.
+  **Not proven redundant.** 36a4777a (the player waits for `duration > 0` before `play`) fixed
+  forward seeking on Linux, but it was confirmed live only with this mode still on, and nobody has
+  run Linux with `[music] stream_ranges_linux = true` and the fix alone. Until that run, this mode
+  stays the Linux default: removing it costs Range, cacheability and memory, keeping it costs
+  nothing that works today (backlog THE-LINUX-TRACK-STREAM-KEEPS-A-NO-RANGE-SPECIAL-CASE-...).
 - **Every answer to a track request carries `Content-Length`** (the span's byte count, set
   before the headers go out) and never `Transfer-Encoding: chunked`: aiohttp's
   `StreamResponse` is chunked unless `content_length` is set, and a chunked answer reads
