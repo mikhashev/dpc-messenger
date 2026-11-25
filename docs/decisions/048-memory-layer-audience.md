@@ -184,7 +184,10 @@ THE-GROUP-GATE-READS-THE-MEMBER-LIST-WHILE-THE-AGENTS-MAP-STILL-NAMES-NODES-THAT
   Splitting a shareable persona out of identity is a separate card.
 - **L6 holds commits born in 1:1 chats.** It was marked shared by default; the default
   became private on 2026-11-09, Mike's call (a), review by Zcode and Johnny, because L6
-  is the owner's curated knowledge and team knowledge is ADR-049's store. A group with
+  is the owner's curated knowledge and team knowledge was to be ADR-049's store (ADR-049
+  was reserved and never written; see [ADR-053](053-who-asked-decides-what-an-agent-may-do.md),
+  Decision 5, and the open board card A-GROUP-HAS-NO-AUDIENCE-OF-ITS-OWN-SO-ITS-PRIVACY-FOLLOWS-ITS-ROSTER,
+  `backlog.md:1478`). A group with
   another node now opens no layer by default, and the turn logs one INFO line saying
   so. Ark counted 5 of 400 L6 file names that look personal; a per-file audience is the
   Teams-era answer. Marking L6 shared stays possible per agent.

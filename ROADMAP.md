@@ -27,9 +27,9 @@ measured both from git and found the number had no source.
 
 | axis | decisions | board entries | awaiting observation |
 |---|---|---|---|
-| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 accepted · ADR-048 accepted · ADR-050 proposed · ADR-051 accepted | 268 | 91 |
+| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 accepted · ADR-048 accepted · ADR-050 proposed · ADR-051 accepted · ADR-053 accepted | 268 | 91 |
 | **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 accepted · ADR-046 accepted · ADR-048 accepted · ADR-051 accepted | 255 | 54 |
-| **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 accepted · ADR-046 accepted · ADR-047 accepted · ADR-050 proposed · ADR-052 implemented | 410 | 93 |
+| **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 accepted · ADR-046 accepted · ADR-047 accepted · ADR-050 proposed · ADR-052 implemented · ADR-053 accepted | 410 | 93 |
 | **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 370 | 84 |
 | **reach** | ADR-035 accepted · ADR-043 proposed | 105 | 28 |
 
