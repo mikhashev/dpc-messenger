@@ -697,8 +697,8 @@ and `test_an_agent_reads_back_its_own_past_tool_calls.py`.
    the read drops what was read (a screenshot file is removed). After click, fill, select,
    download and switch_tab the session waits for the page to settle before the address is read
    again (`AuthBrowser.settle_after_action`: 300 ms, then at most 3 s for DOMContentLoaded).
-   Origins are compared exactly (scheme, host and port), never by etld1. The owner's reads do
-   not ask the address.
+   Origins are compared exactly (scheme, host and port), never by etld1; the spelling of the
+   default port is normalised (follow-up 19 below). The owner's reads do not ask the address.
 2. **data:, blob: and javascript: addresses** (P4). A destination that is not http(s) is neither
    "the same origin" nor "ANOTHER origin" on the click, fill and select cards: the card says
    "destination unknown (data/blob/script URL)" (`browser.NON_WEB_DESTINATION`). For a foreign
@@ -732,10 +732,27 @@ page-side reader for a data: link and a javascript: form action),
 `test_a_foreign_turn_leaves_no_owner_window_and_cards_and_lines_say_what_they_are_about.py` and
 `test_chat_post_file_posts_only_allowed_types_by_content_and_leaves_no_partial_copy_after_a_cancel.py`.
 
+### Follow-up 19 (Zcode's check #199 on follow-up 17; 2026-11-26)
+
+1. **One origin has one spelling** (P4). `browser._origin_of` (and so `_web_origin_of`, the drift
+   check and the destination words on the cards) kept the port as written, so `https://host` and
+   `https://host:443` counted as two origins: a foreign read of a page that spells its default
+   port was a false drift and latched the moved mark. The origin is now `scheme://host[:port]` in
+   one form: scheme and host lowercase, a non-ASCII host as its IDNA (punycode) form, an IPv6 host
+   bracketed, and the scheme's default port dropped (80 for http and ws, 443 for https and wss).
+   A port that is not the scheme's default stays, `https://host:80` included, and an unreadable
+   port (`:99999`, `:abc`) gives no origin, which fails closed. The comparison is still exact
+   otherwise: scheme, host and port, never etld1. Where urllib's IDNA step refuses a label the host
+   is kept as written, the same on both sides of a comparison.
+
+Pinned by the same test file as follow-up 17 (the normalising table, an unreadable origin, a foreign
+click and read on a page that spells its default port, a navigation that spells it, a card that calls
+it the same origin, and a real other port still drifting).
+
 ## Authors
 
 - **Mike** — Decision
-- **Zcode** — Review (#125, #130, #143, #154, #184, #191)
+- **Zcode** — Review (#125, #130, #143, #154, #184, #191, #199)
 - **CC** — Design, research, this record
 
 ## References
