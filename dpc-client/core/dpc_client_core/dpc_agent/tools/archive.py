@@ -913,8 +913,8 @@ def get_tools() -> List[ToolEntry]:
                         "include_tool_calls": {
                             "type": "boolean",
                             "description": (
-                                "If True, each session also counts your tool calls in it "
-                                "(total and per tool name). Default False."
+                                "If True, each session also counts the tool calls in it of "
+                                "this node's agents (total and per tool name). Default False."
                             ),
                             "default": False,
                         },

@@ -191,3 +191,55 @@ def test_the_substring_fallback_reads_tool_calls_as_names_and_arguments(tmp_path
     found = json.loads(archive.search_session_archives(ctx, "e/s", scope="tool_calls"))
     assert found["total_matches"] == 1
     assert found["matches"][0]["scope_matched"] == "tool_calls"
+
+
+# -- follow-up 14 (Zcode #176): the node is the boundary, and an unbounded read is capped ----------
+
+def test_the_flag_says_it_shows_this_nodes_agents_calls_in_this_chat():
+    from dpc_client_core.dpc_agent.tools import core
+    entry = next(e for e in core.get_tools() if e.name == "chat_history")
+    words = entry.schema["parameters"]["properties"]["include_tool_calls"]["description"]
+    assert "this node's agents" in words and "your own" not in words
+    assert f"{core.CHAT_HISTORY_TOOL_CALLS_MESSAGES} messages" in words
+
+
+def test_an_unbounded_read_with_tool_calls_keeps_the_newest_messages_and_says_so(tmp_path, monkeypatch):
+    from dpc_client_core.dpc_agent.tools import core
+    monkeypatch.setattr(core, "CHAT_HISTORY_TOOL_CALLS_MESSAGES", 3)
+    ctx = _ctx(tmp_path, tmp_path)
+    ctx.conversation_monitor.message_history = [
+        {"role": "user", "sender_name": "Mike", "content": f"message {i}"} for i in range(5)]
+    out = chat_history(ctx, include_tool_calls=True)
+    assert "message 4" in out and "message 2" in out and "message 1" not in out
+    assert "2 older messages not read" in out and "limit and offset" in out
+    plain = chat_history(ctx)
+    assert "message 0" in plain, "without the flag nothing is capped"
+
+
+def test_an_unbounded_read_shows_at_most_the_session_cap_of_calls_newest_first(tmp_path, monkeypatch):
+    from dpc_client_core.dpc_agent.tools import core
+    monkeypatch.setattr(core, "CHAT_HISTORY_TOOL_CALLS_TOTAL", 3)
+    ctx = _ctx(tmp_path, tmp_path)
+    ctx.conversation_monitor.message_history = [
+        {"role": "assistant", "content": "old", "tool_calls": [_call("list_dir", {"path": "old"}, "x")] * 2},
+        {"role": "assistant", "content": "new", "tool_calls": [_call("list_dir", {"path": "new"}, "x")] * 2},
+    ]
+    out = chat_history(ctx, include_tool_calls=True)
+    assert out.count('list_dir({"path": "new"})') == 2
+    assert 'list_dir({"path": "old"})' not in out
+    assert "2 tool calls of older messages not shown" in out
+
+
+def test_a_bounded_read_is_not_capped(tmp_path, monkeypatch):
+    from dpc_client_core.dpc_agent.tools import core
+    monkeypatch.setattr(core, "CHAT_HISTORY_TOOL_CALLS_TOTAL", 1)
+    ctx = _ctx(tmp_path, tmp_path)
+    out = chat_history(ctx, limit=10, include_tool_calls=True)
+    assert "read_file(" in out and "run_shell(" in out and "not shown" not in out
+
+
+def test_the_voice_alias_check_has_one_entry_point():
+    """The delegate left after bfbd4e45 had no caller; the save calls the module function."""
+    from dpc_client_core import agent_service
+    assert not hasattr(agent_service.AgentService, "_local_media_alias_refusal")
+    assert callable(agent_service.local_voice_alias_refusal)

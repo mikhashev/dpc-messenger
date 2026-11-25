@@ -64,11 +64,6 @@
     // The agent chat's own `compute_host` (peer node_id; empty = this node). For
     // an agent chat this, not the page-global selectedComputeHost, is the host.
     agentComputeHost = "",
-
-    // An agent chat's model, reasoning level, Vision and Voice are set in Agent
-    // Configuration (Mike, 2026-11-25): the header states them and opens it.
-    agentReasoning = "",
-    agentVoiceAlias = "",
   }: {
     selectedComputeHost?: string;
     selectedTextProvider?: string;
@@ -84,8 +79,6 @@
     agentLlmProvider?: string;
     isAgentChat?: boolean;
     agentComputeHost?: string;
-    agentReasoning?: string;
-    agentVoiceAlias?: string;
   } = $props();
 
   // The host the requests go to: an agent chat's stored compute_host, otherwise
@@ -329,21 +322,6 @@
     display: flex;
     align-items: center;
     gap: 0.4rem;
-  }
-
-  .provider-row-label {
-    font-size: 0.85rem;
-    font-weight: 500;
-    color: #666;
-    white-space: nowrap;
-  }
-
-  /* 2026-09-18: reads as a statement, not a control — an agent chat has no choice here. */
-  .vision-effective {
-    font-size: 0.85rem;
-    color: #333;
-    padding: 0.4rem 0.2rem;
-    white-space: nowrap;
   }
 
   .provider-row-header label {

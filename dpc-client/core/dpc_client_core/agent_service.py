@@ -983,10 +983,6 @@ class AgentService:
             logger.error("get_agent_model_config failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    def _local_media_alias_refusal(self, voice_alias: Optional[str]) -> Optional[str]:
-        """Why a per-agent Voice alias cannot be saved; None when it can (see local_voice_alias_refusal)."""
-        return local_voice_alias_refusal(self, voice_alias)
-
     async def _refresh_live_agent_manager(self, agent_id: str, config: Dict[str, Any]) -> Optional[int]:
         """Push an updated config into the running agent manager (if any) so a model switch takes effect (1:1 + group counters) without a backend restart; returns the resolved context window."""
         try:

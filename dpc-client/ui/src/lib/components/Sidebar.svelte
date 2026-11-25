@@ -297,11 +297,6 @@
     return `${p.alias} (${p.model}) @ ${peerName}`;
   }
 
-  /** Opens the agent's configuration dialog; the agent 1:1 chat header's Configure calls it. */
-  export function openAgentConfiguration(agentId: string) {
-    return handleModelConfig(agentId);
-  }
-
   // Handle model config badge click
   async function handleModelConfig(agentId: string) {
     modelConfigAgentId = agentId;

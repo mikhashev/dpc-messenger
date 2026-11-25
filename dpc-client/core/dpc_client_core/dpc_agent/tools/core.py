@@ -1012,6 +1012,13 @@ This file tracks the agent's self-understanding and evolving identity.
         return f"⚠️ Error updating identity: {e}"
 
 
+# chat_history with include_tool_calls and no limit reads at most this many messages and shows
+# at most this many tool calls in all (follow-up 14, Zcode #176): a long session's calls were
+# all printed at once. The newest are kept (the oldest from an offset); the output says so.
+CHAT_HISTORY_TOOL_CALLS_MESSAGES = 200
+CHAT_HISTORY_TOOL_CALLS_TOTAL = 2000
+
+
 def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_internals: bool = False,
                  include_tool_calls: bool = False) -> str:
     """
@@ -1026,9 +1033,14 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
         offset: Start position. -1 = from end/newest (default).
                 0+ = from start/oldest (e.g. offset=0 returns oldest messages first).
         include_internals: also show the first 500 chars of thinking and raw stream.
-        include_tool_calls: also show each assistant message's own tool calls
-                (name, args, output, round), args and output cut to 300 chars
-                and at most 20 calls per message, each cut stated.
+        include_tool_calls: also show each assistant message's tool calls (name,
+                args, output, round), args and output cut to 300 chars and at most
+                20 calls per message, each cut stated. They are the calls of this
+                node's agents in this chat: in a group of several of this node's
+                agents, one agent sees the others' calls too (Mike's decision: the
+                node is the boundary). With limit=0, at most
+                CHAT_HISTORY_TOOL_CALLS_MESSAGES messages and
+                CHAT_HISTORY_TOOL_CALLS_TOTAL calls, stated in the output.
 
     Examples:
         chat_history()                    → all messages (full session review)
@@ -1057,8 +1069,41 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
         else:
             selected = history[-limit:] if limit > 0 else history
 
-        output_lines = [f"Conversation ({len(selected)} of {len(history)} total messages):\n"]
-        for msg in selected:
+        capped = []
+        if include_tool_calls and limit <= 0 and len(selected) > CHAT_HISTORY_TOOL_CALLS_MESSAGES:
+            dropped = len(selected) - CHAT_HISTORY_TOOL_CALLS_MESSAGES
+            if offset >= 0:
+                selected = selected[:CHAT_HISTORY_TOOL_CALLS_MESSAGES]
+                which = "later"
+            else:
+                selected = selected[-CHAT_HISTORY_TOOL_CALLS_MESSAGES:]
+                which = "older"
+            capped.append(f"{dropped} {which} messages not read: with include_tool_calls and no "
+                          f"limit, at most {CHAT_HISTORY_TOOL_CALLS_MESSAGES} messages are read")
+        calls_by_index: Dict[int, List[str]] = {}
+        if include_tool_calls:
+            budget = CHAT_HISTORY_TOOL_CALLS_TOTAL if limit <= 0 else None
+            # The newest messages' calls first, unless the read starts from an offset.
+            order = range(len(selected)) if offset >= 0 else range(len(selected) - 1, -1, -1)
+            withheld = 0
+            for i in order:
+                lines = tool_call_lines(selected[i])
+                shown = sum(1 for line in lines if not line.startswith("  [TOOL] \u2026"))
+                if budget is not None and (withheld or shown > budget):
+                    withheld += shown
+                    continue
+                if budget is not None:
+                    budget -= shown
+                calls_by_index[i] = lines
+            if withheld:
+                capped.append(f"{withheld} tool calls of {'later' if offset >= 0 else 'older'} "
+                              f"messages not shown: with no limit, at most "
+                              f"{CHAT_HISTORY_TOOL_CALLS_TOTAL} tool calls are shown")
+        header = f"Conversation ({len(selected)} of {len(history)} total messages)"
+        if capped:
+            header += f"; {'; '.join(capped)}. Use limit and offset to read the rest"
+        output_lines = [header + ":\n"]
+        for index, msg in enumerate(selected):
             role = msg.get("role", "unknown")
             sender = msg.get("sender_name", role)
             ts = msg.get("timestamp", "")
@@ -1073,7 +1118,7 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
                 if streaming_raw:
                     output_lines.append(f"  [RAW]: {streaming_raw[:500]}")
             if include_tool_calls:
-                output_lines.extend(tool_call_lines(msg))
+                output_lines.extend(calls_by_index.get(index, []))
 
         return "\n".join(output_lines)
 
@@ -3065,10 +3110,13 @@ def get_tools() -> List[ToolEntry]:
                         "include_tool_calls": {
                             "type": "boolean",
                             "description": (
-                                "Include your own past tool calls of this session under each "
-                                "assistant message: tool name, arguments, a short output and "
-                                "the round. Arguments and output are cut to 300 chars, at most "
-                                "20 calls per message; every cut is stated."
+                                "Include the past tool calls of this node's agents in this chat "
+                                "(yours, and in a group those of this node's other agents) under "
+                                "each assistant message: tool name, arguments, a short output "
+                                "and the round. Arguments and output are cut to 300 chars, at "
+                                "most 20 calls per message; every cut is stated. With no limit, "
+                                f"at most {CHAT_HISTORY_TOOL_CALLS_MESSAGES} messages and "
+                                f"{CHAT_HISTORY_TOOL_CALLS_TOTAL} calls are read, the newest."
                             ),
                             "default": False
                         }
