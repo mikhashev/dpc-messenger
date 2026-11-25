@@ -3,10 +3,9 @@
 
 <script lang="ts">
   import { menuSummary, priceLine, settingsLines, vendorLine, type MenuRow } from './peerMenu';
-  import { effectiveAgentVisionModel, visionFollowingText } from './agentVisionModel';
+  import { visionFollowingText } from './agentVisionModel';
   import { agentHostDisplay } from './agentComputeHost';
   import { providerOptionText } from '$lib/utils/providerPlace';
-  import { agentConfigLine } from './agentConfigLine';
 
   // Provider type definition: one row of PROVIDERS_RESPONSE (DPTP §3.5), which
   // since `ec686608` carries `tariff` and `settings` beside the capabilities.
@@ -71,7 +70,6 @@
     agentReasoning = "",
     agentVisionAlias = "",
     agentVoiceAlias = "",
-    onOpenAgentConfig = undefined
   }: {
     selectedComputeHost?: string;
     selectedTextProvider?: string;
@@ -90,7 +88,6 @@
     agentReasoning?: string;
     agentVisionAlias?: string;
     agentVoiceAlias?: string;
-    onOpenAgentConfig?: () => void;
   } = $props();
 
   // The host the requests go to: an agent chat's stored compute_host, otherwise
@@ -140,29 +137,6 @@
   const mergedVisionProviders = $derived(() => mergedProviders().filter(p => p.supports_vision));
   const mergedVoiceProviders = $derived(() => mergedProviders().filter(p => p.supports_voice));
 
-  // The agent's own Vision model stands in for the global one when its Main LLM cannot see.
-  const agentVision = $derived(() => effectiveAgentVisionModel(
-    agentLlmProvider,
-    providersList || [],
-    agentVisionAlias || defaultProviders?.vision_provider || '',
-    agentComputeHost,
-    peerProviders,
-    hostDisplay().shortName
-  ));
-
-  const agentLine = $derived(() => agentConfigLine({
-    alias: agentLlmProvider,
-    fallbackAlias: defaultProviders?.agent_provider || defaultProviders?.default_provider || '',
-    providers: providersList || [],
-    peerRows: agentComputeHost ? (peerProviders.get(agentComputeHost) || []) : [],
-    reasoning: agentReasoning,
-    host: hostDisplay(),
-    vision: agentVision(),
-    visionIsAgentOwn: !!agentVisionAlias,
-    voiceAlias: agentVoiceAlias,
-    globalVoiceAlias: defaultProviders?.voice_provider || '',
-  }));
-
   // What the guest is about to call on someone else's machine. A local alias
   // needs no such panel — the settings are this node's own and the call is
   // free by construction — so the door opens only on a `remote:` selection.
@@ -209,23 +183,9 @@
 </script>
 
 {#if isAIChat && isAgentChat}
-  <!-- An agent chat: the model, its level and its host are the agent's own,
-       set in Agent Configuration (Mike, 2026-11-25), so the header states them
-       and opens that dialog instead of offering AI Host / Text / Vision / Voice. -->
-  <div class="provider-selector-block">
-    <div class="provider-selector-header agent-config-line">
-      <span class="provider-row-label">Agent:</span>
-      <span class="vision-effective agent-config-text" title={agentLine().title}>{agentLine().text}</span>
-      {#if onOpenAgentConfig}
-        <button
-          type="button"
-          class="agent-config-open"
-          title="Open this agent's configuration: Main LLM, reasoning, Vision and Voice models"
-          onclick={() => onOpenAgentConfig?.()}
-        >Configure</button>
-      {/if}
-    </div>
-  </div>
+  <!-- An agent chat shows no model controls: the model, its level, host, Vision and
+       Voice are the agent's own, set in Agent Configuration (Mike, 2026-11-25: no
+       AI Host / Text / Vision / Voice selectors, and no read-only line either). -->
 {:else if isAIChat && providersList.length > 0}
   <!-- One flex item in the chat header, so the peer panel stacks under the
        dropdowns instead of competing with them for the row. -->
@@ -378,32 +338,6 @@
     font-weight: 500;
     color: #666;
     white-space: nowrap;
-  }
-
-  .agent-config-line {
-    flex-wrap: nowrap;
-    gap: 0.4rem;
-    min-width: 0;
-  }
-
-  .agent-config-text {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    min-width: 0;
-  }
-
-  .agent-config-open {
-    padding: 0.3rem 0.6rem;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-    background: white;
-    cursor: pointer;
-    font-size: 0.8rem;
-    white-space: nowrap;
-  }
-
-  .agent-config-open:hover {
-    border-color: #4CAF50;
   }
 
   /* 2026-09-18: reads as a statement, not a control — an agent chat has no choice here. */

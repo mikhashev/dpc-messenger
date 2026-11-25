@@ -1281,7 +1281,6 @@
             agentReasoning={activeAgentRow?.reasoning_effort || ""}
             agentVisionAlias={activeAgentRow?.vision_provider_alias || ""}
             agentVoiceAlias={activeAgentRow?.voice_provider_alias || ""}
-            onOpenAgentConfig={() => sidebarRef?.openAgentConfiguration(agentChatToAgentId.get(activeChatId) ?? activeChatId)}
           />
           {/if}
 
