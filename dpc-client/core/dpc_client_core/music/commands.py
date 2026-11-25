@@ -122,7 +122,7 @@ from urllib.request import url2pathname
 from ..local_api import slow_command
 from . import job_schemas as js
 from .acestep import AceStepServer, read_config
-from .comments import MusicComments
+from .comments import ORIGINAL_VERSION_ID, MusicComments
 from .capabilities import EngineStatus, MusicCapabilities
 from .engine_base import MusicEngineError
 from .engines import MusicEngines
@@ -644,7 +644,8 @@ class MusicCommandsMixin:
             if self._music_runner_instance is None:
                 self._music_runner_instance = MusicJobRunner(
                     store, self._music_engine_set(), self._music, dpc_home=self.settings.dpc_home_dir,
-                    on_job_change=self._music_job_changed)
+                    on_job_change=self._music_job_changed, lyrics_get=self._music_stored_lyrics,
+                    lyrics_save=self._music_save_take_lyrics)
             self._music_runner_instance.start()
         except Exception:
             logger.exception("music: the job runner did not start")
@@ -773,6 +774,54 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    async def _music_edit_source(self, track_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """What the job store needs of an edit's track (`MusicJobStore.create_job` `source`): its kind,
+        audio hash and length, from the library; None when the id is not a track."""
+        if not track_id:
+            return None
+        library = await self._music()
+        try:
+            entry = library.get_entry(track_id)
+        except MusicLibraryError:
+            raise MusicJobError("invalid_source", f"no library track {track_id!r}", field="track_id")
+        if entry.get("missing"):
+            raise MusicJobError("invalid_source", "the track's file is missing; relink or rescan it first",
+                                field="track_id")
+        return {"kind": (entry.get("source") or {}).get("kind"), "content_hash": entry.get("content_hash"),
+                "duration_s": entry.get("duration_s"), "title": entry.get("title")}
+
+    async def _music_edit_comment(self, strs: Dict[str, Any], region: Any, requested_by: Any) -> None:
+        """An edit proposed without a comment (an agent's request, or the UI sending the form) gets
+        one: the region comment with the action and the text, on the original version, by the person
+        or the agent that asked. `strs` is completed in place (`comment_id`, `base_version_id`,
+        `prompt`)."""
+        if strs.get("base_version_id") is None:
+            strs["base_version_id"] = ORIGINAL_VERSION_ID
+        if strs.get("comment_id") is not None or not isinstance(region, dict):
+            return
+        rb = requested_by if isinstance(requested_by, dict) else {}
+        author = ({"kind": "agent", "name": str(rb.get("agent_id") or "agent")[:80]}
+                  if rb.get("kind") == js.REQUESTER_AGENT else None)
+        text = strs.get("prompt") or f"{strs.get('action')} (proposed without a note)"
+        comment = await (await self._music_comments()).add(
+            strs["track_id"], region.get("t_start"), region.get("t_end"), text, strs.get("action"), author=author)
+        strs["comment_id"] = comment["id"]
+        strs["prompt"] = comment["text"]
+        self._music_broadcast("music_comments_updated", {"track_id": strs["track_id"]})
+
+    async def _music_stored_lyrics(self, track_id: str) -> Optional[Dict[str, Any]]:
+        """The track's stored lyrics (`mp.lyrics/1`) for an edit, or None; never asks the internet."""
+        try:
+            answer = await (await self._music_lyrics()).get(track_id)
+        except Exception:
+            return None
+        lyrics = answer.get("lyrics") if isinstance(answer, dict) else None
+        return lyrics if isinstance(lyrics, dict) else None
+
+    async def _music_save_take_lyrics(self, track_id: str, lrc_text: str) -> None:
+        """A cut-with-shift take's re-timed lyrics, stored as its own (decision 27)."""
+        await (await self._music_lyrics()).save_manual(track_id, lrc_text)
+
     @slow_command
     async def propose_music_job(self, type: Any = None, params: Any = None, track_id: Any = None,
                                 base_version_id: Any = None, comment_id: Any = None, action: Any = None,
@@ -782,7 +831,11 @@ class MusicCommandsMixin:
         turn_id?}`) says who asks; without it the person does (the UI door sends none). An
         agent's request is limited (`requester_queue_full`, `turn_job_limit`: `[music]
         agent_queue_max`, default 2, and `turn_jobs_max`, default 1, read on every call) and,
-        with a `turn_id` and no `idempotency_key`, repeats return the same job."""
+        with a `turn_id` and no `idempotency_key`, repeats return the same job.
+
+        An `edit` (`track_id`, `action`, `region`, `prompt`) is checked against the library track
+        (`listen_only_source`, `track_not_ready`); without a `comment_id` the region comment is made
+        first, and `base_version_id` defaults to the original version."""
         try:
             job_type = _need_str(type, "type", "invalid_type")
             if not isinstance(params, dict):
@@ -796,8 +849,21 @@ class MusicCommandsMixin:
                 raise _bad("invalid_params", "requested_by", "an object or null")
             store = await self._music_jobs()
             queue_max, turn_max = self._music_agent_queue_max(), self._music_turn_jobs_max()
+            source = None
+            if job_type == "edit":
+                source = await self._music_edit_source(strs.get("track_id"))
+                if strs.get("comment_id") is None:
+                    # Every check that can refuse runs before the comment is made, so a refusal leaves none.
+                    probe = dict(strs, comment_id="cmt_" + "0" * 16,
+                                 base_version_id=strs.get("base_version_id") or ORIGINAL_VERSION_ID)
+                    checked = await asyncio.to_thread(lambda: store.check_job(
+                        job_type, params, region=region, requested_by=requested_by, source=source,
+                        agent_queue_max=queue_max, turn_jobs_max=turn_max, **probe))
+                    if checked.get("repeat"):
+                        return {"status": "ok", "job": checked["repeat"]}
+                await self._music_edit_comment(strs, region, requested_by)
             job = await asyncio.to_thread(lambda: store.create_job(
-                job_type, params, region=region, requested_by=requested_by,
+                job_type, params, region=region, requested_by=requested_by, source=source,
                 agent_queue_max=queue_max, turn_jobs_max=turn_max, **strs))
             if job.get("state") == "queued":
                 self._music_wake_runner()
@@ -808,11 +874,13 @@ class MusicCommandsMixin:
 
     @slow_command
     async def check_music_job(self, type: Any = None, params: Any = None,
-                              idempotency_key: Any = None, requested_by: Any = None) -> Dict[str, Any]:
+                              idempotency_key: Any = None, requested_by: Any = None, track_id: Any = None,
+                              action: Any = None, region: Any = None, prompt: Any = None) -> Dict[str, Any]:
         """What `propose_music_job` with these arguments would answer, without making a job, for
         the agent runtime (music tools follow-up 12): `{repeat: job|null, params}`, or the error
         `propose_music_job` would give, and `unsupported` (with the reason) where it would make
-        the job `unsupported`. Only a request that passes is put to the person for approval."""
+        the job `unsupported`. Only a request that passes is put to the person for approval. An
+        `edit` names its `track_id`, `action` and `region`; no comment is made by a check."""
         try:
             job_type = _need_str(type, "type", "invalid_type")
             if not isinstance(params, dict):
@@ -820,11 +888,20 @@ class MusicCommandsMixin:
             key = _opt_str(idempotency_key, "idempotency_key", "invalid_params")
             if requested_by is not None and not isinstance(requested_by, dict):
                 raise _bad("invalid_params", "requested_by", "an object or null")
+            if region is not None and not isinstance(region, dict):
+                raise _bad("invalid_params", "region", "an object or null")
             store = await self._music_jobs()
             queue_max, turn_max = self._music_agent_queue_max(), self._music_turn_jobs_max()
+            edit: Dict[str, Any] = {}
+            if job_type == "edit":
+                tid = _opt_str(track_id, "track_id", "invalid_params")
+                edit = {"track_id": tid, "action": _opt_str(action, "action", "invalid_params"), "region": region,
+                        "prompt": _opt_str(prompt, "prompt", "invalid_params"),
+                        "comment_id": "cmt_" + "0" * 16, "base_version_id": ORIGINAL_VERSION_ID,
+                        "source": await self._music_edit_source(tid)}
             answer = await asyncio.to_thread(lambda: store.check_job(
                 job_type, params, idempotency_key=key, requested_by=requested_by,
-                agent_queue_max=queue_max, turn_jobs_max=turn_max))
+                agent_queue_max=queue_max, turn_jobs_max=turn_max, **edit))
             return {"status": "ok", **answer}
         except Exception as exc:
             return _error(exc)
@@ -1197,8 +1274,10 @@ class MusicCommandsMixin:
     # -- listening notes: timecoded comments (`mp.comment/1`, music/comments.py) ----------
 
     async def _music_comments(self) -> MusicComments:
-        await self._music()
-        assert self._music_comments_instance is not None
+        library = await self._music()
+        if self._music_comments_instance is None or self._music_comments_instance.library is not library:
+            # A library set from outside (`_music` builds both together otherwise) gets its comments here.
+            self._music_comments_instance = MusicComments(self.settings.dpc_home_dir, library)
         return self._music_comments_instance
 
     @slow_command

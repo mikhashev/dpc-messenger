@@ -108,6 +108,24 @@ backbone and its sha256, the adapters with the source and both split sha256s and
 strengths, `cot`, and the duration cap beside the received length. Cancel stops between
 variants and cancels the engine's job in flight. A job's engine-job limit grows with the
 cap (about 3.5x real time on the trial card).
+
+**Region edits** (`edit` jobs with a built action, `region_edit.py`; ADR-051 row B4). The same queue,
+oldest first. Before the card: the base track is looked up in the library (gone, missing, or its audio
+hash changed since the proposal: `unsupported` with the reason, SPEC §6 `hash_mismatch`), decoded by
+ffmpeg to the **control** (48 kHz stereo 24-bit WAV, `generated/<job>/control.wav.part`), and the
+payload `edit.request.json` (the action, the zones, the crossfade, the seed, the base's ids and the
+control's sha256 and frames) is written; a resumed job must decode to the same control. The style
+caption and lyrics a repaint sends are the params', else the base file's own provenance record's, else
+(lyrics only) the track's stored lyrics; a repaint with no caption anywhere is refused, since acestep.cpp
+requires one. `regenerate_region` and `fix_seam` then hold acestep.cpp's card like a from-text job, write
+`synth.request.json` (the repaint request) and send it with the control as one multipart `/synth`
+(`submit_form`); every audio part (wav32) is spliced into the control (`region_edit.splice`). A
+`remove_region` needs no engine and no card. Each take is written as a 24-bit WAV and goes the same way
+as a from-text take (FLAC, lossless check, loudness, stage-1 QA with the edit zone and the seam numbers,
+the `mp.provenance/1` record of `build_edit_record` naming the parent, the library with lineage
+`region_edit`, an `edit` take of the job). A take the splice cannot make the control's length is not
+kept (`length_mismatch`, decision 23); the job fails only when no take is usable. A `cut_with_shift`
+removal re-times the base's stored lyrics onto the take (decision 27).
 """
 
 from __future__ import annotations
@@ -129,14 +147,15 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 
 from . import job_schemas as js
 from . import provenance as prov
+from . import region_edit as re_
 from .acestep import MODEL_FILES
-from .audio_tags import AlreadyTagged, TagError, flac_add_comments
+from .audio_tags import AlreadyTagged, TagError, flac_add_comments, flac_read_comments
 from .engine_base import MusicEngineError
 from .engines import MusicEngines
 from .identity import MediaTools, read_flac_streaminfo
 from .jobs import MusicJobError, MusicJobStore
 from .loudness import LoudnessError, LoudnessMeter, ffmpeg_loudness_meter
-from .qa import LENGTH_CAP, LENGTH_EXACT, QaError, QaMeter, ffmpeg_qa_meter, not_measured_record
+from .qa import LENGTH_CAP, LENGTH_EXACT, LENGTH_SAME, QaError, QaMeter, ffmpeg_qa_meter, not_measured_record
 from .store import atomic_write_text, music_dir_of
 
 logger = logging.getLogger(__name__)
@@ -144,6 +163,8 @@ logger = logging.getLogger(__name__)
 LM_PAYLOAD = "lm.request.json"
 LM_RESULT_PAYLOAD = "lm.result.json"
 SYNTH_PAYLOAD = "synth.request.json"
+EDIT_PAYLOAD = "edit.request.json"
+EDIT_SCHEMA = "dpc.region-edit/1"
 SIDECAR_SCHEMA = "dpc.take-sidecar/1"
 INSTRUMENTAL_LYRICS = "[Instrumental]"   # acestep.cpp's instrumental marker (request.cpp)
 CODES_HZ = 5.0                            # audio_codes run at 5 Hz: received length = codes x 0.2 s
@@ -156,6 +177,9 @@ DEFAULT_ENGINE_JOB_TIMEOUT_S = 1800.0
 _COPY_CHUNK = 4 * 1024 * 1024
 
 Converter = Callable[[Path, Path, Mapping[str, str]], None]
+ControlDecoder = Callable[[Path, Path], None]
+LyricsGet = Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
+LyricsSave = Callable[[str, str], Awaitable[Any]]
 
 
 class _Cancelled(Exception):
@@ -464,6 +488,48 @@ def ffmpeg_converter(tools: Optional[MediaTools] = None) -> Converter:
     return convert
 
 
+def ffmpeg_control_decoder(tools: Optional[MediaTools] = None) -> ControlDecoder:
+    """A decoder running ffmpeg through the process registry: any audio in, the control out (48 kHz,
+    stereo, 24-bit PCM WAV, the rate acestep.cpp works at)."""
+    def decode(source: Path, dest: Path) -> None:
+        found = tools or MediaTools.discover()
+        if not found.ffmpeg:
+            raise _JobFailure("ffmpeg is not on PATH; an edit decodes the track with it (install ffmpeg)")
+        cmd = [found.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+               "-map", "0:a:0", "-ac", str(re_.CHANNELS), "-ar", str(re_.RATE), "-c:a", "pcm_s24le", "-f", "wav",
+               str(dest)]
+        result = found.runner(cmd, timeout=FFMPEG_TIMEOUT_S)
+        if result.returncode != 0:
+            err = (result.stderr or b"").decode("utf-8", errors="replace").strip()[-400:]
+            raise _JobFailure(f"ffmpeg could not decode the track (rc {result.returncode}): {err}")
+    return decode
+
+
+def _base_record(path: Path) -> Dict[str, Any]:
+    """The base file's own `mp.provenance/1` (a DPC take's FLAC), or {}: read as untrusted text."""
+    if Path(path).suffix.lower() != ".flac":
+        return {}
+    try:
+        raw = flac_read_comments(Path(path), max_block_bytes=2 * 1024 * 1024).get(prov.TAG)
+    except Exception:
+        return {}
+    rec, _problem = prov.parse_embedded(raw) if raw else (None, None)
+    return rec or {}
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(_COPY_CHUNK), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def _lines_text(lyrics: Optional[Mapping[str, Any]]) -> str:
+    lines = (lyrics or {}).get("lines") if isinstance(lyrics, Mapping) else None
+    return "\n".join(str(l.get("text") or "") for l in lines or [] if isinstance(l, Mapping)).strip()
+
+
 # -- the runner ----------------------------------------------------------------------
 
 
@@ -487,6 +553,9 @@ class MusicJobRunner:
         loudness_meter: Optional[LoudnessMeter] = None,
         qa_meter: Optional[QaMeter] = None,
         device_probe: Optional[Callable[[], Dict[str, Any]]] = None,
+        control_decoder: Optional[ControlDecoder] = None,
+        lyrics_get: Optional[LyricsGet] = None,
+        lyrics_save: Optional[LyricsSave] = None,
     ):
         self.store = store
         # A `MusicEngines`, a mapping of engine word to supervisor, or one supervisor.
@@ -497,6 +566,9 @@ class MusicJobRunner:
         self._measure = loudness_meter or ffmpeg_loudness_meter()
         self._qa_measure = qa_meter or ffmpeg_qa_meter()
         self._device_probe = device_probe or prov.device_identity
+        self._decode_control = control_decoder or ffmpeg_control_decoder()
+        self._lyrics_get = lyrics_get
+        self._lyrics_save = lyrics_save
         self._ffmpeg_version: Optional[str] = None
         self._ffmpeg_version_known = False
         self.on_job_change = on_job_change
@@ -545,9 +617,16 @@ class MusicJobRunner:
             except (asyncio.CancelledError, Exception):
                 pass
 
+    @staticmethod
+    def runs(job: Mapping[str, Any]) -> bool:
+        """Whether this runner runs a job of this kind: `generate_from_text`, and an `edit` with a
+        built action (`region_edit.BUILT_ACTIONS`)."""
+        return job.get("type") == js.GENERATE_FROM_TEXT or (
+            job.get("type") == "edit" and job.get("action") in re_.BUILT_ACTIONS)
+
     def _next_queued(self) -> Optional[str]:
-        for job in self.store.list_jobs(states=[js.QUEUED], job_type=js.GENERATE_FROM_TEXT):
-            if job["id"] not in self._skipped:
+        for job in self.store.list_jobs(states=[js.QUEUED]):
+            if self.runs(job) and job["id"] not in self._skipped:
                 return job["id"]
         return None
 
@@ -640,7 +719,10 @@ class MusicJobRunner:
 
     async def run_job(self, job_id: str) -> None:
         job = await self._get(job_id)
-        if job is None or job["state"] != js.QUEUED or job["type"] != js.GENERATE_FROM_TEXT:
+        if job is None or job["state"] != js.QUEUED or not self.runs(job):
+            return
+        if job["type"] == "edit":
+            await self._run_edit(job)
             return
         started = False
         while True:
@@ -837,11 +919,12 @@ class MusicJobRunner:
 
     async def _engine_job(self, job_id: str, engine: Any, path: str, body: bytes,
                           engine_job: List[Optional[str]], dest: Optional[Path] = None,
-                          timeout_s: Optional[float] = None) -> Tuple[str, Optional[bytes]]:
-        """POST a body, poll `/job` until it ends (watching for the person's Cancel),
-        and fetch the result."""
+                          timeout_s: Optional[float] = None,
+                          files: Optional[List[Tuple[str, Path, str]]] = None) -> Tuple[str, Optional[bytes]]:
+        """POST a body (with `files`, a multipart form whose `request` part is the body), poll `/job`
+        until it ends (watching for the person's Cancel), and fetch the result."""
         await self._check(job_id)
-        eid = await engine.submit(path, body)
+        eid = await (engine.submit_form(path, body, files) if files else engine.submit(path, body))
         engine_job[0] = eid
         limit = timeout_s if timeout_s is not None else self.engine_job_timeout_s
         loop = asyncio.get_running_loop()
@@ -1107,22 +1190,359 @@ class MusicJobRunner:
                   "engine": identity.get("engine") or "yue2.cpp",
                   "lm_seed": v_lm_seed if 0 <= v_lm_seed <= js.LM_SEED_MAX else None})
 
+    # -- region edits: regenerate_region, fix_seam (acestep.cpp repaint), remove_region ---------------
+
+    async def _run_edit(self, job: dict) -> None:
+        """One edit job, from `queued` (module docstring, "Region edits")."""
+        job_id, action = job["id"], job["action"]
+        out_dir = self.generated_root / job_id
+        control = out_dir / "control.wav.part"
+        try:
+            try:
+                prepared = await self._edit_prepare(job, out_dir, control)
+            except (_JobFailure, re_.EditError, MusicJobError, MusicEngineError) as exc:
+                reason = exc.message if hasattr(exc, "message") else str(exc)
+                logger.warning("music: edit job %s cannot run: %s", job_id, reason)
+                if not await self._cancelled(job_id):
+                    await self._refuse(job_id, reason)
+                return
+            if action == re_.REMOVE_REGION:
+                await self._edit_on_its_own(job, prepared)
+                return
+            engine = self.engines.find(js.ENGINE_ACESTEP)
+            if engine is None:
+                await self._refuse(job_id, "acestep.cpp is not set up in this DPC; a repaint needs it")
+                return
+            shown = _CardWait(self, job_id, engine.card_lease)
+            try:
+                async with engine.in_use(f"music job {job_id}", wait_s=None, check=self._card_check(job_id),
+                                         on_wait=shown, expected_s=None):
+                    await shown.settled()
+                    await self._edit_on_the_card(job, prepared, engine)
+            except _Cancelled:
+                await shown.settled()
+                logger.info("music: edit job %s cancelled while it waited for the card", job_id)
+            finally:
+                engine.card_lease.release_when_empty("its job ended with no engine running", holds=engine.alive)
+        finally:
+            for p in (control, out_dir / "repaint.multipart.part"):
+                try:
+                    p.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logger.warning("music: could not remove %s", p, exc_info=True)
+
+    async def _edit_prepare(self, job: dict, out_dir: Path, control: Path) -> Dict[str, Any]:
+        """The base track, the control and the payloads, while the job is still `queued`."""
+        job_id, action, params = job["id"], job["action"], job["params"]
+        library = await self._library()
+        try:
+            entry = library.get_entry(job["track_id"])
+        except Exception:
+            raise _JobFailure(f"the track {job['track_id']} is no longer in the library")
+        path = library.get_track_path(job["track_id"])
+        if path is None or not Path(path).is_file():
+            raise _JobFailure("the track's file is missing; relink or rescan it and propose the edit again")
+        want = params.get("source_content_hash")
+        if want and entry.get("content_hash") and entry["content_hash"] != want:
+            raise _JobFailure("hash_mismatch: the track's file changed since the edit was proposed; propose it again")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(self._decode_control, Path(path), control)
+        pcm = await asyncio.to_thread(re_.read_pcm, control)
+        if pcm.rate != re_.RATE or pcm.channels != re_.CHANNELS:
+            raise _JobFailure(f"the control is {pcm.rate} Hz x {pcm.channels}, not {re_.RATE} Hz x {re_.CHANNELS}")
+        control_sha = await asyncio.to_thread(_file_sha256, control)
+        zones = re_.zones_of(job["region"], params)
+        base_rec = await asyncio.to_thread(_base_record, Path(path))
+        parent_take = await self._call(self.store.find_take_by_library_track, job["track_id"])
+        parent = {"role": "base", "library_track_id": job["track_id"], "content_hash": entry.get("content_hash"),
+                  "version_id": job["base_version_id"], "take_id": (parent_take or {}).get("id"),
+                  "job_id": (parent_take or {}).get("job_id") or ((entry.get("source") or {}).get("lineage") or {}).get("job_id"),
+                  "comment_id": job.get("comment_id"),
+                  "licence_key": (entry.get("provenance") or {}).get("licence_key")}
+        have = {p["name"] for p in job.get("payloads") or []}
+        if EDIT_PAYLOAD in have:
+            body = await self._call(self.store.read_payload, job_id, EDIT_PAYLOAD)
+            request = json.loads(body.decode("utf-8"))
+            if request.get("control", {}).get("sha256") != control_sha:
+                raise _JobFailure("the track decodes to another control than the one recorded when the job was "
+                                  "first prepared; propose the edit again")
+        else:
+            request = {
+                "schema": EDIT_SCHEMA, "action": action, "region": dict(job["region"]),
+                "zones": {k: {"t_start": v[0], "t_end": v[1]} for k, v in zones.items()},
+                "crossfade_ms": params["crossfade_ms"], "cut_with_shift": bool(params.get("cut_with_shift")),
+                "takes": params["takes"], "engine": params["engine"],
+                "base": {k: parent[k] for k in ("library_track_id", "content_hash", "version_id", "take_id")},
+                "control": {"format": re_.CONTROL_FORMAT, "frames": pcm.frames, "rate": pcm.rate,
+                            "channels": pcm.channels, "sha256": control_sha},
+            }
+            if action in re_.REPAINT_ACTIONS:
+                caption, cap_from = params.get("caption"), "params"
+                if not caption:
+                    caption, cap_from = base_rec.get("caption_sent") or base_rec.get("caption_chosen"), "the base's record"
+                if not isinstance(caption, str) or not caption.strip():
+                    raise _JobFailure("no style caption for the repaint: the track carries no DPC record of its style; "
+                                      "propose the edit with params.caption (the track's style)")
+                lyrics, lyr_from = params.get("lyrics"), "params"
+                if lyrics is None:
+                    if isinstance(base_rec.get("lyrics"), str):
+                        lyrics, lyr_from = base_rec["lyrics"], "the base's record"
+                    elif base_rec.get("instrumental") is True:
+                        lyrics, lyr_from = INSTRUMENTAL_LYRICS, "the base's record (instrumental)"
+                    elif self._lyrics_get is not None:
+                        try:
+                            text = _lines_text(await self._lyrics_get(job["track_id"]))
+                        except Exception:
+                            text = ""
+                        if text:
+                            lyrics, lyr_from = text, "the track's stored lyrics"
+                if lyrics is None:
+                    lyrics, lyr_from = "", "none: the track has no known lyrics"
+                seed = params["seed"] if params.get("seed") is not None else int(self._draw_seed())
+                window = re_.engine_window(zones["allowed"], pcm.frames, pcm.rate)
+                request.update({"seed": seed, "caption": caption.strip(), "caption_from": cap_from,
+                                "lyrics": lyrics, "lyrics_from": lyr_from, "engine_window": window.as_dict()})
+            body = json.dumps(request, ensure_ascii=False).encode("utf-8")
+            await self._call(self.store.write_payload, job_id, EDIT_PAYLOAD, body, endpoint=None)
+            if action in re_.REPAINT_ACTIONS:
+                synth = re_.build_repaint_request(
+                    caption=request["caption"], lyrics=request["lyrics"], window=window, seed=request["seed"],
+                    takes=params["takes"], inference_steps=js.FROM_TEXT_INFERENCE_STEPS,
+                    synth_model=MODEL_FILES["dit"], vae=MODEL_FILES["vae"])
+                await self._call(self.store.write_payload, job_id, SYNTH_PAYLOAD, synth, endpoint="/synth")
+            self._emit(await self._get(job_id))
+        return {"entry": entry, "path": Path(path), "control": control, "pcm": pcm, "control_sha": control_sha,
+                "zones": zones, "request": request, "parent": parent}
+
+    async def _edit_start(self, job_id: str) -> bool:
+        try:
+            await self._change(self.store.start_job, job_id)
+        except MusicJobError:
+            if await self._cancelled(job_id):
+                return False
+            raise
+        return True
+
+    async def _edit_on_its_own(self, job: dict, prepared: Dict[str, Any]) -> None:
+        """remove_region: no engine, no card."""
+        job_id = job["id"]
+        if not await self._edit_start(job_id):
+            return
+        try:
+            await self._progress(job_id, 0.3)
+            params = job["params"]
+            zones = prepared["zones"]
+            result = re_.remove(prepared["pcm"], zones["intent"], params["crossfade_ms"],
+                                cut_with_shift=bool(params.get("cut_with_shift")))
+            await self._check(job_id)
+            rejected: List[str] = []
+            await self._edit_take(job, prepared, 1, result, rejected, identity={"engine": prov.EDIT_ENGINE_LOCAL})
+            await self._edit_finish(job_id, rejected)
+        except _Cancelled:
+            logger.info("music: edit job %s cancelled", job_id)
+        except (_JobFailure, re_.EditError, MusicEngineError) as exc:
+            await self._edit_failed(job_id, exc)
+
+    async def _edit_on_the_card(self, job: dict, prepared: Dict[str, Any], engine: Any) -> None:
+        """regenerate_region / fix_seam: one multipart `/synth` repaint with every take in its batch."""
+        job_id, params = job["id"], job["params"]
+        if not await self._edit_start(job_id):
+            return
+        self.current_engine = js.ENGINE_ACESTEP
+        engine_job: List[Optional[str]] = [None]
+        out_dir = self.generated_root / job_id
+        multipart = out_dir / "repaint.multipart.part"
+        try:
+            await self._progress(job_id, 0.05)
+            await self._start_engine(job_id, js.ENGINE_ACESTEP, engine)
+            await self._progress(job_id, 0.1)
+            synth_body = await self._call(self.store.read_payload, job_id, SYNTH_PAYLOAD)
+            ctype, _ = await self._engine_job(job_id, engine, "/synth", synth_body, engine_job, dest=multipart,
+                                              files=[("audio", prepared["control"], "audio/wav")])
+            await self._check(job_id)
+            parts = await asyncio.to_thread(split_multipart_file, multipart, multipart_boundary(ctype))
+            audio = [(h, a, b) for h, a, b in parts if "audio/" in h.lower()]
+            takes = int(params["takes"])
+            if len(audio) != takes:
+                raise _JobFailure(f"acestep.cpp returned {len(audio)} audio part(s) for a repaint of {takes} takes")
+            await self._progress(job_id, 0.8)
+            identity = await asyncio.to_thread(engine.identity)
+            request = json.loads(synth_body.decode("utf-8"))
+            rejected: List[str] = []
+            for index, (_h, a, b) in enumerate(audio):
+                await self._check(job_id)
+                variant = index + 1
+                try:
+                    engine_pcm = await asyncio.to_thread(re_.read_pcm, multipart, a, b)
+                    result = await asyncio.to_thread(re_.splice, prepared["pcm"], engine_pcm,
+                                                     prepared["zones"]["splice"], params["crossfade_ms"])
+                except re_.EditError as exc:
+                    logger.warning("music: variant %s of edit job %s is not kept: %s", variant, job_id, exc.message)
+                    rejected.append(f"variant {variant} rejected: {exc.message}")
+                    continue
+                raw_sha = await asyncio.to_thread(_range_sha256, multipart, a, b)
+                await self._edit_take(job, prepared, variant, result, rejected, identity=identity, request=request,
+                                      batch=(takes, index), engine_raw={"format": re_.ENGINE_OUTPUT_FORMAT,
+                                                                        "sha256": raw_sha,
+                                                                        "frames": engine_pcm.frames})
+                await self._progress(job_id, round(0.8 + 0.2 * variant / takes, 4))
+            await self._edit_finish(job_id, rejected)
+        except _Cancelled:
+            if engine_job[0] is not None and engine.alive():
+                await engine.cancel(engine_job[0])
+            logger.info("music: edit job %s cancelled", job_id)
+        except (_JobFailure, re_.EditError, MusicEngineError) as exc:
+            await self._edit_failed(job_id, exc)
+
+    async def _edit_failed(self, job_id: str, exc: Exception) -> None:
+        reason = exc.message if hasattr(exc, "message") else str(exc)
+        logger.warning("music: edit job %s failed: %s", job_id, reason)
+        if not await self._cancelled(job_id):
+            await self._fail(job_id, reason)
+
+    async def _edit_finish(self, job_id: str, rejected: List[str]) -> None:
+        await self._check(job_id)
+        job = await self._get(job_id)
+        if not (job or {}).get("take_ids"):
+            raise _JobFailure("no take is usable: " + ("; ".join(rejected) or "none was made"))
+        await self._change(self.store.finish_job, job_id, "; ".join(rejected) or None)
+
+    async def _edit_take(self, job: dict, prepared: Dict[str, Any], variant: int, result: "re_.SpliceResult",
+                         rejected: List[str], *, identity: Dict[str, Any], request: Optional[Dict[str, Any]] = None,
+                         batch: Optional[Tuple[int, int]] = None, engine_raw: Optional[Dict[str, Any]] = None) -> None:
+        """One edit take: the spliced samples to a 24-bit WAV, the seam numbers, then the shared take path."""
+        job_id, action, params = job["id"], job["action"], job["params"]
+        pcm, zones, entry = prepared["pcm"], prepared["zones"], prepared["entry"]
+        out_dir = self.generated_root / job_id
+        spliced = out_dir / f"take_v{variant}.splice.part"
+        cut = bool(params.get("cut_with_shift"))
+        expected = pcm.frames - ((result.splice_frames[1] - result.splice_frames[0]) if cut else 0)
+        try:
+            frames = await asyncio.to_thread(re_.write_wav_s24, spliced, result.pieces, rate=pcm.rate,
+                                             channels=pcm.channels)
+            if frames != expected or result.frames != expected:
+                rejected.append(f"variant {variant} rejected: length_mismatch ({frames} frames, the control "
+                                f"{'minus the cut ' if cut else ''}is {expected})")
+                logger.warning("music: %s (job %s)", rejected[-1], job_id)
+                return
+            window = None
+            if request is not None and isinstance(prepared["request"].get("engine_window"), Mapping):
+                w = prepared["request"]["engine_window"]
+                window = re_.EngineWindow(int(round(w["t_start"] * re_.GRID_HZ)), int(round(w["t_end"] * re_.GRID_HZ)),
+                                          w["repainting_start"], w["repainting_end"])
+            seams = await asyncio.to_thread(re_.seams_entry, action, result, pcm.rate,
+                                            crossfade_ms=params["crossfade_ms"], window=window)
+            control_s = round(expected / pcm.rate, 6)
+            zone = None if cut else (zones["intent"] if action == re_.REMOVE_REGION else zones["splice"])
+            qa_override = {"requested_s": control_s, "length_mode": LENGTH_SAME,
+                           "edit": {"action": action, "zone": zone, "expects_silence": action == re_.REMOVE_REGION,
+                                    "seams": seams}}
+            base_title = " ".join(str(entry.get("title") or "track").split())[:60]
+            words = re_.region_words(action, job["region"])
+            title = f"{base_title} ({words}, v{variant})"
+            slug = slug_of(f"{base_title}-{action}")
+            seed = (request or {}).get("seed")
+            edit_rec = {
+                "action": action, "region": dict(job["region"]),
+                "zones": {k: {"t_start": v[0], "t_end": v[1]} for k, v in zones.items()},
+                "engine_window": prepared["request"].get("engine_window"),
+                "crossfade_ms": params["crossfade_ms"], "cut_with_shift": cut,
+                "seams": [s.as_dict(pcm.rate) for s in result.seams], "notes": list(result.notes),
+                "coherence_linear_min": re_.COHERENCE_LINEAR_MIN,
+                "control": dict(prepared["request"]["control"]),
+                "caption_from": prepared["request"].get("caption_from"),
+                "lyrics_from": prepared["request"].get("lyrics_from"),
+                "engine_raw_output": engine_raw,
+                "length_rule": ("cut with shift: control minus the region (decision 27)" if cut
+                                else "the control's length (decision 23)"),
+            }
+            job_now = await self._get(job_id)
+            payloads = {p["name"]: p["sha256"] for p in (job_now or {}).get("payloads") or []}
+
+            def make_record(facts: Dict[str, Any]) -> Dict[str, Any]:
+                return prov.build_edit_record(
+                    job_id=job_id, variant=variant, action=action,
+                    task_type="repaint" if action in re_.REPAINT_ACTIONS else action,
+                    identity=identity, parent=prepared["parent"], edit=edit_rec, duration_requested_s=control_s,
+                    request=request, seed=seed, batch_size=batch[0] if batch else None,
+                    batch_index=batch[1] if batch else None, payloads=payloads,
+                    **{k: facts[k] for k in ("created_at", "duration_received_s", "loudness", "device",
+                                             "engine_output", "postprocess", "output")})
+
+            after = None
+            if cut and self._lyrics_get is not None and self._lyrics_save is not None:
+                after = self._retime_lyrics_after(job["track_id"], zones["intent"])
+            await self._store_take(
+                job_id, {"style": request.get("caption") if request else base_title, "duration_s": control_s},
+                out_dir, slug, variant, spliced, 0, spliced.stat().st_size, latent_sha=None,
+                provenance=make_record, artist="DPC (region edit)",
+                comment=(f"Region edit by DPC ({words}) of library track {job['track_id']}; job {job_id}, "
+                         f"variant {variant}" + (f", seed {seed}" if seed is not None else "")),
+                tags={"DPC_EDIT_ACTION": action, "DPC_EDIT_OF": str(entry.get("content_hash") or ""),
+                      "DPC_EDIT_REGION": f"{job['region']['t_start']}-{job['region']['t_end']}",
+                      **({"DPC_SEED": str(seed)} if seed is not None else {})},
+                record={"task_type": "repaint" if action in re_.REPAINT_ACTIONS else action,
+                        "relation": "region_edit", "parent": prepared["parent"], "edit": edit_rec,
+                        "payloads": payloads, "seed": seed},
+                take={"seed": seed + batch[1] if seed is not None and batch else None,
+                      "synth_batch_size": batch[0] if batch else None,
+                      "synth_batch_index": batch[1] if batch else None,
+                      "payload": SYNTH_PAYLOAD if request is not None else EDIT_PAYLOAD,
+                      "engine": identity.get("engine") or prov.EDIT_ENGINE_LOCAL,
+                      "duration_requested_s": control_s},
+                title=title,
+                lineage={"relation": "region_edit", "variant": variant, "action": action,
+                         "base_track_id": job["track_id"], "region": dict(job["region"])},
+                qa_override=qa_override, after_register=after)
+        finally:
+            try:
+                spliced.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("music: could not remove %s", spliced, exc_info=True)
+
+    def _retime_lyrics_after(self, base_track_id: str, region_s: Tuple[float, float]):
+        """The hook that gives a cut-with-shift take the base's lyrics re-timed (decision 27)."""
+        async def hook(library_id: Optional[str]) -> Dict[str, Any]:
+            if not library_id:
+                return {"lyrics_retimed": {"saved": False, "reason": "the take has no library entry"}}
+            answer = await self._lyrics_get(base_track_id)
+            lyrics = answer if isinstance(answer, Mapping) else None
+            lines = list((lyrics or {}).get("lines") or [])
+            if not lines:
+                return {"lyrics_retimed": {"saved": False, "reason": "the edited track has no stored lyrics"}}
+            moved = re_.retime_lines(lines, region_s)
+            from .lyrics import format_lrc
+            await self._lyrics_save(library_id, format_lrc({**lyrics, "lines": moved}))
+            return {"lyrics_retimed": {"saved": True, "lines_before": len(lines), "lines_after": len(moved),
+                                       "cut_s": [region_s[0], region_s[1]]}}
+        return hook
+
     # -- a take, whichever engine made it ---------------------------------------------------
 
     async def _store_take(self, job_id: str, params: Mapping[str, Any], out_dir: Path, slug: str, variant: int,
                           source: Path, start: int, end: int, *, latent_sha: Optional[str], artist: str,
                           comment: str, tags: Mapping[str, str], record: Mapping[str, Any],
                           take: Mapping[str, Any], window_s: Optional[float] = None,
-                          provenance: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None) -> None:
+                          provenance: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+                          title: Optional[str] = None, lineage: Optional[Dict[str, Any]] = None,
+                          qa_override: Optional[Dict[str, Any]] = None,
+                          after_register: Optional[Callable[[Optional[str]], Awaitable[Dict[str, Any]]]] = None) -> None:
         """The engine's WAV bytes (`source[start:end]`) to a verified FLAC, a sidecar, a
-        loudness measurement, a library entry and a take."""
+        loudness measurement, a library entry and a take. An edit take passes its `title`, its
+        library `lineage`, its QA terms (`qa_override`: `requested_s`, `length_mode`, `edit`) and a
+        hook run once the library entry exists, whose answer joins the sidecar."""
         stem = f"{slug}_v{variant}"
         wav_part = out_dir / f"{stem}.wav.part"
         flac_part = out_dir / f"{stem}.flac.part"
         flac = out_dir / f"{stem}.flac"
         sidecar = out_dir / f"{stem}.json"
         style = " ".join(str(params.get("style") or "").split())
-        title = f"{style[:60]} (v{variant})" if style else f"Generated take v{variant}"
+        if title is None:
+            title = f"{style[:60]} (v{variant})" if style else f"Generated take v{variant}"
 
         length_take: Dict[str, Any] = {}
         await asyncio.to_thread(copy_range, source, start, end, wav_part)
@@ -1158,7 +1578,8 @@ class MusicJobRunner:
                                    variant, job_id, info.duration_s, window_s)
             # Loudness of the staged FLAC: advisory (decision 29), and the provenance record holds it.
             loudness = await self._measure_loudness(flac_part, job_id, variant)
-            qa_record = await self._measure_qa(flac_part, job_id, variant, params, take, info.duration_s, loudness)
+            qa_record = await self._measure_qa(flac_part, job_id, variant, params, take, info.duration_s, loudness,
+                                               override=qa_override)
             created_at = _now()
             record_obj, record_text = await self._take_record(
                 provenance, job_id, variant, flac_part, wav_part, all_tags, loudness, created_at, wav, wav_md5,
@@ -1209,8 +1630,8 @@ class MusicJobRunner:
         content_hash = f"md5:{info.md5}"
         try:
             library = await self._library()
-            entry = await library.register_generated(str(flac), job_id=job_id,
-                                                     lineage={"relation": "song_from_own_text", "variant": variant})
+            entry = await library.register_generated(
+                str(flac), job_id=job_id, lineage=lineage or {"relation": "song_from_own_text", "variant": variant})
             library_id = entry.get("id")
             content_hash = entry.get("content_hash") or content_hash
         except Exception as exc:
@@ -1229,6 +1650,11 @@ class MusicJobRunner:
             raise
         self._emit(await self._get(job_id))
         sidecar_record["take_id"], sidecar_record["library_track_id"] = added["id"], library_id
+        if after_register is not None:
+            try:
+                sidecar_record.update(await after_register(library_id))
+            except Exception:
+                logger.exception("music: the after-take step of variant %s of job %s failed", variant, job_id)
         await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(sidecar_record, ensure_ascii=False, indent=1))
 
 
@@ -1246,18 +1672,25 @@ class MusicJobRunner:
 
     async def _measure_qa(self, path: Path, job_id: str, variant: int, params: Mapping[str, Any],
                           take: Mapping[str, Any], duration_s: Optional[float],
-                          loudness: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+                          loudness: Optional[Dict[str, Any]],
+                          override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """`{qa, qa_report}` of the take, never an exception: stage-1 QA flags, it does not fail
         the job. A measurement that cannot run gives `not_measured`, never a pass. YuE2's
-        `duration_s` is a cap (the model ends the song itself), acestep's is the length asked for."""
+        `duration_s` is a cap (the model ends the song itself), acestep's is the length asked for;
+        an edit take passes its own terms (`override`: the control's length, mode `same`, `edit`)."""
         requested = params.get("duration_s")
         requested = float(requested) if isinstance(requested, (int, float)) and not isinstance(requested, bool) else None
         mode = LENGTH_CAP if str(take.get("engine") or "").startswith("yue2") else LENGTH_EXACT
+        extra: Dict[str, Any] = {}
+        if override:
+            requested, mode = override.get("requested_s", requested), override.get("length_mode", mode)
+            if override.get("edit") is not None:
+                extra["edit"] = override["edit"]
         try:
             version = await self._ffmpeg_version_text()
             record = await asyncio.to_thread(
                 self._qa_measure, path, requested_s=requested, length_mode=mode, duration_s=duration_s,
-                loudness=loudness, tool_version=version)
+                loudness=loudness, tool_version=version, **extra)
             js.check_qa_report(record["qa_report"])
             if record["qa"] is not None:
                 js.check_qa(record["qa"])

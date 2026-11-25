@@ -145,8 +145,12 @@ async def test_validation_refuses_bad_times_text_and_actions(tmp_path, no_tools)
         assert (await add(start_s=True, text="x"))["code"] == "invalid_comment"
         assert (await add(start_s=float("nan"), text="x"))["code"] == "invalid_comment"
         assert (await add(start_s=10, text="x", action="note"))["status"] == "ok"
-        planned = await add(start_s=10, text="x", action="regenerate_region")
+        planned = await add(start_s=10, end_s=12, text="x", action="extend_ending")
         assert planned["code"] == "action_unsupported" and "planned" in planned["message"]
+        # a built region edit is a comment action now, and it needs a region
+        point = await add(start_s=10, text="x", action="regenerate_region")
+        assert point["code"] == "invalid_comment" and "needs a region" in point["message"]
+        assert (await add(start_s=10, end_s=12, text="x", action="regenerate_region"))["status"] == "ok"
         assert (await add(start_s=10, text="x", action="nonsense"))["code"] == "invalid_comment"
 
         bad_edit = await service.update_music_comment(track_id=tid, comment_id="cmt_nope", text="y")

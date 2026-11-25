@@ -26,6 +26,7 @@ import {
     listMusicJobs,
     listMusicTakes,
     measureMusicTakeLoudness,
+    proposeMusicEdit,
     proposeMusicJob,
     rejectAllMusicTakes,
     startMusicEngine,
@@ -51,6 +52,9 @@ import {
 import { loadMusicLibrary, noteTracksHidden } from '$lib/services/music';
 
 export const FROM_TEXT = 'generate_from_text';
+export const EDIT = 'edit';
+/** The job types the Create panel lists: songs from text and region edits. */
+const LISTED_TYPES = new Set([FROM_TEXT, EDIT]);
 
 export type JobsStatus = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error';
 
@@ -150,13 +154,13 @@ function failure(a: MusicAnswer<any>): { status: JobsStatus; message: string } {
 /** Read the jobs, the capabilities and the engine (the panel opens, or the backend came back). */
 export async function loadMusicJobs(): Promise<void> {
     musicJobs.update(x => ({ ...x, status: x.status === 'ready' ? 'ready' : 'loading', message: '' }));
-    const [jobs, caps, engine] = await Promise.all([listMusicJobs(FROM_TEXT), getMusicCapabilities(), getMusicEngineStatus()]);
+    const [jobs, caps, engine] = await Promise.all([listMusicJobs(), getMusicCapabilities(), getMusicEngineStatus()]);
     const bad = [jobs, caps, engine].find(a => !a.ok);
     if (bad) {
         musicJobs.update(x => ({ ...x, ...failure(bad) }));
         return;
     }
-    const list = (jobs as any).data.jobs as MusicJob[];
+    const list = ((jobs as any).data.jobs as MusicJob[]).filter(j => LISTED_TYPES.has(j.type));
     for (const j of list) seen(j.id);
     musicJobs.update(x => ({
         ...x,
@@ -203,6 +207,15 @@ export function startJobWatch(): () => void {
             watchers = 0;
         }
     };
+}
+
+/** A region edit from the player's comment form (`propose_music_job {type: "edit"}`): the job comes
+ *  back `queued` (or `unsupported` with the reason) and joins the list; its takes are reviewed in the
+ *  Create panel like any other job's. */
+export async function proposeEdit(args: Parameters<typeof proposeMusicEdit>[0]): Promise<MusicAnswer<{ job: MusicJob }>> {
+    const a = await proposeMusicEdit(args);
+    if (a.ok) putJob(a.data.job);
+    return a;
 }
 
 /** Generate: `propose_music_job {type: generate_from_text}`. The job comes back `queued`,

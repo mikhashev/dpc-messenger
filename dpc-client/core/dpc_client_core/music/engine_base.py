@@ -917,6 +917,35 @@ class SupervisedEngine:
             raise MusicEngineError("engine_refused", f"POST {path} answered without a job id: {resp.text[:200]}")
         return str(job_id)
 
+    async def submit_form(self, path: str, request: bytes, files: List[Tuple[str, Path, str]]) -> str:
+        """POST a multipart job (`/synth` with source audio): part `request` holds the JSON body and
+        each `(part name, file, content type)` streams a file from disk (acestep.cpp `handle_synth`
+        reads parts `request`, `audio`, `ref_audio`, `src_latents`). The engine's job id."""
+        import httpx
+        self._last_used = time.monotonic()
+        handles = []
+        try:
+            parts: List[Tuple[str, Tuple[str, Any, str]]] = [("request", ("request.json", request, "application/json"))]
+            for name, file, ctype in files:
+                fh = open(file, "rb")
+                handles.append(fh)
+                parts.append((name, (Path(file).name, fh, ctype)))
+            try:
+                async with self._client(300.0) as client:
+                    resp = await client.post(self.base_url + path, files=parts)
+            except httpx.HTTPError as exc:
+                raise self._unreachable(exc, f"POST {path}") from exc
+        finally:
+            for fh in handles:
+                fh.close()
+        if resp.status_code != 200:
+            raise MusicEngineError("engine_refused", f"POST {path} answered {resp.status_code}: {resp.text[:300]}")
+        try:
+            job_id = resp.json()["id"]
+        except (ValueError, KeyError, TypeError):
+            raise MusicEngineError("engine_refused", f"POST {path} answered without a job id: {resp.text[:200]}")
+        return str(job_id)
+
     async def job_status(self, engine_job_id: str) -> str:
         """`running`, `done`, `failed` or `cancelled`."""
         import httpx

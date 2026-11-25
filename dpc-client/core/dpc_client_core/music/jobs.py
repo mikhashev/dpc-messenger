@@ -91,6 +91,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from . import job_schemas as js
 from . import qc as qc_
+from . import region_edit as re_
 from .capabilities import MusicCapabilities
 from .schemas import SchemaError
 from .store import atomic_write_text, music_dir_of
@@ -387,7 +388,8 @@ class MusicJobStore:
         if job["state"] == js.RUNNING:
             takes = self._takes[job_id]
             if takes:
-                wanted = job["params"].get("variants") if job["type"] == js.GENERATE_FROM_TEXT else None
+                wanted = (job["params"].get("variants") if job["type"] == js.GENERATE_FROM_TEXT
+                          else job["params"].get("takes") if job["type"] == "edit" else None)
                 of = f" of {wanted}" if wanted else ""
                 self._move(job, js.REVIEW, f"{RESTART_REASON} after {len(takes)}{of} variant(s)")
             else:
@@ -504,10 +506,17 @@ class MusicJobStore:
         requested_by: Optional[Mapping[str, Any]] = None,
         agent_queue_max: Optional[int] = None,
         turn_jobs_max: Optional[int] = None,
+        source: Optional[Mapping[str, Any]] = None,
         _check_only: bool = False,
     ) -> dict:
         """Propose a job (SPEC §6 `propose_job`) and return it: `queued` when its type can
         run now, else `unsupported` with the reason.
+
+        An `edit` job with a built action (`region_edit.BUILT_ACTIONS`) has its params checked and
+        completed by `region_edit.normalize_params_edit` against `source`, what the library knows of
+        the track (`{kind, content_hash, duration_s}`, the door looks it up): a web track is refused
+        `listen_only_source` (SPEC §6), a track whose audio hash or length is not known yet
+        `track_not_ready`. Its `prompt` is the comment's text.
 
         `generate_from_text` params are checked and completed by
         `job_schemas.normalize_params_from_text`, and its `prompt` is the style. Other
@@ -552,6 +561,8 @@ class MusicJobStore:
                 if prompt is not None and not isinstance(prompt, str):
                     raise MusicJobError("invalid_params", "prompt must be text", field="prompt")
                 region = dict(region) if region is not None else None
+                if job_type == "edit" and action in re_.BUILT_ACTIONS:
+                    params = self._edit_params(action, params, region, source, requester)
 
             if is_agent and idempotency_key is None and requester.get("turn_id") is not None:
                 idempotency_key = self._derived_key(requester, job_type, params, track_id)
@@ -570,7 +581,7 @@ class MusicJobStore:
                                          self.turn_jobs_max if turn_jobs_max is None else turn_jobs_max)
             if _check_only:
                 reason = self.capabilities.unsupported_reason(
-                    job_type, params if job_type == js.GENERATE_FROM_TEXT else None)
+                    job_type, params if job_type == js.GENERATE_FROM_TEXT else None, action=action)
                 if reason is not None:
                     raise MusicJobError("unsupported", reason)
                 return {"repeat": None, "params": copy.deepcopy(params)}
@@ -579,7 +590,7 @@ class MusicJobStore:
                                 idempotency_key=idempotency_key, requested_by=requester)
             job["engine_choice"] = engine_choice
             reason = self.capabilities.unsupported_reason(
-                job_type, params if job_type == js.GENERATE_FROM_TEXT else None)
+                job_type, params if job_type == js.GENERATE_FROM_TEXT else None, action=action)
             if reason is not None:
                 self._move(job, js.UNSUPPORTED, reason)
             self._jobs[job["id"]] = job
@@ -640,6 +651,41 @@ class MusicJobStore:
         elif any(v is not None for v in (comment_id, action, region)):
             raise MusicJobError("invalid_source", "comment_id, action and region are for edit jobs only")
         return params
+
+    @staticmethod
+    def _edit_params(action: str, params: dict, region: Optional[dict], source: Optional[Mapping[str, Any]],
+                     requester: Mapping[str, Any]) -> dict:
+        """The checked params of a built edit (`region_edit.normalize_params_edit`), against what the
+        library knows of the track."""
+        if not isinstance(source, Mapping):
+            raise MusicJobError("invalid_source", "an edit job needs the library track it edits (track_id)",
+                                field="track_id")
+        if source.get("kind") == "web":
+            raise MusicJobError("listen_only_source", "a web track's file cannot be edited in place (no write-back "
+                                                      "to a URL): only notes, lyrics and the generate flows work on it",
+                                field="track_id")
+        content_hash = source.get("content_hash")
+        if not isinstance(content_hash, str) or not content_hash:
+            raise MusicJobError("track_not_ready", "the track's audio is still being hashed; propose the edit again "
+                                                   "in a moment", field="track_id")
+        try:
+            return re_.normalize_params_edit(action, params, region, duration_s=source.get("duration_s"),
+                                             content_hash=content_hash,
+                                             by_person=requester.get("kind") != js.REQUESTER_AGENT)
+        except re_.EditError as exc:
+            code = "track_not_ready" if exc.field == "track_id" else "invalid_params"
+            raise MusicJobError(code, exc.message, field=exc.field)
+
+    def find_take_by_library_track(self, library_track_id: str) -> Optional[dict]:
+        """The take whose file is library entry `library_track_id`, or None: an edit of a take names its
+        parent take in the record."""
+        with self._lock:
+            self._ready()
+            for takes in self._takes.values():
+                for t in takes:
+                    if t.get("library_track_id") == library_track_id:
+                        return copy.deepcopy(t)
+            return None
 
     def get_job(self, job_id: str) -> dict:
         with self._lock:
@@ -739,7 +785,8 @@ class MusicJobStore:
     def finish_job(self, job_id: str, reason: Optional[str] = None) -> dict:
         """The runner is done: `running -> review`. A new-track job needs a take first."""
         def change(job: dict) -> None:
-            if job["type"] in js.NEW_TRACK_TYPES and job["state"] == js.RUNNING and not self._takes[job_id]:
+            needs_take = job["type"] in js.NEW_TRACK_TYPES or (job["type"] == "edit" and job.get("action") in re_.BUILT_ACTIONS)
+            if needs_take and job["state"] == js.RUNNING and not self._takes[job_id]:
                 raise MusicJobError("no_takes", f"job {job_id} has no take to review; fail it instead")
             self._move(job, js.REVIEW, reason)
             job["progress"] = 1
@@ -926,9 +973,9 @@ class MusicJobStore:
         file_uri: str,
         content_hash: Optional[str],
         title: str,
-        seed: int,
-        synth_batch_size: int,
-        synth_batch_index: int,
+        seed: Optional[int],
+        synth_batch_size: Optional[int],
+        synth_batch_index: Optional[int],
         payload: str,
         sample_rate: Optional[int] = None,
         channels: Optional[int] = None,
@@ -943,8 +990,12 @@ class MusicJobStore:
         length_delta_s: Optional[float] = None,
         qa: Optional[Mapping[str, Any]] = None,
         qa_report: Optional[Mapping[str, Any]] = None,
+        duration_requested_s: Optional[float] = None,
     ) -> dict:
-        """Record a finished take of a running `generate_from_text` job: a `new_track` take,
+        """Record a finished take of a running job. A `generate_from_text` take is a `new_track` take; a
+        built `edit` job's take (`region_edit`) is an `edit` take of the job's track, version and region,
+        one of `params.takes` sibling takes: a new file, the base never touched. `seed` and the batch
+        fields are None for a take no engine made (a removal), and are then left out. Every take is
         `pending`, `qa` the runner's stage-1 `mp.qa/1` or null when it could not be filled and
         `qa_report` its gates (`qa.py`; both validated), `loudness` the runner's ebur128 measurement or
         null (`loudness.py`), `engine` the engine id that made it and `lm_seed` its token
@@ -957,10 +1008,11 @@ class MusicJobStore:
             job = self._job(job_id)
             if job["state"] != js.RUNNING:
                 raise MusicJobError("illegal_transition", f"job {job_id} is {job['state']}; takes arrive while it runs")
-            if job["type"] != js.GENERATE_FROM_TEXT:
+            is_edit = job["type"] == "edit" and job.get("action") in re_.BUILT_ACTIONS
+            if job["type"] != js.GENERATE_FROM_TEXT and not is_edit:
                 raise MusicJobError("invalid_type", f"takes of {job['type']} jobs are not built")
             takes = self._takes[job_id]
-            wanted = job["params"]["variants"]
+            wanted = job["params"]["takes"] if is_edit else job["params"]["variants"]
             if isinstance(variant, bool) or not isinstance(variant, int) or not 1 <= variant <= wanted:
                 raise MusicJobError("invalid_params", f"variant must be from 1 to {wanted}", field="variant")
             if any(t["variant"] == variant for t in takes):
@@ -974,14 +1026,14 @@ class MusicJobStore:
             take = {
                 "schema": js.TAKE,
                 "id": _new_id("tak_"),
-                "kind": "new_track",
+                "kind": "edit" if is_edit else "new_track",
                 "variant": variant,
                 "job_id": job_id,
-                "track_id": None,
-                "base_version_id": None,
-                "source_track_id": None,
+                "track_id": job["track_id"] if is_edit else None,
+                "base_version_id": job["base_version_id"] if is_edit else None,
+                "source_track_id": job["track_id"] if is_edit else None,
                 "title": title,
-                "region": None,
+                "region": dict(job["region"]) if is_edit else None,
                 "file": file,
                 "qa": dict(qa) if qa is not None else None,
                 "qa_report": copy.deepcopy(dict(qa_report)) if qa_report is not None else None,
@@ -992,7 +1044,9 @@ class MusicJobStore:
                 "synth_batch_size": synth_batch_size,
                 "synth_batch_index": synth_batch_index,
                 "payload": payload,
-                "duration_requested_s": job["params"]["duration_s"],
+                "duration_requested_s": (duration_requested_s if duration_requested_s is not None
+                                         else job["params"].get("source_duration_s") if is_edit
+                                         else job["params"]["duration_s"]),
                 "library_track_id": library_track_id,
                 "reason_text": None,
                 "reason_class": None,
@@ -1001,6 +1055,9 @@ class MusicJobStore:
                 "engine": engine,
                 "lm_seed": lm_seed,
             }
+            for k in ("seed", "synth_batch_size", "synth_batch_index"):
+                if take[k] is None:
+                    del take[k]
             # Advisory length check (acestep: codes x 0.2 s); absent when the engine has no such window.
             if engine_window_s is not None:
                 take["engine_window_s"] = engine_window_s

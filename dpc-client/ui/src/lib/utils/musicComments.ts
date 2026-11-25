@@ -20,13 +20,14 @@ export interface MusicComment {
     updated_at?: string;
 }
 
-/** The actions the form lists: only Note works now; the rest are planned (SPEC §4). */
+/** The actions the form lists (SPEC §4). `supported` says whether DPC has the action built; whether it
+ *  runs now is the capability report's (`utils/musicEdit.ts` `editActionState`). Extend ending is planned. */
 export const COMMENT_ACTIONS: { value: CommentAction; label: string; supported: boolean }[] = [
     { value: 'note', label: 'Note', supported: true },
-    { value: 'regenerate_region', label: 'Regenerate region', supported: false },
+    { value: 'regenerate_region', label: 'Regenerate region', supported: true },
     { value: 'extend_ending', label: 'Extend ending', supported: false },
-    { value: 'fix_seam', label: 'Fix seam', supported: false },
-    { value: 'remove_region', label: 'Remove region', supported: false },
+    { value: 'fix_seam', label: 'Fix seam', supported: true },
+    { value: 'remove_region', label: 'Remove region', supported: true },
 ];
 
 /** The core's text limit (`comments.MAX_TEXT_CHARS`). */

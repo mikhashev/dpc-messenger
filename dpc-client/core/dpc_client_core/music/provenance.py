@@ -518,6 +518,67 @@ def build_yue2_record(*, job_id: str, variant: int, created_at: str, params: Map
     return rec
 
 
+EDIT_ENGINE_LOCAL = "dpc"   # a removal is DPC's own sample work, no engine
+
+
+def _with_parent_licence(licence: Dict[str, Any], parent_key: Optional[str]) -> Dict[str, Any]:
+    """An edit inherits its base's licence: each part of the base's key becomes a `parent` component
+    (`unknown` when the base has no record), and the key and `non_commercial` are recomputed."""
+    parts = list(licence["components"])
+    keys = [k for k in str(parent_key).split("+") if k] if isinstance(parent_key, str) and \
+        _LICENCE_KEY_RE.match(parent_key) else [LICENCE_UNKNOWN]
+    for k in keys:
+        parts.append({"role": "parent", "name": "the edited track", "licence": k})
+    found = {p["licence"] for p in parts}
+    nc: Optional[bool] = True if found & NON_COMMERCIAL_LICENCES else (None if LICENCE_UNKNOWN in found else False)
+    return {"key": "+".join(sorted(found)), "non_commercial": nc, "components": parts}
+
+
+def build_edit_record(*, job_id: str, variant: int, created_at: str, action: str, task_type: str,
+                      identity: Mapping[str, Any], parent: Mapping[str, Any], edit: Mapping[str, Any],
+                      duration_requested_s: float, duration_received_s: Optional[float],
+                      loudness: Optional[Mapping[str, Any]], engine_output: Mapping[str, Any],
+                      postprocess: Mapping[str, Any], output: Mapping[str, Any],
+                      request: Optional[Mapping[str, Any]] = None, seed: Optional[int] = None,
+                      batch_size: Optional[int] = None, batch_index: Optional[int] = None,
+                      payloads: Optional[Mapping[str, str]] = None,
+                      device: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """The `mp.provenance/1` record of one region-edit take (`region_edit`): what was edited (`parents`:
+    the base track's library id, audio hash, version and the take it came from when it is one), how
+    (`edit`: the action, the three zones, the engine window, the seams and their shapes), the repaint
+    request as sent when the engine made it, and the output chain. The genome stays `not_stored`: a
+    repaint has no `audio_codes`; what makes it repeatable is the parent plus the request and seed."""
+    engine = str(identity.get("engine") or EDIT_ENGINE_LOCAL)
+    rec = _base(engine=engine, job_id=job_id, variant=variant, created_at=created_at, identity=identity,
+                device=device, payloads=payloads)
+    rec["licence"] = _with_parent_licence(licence_record(engine), parent.get("licence_key"))
+    req = dict(request or {})
+    rec.update({
+        "task_type": task_type,
+        "edit_action": action,
+        "caption_sent": req.get("caption"),
+        "bpm_sent": None, "keyscale_sent": None, "timesignature_sent": None, "vocal_language_sent": None,
+        "lyrics": req.get("lyrics"),
+        "instrumental": None,
+        "seed": seed if seed is not None else NOT_STORED,
+        "variant_seed": (seed + (batch_index or 0)) if seed is not None else NOT_STORED,
+        "inference_steps": _sent_or_default(req, "inference_steps") if req else NOT_STORED,
+        "synth_model": req.get("synth_model") or NOT_STORED,
+        "vae": req.get("vae") or NOT_STORED,
+        "synth_batch_size": batch_size if batch_size is not None else NOT_STORED,
+        "synth_batch_index": batch_index if batch_index is not None else NOT_STORED,
+        "duration_requested_s": duration_requested_s,
+        "duration_received_s": duration_received_s,
+        "loudness": dict(loudness) if loudness else NOT_STORED,
+        "relation": "region_edit",
+        "parents": [{k: parent.get(k) for k in ("role", "library_track_id", "content_hash", "version_id",
+                                                 "take_id", "job_id", "comment_id", "licence_key")}],
+        "edit": dict(edit),
+        **_chain(engine_output, postprocess, output),
+    })
+    return rec
+
+
 # -- ids, size, serialization -------------------------------------------------------------------
 
 

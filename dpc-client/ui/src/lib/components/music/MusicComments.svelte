@@ -7,10 +7,16 @@
 
   "Comment" (or C in the player, outside text fields) opens the form with Start at the
   current position and End empty (a point). "Mark end" sets End to the position now;
-  Save is Ctrl+Enter, Cancel is Esc. Only the Note action works; the others are listed as
-  planned. Sending a comment to an agent is planned too (agents have no music tools yet),
-  so there is no button for it. Clicking a time in the list seeks there (`onseek`: the
+  Save is Ctrl+Enter, Cancel is Esc. Clicking a time in the list seeks there (`onseek`: the
   player's safe seek by default, the review's own for a take).
+
+  Region edits (ADR-051 row B4): with a region and an edit action (Regenerate region, Fix seam,
+  Remove region) the form offers "Propose edit", which sends `propose_music_job {type: edit}`;
+  the core makes the comment and a job whose takes are new files, reviewed as sibling takes in
+  the Create panel (the track itself is never changed). Each action follows the capability
+  report: one the backend cannot run now is listed with its reason. A repaint takes the track's
+  style (empty: the core reads it from a DPC take's own record); a removal near the end may cut
+  with shift, which shortens the take and re-times its lyrics (decision 27).
 -->
 
 <script lang="ts">
@@ -26,7 +32,9 @@
     type MusicComment,
   } from '$lib/utils/musicComments';
   import { seekTo } from '$lib/services/music';
-  import { ensureComments, musicComments, musicCommentsError, removeComment, saveComment } from '$lib/services/musicComments';
+  import { ensureComments, loadComments, musicComments, musicCommentsError, removeComment, saveComment } from '$lib/services/musicComments';
+  import { musicJobs, proposeEdit } from '$lib/services/musicJobs';
+  import { canCutWithShift, editActionState, editLimits, editProposal, isEditAction, REPAINT_ACTIONS } from '$lib/utils/musicEdit';
 
   let {
     trackId = null,
@@ -60,10 +68,24 @@
     ensureComments(trackId);
   });
 
-  type Form = { id: string | null; start: string; end: string; text: string; action: string };
+  type Form = { id: string | null; start: string; end: string; text: string; action: string; caption: string; cut: boolean };
   let form = $state<Form | null>(null);
   let formError = $state('');
+  let notice = $state('');
   let busy = $state(false);
+
+  let caps = $derived($musicJobs.capabilities);
+  let limits = $derived(editLimits(caps));
+  let actionState = $derived(form && isEditAction(form.action) ? editActionState(caps, form.action) : null);
+  let endNow = $derived(form && form.end.trim() ? Number(form.end.replace(',', '.')) : null);
+  let cutPossible = $derived(!!form && form.action === 'remove_region'
+    && canCutWithShift(endNow, duration > 0 ? duration : null, limits.cut_with_shift_near_end_s));
+
+  function optionNote(a: { value: string; supported: boolean }): string {
+    if (!a.supported) return ' (planned)';
+    if (!isEditAction(a.value)) return '';
+    return editActionState(caps, a.value).supported ? '' : ' (off now)';
+  }
   let textEl = $state<HTMLTextAreaElement | null>(null);
 
   // The form belongs to a track: another track, another list.
@@ -79,7 +101,8 @@
 
   async function openNew() {
     if (!trackId) return;
-    form = { id: null, start: secondsText(loaded ? currentTime : 0) || '0', end: '', text: '', action: 'note' };
+    form = { id: null, start: secondsText(loaded ? currentTime : 0) || '0', end: '', text: '', action: 'note', caption: '', cut: false };
+    notice = '';
     formError = '';
     await tick();
     textEl?.focus();
@@ -87,7 +110,8 @@
 
   async function openRegion(start: number, end: number) {
     if (!trackId) return;
-    form = { id: null, start: secondsText(start) || '0', end: secondsText(end), text: '', action: 'note' };
+    form = { id: null, start: secondsText(start) || '0', end: secondsText(end), text: '', action: 'note', caption: '', cut: false };
+    notice = '';
     formError = '';
     await tick();
     textEl?.focus();
@@ -111,7 +135,8 @@
   });
 
   async function openEdit(c: MusicComment) {
-    form = { id: c.id, start: secondsText(c.t_start), end: secondsText(c.t_end), text: c.text, action: c.action };
+    form = { id: c.id, start: secondsText(c.t_start), end: secondsText(c.t_end), text: c.text, action: c.action, caption: '', cut: false };
+    notice = '';
     formError = '';
     await tick();
     textEl?.focus();
@@ -145,9 +170,49 @@
     busy = true;
     formError = '';
     try {
-      const err = await saveComment(trackId, r.value, form.id ?? undefined);
+      const err = await saveComment(trackId, r.value, form.id ?? undefined, form.action);
       if (err) formError = err;
       else form = null;
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Send the region as an edit job; the core makes (or keeps) the comment. */
+  async function proposeEditJob() {
+    if (!form || !trackId || busy) return;
+    const r = validateCommentForm(form, duration > 0 ? duration : null);
+    if (r.error || !r.value) {
+      formError = r.error ?? '';
+      return;
+    }
+    const p = editProposal({ action: form.action, ...r.value, caption: form.caption, cut_with_shift: form.cut && cutPossible },
+                           duration > 0 ? duration : null, limits);
+    if (p.error || !p.value) {
+      formError = p.error ?? '';
+      return;
+    }
+    busy = true;
+    formError = '';
+    try {
+      if (form.id) {
+        const err = await saveComment(trackId, r.value, form.id, form.action);
+        if (err) {
+          formError = err;
+          return;
+        }
+      }
+      const a = await proposeEdit({ track_id: trackId, ...p.value, ...(form.id ? { comment_id: form.id } : {}) });
+      if (!a.ok) {
+        formError = a.message;
+        return;
+      }
+      const job = a.data.job;
+      notice = job.state === 'unsupported'
+        ? `The edit was not started: ${job.state_reason ?? 'unsupported'}`
+        : `Edit proposed: ${limits.takes[p.value.action] ?? 1} take(s) on their way; review them in the Create panel (the track stays as it is).`;
+      form = null;
+      await loadComments(trackId);
     } finally {
       busy = false;
     }
@@ -202,7 +267,7 @@
           <span class="muted tiny">Action</span>
           <select class="text-input" bind:value={form.action} disabled={busy} aria-label="Action">
             {#each COMMENT_ACTIONS as a (a.value)}
-              <option value={a.value} disabled={!a.supported}>{a.label}{a.supported ? '' : ' (planned)'}</option>
+              <option value={a.value} disabled={!a.supported}>{a.label}{optionNote(a)}</option>
             {/each}
           </select>
         </label>
@@ -216,14 +281,41 @@
         aria-label="Comment text"
         disabled={busy}
       ></textarea>
+      {#if actionState}
+        {#if REPAINT_ACTIONS.includes(form.action as any)}
+          <label class="field">
+            <span class="muted tiny">Style (the track's caption; empty = read from a DPC take's own record)</span>
+            <input class="text-input" type="text" bind:value={form.caption} disabled={busy} placeholder="e.g. synthwave, warm pads, female vocal" />
+          </label>
+        {/if}
+        {#if cutPossible}
+          <label class="check">
+            <input type="checkbox" bind:checked={form.cut} disabled={busy} />
+            <span class="small">Cut with shift: take the region out and move the end earlier (the take is shorter; its lyrics are re-timed)</span>
+          </label>
+        {/if}
+        <p class="muted tiny" role="status">
+          {#if actionState.supported}
+            Propose edit makes {limits.takes[form.action] ?? 1} take(s), each a new file; the track itself is never changed.
+          {:else}
+            This edit cannot run now: {actionState.reason}
+          {/if}
+        </p>
+      {/if}
       {#if formError}<p class="field-error" role="alert">{formError}</p>{/if}
       <div class="form-row">
-        <button type="button" class="small-btn primary" onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+        <button type="button" class="small-btn" class:primary={!actionState} onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+        {#if actionState}
+          <button type="button" class="small-btn primary" onclick={proposeEditJob} disabled={busy || !actionState.supported}
+            title="Send the region as an edit job">Propose edit</button>
+        {/if}
         <button type="button" class="small-btn" onclick={cancel} disabled={busy}>Cancel</button>
-        <span class="muted tiny">Ctrl+Enter saves · Esc cancels · sending to an agent is planned</span>
+        <span class="muted tiny">Ctrl+Enter saves · Esc cancels</span>
       </div>
     </div>
   {/if}
+
+  {#if notice}<p class="muted small" role="status" aria-live="polite">{notice}</p>{/if}
 
   {#if !comments.length && !form}
     <p class="muted small">{trackId ? 'No comments yet. Press C while listening to note what you hear.' : 'Nothing to comment on yet.'}</p>
@@ -234,7 +326,7 @@
       {#each comments as c (c.id)}
         <li class="item">
           <button type="button" class="when" onclick={() => onseek(c.t_start)} title="Seek to {formatTime(c.t_start)}">{commentTimeLabel(c, formatTime)}</button>
-          <span class="what">{c.text}</span>
+          <span class="what">{#if c.action && c.action !== 'note'}<span class="act-tag">{c.action.replace(/_/g, ' ')}</span> {/if}{c.text}</span>
           <span class="acts">
             <button type="button" class="small-btn" onclick={() => openEdit(c)}>Edit</button>
             <button type="button" class="small-btn danger" onclick={() => remove(c)}>Delete</button>
@@ -317,6 +409,8 @@
   .small-btn.primary { border-color: #58a6ff; color: #58a6ff; }
   .small-btn.danger { border-color: #7a3a3a; color: #f5a5a5; }
   .muted { color: var(--text-secondary, #a9b0bb); }
+  .check { display: flex; align-items: flex-start; gap: 6px; }
+  .act-tag { font-size: 11px; padding: 0 5px; border-radius: 4px; border: 1px solid #3a3f47; color: #c9d1d9; }
   .field-error { color: #f5a5a5; margin: 0; font-size: 13px; }
   .small { font-size: 13px; }
   .tiny { font-size: 12px; }

@@ -45,8 +45,15 @@ SPEC §8; each is in the report's `thresholds` so a reader sees the number that 
   trailing silence fails only when it is longer than 5 s. A cut-off last phrase is not
   measurable here: the person listens to the ending.
 
-**Advisory, never gates** (decision 29): seam metrics (`seams`: not measured, a new take has no
-seam and edit takes are not built) and lyrics WER (no judge). QC ranking is off by default and
+**Advisory, never gates** (decision 29): seam metrics (`seams`: a new take has no seam; a region-edit
+take brings its seam numbers from `region_edit.seams_entry`, which fill `mp.qa/1`'s seam fields and the
+advisory entry) and lyrics WER (no judge).
+
+**Edit takes** (`edit=`): the length mode is `same` (the take must be the control's length within
+`LENGTH_SAME_TOLERANCE_S`, decision 23; `length_mismatch` otherwise), the silence gate judges the
+runs outside the edit zone as above, a removal's zone is expected to be silent, and a repaint's zone
+with `INTERNAL_SILENCE_MAX_S` or more of silence fails as a hole (silence instead of the edit, SPEC §8
+gate 5). QC ranking is off by default and
 stage 2 does not exist (no judge): nothing here ranks takes.
 
 The report holds numbers and words only: no path, nothing of the request.
@@ -78,8 +85,9 @@ TRUE_PEAK_MAX_DBTP = -1.0           # SPEC §8
 LENGTH_EXACT_MIN_TOLERANCE_S = 2.0
 LENGTH_EXACT_TOLERANCE_FRACTION = 0.05
 LENGTH_CAP_MIN_S = 10.0
-LENGTH_EXACT, LENGTH_CAP = "exact", "cap"
-LENGTH_MODES = (LENGTH_EXACT, LENGTH_CAP)
+LENGTH_SAME_TOLERANCE_S = 0.001     # an edit take keeps the control's length (decision 23): a frame or so
+LENGTH_EXACT, LENGTH_CAP, LENGTH_SAME = "exact", "cap", "same"
+LENGTH_MODES = (LENGTH_EXACT, LENGTH_CAP, LENGTH_SAME)
 MAX_RUNS_KEPT = 8                   # silent runs listed in the report
 
 THRESHOLDS: Dict[str, Any] = {
@@ -92,6 +100,7 @@ THRESHOLDS: Dict[str, Any] = {
     "true_peak_max_dbtp": TRUE_PEAK_MAX_DBTP,
     "length_exact_tolerance": f"max({LENGTH_EXACT_MIN_TOLERANCE_S:g} s, {LENGTH_EXACT_TOLERANCE_FRACTION:.0%})",
     "length_cap_min_s": LENGTH_CAP_MIN_S,
+    "length_same_tolerance_s": LENGTH_SAME_TOLERANCE_S,
 }
 
 TOOLS_NAME = "ffmpeg ebur128+astats+silencedetect"
@@ -238,6 +247,14 @@ def length_gate(requested_s: Optional[float], received_s: Optional[float], mode:
     delta = round(received_s - requested_s, 2)
     common = {"mode": mode, "requested_s": round(requested_s, 2), "received_s": round(received_s, 2),
               "delta_s": delta}
+    if mode == LENGTH_SAME:
+        ok = abs(received_s - requested_s) <= LENGTH_SAME_TOLERANCE_S
+        words = (f"{received_s:.3f} s against the control's {requested_s:.3f} s "
+                 f"(an edit keeps the length, decision 23)")
+        return _gate(js.GATE_PASS if ok else js.GATE_FAIL, words if ok else f"length_mismatch: {words}",
+                     tolerance_s=LENGTH_SAME_TOLERANCE_S,
+                     **{**common, "requested_s": round(requested_s, 4), "received_s": round(received_s, 4),
+                        "delta_s": round(received_s - requested_s, 4)})
     if mode == LENGTH_CAP:
         if received_s > requested_s + LENGTH_EXACT_MIN_TOLERANCE_S:
             return _gate(js.GATE_FAIL, f"{received_s:.1f} s is longer than the {requested_s:g} s cap",
@@ -281,10 +298,39 @@ def true_peak_gate(true_peak_dbtp: Optional[float]) -> Dict[str, Any]:
                  true_peak_dbtp=true_peak_dbtp)
 
 
-def silence_gate(found: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+def split_runs_by_zone(runs: List[Tuple[float, float]],
+                       zone: Optional[Tuple[float, float]]) -> Tuple[List[Tuple[float, float]], float]:
+    """`(runs outside the edit zone, the longest silent stretch inside it)`: a run that crosses an edge
+    of the zone is cut there (SPEC §8 gates 4 and 5: silence outside the edit zone, silence instead of
+    the edit)."""
+    if zone is None:
+        return list(runs), 0.0
+    z0, z1 = zone
+    outside: List[Tuple[float, float]] = []
+    inside = 0.0
+    for a, b in runs:
+        if b <= z0 or a >= z1:
+            outside.append((a, b))
+            continue
+        inside = max(inside, min(b, z1) - max(a, z0))
+        if a < z0:
+            outside.append((a, z0))
+        if b > z1:
+            outside.append((z1, b))
+    return outside, round(inside, 2)
+
+
+def silence_gate(found: Optional[Mapping[str, Any]], *, zone_silence_s: Optional[float] = None,
+                 zone_expects_silence: bool = False) -> Dict[str, Any]:
+    """The silence gate. With an edit zone (`zone_silence_s` is the longest silence inside it, and the
+    runs in `found` are those outside it): a removal expects its zone to be silent; a repaint whose zone
+    holds `INTERNAL_SILENCE_MAX_S` or more of silence has a hole (silence instead of the edit)."""
     if found is None:
         return _gate(js.GATE_NOT_MEASURED, "the file's length is unknown, so silence cannot be placed")
     why: List[str] = []
+    if zone_silence_s is not None and not zone_expects_silence and zone_silence_s >= INTERNAL_SILENCE_MAX_S:
+        why.append(f"a hole: {zone_silence_s:.1f} s of silence inside the edited region, where the edit should "
+                   f"have put sound (from {INTERNAL_SILENCE_MAX_S:g} s)")
     if found["whole"]:
         why.append("the whole take is silent")
     if found["leading_s"] > LEADING_SILENCE_MAX_S:
@@ -296,18 +342,24 @@ def silence_gate(found: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
                    f"{TAIL_SILENCE_MAX_S:g} s is normal)")
     values = {"leading_s": found["leading_s"], "tail_s": found["tail_s"],
               "longest_internal_s": found["longest_internal_s"], "whole_take": found["whole"]}
+    zone_words = ""
+    if zone_silence_s is not None:
+        values["edit_zone_silence_s"] = zone_silence_s
+        values["edit_zone_expects_silence"] = zone_expects_silence
+        zone_words = (" outside the removed region (its silence is the edit)" if zone_expects_silence
+                      else f"; {zone_silence_s:.1f} s of silence inside the edited region")
     if why:
         return _gate(js.GATE_FAIL, "; ".join(why), **values)
     return _gate(js.GATE_PASS, f"start {found['leading_s']:.1f} s, end {found['tail_s']:.1f} s, longest dropout "
-                               f"{found['longest_internal_s']:.1f} s: all within bounds", **values)
+                               f"{found['longest_internal_s']:.1f} s{zone_words}: all within bounds", **values)
 
 
 # -- the record ---------------------------------------------------------------------------
 
 _ADVISORY: Dict[str, Dict[str, Any]] = {
     "seams": {"status": js.GATE_NOT_MEASURED,
-              "reason": "a new take has no seam; seam metrics apply to edit takes, which are not built, and are advisory "
-                        "only (decision 29)"},
+              "reason": "a new take has no seam; seam metrics apply to region-edit takes (region_edit.py) and are "
+                        "advisory only (decision 29)"},
     "lyrics_wer": {"status": js.GATE_NOT_MEASURED,
                    "reason": "needs the judge; advisory, never a gate (decision 29)"},
 }
@@ -317,23 +369,41 @@ def _advisory() -> Dict[str, Dict[str, Any]]:
     return {k: dict(v) for k, v in _ADVISORY.items()}
 
 
+SEAM_FIELDS = ("seam_start_jump_db", "seam_end_jump_db", "seam_click_score")
+
+
+def _seam_number(value: Any) -> Optional[float]:
+    """A seam field as `mp.qa/1` holds it: a finite number >= 0, else null (never inf or NaN)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
+
+
 def build_record(*, gates: Mapping[str, Dict[str, Any]], measurements: Mapping[str, Any],
                  integrated_lufs: Optional[float], true_peak_dbtp: Optional[float], clipped_samples: Optional[int],
                  measured_by: str, measured_at: Optional[str] = None,
-                 note: Optional[str] = None) -> Dict[str, Any]:
+                 note: Optional[str] = None, seam_fields: Optional[Mapping[str, Any]] = None,
+                 seams_advisory: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """`{qa, qa_report}`: the `mp.qa/1` when its three required numbers exist, else None, and
-    the report, whose verdict is the one the gates give."""
+    the report, whose verdict is the one the gates give. An edit take passes its seam numbers
+    (`seam_fields`, `region_edit.seams_entry`) and its advisory `seams` entry; they never gate."""
     qa: Optional[Dict[str, Any]] = None
+    seams = {k: _seam_number((seam_fields or {}).get(k)) for k in SEAM_FIELDS}
     if (integrated_lufs is not None and true_peak_dbtp is not None and clipped_samples is not None
             and math.isfinite(integrated_lufs) and math.isfinite(true_peak_dbtp)):
         qa = {"integrated_lufs": integrated_lufs, "true_peak_dbtp": true_peak_dbtp, "loudness_delta_lu": None,
-              "seam_start_jump_db": None, "seam_end_jump_db": None, "seam_click_score": None,
-              "clipped_samples": clipped_samples, "lyrics_wer": None, "measured_by": measured_by}
+              **seams, "clipped_samples": clipped_samples, "lyrics_wer": None, "measured_by": measured_by}
+    advisory = _advisory()
+    if seams_advisory is not None:
+        entry = dict(seams_advisory)
+        if entry.get("status") not in ("measured", js.GATE_NOT_MEASURED):
+            entry["status"] = js.GATE_NOT_MEASURED   # an advisory entry never passes or fails (decision 29)
+        advisory["seams"] = entry
     report: Dict[str, Any] = {
         "stage": 1,
         "verdict": js.qa_verdict_of(gates),
         "gates": {name: dict(gates[name]) for name in js.QA_GATES},
-        "advisory": _advisory(),
+        "advisory": advisory,
         "measurements": dict(measurements),
         "thresholds": dict(THRESHOLDS),
         "measured_by": measured_by,
@@ -357,11 +427,15 @@ def not_measured_record(reason: str, *, requested_s: Optional[float] = None, len
 
 def measure_take_qa(path: Path, *, requested_s: Optional[float], length_mode: str = LENGTH_EXACT,
                     duration_s: Optional[float] = None, loudness: Optional[Mapping[str, Any]] = None,
-                    tool_version: Optional[str] = None, tools: Optional[MediaTools] = None) -> Dict[str, Any]:
+                    tool_version: Optional[str] = None, tools: Optional[MediaTools] = None,
+                    edit: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Measure one take file and return `{qa, qa_report}`. `loudness` is the take's ebur128
     record when it has one (then ebur128 is not run again); `duration_s` its exact length when
-    known. Blocking: call it through `asyncio.to_thread`. Raises `QaError` when ffmpeg cannot
-    be run; a measurement ffmpeg ran but could not read is a `not_measured` gate."""
+    known. `edit` is a region-edit take's `{action, zone: (t0, t1) or None, expects_silence,
+    seams: {entry, qa_fields}}` (`region_edit`): the silence gate judges outside the zone and looks
+    for a hole inside it, and the seam numbers fill `mp.qa/1`. Blocking: call it through
+    `asyncio.to_thread`. Raises `QaError` when ffmpeg cannot be run; a measurement ffmpeg ran but
+    could not read is a `not_measured` gate."""
     if length_mode not in LENGTH_MODES:
         raise QaError(f"unknown length mode {length_mode!r}")
     have_loudness = isinstance(loudness, Mapping) and isinstance(loudness.get("lufs_i"), (int, float))
@@ -385,12 +459,19 @@ def measure_take_qa(path: Path, *, requested_s: Optional[float], length_mode: st
 
     astats = parse_astats(err)
     clip, clipped = clipping_gate(astats)
-    silence = classify_silences(parse_silences(err, duration), duration) if duration else None
+    zone = tuple(edit["zone"]) if edit and edit.get("zone") else None
+    zone_silence: Optional[float] = None
+    silence = None
+    if duration:
+        runs, inside = split_runs_by_zone(parse_silences(err, duration), zone)
+        silence = classify_silences(runs, duration)
+        zone_silence = inside if zone is not None else None
     gates = {
         "length": length_gate(requested_s, duration, length_mode),
         "clipping": clip,
         "true_peak": true_peak_gate(peak),
-        "silence": silence_gate(silence),
+        "silence": silence_gate(silence, zone_silence_s=zone_silence,
+                                zone_expects_silence=bool(edit and edit.get("expects_silence"))),
     }
     measurements: Dict[str, Any] = {
         "duration_s": round(duration, 2) if duration else None,
@@ -406,8 +487,13 @@ def measure_take_qa(path: Path, *, requested_s: Optional[float], length_mode: st
         "longest_internal_silence_s": silence["longest_internal_s"] if silence else None,
         "silent_runs_s": silence["runs"] if silence else None,
     }
+    seams = (edit or {}).get("seams") or {}
+    if edit:
+        measurements["edit_zone_s"] = [round(zone[0], 3), round(zone[1], 3)] if zone else None
+        measurements["edit_zone_silence_s"] = zone_silence
     return build_record(gates=gates, measurements=measurements, integrated_lufs=lufs, true_peak_dbtp=peak,
-                        clipped_samples=clipped, measured_by=by)
+                        clipped_samples=clipped, measured_by=by, seam_fields=seams.get("qa_fields"),
+                        seams_advisory=seams.get("entry"))
 
 
 def ffmpeg_qa_meter(tools: Optional[MediaTools] = None) -> QaMeter:

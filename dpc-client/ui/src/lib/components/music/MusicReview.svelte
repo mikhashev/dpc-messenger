@@ -18,6 +18,9 @@
 
   Keep marks the take accepted, with an optional add-to-playlist (there is no track rename
   in the library yet). Discard and "None of these" need a reason (MusicReasonBox).
+
+  A region edit's takes (ADR-051 row B4) are sibling files of the edited track, which stays as it
+  is; the view names the region and "Play region" starts the take 2 s before it (SPEC flow 6).
 -->
 
 <script lang="ts">
@@ -55,6 +58,7 @@
   import MusicReasonBox from './MusicReasonBox.svelte';
   import MusicComments from './MusicComments.svelte';
   import MusicWaveform from './MusicWaveform.svelte';
+  import { editJobLine } from '$lib/utils/musicEdit';
   import { musicComments } from '$lib/services/musicComments';
 
   let { job, classes = [], onclose }: { job: MusicJob; classes?: FailureClass[]; onclose: () => void } = $props();
@@ -136,6 +140,12 @@
   }
 
   /** Switch to take `i` at the same position. */
+  /** An edit's region with 2 s of context before it, on the take picked now. */
+  async function playRegion() {
+    if (!job.region) return;
+    await load(current, Math.max(0, job.region.t_start - 2), true);
+  }
+
   async function switchTo(i: number) {
     if (i < 0 || i >= takes.length) return;
     if (i === current && (loaded || !rv.active)) return;
@@ -284,6 +294,14 @@
   </div>
   {#if loadError}<p class="field-error" role="alert">Could not read the takes: {loadError}</p>{/if}
   {#if !takes.length && !loadError}<p class="muted small">Reading the takes…</p>{/if}
+
+  {#if job.type === 'edit' && job.region}
+    <p class="muted small edit-line">
+      {editJobLine(job)}: each take is a new file; the edited track stays as it is.
+      <button type="button" class="small-btn" onclick={playRegion} disabled={!playable(take)}
+        title="Play the picked take from 2 s before the region">Play region</button>
+    </p>
+  {/if}
 
   {#if takes.length}
     <div class="ab-bar" role="group" aria-label="Takes">

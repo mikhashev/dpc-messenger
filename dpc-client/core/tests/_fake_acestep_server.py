@@ -1,7 +1,9 @@
 """A stand-in for acestep.cpp's `ace-server`, run as a child process by the music engine
 tests: the same CLI flags, `/health`, `/props`, `POST /lm`, `POST /synth`, `GET /job`,
 `POST /job?cancel=1`, with canned audio codes and a short generated wav24 per variant
-(WAVE_FORMAT_EXTENSIBLE, as the real server writes). No GPU.
+(WAVE_FORMAT_EXTENSIBLE, as the real server writes). A multipart `/synth` (parts `request` and
+`audio`, as acestep.cpp's `handle_synth` reads them) is a repaint: the source back as wav32 with a
+tone per variant inside the window. No GPU.
 
 `FAKE_ACESTEP_MODE` (comma-separated) picks a misbehaviour:
 `exit_at_start`, `missing_model`, `crash_on_lm`, `fail_synth`, `slow_synth` (stays running
@@ -107,7 +109,75 @@ def main():
         jobs[jid].update(status="done", body=json.dumps([out], ensure_ascii=False).encode("utf-8"))
         return web.json_response({"id": jid})
 
+    async def repaint(req):
+        """`POST /synth` multipart (part `request`, part `audio`) as acestep.cpp's handle_synth reads it:
+        task_type repaint answers each variant as the source with a tone of its own inside the window
+        [int(start*25), int(end*25)) latent frames, on the 25 Hz grid, as wav32 float, so a test can tell
+        what came from where. Without `audio` or a caption it fails, as the real server refuses."""
+        import numpy as np
+        reader = await req.multipart()
+        request_body, audio = None, None
+        async for part in reader:
+            data = await part.read(decode=False)
+            if part.name == "request":
+                request_body = bytes(data)
+            elif part.name == "audio":
+                audio = bytes(data)
+        recorded("synth", request_body or b"")
+        r = json.loads(request_body)
+        jid = new_job()
+        if r.get("task_type") != "repaint" or audio is None or not r.get("caption") or "fail_synth" in modes:
+            jobs[jid]["status"] = "failed"
+            return web.json_response({"id": jid})
+        if "slow_synth" in modes:
+            return web.json_response({"id": jid})
+        pos, fmt, data_off, data_len = 12, None, None, None
+        while pos + 8 <= len(audio):
+            cid, size = audio[pos:pos + 4], struct.unpack("<I", audio[pos + 4:pos + 8])[0]
+            if cid == b"fmt ":
+                tag, ch, rate, _br, _ba, bits = struct.unpack("<HHIIHH", audio[pos + 8:pos + 24])
+                fmt = (tag, ch, rate, bits)
+            elif cid == b"data":
+                data_off, data_len = pos + 8, min(size, len(audio) - pos - 8)
+                break
+            pos += 8 + size + (size % 2)
+        _tag, ch, rate, bits = fmt
+        raw = audio[data_off:data_off + data_len]
+        if bits == 24:
+            b = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3).astype(np.int32)
+            ints = b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)
+            src = (np.where(ints & 0x800000, ints - 0x1000000, ints) / 8388608.0).astype(np.float32)
+        elif bits == 16:
+            src = (np.frombuffer(raw, dtype="<i2") / 32768.0).astype(np.float32)
+        else:
+            src = np.frombuffer(raw, dtype="<f4").astype(np.float32)
+        src = src.reshape(-1, ch)
+        n_out = int(math.ceil(src.shape[0] / 1920)) * 1920
+        t0 = int(float(r.get("repainting_start", 0)) * 25) * 1920
+        t1 = min(n_out, int(float(r.get("repainting_end", -1)) * 25) * 1920)
+        n = int(r.get("synth_batch_size", 1)) - (1 if "short_batch" in modes else 0)
+        seed = int(r.get("seed", 0))
+        parts = b""
+        for i in range(n):
+            out = np.zeros((n_out, ch), dtype=np.float32)
+            out[:src.shape[0]] = src
+            k = np.arange(t0, t1)
+            out[t0:t1] = (0.25 * np.sin(2 * np.pi * (440 + 20 * ((seed + i) % 10)) * k / rate))[:, None]
+            pcm = out.reshape(-1).astype("<f4").tobytes()
+            fmt_chunk = struct.pack("<HHIIHH", 3, ch, rate, rate * ch * 4, ch * 4, 32)
+            body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt_chunk)) + fmt_chunk + b"data" + \
+                struct.pack("<I", len(pcm)) + pcm
+            wav = b"RIFF" + struct.pack("<I", len(body)) + body
+            parts += (f"--{BOUNDARY}\r\nContent-Type: audio/wav\r\n\r\n").encode() + wav + b"\r\n"
+            latent = struct.pack("<64f", *([float(seed + i)] * 64))
+            parts += (f"--{BOUNDARY}\r\nContent-Type: application/octet-stream\r\n\r\n").encode() + latent + b"\r\n"
+        parts += f"--{BOUNDARY}--\r\n".encode()
+        jobs[jid].update(status="done", body=parts, mime=f"multipart/mixed; boundary={BOUNDARY}")
+        return web.json_response({"id": jid})
+
     async def synth(req):
+        if req.content_type.startswith("multipart/"):
+            return await repaint(req)
         body = await req.read()
         recorded("synth", body)
         r = json.loads(body)

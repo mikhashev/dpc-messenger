@@ -59,10 +59,11 @@ export async function saveComment(
     trackId: string,
     value: { start_s: number; end_s: number | null; text: string },
     commentId?: string,
+    action = 'note',
 ): Promise<string | null> {
     const a = commentId
-        ? await updateMusicComment(trackId, commentId, value)
-        : await addMusicComment(trackId, { ...value, action: 'note' });
+        ? await updateMusicComment(trackId, commentId, { ...value, action })
+        : await addMusicComment(trackId, { ...value, action });
     if (!a.ok) return a.message;
     await loadComments(trackId);
     return null;

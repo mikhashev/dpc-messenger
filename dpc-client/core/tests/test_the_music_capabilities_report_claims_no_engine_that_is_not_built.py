@@ -12,7 +12,7 @@ from tests._music_jobs_helpers import from_text_params, installed_probe, store_a
 
 
 def test_today_the_engine_is_reported_as_not_built_and_nothing_claims_it():
-    report = MusicCapabilities().report()
+    report = MusicCapabilities(ffmpeg_probe=lambda: False).report()
     assert report["schema"] == "mp.capabilities/1"
     assert report["engine"]["state"] == "not_built"
     assert report["engine"]["available"] is False
@@ -22,8 +22,19 @@ def test_today_the_engine_is_reported_as_not_built_and_nothing_claims_it():
     assert all(v["status"] != "supported" for v in report["job_types"].values())
 
 
+def test_without_an_engine_only_the_removal_runs_because_it_needs_no_model():
+    report = MusicCapabilities(ffmpeg_probe=lambda: True).report()
+    actions = report["actions"]
+    assert actions["remove_region"]["status"] == "supported" and "no model" in actions["remove_region"]["reason"]
+    for repaint in ("regenerate_region", "fix_seam"):
+        assert actions[repaint]["status"] == "unsupported"
+        assert "acestep.cpp" in actions[repaint]["reason"] and "engine adapter not built" in actions[repaint]["reason"]
+    assert report["job_types"]["edit"]["status"] == "supported"
+    assert {k for k, v in report["job_types"].items() if v["status"] == "supported"} == {"edit"}
+
+
 def test_every_job_type_and_edit_action_is_listed_with_a_status_and_a_reason():
-    report = MusicCapabilities(installed_probe).report()
+    report = MusicCapabilities(installed_probe, ffmpeg_probe=lambda: True).report()
     assert set(report["job_types"]) == set(js.JOB_TYPES)
     assert set(report["actions"]) == set(js.EDIT_ACTIONS)
     for block in (report["job_types"], report["actions"], report["features"]):
@@ -31,18 +42,24 @@ def test_every_job_type_and_edit_action_is_listed_with_a_status_and_a_reason():
             assert st["status"] in ("supported", "planned", "unsupported"), name
             assert st["reason"].strip(), name
     assert report["job_types"]["generate_from_text"]["status"] == "supported"
-    for planned in ("edit", "generate_similar", "generate_from_lyrics", "cover", "transcribe", "qc", "generate_from_melody"):
+    assert report["job_types"]["edit"]["status"] == "supported"
+    for planned in ("generate_similar", "generate_from_lyrics", "cover", "transcribe", "qc", "generate_from_melody"):
         assert report["job_types"][planned]["status"] == "planned"
     assert report["job_types"]["voice_clone"]["status"] == "unsupported"
 
 
-def test_the_report_says_comments_are_built_and_the_region_edits_are_not():
+def test_the_report_says_which_region_edits_are_built_and_extend_ending_is_not():
     from dpc_client_core.music.comments import SUPPORTED_ACTIONS
-    actions = MusicCapabilities(installed_probe).report()["actions"]
-    assert set(SUPPORTED_ACTIONS) == {"note"}
+    actions = MusicCapabilities(installed_probe, ffmpeg_probe=lambda: True).report()["actions"]
+    assert set(SUPPORTED_ACTIONS) == {"note", "regenerate_region", "fix_seam", "remove_region"}
     assert actions["note"]["status"] == "supported" and "not built" not in actions["note"]["reason"]
-    for planned in set(js.EDIT_ACTIONS) - set(SUPPORTED_ACTIONS):
-        assert actions[planned]["status"] == "planned", planned
+    for built in ("regenerate_region", "fix_seam", "remove_region"):
+        assert actions[built]["status"] == "supported", built
+    assert actions["extend_ending"]["status"] == "planned"
+    # every edit decodes the track with ffmpeg: without it none runs, and the reason says so
+    no_ffmpeg = MusicCapabilities(installed_probe, ffmpeg_probe=lambda: False).report()["actions"]
+    for built in ("regenerate_region", "fix_seam", "remove_region"):
+        assert no_ffmpeg[built]["status"] == "unsupported" and "ffmpeg" in no_ffmpeg[built]["reason"]
 
 
 def test_the_limits_are_the_slice_one_decisions_per_engine():
@@ -80,8 +97,11 @@ def test_the_qa_block_lists_the_spec_fields_and_says_which_ones_stage_1_measures
     # every field says whether anything produces it; stage 1 measures loudness, true peak and clipping
     assert set(qa["field_status"]) == set(qa["fields"])
     measured = {k for k, v in qa["field_status"].items() if v["status"] == "measured"}
-    assert measured == {"integrated_lufs", "true_peak_dbtp", "clipped_samples"}
-    for k in ("seam_start_jump_db", "seam_end_jump_db", "seam_click_score", "loudness_delta_lu", "lyrics_wer"):
+    assert measured == {"integrated_lufs", "true_peak_dbtp", "clipped_samples", "seam_start_jump_db",
+                        "seam_end_jump_db", "seam_click_score"}
+    for k in ("seam_start_jump_db", "seam_end_jump_db", "seam_click_score"):
+        assert "region-edit" in qa["field_status"][k]["reason"] and "never a gate" in qa["field_status"][k]["reason"]
+    for k in ("loudness_delta_lu", "lyrics_wer"):
         assert qa["field_status"][k]["status"] == "planned" and qa["field_status"][k]["reason"]
     # the gates and the number that judges each; seams and WER never gate
     assert qa["gates"]["names"] == ["length", "clipping", "true_peak", "silence"]

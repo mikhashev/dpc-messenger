@@ -16,7 +16,10 @@ gives the take's own file and nothing of the job's request (D44).
 - `music_propose_job` makes one job per call (D45), records who asked (`requested_by` with the
   agent, chat and turn, D46) and asks the person first through the approval machinery of
   `schedule_task` (D47). A refusal makes no job. A repeat in the same turn returns the turn's
-  job and asks nothing.
+  job and asks nothing. Type `generate_from_text`, or `edit` (ADR-051 row B4: `track_id`, `action`
+  regenerate_region / fix_seam / remove_region, `region`, `text` in params; core makes the
+  region comment); the card names the action and the region. An agent cannot ask for a
+  `cut_with_shift` removal (the person's word only, decision 27).
 - `music_wait` polls every `POLL_INTERVAL_S` and follows the self-wait rule (D51): when this
   turn holds a live card hold on a local alias and the job is `queued`, or the job's `card_wait`
   names that alias among its holders (a running job whose engine ended and waits for the card
@@ -48,6 +51,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from ...managers.llama_server_supervisor import current_card_hold
 from ...music import job_schemas as js
+from ...music import region_edit as re_
 from ...process_registry import SPAWN_ORIGIN, get_registry
 from .registry import ToolContext, ToolEntry
 
@@ -315,6 +319,9 @@ def music_capabilities(ctx: ToolContext) -> str:
         "generate_from_text": (report.get("job_types") or {}).get(js.GENERATE_FROM_TEXT),
         "params_limits": limits,
         "engine_choice_rules": report.get("engine_choice_rules"),
+        "edit": (report.get("job_types") or {}).get(EDIT),
+        "edit_actions": report.get("actions"),
+        "edit_limits": (report.get("limits") or {}).get("edit"),
     }
     return json.dumps(view, ensure_ascii=False, default=str)
 
@@ -366,6 +373,44 @@ def _duration_s(params: Dict[str, Any]) -> Optional[float]:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+EDIT = "edit"
+_EDIT_TOP_KEYS = ("track_id", "action", "region", "text")
+
+
+def _split_edit(params: Dict[str, Any]) -> tuple:
+    """`(edit args for the service, the edit's own params, refusal or None)` of an `edit` request whose
+    params carry `track_id`, `action`, `region` and `text` beside the edit params."""
+    args = {"track_id": params.get("track_id"), "action": params.get("action"), "region": params.get("region"),
+            "prompt": params.get("text")}
+    rest = {k: v for k, v in params.items() if k not in _EDIT_TOP_KEYS}
+    if not isinstance(args["track_id"], str) or not args["track_id"]:
+        return args, rest, "params.track_id (a library track id, see music_list_library) is required"
+    if args["action"] not in re_.BUILT_ACTIONS:
+        return args, rest, f"params.action must be one of {', '.join(re_.BUILT_ACTIONS)}"
+    if not isinstance(args["region"], dict):
+        return args, rest, "params.region {t_start, t_end} in seconds is required"
+    if args["prompt"] is not None and not isinstance(args["prompt"], str):
+        return args, rest, "params.text must be text"
+    return args, rest, None
+
+
+def _edit_about(args: Dict[str, Any], params: Dict[str, Any]) -> str:
+    words = re_.region_words(args["action"], args["region"])
+    takes = re_.takes_for(args["action"])
+    gpu = "on the GPU (acestep.cpp repaint)" if args["action"] in re_.REPAINT_ACTIONS else "no GPU (DPC fades it out)"
+    return f"Edit library track {args['track_id']}: {words}, {takes} take{'s' if takes != 1 else ''}, {gpu}"
+
+
+def _edit_parts(args: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """The card's parts of an edit: the action and the region (in seconds and as text), the track, the takes."""
+    region = args["region"]
+    return {"type": EDIT, "action": args["action"], "track_id": args["track_id"],
+            "region": {"t_start": region.get("t_start"), "t_end": region.get("t_end")},
+            "region_text": re_.region_words(args["action"], region), "variants": re_.takes_for(args["action"]),
+            "uses_gpu": args["action"] in re_.REPAINT_ACTIONS, "text": args.get("prompt") or None,
+            "style": " ".join(str(params.get("caption") or "").split()) or None}
 
 
 def _approval_parts(job_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -439,8 +484,8 @@ def _after_propose_hint(job: Dict[str, Any]) -> str:
 def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, params: Any = None,
                       idempotency_key: Optional[str] = None) -> str:
     """Propose one music job, after the person approves it."""
-    if type != js.GENERATE_FROM_TEXT:
-        return f"⚠️ music_propose_job: type must be '{js.GENERATE_FROM_TEXT}'; nothing was proposed."
+    if type not in (js.GENERATE_FROM_TEXT, EDIT):
+        return f"⚠️ music_propose_job: type must be '{js.GENERATE_FROM_TEXT}' or '{EDIT}'; nothing was proposed."
     if isinstance(params, str):
         try:
             params = json.loads(params)
@@ -448,6 +493,11 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
             return "⚠️ music_propose_job: params must be an object; nothing was proposed."
     if not isinstance(params, dict):
         return "⚠️ music_propose_job: params must be an object; nothing was proposed."
+    edit_args: Dict[str, Any] = {}
+    if type == EDIT:
+        edit_args, params, problem = _split_edit(params)
+        if problem:
+            return f"⚠️ music_propose_job: {problem}; nothing was proposed."
     who = _requested_by(ctx)
     turn_id = who.get("turn_id")
     if not who.get("agent_id") or not turn_id:
@@ -482,7 +532,7 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     # Everything core would refuse, and a job core would make `unsupported`, is answered before
     # anyone is asked (follow-up 12, Zcode #68 P2): core's own checks, with no job made.
     checked = _service_call(ctx, "check_music_job", type=type, params=params,
-                            idempotency_key=idempotency_key or None, requested_by=who)
+                            idempotency_key=idempotency_key or None, requested_by=who, **edit_args)
     refused = _error_text(checked, "music_propose_job")
     if refused:
         return refused + " Nothing was asked or proposed."
@@ -495,10 +545,15 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     # is up withdraws it: a "yes" after Stop makes no job (follow-up 12, Zcode #68 P3).
     from .core import _await_schedule_approval
     from ..owner_approval import GPU_CARD_COST_LINE
+    if type == EDIT:
+        about, parts = _edit_about(edit_args, final), _edit_parts(edit_args, final)
+        card = {"cost": GPU_CARD_COST_LINE} if edit_args["action"] in re_.REPAINT_ACTIONS else {}
+    else:
+        about, parts, card = _approval_about(type, final), _approval_parts(type, final), {"cost": GPU_CARD_COST_LINE}
     approved, reason = _await_schedule_approval(
-        ctx, task_type="music_job", when="now", about=_approval_about(type, final),
-        music=_approval_parts(type, final), void_on_stop=True,
-        card={"cost": GPU_CARD_COST_LINE})  # ADR-053 2.6: the card states the cost
+        ctx, task_type="music_job", when="now", about=about,
+        music=parts, void_on_stop=True,
+        card=card)  # ADR-053 2.6: the card states the cost
     if not approved:
         return f"⚠️ The music job was not proposed: {reason}. No job was made."
     # Stop or Kill pressed after the "yes" (while the answer was on its way, or in the moment
@@ -510,7 +565,7 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     # the call below still finds the job it made.
     _ctx_dict(ctx, "_music_turns")[turn_id] = who["agent_id"]
     answer = _service_call(ctx, "propose_music_job", type=type, params=params,
-                           idempotency_key=idempotency_key or None, requested_by=who)
+                           idempotency_key=idempotency_key or None, requested_by=who, **edit_args)
     refused = _error_text(answer, "music_propose_job")
     if refused:
         return refused + " No job was made."
@@ -901,17 +956,24 @@ def get_tools() -> List[ToolEntry]:
                "limits, and the params a generate_from_text job takes.",
                {}, [], music_capabilities),
         _entry("music_propose_job",
-               "Propose ONE music generation job (type generate_from_text). The person is asked to "
+               "Propose ONE music job: a new song (type generate_from_text) or a region edit of a library "
+               "track (type edit). The person is asked to "
                "approve it first; refused, no job is made. One job per turn: a repeat in the same turn "
                "returns the turn's job. On a local model the job starts only after this turn ends: do "
                "not wait for it, schedule a check_back with task_data {\"music_job_id\": ...}." + CHECK_BACK_ONLY_LINE,
-               {"type": {"type": "string", "enum": [js.GENERATE_FROM_TEXT],
-                         "description": "Job type; only generate_from_text."},
+               {"type": {"type": "string", "enum": [js.GENERATE_FROM_TEXT, EDIT],
+                         "description": "generate_from_text (a new song) or edit (a region of a library track)."},
                 "params": {"type": "object",
-                           "description": "style (text, required), lyrics (text with [verse]/[chorus] "
-                                          "tags; null for an instrumental), variants (1-4), duration_s, "
-                                          "engine (see music_capabilities), seed. Params core would "
-                                          "refuse are refused before the person is asked."},
+                           "description": "generate_from_text: style (text, required), lyrics (text with "
+                                          "[verse]/[chorus] tags; null for an instrumental), variants (1-4), "
+                                          "duration_s, engine (see music_capabilities), seed. edit: track_id "
+                                          "(from music_list_library), action (regenerate_region, fix_seam or "
+                                          "remove_region), region {t_start, t_end} in seconds (at most 30 s), "
+                                          "text (what is wrong there); for a repaint optionally caption (the "
+                                          "track's style; needed when the track is not a DPC take), lyrics, "
+                                          "seed, allowed_zone, splice_bounds, crossfade_ms. A repaint makes 2 "
+                                          "takes, a removal 1, each a new file; the track is never changed. "
+                                          "Params core would refuse are refused before the person is asked."},
                 "idempotency_key": {"type": "string",
                                     "description": "Optional; the default comes from the turn."}},
                ["params"], music_propose_job, timeout_sec=PROPOSE_TOOL_TIMEOUT_S),

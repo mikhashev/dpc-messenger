@@ -48,10 +48,12 @@ from __future__ import annotations
 
 import copy
 import logging
+import shutil
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from . import job_schemas as js
+from . import region_edit as re_
 from .qa import THRESHOLDS as QA_THRESHOLDS
 
 logger = logging.getLogger(__name__)
@@ -70,7 +72,6 @@ SUPPORTED, PLANNED, UNSUPPORTED = "supported", "planned", "unsupported"
 # The job types that are not built in DPC, with why (SPEC §7, §7.1; ADR-051 Implementation
 # Status). `generate_from_text` is missing on purpose: its status follows the engine.
 _NOT_BUILT_JOB_TYPES: Dict[str, Dict[str, str]] = {
-    "edit": {"status": PLANNED, "reason": "region edits are not built in DPC (repaint, continuation, ffmpeg cut)"},
     "generate_similar": {"status": PLANNED, "reason": "same-style generation is not built in DPC"},
     "generate_from_lyrics": {"status": PLANNED, "reason": "song from a track's lyrics is not built in DPC"},
     "cover": {"status": PLANNED, "reason": "cover is not built in DPC (YuE2-Studio or ACE-Step cover)"},
@@ -80,13 +81,15 @@ _NOT_BUILT_JOB_TYPES: Dict[str, Dict[str, str]] = {
     "voice_clone": {"status": UNSUPPORTED, "reason": "no voice clone engine is chosen (research card, flow 26)"},
 }
 
-_EDIT_ACTIONS: Dict[str, Dict[str, str]] = {
-    "note": {"status": SUPPORTED, "reason": "timecoded comments, mp.comment/1 (music/comments.py); the other four actions are planned"},
-    "regenerate_region": {"status": PLANNED, "reason": "repaint is not built in DPC"},
-    "extend_ending": {"status": PLANNED, "reason": "continuation is not built in DPC"},
-    "fix_seam": {"status": PLANNED, "reason": "repaint around the seam is not built in DPC"},
-    "remove_region": {"status": PLANNED, "reason": "ffmpeg fade to silence, length kept, not built in DPC"},
+# The edit actions whose status does not follow an engine (`action_statuses` adds the three built ones).
+_FIXED_EDIT_ACTIONS: Dict[str, Dict[str, str]] = {
+    "note": {"status": SUPPORTED, "reason": "timecoded comments, mp.comment/1 (music/comments.py); a note makes no job"},
+    "extend_ending": {"status": PLANNED, "reason": "continuation is not built in DPC (whether acestep.cpp continues a "
+                                                   "track is not verified)"},
 }
+_REPAINT_WORDS = ("acestep.cpp repaint (POST /synth, task_type repaint) of the region, spliced back into the track "
+                  "with a crossfade, length kept; built, to be checked live on a real track (decision 28)")
+_REMOVE_WORDS = "the region faded to silence in DPC, length kept (decision 23); no model, no card"
 
 # SPEC §7 / §8: the canonical stage-1 list of mp.qa/1, and the advisory ones (decision 29).
 QA_FIELDS = ("integrated_lufs", "true_peak_dbtp", "loudness_delta_lu", "seam_start_jump_db", "seam_end_jump_db",
@@ -102,9 +105,12 @@ QA_FIELD_STATUS: Dict[str, Dict[str, str]] = {
     "integrated_lufs": {"status": MEASURED, "reason": "loudness.py, ffmpeg ebur128; copied into qa by qa.py"},
     "true_peak_dbtp": {"status": MEASURED, "reason": "loudness.py, ffmpeg ebur128; copied into qa by qa.py"},
     "loudness_delta_lu": {"status": PLANNED, "reason": "nothing produces it yet"},
-    "seam_start_jump_db": {"status": PLANNED, "reason": "seam analysis is not built in DPC"},
-    "seam_end_jump_db": {"status": PLANNED, "reason": "seam analysis is not built in DPC"},
-    "seam_click_score": {"status": PLANNED, "reason": "seam analysis is not built in DPC"},
+    "seam_start_jump_db": {"status": MEASURED, "reason": "region_edit.py on region-edit takes (RMS 20 ms before vs after "
+                           "the crossfade); null on a new take and a removed region; advisory, never a gate"},
+    "seam_end_jump_db": {"status": MEASURED, "reason": "region_edit.py on region-edit takes; null on a new take and a "
+                         "removed region; advisory, never a gate"},
+    "seam_click_score": {"status": MEASURED, "reason": "region_edit.py on region-edit takes (largest step near the seam "
+                         "over the local median step); null on a new take and a removed region; advisory, never a gate"},
     "clipped_samples": {"status": MEASURED, "reason": "qa.py, ffmpeg astats: samples at the peak when the peak is "
                         "0.999 of full scale or more (a lower bound)"},
     "lyrics_wer": {"status": PLANNED, "reason": "needs the judge; not built in DPC"},
@@ -177,10 +183,13 @@ class MusicCapabilities:
 
     def __init__(self, engine_probe: Optional[EngineProbe] = None, *,
                  engines: Optional[Mapping[str, Any]] = None,
-                 default_engine: str = js.DEFAULT_FROM_TEXT_ENGINE):
+                 default_engine: str = js.DEFAULT_FROM_TEXT_ENGINE,
+                 ffmpeg_probe: Optional[Callable[[], bool]] = None):
         self._probe: EngineProbe = engine_probe or adapter_not_built_probe
         self._engines: Dict[str, Any] = dict(engines or {})
         self.default_engine = default_engine
+        # Every edit decodes the track with ffmpeg (the control, region_edit.py).
+        self._ffmpeg_probe = ffmpeg_probe or (lambda: bool(shutil.which("ffmpeg")))
 
     # -- probes ------------------------------------------------------------------
 
@@ -247,10 +256,47 @@ class MusicCapabilities:
         reasons = "; ".join(f"{k}: {statuses[k].reason}" for k in order if k in statuses)
         return {"status": UNSUPPORTED, "reason": reasons or "no music engine"}
 
+    def _ffmpeg(self) -> bool:
+        try:
+            return bool(self._ffmpeg_probe())
+        except Exception:
+            return False
+
+    def action_statuses(self, acestep: Optional[EngineStatus] = None) -> Dict[str, Dict[str, str]]:
+        """`{status, reason}` of each edit action (SPEC §7 `actions`): the repaint pair follows
+        acestep.cpp, the removal needs ffmpeg only, and every built edit needs ffmpeg for the control."""
+        out = copy.deepcopy(_FIXED_EDIT_ACTIONS)
+        ffmpeg = self._ffmpeg()
+        no_ffmpeg = "ffmpeg is not on PATH; an edit decodes the track with it (install ffmpeg)"
+        ace = acestep or self.engine_status(js.ENGINE_ACESTEP)
+        for action in re_.REPAINT_ACTIONS:
+            if not ffmpeg:
+                out[action] = {"status": UNSUPPORTED, "reason": no_ffmpeg}
+            elif ace.available:
+                out[action] = {"status": SUPPORTED, "reason": _REPAINT_WORDS}
+            else:
+                out[action] = {"status": UNSUPPORTED, "reason": f"needs acestep.cpp: {ace.reason}"}
+        out[re_.REMOVE_REGION] = ({"status": SUPPORTED, "reason": _REMOVE_WORDS} if ffmpeg
+                                  else {"status": UNSUPPORTED, "reason": no_ffmpeg})
+        return {a: out[a] for a in js.EDIT_ACTIONS}
+
+    def _edit_status(self, action: Optional[str], actions: Optional[Mapping[str, Dict[str, str]]] = None) -> Dict[str, str]:
+        actions = actions or self.action_statuses()
+        if action is not None:
+            if action == "note":
+                return {"status": UNSUPPORTED, "reason": "a note is a comment; it makes no job"}
+            return dict(actions.get(action) or {"status": UNSUPPORTED, "reason": f"{action!r} is not an edit action"})
+        built = [a for a in re_.BUILT_ACTIONS if actions[a]["status"] == SUPPORTED]
+        if built:
+            return {"status": SUPPORTED, "reason": f"region edits: {', '.join(built)} (see actions)"}
+        return {"status": UNSUPPORTED, "reason": "; ".join(f"{a}: {actions[a]['reason']}" for a in re_.BUILT_ACTIONS)}
+
     def job_type_status(self, job_type: str, engine: Optional[EngineStatus] = None,
-                        params: Optional[Mapping[str, Any]] = None) -> Dict[str, str]:
+                        params: Optional[Mapping[str, Any]] = None, action: Optional[str] = None) -> Dict[str, str]:
         """`{status, reason}` of one job type; for `generate_from_text` with `params`, of
-        the engine they name."""
+        the engine they name; for `edit` with `action`, of that action."""
+        if job_type == "edit":
+            return self._edit_status(action)
         if job_type == js.GENERATE_FROM_TEXT:
             if engine is not None:
                 return self._from_text_status(engine)
@@ -261,10 +307,11 @@ class MusicCapabilities:
             return dict(_NOT_BUILT_JOB_TYPES[job_type])
         return {"status": UNSUPPORTED, "reason": f"{job_type!r} is not a job type"}
 
-    def unsupported_reason(self, job_type: str, params: Optional[Mapping[str, Any]] = None) -> Optional[str]:
-        """Why a job of this type (with these params) cannot run now, or None when it can
-        be queued."""
-        st = self.job_type_status(job_type, params=params)
+    def unsupported_reason(self, job_type: str, params: Optional[Mapping[str, Any]] = None,
+                           action: Optional[str] = None) -> Optional[str]:
+        """Why a job of this type (with these params, or this edit action) cannot run now, or None
+        when it can be queued."""
+        st = self.job_type_status(job_type, params=params, action=action)
         if st["status"] == SUPPORTED:
             return None
         if st["status"] == PLANNED:
@@ -383,7 +430,9 @@ class MusicCapabilities:
             engines[k] = {**st.as_dict(), "key": k, "default": k == self.default_engine,
                           "limits": self._engine_limits(k), **self._form_info(k)}
         dmin, dmax, ddefault = js.DURATION_LIMITS[self.default_engine]
-        job_types = {t: dict(from_text) if t == js.GENERATE_FROM_TEXT else self.job_type_status(t)
+        actions = self.action_statuses(statuses.get(js.ENGINE_ACESTEP))
+        job_types = {t: dict(from_text) if t == js.GENERATE_FROM_TEXT
+                     else self._edit_status(None, actions) if t == "edit" else self.job_type_status(t)
                      for t in js.JOB_TYPES}
         return {
             "schema": js.CAPABILITIES,
@@ -393,11 +442,24 @@ class MusicCapabilities:
             "default_engine": self.default_engine,
             "engine_choice_rules": self.engine_choice_rules(statuses.get(js.ENGINE_YUE2)),
             "job_types": job_types,
-            "actions": copy.deepcopy(_EDIT_ACTIONS),
+            "actions": actions,
             "limits": {
-                "max_region_s": 30,
+                "max_region_s": re_.MAX_REGION_S,
                 "max_track_s": max(js.DURATION_MAX_S, js.YUE2_DURATION_MAX_S),
-                "takes_per_job": 2,
+                "takes_per_job": re_.TAKES_PER_JOB,
+                "edit": {
+                    "actions": list(re_.BUILT_ACTIONS),
+                    "takes": {a: re_.takes_for(a) for a in re_.BUILT_ACTIONS},
+                    "max_region_s": re_.MAX_REGION_S, "max_allowed_s": re_.MAX_ALLOWED_S,
+                    "fix_seam_window_s": re_.FIX_SEAM_WINDOW_S,
+                    "crossfade_ms": {"min": re_.CROSSFADE_MS_MIN, "max": re_.CROSSFADE_MS_MAX,
+                                     "default": re_.CROSSFADE_MS_DEFAULT, "chosen": False},
+                    "coherence_linear_min": re_.COHERENCE_LINEAR_MIN,
+                    "cut_with_shift_near_end_s": re_.NEAR_END_S,
+                    "engine_grid_hz": re_.GRID_HZ,
+                    "zones": "region = intent; allowed_zone (what the engine may rework, null = region; fix_seam: at "
+                             f"least {re_.FIX_SEAM_WINDOW_S:g} s); splice_bounds (where the take joins, null = allowed)",
+                },
                 "generate_from_text": {
                     "variants": {"min": js.VARIANTS_MIN, "max": js.VARIANTS_MAX, "default": js.VARIANTS_DEFAULT},
                     "duration_s": {"min": dmin, "max": dmax, "default": ddefault},
@@ -413,8 +475,8 @@ class MusicCapabilities:
                    "field_status": {k: dict(v) for k, v in QA_FIELD_STATUS.items()}, "advisory": list(QA_ADVISORY),
                    "status": SUPPORTED,
                    "reason": "stage 1 is built for takes the runner makes (qa.py): one ffmpeg pass fills qa (mp.qa/1) and "
-                             "qa_report; seam fields, loudness delta and lyrics WER are planned and null; QA flags a take "
-                             "and never rejects it",
+                             "qa_report; the seam fields are measured on region-edit takes (advisory); loudness delta and "
+                             "lyrics WER are planned and null; QA flags a take and never rejects it",
                    "gates": {"names": ["length", "clipping", "true_peak", "silence"], "thresholds": dict(QA_THRESHOLDS),
                              "advisory_only": ["seams", "lyrics_wer"]}},
             "features": features,

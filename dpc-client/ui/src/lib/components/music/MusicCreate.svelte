@@ -72,6 +72,7 @@
     stopEngine,
   } from '$lib/services/musicJobs';
   import MusicReview from './MusicReview.svelte';
+  import { editJobLine } from '$lib/utils/musicEdit';
   import MusicLyricsPrep from './MusicLyricsPrep.svelte';
   import { stressMarkNote, type LyricsPrepState } from '$lib/utils/musicLyricsPrep';
 
@@ -458,7 +459,11 @@
             {#if job.state === 'running'}
               <progress class="job-progress" max="1" value={job.progress ?? 0} aria-label="Progress of {jobTitle(job, 40)}"></progress>
             {/if}
-            <span class="muted tiny">{job.params?.engine === 'yue2' ? 'YuE2' : 'ACE-Step'} · {job.params?.variants ?? '?'} × {job.params?.duration_s ?? '?'} s{job.params?.seed != null ? ` · seed ${job.params.seed}` : ''}{jobVoiceName(job) ? ` · voice ${jobVoiceName(job)}` : ''} · {new Date(job.created_at).toLocaleString()}</span>
+            {#if job.type === 'edit'}
+              <span class="muted tiny">{editJobLine(job)} · {new Date(job.created_at).toLocaleString()}</span>
+            {:else}
+              <span class="muted tiny">{job.params?.engine === 'yue2' ? 'YuE2' : 'ACE-Step'} · {job.params?.variants ?? '?'} × {job.params?.duration_s ?? '?'} s{job.params?.seed != null ? ` · seed ${job.params.seed}` : ''}{jobVoiceName(job) ? ` · voice ${jobVoiceName(job)}` : ''} · {new Date(job.created_at).toLocaleString()}</span>
+            {/if}
             {#if job.engine_choice?.reason}<span class="muted tiny">{job.engine_choice.reason}</span>{/if}
           </div>
           <span class="row-actions">
@@ -597,6 +602,7 @@
 
   /* The review (MusicReview.svelte) and the reason box (MusicReasonBox.svelte). */
   .mc-root :global(.ab-bar) { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .mc-root :global(.edit-line) { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; }
   .mc-root :global(.ab-btn) {
     min-width: 40px;
     height: 36px;

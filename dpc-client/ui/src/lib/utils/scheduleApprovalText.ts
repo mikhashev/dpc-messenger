@@ -36,6 +36,12 @@ export interface MusicJobRequest {
   eta_seconds?: number;
   /** True when `eta_seconds` is a cap-based estimate (YuE2): the card reads it as "up to". */
   eta_is_upper_bound?: boolean;
+  /** An edit (`type: "edit"`, ADR-051 row B4): the action, the region in words, the track, whether it holds the GPU. */
+  action?: string;
+  region_text?: string;
+  track_id?: string;
+  uses_gpu?: boolean;
+  text?: string | null;
 }
 
 export const OWNER_APPROVAL_TASK_TYPE = 'owner_approval';
@@ -121,6 +127,13 @@ function humanType(type: string): string {
 export function musicJobSentence(request: Pick<ApprovalRequestLike, 'about' | 'music'>): string {
   const m = request.music;
   const parts: string[] = [];
+  if (m && m.type === 'edit' && typeof m.region_text === 'string' && m.region_text.trim()) {
+    const takes = typeof m.variants === 'number' && m.variants > 0 ? `, ${m.variants} ${m.variants === 1 ? 'take' : 'takes'}` : '';
+    const what = typeof m.text === 'string' && m.text.trim() ? ` ("${m.text.trim()}")` : '';
+    const where = m.track_id ? ` of track ${m.track_id}` : '';
+    return `Edit a region${where}: ${m.region_text.trim()}${what}${takes}, ` +
+      (m.uses_gpu ? 'on the GPU' : 'no GPU') + '; each take is a new file, the track stays as it is';
+  }
   if (m && typeof m.type === 'string' && m.type.trim()) parts.push(humanType(m.type));
   if (m && typeof m.style === 'string' && m.style.trim()) parts.push(m.style.trim());
   if (m && typeof m.variants === 'number' && Number.isFinite(m.variants) && m.variants > 0) {

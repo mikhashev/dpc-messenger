@@ -45,6 +45,10 @@ export interface MusicJob {
     history?: { state: string; at: string; reason: string | null }[];
     card_wait?: { holders: CardHolder[]; since: string } | null;
     engine_choice?: EngineChoice | null;
+    /** An edit job's (ADR-051 row B4): the action, the intent region, the library track it edits. */
+    action?: string | null;
+    region?: { t_start: number; t_end: number } | null;
+    track_id?: string | null;
 }
 
 /** What a rule chose for a job from what the job is (core `job_schemas`, `engine_choice`):
@@ -166,7 +170,9 @@ export interface MusicCapabilities {
     /** What each rule would choose now (core `MusicCapabilities.engine_choice_rules`). */
     engine_choice_rules?: Record<string, Omit<EngineChoice, 'at' | 'fell_back'> | null>;
     job_types?: Record<string, { status: string; reason: string }>;
-    limits?: { generate_from_text?: Partial<FromTextLimits> & Record<string, any> };
+    /** Each comment / edit action's `{status, reason}` (SPEC §7 `actions`). */
+    actions?: Record<string, { status: string; reason: string }>;
+    limits?: { generate_from_text?: Partial<FromTextLimits> & Record<string, any>; edit?: Record<string, any> };
     take_decisions?: { failure_classes?: FailureClass[]; max_reason_text?: number };
 }
 
@@ -232,7 +238,8 @@ export function jobStateText(job: MusicJob): string {
 
 /** The style the job was made with, cut for a row. */
 export function jobTitle(job: MusicJob, limit = 70): string {
-    const style = String(job.params?.style ?? job.prompt ?? '').replace(/\s+/g, ' ').trim();
+    const style = String((job.type === 'edit' ? job.prompt : null) ?? job.params?.style ?? job.prompt ?? '')
+        .replace(/\s+/g, ' ').trim();
     if (!style) return job.id;
     return style.length > limit ? `${style.slice(0, limit - 1)}…` : style;
 }

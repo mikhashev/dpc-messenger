@@ -43,9 +43,10 @@ describe('labels', () => {
         expect(secondsText(null)).toBe('');
         expect(secondsText(-1)).toBe('');
     });
-    it('lists Note as the only supported action', () => {
-        expect(COMMENT_ACTIONS.filter(a => a.supported).map(a => a.value)).toEqual(['note']);
-        expect(COMMENT_ACTIONS.length).toBeGreaterThan(1);
+    it('lists Note and the built region edits as supported, and Extend ending as planned', () => {
+        expect(COMMENT_ACTIONS.filter(a => a.supported).map(a => a.value))
+            .toEqual(['note', 'regenerate_region', 'fix_seam', 'remove_region']);
+        expect(COMMENT_ACTIONS.find(a => a.value === 'extend_ending')?.supported).toBe(false);
     });
 });
 

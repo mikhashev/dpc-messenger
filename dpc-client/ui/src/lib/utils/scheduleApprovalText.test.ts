@@ -97,3 +97,15 @@ describe('duration and lyrics on the music card', () => {
     expect(approvalView({ ...base, music: { style: 's', instrumental: true } }).rows.map(r => r.label)).toEqual(['Request']);
   });
 });
+
+describe('the card for a region edit (ADR-051 row B4)', () => {
+  it('names the region, the takes and whether it holds the GPU', () => {
+    expect(musicJobSentence({ about: 'x', music: { type: 'edit', action: 'regenerate_region', region_text: 'regenerate 0:02.0-0:04.0',
+      track_id: 'trk_1', variants: 2, uses_gpu: true, text: 'the snare flams' } }))
+      .toBe('Edit a region of track trk_1: regenerate 0:02.0-0:04.0 ("the snare flams"), 2 takes, on the GPU; '
+        + 'each take is a new file, the track stays as it is');
+    expect(musicJobSentence({ about: 'x', music: { type: 'edit', action: 'remove_region', region_text: 'remove 0:50.0-0:58.0',
+      variants: 1, uses_gpu: false } }))
+      .toBe('Edit a region: remove 0:50.0-0:58.0, 1 take, no GPU; each take is a new file, the track stays as it is');
+  });
+});

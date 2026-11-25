@@ -2229,6 +2229,15 @@ export function proposeMusicJob(type: string, params: Record<string, any>, idemp
     return callMusic(sendCommand, 'propose_music_job', idempotencyKey ? { type, params, idempotency_key: idempotencyKey } : { type, params });
 }
 
+/** Propose a region edit of a library track (`type: "edit"`, ADR-051 row B4). Without `comment_id` the
+ *  core makes the region comment from `region`, `action` and `prompt`. */
+export function proposeMusicEdit(args: {
+    track_id: string; action: string; region: { t_start: number; t_end: number }; prompt: string;
+    params: Record<string, unknown>; comment_id?: string; idempotency_key?: string;
+}): Promise<MusicAnswer<{ job: MusicJob }>> {
+    return callMusic(sendCommand, 'propose_music_job', { type: 'edit', ...args });
+}
+
 export function getMusicJob(jobId: string): Promise<MusicAnswer<{ job: MusicJob }>> {
     return callMusic(sendCommand, 'get_music_job', { job_id: jobId });
 }

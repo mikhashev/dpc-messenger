@@ -16,11 +16,13 @@ generated file) its comments file is **kept** on disk: it is a few KB of the per
 words, and nothing reads it once the id is gone. It is not cleaned up; a later change can
 sweep files whose id the library no longer knows.
 
-The core reads and writes the fields SPEC §4 names. What this change does not build is
-marked: `action` is `note` only (the other four SPEC actions are refused as
-`action_unsupported`, the capabilities report's "planned"), `version_id` is the constant
-`ORIGINAL_VERSION_ID` because the core has no versions yet, and `author` is the local
-person, `{kind: "human", name: "Me"}` (the prototype's own value).
+The core reads and writes the fields SPEC §4 names. `action` is `note` or one of the built
+region edits (`regenerate_region`, `fix_seam`, `remove_region`, `region_edit.py`), which need a
+region; `extend_ending` is refused as `action_unsupported` (the capabilities report's "planned").
+`version_id` is the constant `ORIGINAL_VERSION_ID` because the core has no versions yet: an edit's
+takes are sibling files with their own library entries, the base is never changed. `author` is the
+local person, `{kind: "human", name: "Me"}` (the prototype's own value), or the agent that proposed
+an edit (`add(..., author=)`).
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from typing import Any, Dict, List, Optional
 
 from . import schemas
 from .library import MusicLibrary, MusicLibraryError
+from .region_edit import BUILT_ACTIONS
 from .store import atomic_write_json, load_records, music_dir_of
 
 logger = logging.getLogger(__name__)
@@ -45,7 +48,7 @@ MAX_TEXT_CHARS = 2000
 # on "the original": `ver_` + 16 zeros.
 ORIGINAL_VERSION_ID = "ver_" + "0" * 16
 LOCAL_AUTHOR = {"kind": "human", "name": "Me"}
-SUPPORTED_ACTIONS = ("note",)
+SUPPORTED_ACTIONS = ("note", *BUILT_ACTIONS)
 
 
 def _now() -> str:
@@ -65,8 +68,24 @@ def check_action(action: Any) -> str:
         raise MusicLibraryError("invalid_comment", f"action {action!r} is not one of {schemas.COMMENT_ACTIONS}")
     if action not in SUPPORTED_ACTIONS:
         raise MusicLibraryError(
-            "action_unsupported", f"the action {action!r} is planned and not supported yet; only 'note' works now")
+            "action_unsupported", f"the action {action!r} is planned and not supported yet; these work now: "
+                                  f"{', '.join(SUPPORTED_ACTIONS)}")
     return action
+
+
+def check_action_range(action: str, t_end: Optional[float]) -> None:
+    """A region edit needs a region: a point comment carries only a note."""
+    if action in BUILT_ACTIONS and t_end is None:
+        raise MusicLibraryError("invalid_comment", f"the {action} action needs a region (an end time)")
+
+
+def check_author(author: Any) -> dict:
+    if author is None:
+        return dict(LOCAL_AUTHOR)
+    if (not isinstance(author, dict) or set(author) != {"kind", "name"} or author["kind"] not in ("human", "agent")
+            or not isinstance(author["name"], str) or not author["name"].strip()):
+        raise MusicLibraryError("invalid_comment", "author must be {kind: human|agent, name}")
+    return {"kind": author["kind"], "name": author["name"].strip()[:80]}
 
 
 def check_text(text: Any) -> str:
@@ -128,11 +147,13 @@ class MusicComments:
         return sorted(copy.deepcopy(comments), key=_sort_key)
 
     async def add(self, track_id: str, start_s: Any, end_s: Any = None, text: Any = None,
-                  action: Any = None) -> dict:
+                  action: Any = None, *, author: Any = None) -> dict:
         duration = self._duration(track_id)
         t_start, t_end = check_range(start_s, end_s, duration)
         body = check_text(text)
         act = check_action(action)
+        check_action_range(act, t_end)
+        who = check_author(author)
         now = _now()
         comment = {
             "schema": schemas.COMMENT,
@@ -144,7 +165,7 @@ class MusicComments:
             "t_end": t_end,
             "text": body,
             "action": act,
-            "author": dict(LOCAL_AUTHOR),
+            "author": who,
             "created_at": now,
             "updated_at": now,
         }
@@ -173,6 +194,7 @@ class MusicComments:
                 updated["text"] = check_text(fields["text"])
             if "action" in fields:
                 updated["action"] = check_action(fields["action"])
+            check_action_range(updated["action"], t_end)
             updated["updated_at"] = _now()
             schemas.validate_comment(updated)
             comments[comments.index(comment)] = updated
