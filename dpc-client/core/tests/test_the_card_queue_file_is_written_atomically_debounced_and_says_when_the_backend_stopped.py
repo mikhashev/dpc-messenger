@@ -255,3 +255,39 @@ class TestTheContentKey:
         other = json.loads(json.dumps(base))
         other["waiters"][0]["purpose"] = "r"
         assert content_key(base) != content_key(other)
+
+
+class TestTheFileIsTheOwnersAlone:
+    """Follow-up 14 (Zcode #176): 0600 on POSIX, and the folder fsynced after the replace."""
+
+    def test_the_file_is_created_with_owner_only_mode(self, tmp_path, monkeypatch):
+        modes = []
+        real_open = os.open
+
+        def recording_open(path, flags, mode=0o777, *args, **kwargs):
+            if str(path).endswith(".tmp"):
+                modes.append(mode)
+            return real_open(path, flags, mode, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", recording_open)
+        assert write_atomically(state_file_path(tmp_path), {"a": 1}) is True
+        assert modes == [0o600]
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+    def test_on_posix_the_written_file_is_0600(self, tmp_path):
+        path = state_file_path(tmp_path)
+        assert write_atomically(path, {"a": 1}) is True
+        assert path.stat().st_mode & 0o777 == 0o600
+
+    def test_the_folder_is_synced_after_the_replace(self, tmp_path, monkeypatch):
+        order = []
+        real_replace = os.replace
+        monkeypatch.setattr(os, "replace", lambda s, d: (order.append("replace"), real_replace(s, d)))
+        monkeypatch.setattr(card_lease_state, "_fsync_directory",
+                            lambda folder: order.append(("fsync", folder)))
+        path = state_file_path(tmp_path)
+        assert write_atomically(path, {"a": 1}) is True
+        assert order == ["replace", ("fsync", path.parent)]
+
+    def test_a_folder_that_cannot_be_synced_is_not_an_error(self, tmp_path):
+        card_lease_state._fsync_directory(tmp_path / "missing")  # never raises

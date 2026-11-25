@@ -44,6 +44,26 @@ FILE_NAME = "card_lease.json"
 
 # How often the replace is tried when the platform refuses it (Windows: a reader holds the file).
 _REPLACE_TRIES = 5
+# The queue file is read by this user's processes only (POSIX mode bits; ignored on Windows).
+STATE_FILE_MODE = 0o600
+
+
+def _fsync_directory(folder: Path) -> None:
+    """fsync `folder` after a rename into it, on POSIX (Windows cannot open a directory for
+    it, and NTFS journals the rename). Best effort: a failure is logged, never raised."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+    except OSError as exc:
+        logger.debug("card: the folder %s could not be opened to fsync: %s", folder, exc)
+        return
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        logger.debug("card: the folder %s could not be fsynced: %s", folder, exc)
+    finally:
+        os.close(fd)
 
 
 def state_file_path(dpc_home: Path) -> Path:
@@ -53,19 +73,26 @@ def state_file_path(dpc_home: Path) -> Path:
 
 def write_atomically(path: Path, snapshot: Dict[str, Any]) -> bool:
     """Write `snapshot` as JSON to `path` so that a reader sees the old file or the new one, never
-    half of one. False (and a log line) when it could not be written; never raises."""
+    half of one. False (and a log line) when it could not be written; never raises.
+
+    The file is the owner's alone (follow-up 14, Zcode #176): created 0600 on Linux and macOS
+    (Windows has no such mode bits; the file lives in the user's profile), and after the
+    replace the directory is fsynced there too, so the new name survives a power cut."""
     path = Path(path)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         text = json.dumps(snapshot, ensure_ascii=False, indent=2, default=str)
-        with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0),
+                     STATE_FILE_MODE)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text + "\n")
             handle.flush()
             os.fsync(handle.fileno())
         for attempt in range(_REPLACE_TRIES):
             try:
                 os.replace(tmp, path)
+                _fsync_directory(path.parent)
                 return True
             except PermissionError:
                 if attempt == _REPLACE_TRIES - 1:

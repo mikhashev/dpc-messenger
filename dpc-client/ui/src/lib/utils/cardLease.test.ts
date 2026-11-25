@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { get } from 'svelte/store';
 import {
+    CARD_STALE_AFTER_MS,
     cardLeaseView,
+    cardStaleWords,
     cardWaitNote,
     clockOfSeconds,
     estimateWords,
@@ -12,7 +14,7 @@ import {
 } from './cardLease';
 import { buildAgentMap } from './agentMap';
 import { applyTurnSnapshot, type AgentTurnStates } from './agentTurnNotice';
-import { cardLease, onCardLeaseUpdated } from '../services/cardLease';
+import { cardLease, cardLeaseFreshAt, forgetCardLease, onCardLeaseUpdated } from '../services/cardLease';
 import mapSrc from '../components/AgentMap.svelte?raw';
 import coreSrc from '../coreService.ts?raw';
 
@@ -196,5 +198,34 @@ describe('the wiring', () => {
     it('the core service stores the pushed event', () => {
         expect(coreSrc).toContain('message.event === "card_lease_updated"');
         expect(coreSrc).toContain('onCardLeaseUpdated(message.payload)');
+    });
+});
+
+describe('a stale card block (follow-up 14, Zcode #176)', () => {
+    it('says nothing while snapshots keep coming', () => {
+        expect(cardStaleWords(NOW - 5_000, NOW)).toBe('');
+        expect(cardStaleWords(NOW - CARD_STALE_AFTER_MS, NOW)).toBe('');
+        expect(cardLeaseView(snap(), NOW, undefined, NOW - 4_000)?.stale).toBe('');
+    });
+    it('says stale with the age after 15 s without a fresh snapshot', () => {
+        expect(CARD_STALE_AFTER_MS).toBe(15_000);
+        expect(cardStaleWords(NOW - 40_000, NOW)).toBe('stale (last update 40 s ago)');
+        expect(cardLeaseView(snap(), NOW, undefined, NOW - 16_000)?.stale).toBe('stale (last update 16 s ago)');
+    });
+    it('says nothing when no arrival time is known', () => {
+        expect(cardStaleWords(null, NOW)).toBe('');
+        expect(cardLeaseView(snap(), NOW)?.stale).toBe('');
+    });
+    it('a snapshot read or pushed marks the time; a failed read or a broken payload does not', () => {
+        forgetCardLease();
+        onCardLeaseUpdated({ status: 'error', message: 'down' }, NOW);
+        expect(get(cardLeaseFreshAt)).toBeNull();
+        onCardLeaseUpdated(snap({ updated_at: 30 }), NOW - 20_000);
+        expect(get(cardLeaseFreshAt)).toBe(NOW - 20_000);
+        // An unchanged snapshot is still a fresh one: the backend answered.
+        onCardLeaseUpdated(snap({ updated_at: 30 }), NOW);
+        expect(get(cardLeaseFreshAt)).toBe(NOW);
+        forgetCardLease();
+        expect(get(cardLeaseFreshAt)).toBeNull();
     });
 });

@@ -70,11 +70,15 @@ export interface CardLeaseSnapshot {
 
 /** Whether `next` is a snapshot to show: the newest by its own clock wins, so a read that lands after
  *  a later push does not put the older queue back. */
+/** Is `payload` a snapshot of the queue at all (holders and waiters lists)? */
+export function isCardLeaseSnapshot(payload: unknown): payload is CardLeaseSnapshot {
+    const snap = payload as CardLeaseSnapshot | null;
+    return !!snap && typeof snap === 'object' && Array.isArray(snap.holders) && Array.isArray(snap.waiters);
+}
+
 export function newerSnapshot(current: CardLeaseSnapshot | null, next: unknown): CardLeaseSnapshot | null {
-    const snap = next as CardLeaseSnapshot | null;
-    if (!snap || typeof snap !== 'object' || !Array.isArray(snap.holders) || !Array.isArray(snap.waiters)) {
-        return current;
-    }
+    if (!isCardLeaseSnapshot(next)) return current;
+    const snap = next;
     if (current && typeof current.updated_at === 'number' && snap.updated_at < current.updated_at) return current;
     return snap;
 }
@@ -132,6 +136,21 @@ export interface CardView {
     recent: CardRecentLine[];
     /** The backend is stopping and hands the card out no more. */
     closed: string;
+    /** `stale (last update 40 s ago)` when no snapshot came for CARD_STALE_AFTER_MS, else ''. */
+    stale: string;
+}
+
+/** After this long without a snapshot (a failed read, a lost connection) the block says it is stale
+ * (follow-up 14, Zcode #176): the map reads every 5 s, so three missed reads. */
+export const CARD_STALE_AFTER_MS = 15_000;
+
+/** `stale (last update N s ago)` when the last snapshot came more than CARD_STALE_AFTER_MS ago;
+ * '' when it is recent or when no time is known. */
+export function cardStaleWords(freshAtMs: number | null | undefined, nowMs: number): string {
+    if (typeof freshAtMs !== 'number' || !Number.isFinite(freshAtMs)) return '';
+    const age = nowMs - freshAtMs;
+    if (age <= CARD_STALE_AFTER_MS) return '';
+    return `stale (last update ${Math.round(age / 1000)} s ago)`;
 }
 
 type AgentName = (agentId: string) => string;
@@ -144,7 +163,8 @@ const join = (...parts: Array<string | null | undefined>) => parts.filter(Boolea
 
 /** The block's lines from a snapshot. `agentName` turns an agent id into the name the map shows. */
 export function cardLeaseView(snap: CardLeaseSnapshot | null, nowMs: number,
-                              agentName: AgentName = (id) => id): CardView | null {
+                              agentName: AgentName = (id) => id,
+                              freshAtMs: number | null = null): CardView | null {
     if (!snap) return null;
     const secondsSince = (at: number) => (nowMs - at * 1000) / 1000;
     const holders = snap.holders.map((h): CardHolderLine => ({
@@ -181,7 +201,8 @@ export function cardLeaseView(snap: CardLeaseSnapshot | null, nowMs: number,
         snap.free ? 'Free' : `Held by ${holders.map((h) => h.name).join(' + ')}`,
         snap.waiters.length ? `${snap.waiters.length} waiting` : '',
     );
-    return { free: snap.free, headline, holders, waiters, recent, closed: snap.closed ?? '' };
+    return { free: snap.free, headline, holders, waiters, recent, closed: snap.closed ?? '',
+             stale: cardStaleWords(freshAtMs, nowMs) };
 }
 
 /** What an agent's NOW line adds when its turn waits for the card: its place in the line and what it

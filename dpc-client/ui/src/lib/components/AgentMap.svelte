@@ -23,7 +23,7 @@
   import { untrack } from 'svelte';
   import { sendCommand, groupChats, nodeStatus } from '$lib/coreService';
   import { agentTurns, agentsList } from '$lib/services/agents';
-  import { cardLease, onCardLeaseUpdated } from '$lib/services/cardLease';
+  import { cardLease, cardLeaseFreshAt, onCardLeaseUpdated } from '$lib/services/cardLease';
   import { cardLeaseView } from '$lib/utils/cardLease';
   import {
     PROCESS_POLL_MS,
@@ -147,7 +147,8 @@
   const remember = () => saveWindowState(storage(), { rect, minimised });
 
   // The card's queue: read with the map's own reads, then kept current by the pushed event. An older
-  // backend has no such command, and the block then stays out.
+  // backend has no such command, and the block then stays out. A read that fails leaves the block as
+  // it was, and after CARD_STALE_AFTER_MS with no snapshot the block says it is stale.
   async function refreshCard() {
     try {
       const r: any = await sendCommand('get_card_lease_status', {});
@@ -233,6 +234,7 @@
     $cardLease,
     now,
     (id: string) => (($agentsList ?? []) as any[]).find(a => a.agent_id === id)?.name || id,
+    $cardLeaseFreshAt,
   ));
   let selected = $derived(map.agents.find(a => a.agent_id === pickSelected(map, selectedId)) ?? null);
 
@@ -453,6 +455,9 @@
           <div class="card-head">
             <span class="section-label">CARD</span>
             <span class="card-headline" class:free={card.free}>{card.headline}</span>
+            {#if card.stale}
+              <span class="card-stale" title="No update of the card's queue came from the backend lately: what is shown may be out of date.">{card.stale}</span>
+            {/if}
           </div>
           {#if card.closed}
             <span class="muted small">The backend is stopping ({card.closed}): the card is not handed out.</span>
@@ -826,6 +831,7 @@
   .card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   .card-headline { font-weight: 600; }
   .card-headline.free { color: #7ee2a0; font-weight: 500; }
+  .card-stale { color: #f0c674; font-size: 0.85em; }
   .card-row { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; }
   .card-name { font-weight: 600; }
   .card-position { color: #f0c674; min-width: 1.4em; }
