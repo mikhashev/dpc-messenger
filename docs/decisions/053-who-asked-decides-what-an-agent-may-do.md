@@ -654,6 +654,34 @@ reason the marker exists. Pinned by
 `test_the_gate_fails_closed_without_a_turn_and_the_two_most_dangerous_handlers_check_again.py`
 and `test_a_foreign_turn_leaves_no_owner_window_and_cards_and_lines_say_what_they_are_about.py`.
 
+### Follow-up 15 (Zcode's check #184 on follow-up 14; 2026-11-26)
+
+1. **Click blindness** (P3). The cards of `browser_click`, `browser_fill` and `browser_select`
+   (`browser._browser_click_approval`, `_browser_fill_approval`, `_browser_select_approval`)
+   name where the action leads, read from the open page without acting
+   (`AuthBrowser.action_destination`): a link's resolved address, a submit control's or a
+   field's form action and method, each marked as the page's origin or another one; when the
+   page cannot tell, "destination unknown (script)". After each action that can move the page
+   (click, fill, select, download, switch_tab) the per-navigation mark is re-read
+   (`browser._reevaluates_mark`): the origin the owner approved is kept with the mark, and a
+   foreign turn's action that leaves it, or leaves it unreadable, blocks snapshot, extract and
+   screenshot on a foreign turn until `browser_navigate` asks the owner again; the owner's own
+   action resets the mark as the owner's. A session that cannot carry the marks counts as the
+   owner's page and never breaks a browse (the visible-window tests that failed on a bare
+   object are green). Residual: `browser_download` keeps its raw-arguments card, and
+   `browser_scroll`, `collect` and `wait_for` still read without the check.
+2. **The per-turn byte cap counts the copy** (P4). In the 1:1 path of `chat_post_file`
+   the copy is read whole after it is made, its size and type come from the same read as in
+   the group path, and the turn's 200 MB cap is checked against that size, so a source that
+   grew between the stat and the copy no longer gets past it.
+3. **`chat_history` clamps `limit`** (P4). With `include_tool_calls` a `limit` above 200 is
+   lowered to 200, the 2000-call budget holds for any limit, and the header and the tool
+   description say so.
+
+Pinned by `test_a_click_card_names_where_it_leads_and_a_foreign_action_that_leaves_the_approved_origin_needs_a_new_approval.py`,
+`test_chat_post_file_posts_only_allowed_types_by_content_and_leaves_no_partial_copy_after_a_cancel.py`
+and `test_an_agent_reads_back_its_own_past_tool_calls.py`.
+
 ## Authors
 
 - **Mike** — Decision
