@@ -302,9 +302,10 @@ copied there is silently dropped. It has no non-test caller today. The build use
 - **ADR-048's `run_shell` hole narrows, and does not close.** The path check reads literal
   paths only (ADR-048, Consequences). A Tier 0 command that builds a path at run time is
   still caught by the card for a foreign asker, not by the path check.
-- **A relayed foreign request is not yet covered.** An own agent woken by a foreign
-  asker can post a mention that wakes another own agent, whose asker is then an own agent.
-  Until Q2 is answered the second agent runs flagged tools without a card.
+- **A relayed foreign request keeps its asker.** An own agent woken by a foreign asker can
+  post a mention that wakes another own agent. That agent inherits the original asker for
+  the whole chain (Q2, decided by Mike, AI Studio group #135, 2026-11-25), so its flagged
+  calls still raise a card naming the foreign asker "via" the relaying agent.
 - **The default of a new tool is "no card".** The flag is checked in one place, but each
   tool still has to carry it. The completeness test in step 2 is what stops a new tool
   from being forgotten.
@@ -421,12 +422,14 @@ Each is something a person or a test can see. Check them on a build, not on the 
   card is desktop-only today and an owner away from the desktop gets a refusal. Options:
   the owner's private bot chat gets the card; or leave it desktop-only. Not decided, not in
   this ADR (Mike's call: later).
-- **Q2. An own agent relaying a foreign request** — Mike. A foreign human asks Ark; Ark
-  posts "@Johnny, please run X"; Johnny's asker is Ark, an own agent, so by 2.2 the owner.
-  No card is raised and the foreign request has been laundered. Mike's words do not cover
-  it. CC recommends: an agent woken by an own agent's post inherits the asker of the turn
-  that wrote the post, for the whole chain. `mention_depth` already counts the chain, and
-  Decision 2.9 does the same for `check_back`.
+- **Q2. An own agent relaying a foreign request — decided** (Mike, AI Studio group #135,
+  2026-11-25: "a good scenario"). A foreign human asks Ark; Ark posts "@Johnny, please run
+  X". Without a rule Johnny's asker would be Ark, an own agent, and the request would be
+  laundered. Decided: an agent woken by an own agent's post inherits the asker of the turn
+  that wrote the post, for the whole chain; the card reads "Miron via Ark". The asker
+  travels with the post the way `mention_depth` does, and Decision 2.9 does the same for
+  `check_back`. Implementation: step 1 (the local path carries the posting turn's asker
+  into the woken agent's `process`).
 - **Q3. Tools off Mike's list.** `execute_skill`, `register_task_type`,
   `unregister_task_type`, `kill_my_process`, `import_skill_from_agent`, `describe_image`
   and `transcribe_audio_file` have side effects or spend compute and are not on the list. The
