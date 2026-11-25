@@ -3,7 +3,8 @@
 - A take is posted by its id only when its job is done (review or accepted), the take is not
   discarded and its library entry is not hidden: a take of a running or cancelled job, a
   discarded take and a take whose library entry is hidden are refused with the reason.
-- A file that runs or opens something when clicked (REFUSED_EXTENSIONS) is never posted.
+- A file that runs or opens something when clicked is never posted (follow-up 12's deny-list; follow-up 13
+  made it an allow-list by name and content, pinned in the follow-up 13 test of chat_post_file).
 - A failed turn leaves no copy behind in the chat's files/: a loop that raises, and a record
   that is not written.
 - The DPC-home rule holds for more than the token: the config, another agent's folder and
@@ -100,15 +101,15 @@ async def test_a_file_that_runs_when_clicked_is_never_posted(tmp_path, home, mon
     except OSError:
         pytest.skip(f"this file system does not keep the name {name!r}")
     await w.turn([{"path": str(f)}])
-    assert "runs or opens something when clicked" in _tool_results(w), _tool_results(w)[-800:]
+    assert "is not a type that may be posted" in _tool_results(w), _tool_results(w)[-800:]
     assert w.all_chat_files() == []
 
 
-def test_the_refused_extensions_are_one_constant_compared_lower_case():
-    assert chat_files.refused_extension("Setup.EXE") == ".exe"
-    assert chat_files.refused_extension("a.cmd. ") == ".cmd"
-    assert chat_files.refused_extension("take.flac") is None
-    assert chat_files.refused_extension("notes.sh.txt") is None
+def test_the_allowed_suffixes_are_one_table_compared_lower_case():
+    assert chat_files._suffix_of("Take.FLAC") == ".flac"
+    assert chat_files._suffix_of("a.png. ") == ".png"
+    assert chat_files._suffix_of("notes.sh.txt") == ".txt"
+    assert ".exe" not in chat_files.ALLOWED_SUFFIXES and ".flac" in chat_files.ALLOWED_SUFFIXES
 
 
 class _Boom(BaseException):
