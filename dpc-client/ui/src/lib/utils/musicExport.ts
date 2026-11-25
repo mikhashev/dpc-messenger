@@ -24,6 +24,18 @@ export function presetShortLabel(id: string): string {
     return id;
 }
 
+/** A file in a playlist folder that holds the same song as a single export: a hard link of it (the
+ *  same bytes on disk) or a copy. Deleting the single export leaves it where it is. */
+export interface PlaylistCopy {
+    playlist_id: string;
+    playlist_name: string;
+    /** The playlist's folder name under the export root. */
+    folder: string;
+    path: string;
+    name: string;
+    how: 'hardlink' | 'copy';
+}
+
 /** One existing export of a track (`get_music_export_info`). */
 export interface MusicExportRecord {
     export_id: string;
@@ -35,6 +47,8 @@ export interface MusicExportRecord {
     exported_at?: string | null;
     limited_db?: number | null;
     true_peak_out_dbtp?: number | null;
+    /** The playlist-folder files of the same song; absent from an older core. */
+    playlists?: PlaylistCopy[];
 }
 
 /** `delete_music_export`'s answer. */
@@ -46,6 +60,8 @@ export interface DeleteExportAnswer {
     format: string;
     deleted: boolean;
     file_missing: boolean;
+    /** The playlist-folder files of the same song, which stay. */
+    playlist_copies?: PlaylistCopy[];
 }
 
 export interface MusicExportInfo {
@@ -126,6 +142,34 @@ export function exportCopyDetail(r: MusicExportRecord): string {
     return [presetShortLabel(r.preset), exportSizeText(r.size_bytes), exportDateText(r.exported_at), limit]
         .filter(Boolean)
         .join(' · ');
+}
+
+/** One playlist file as a person reads it: "Road trip / 01 - Band - Song.mp3 (hard link)". */
+export function playlistCopyText(c: PlaylistCopy): string {
+    return `${c.folder} / ${c.name} (${c.how === 'hardlink' ? 'hard link' : 'copy'})`;
+}
+
+/** The line under an exported copy that names the playlist folders holding the same song, or ''. */
+export function playlistCopiesLine(copies: PlaylistCopy[] | null | undefined): string {
+    if (!copies || !copies.length) return '';
+    const folders = [...new Set(copies.map(c => c.folder))];
+    return `Also in ${folders.length === 1 ? 'playlist folder' : 'playlist folders'}: ${folders.join(', ')}`;
+}
+
+/** What the confirm for deleting an exported copy says. Playlist-folder files of the same song are
+ *  not deleted, so it names the ones that stay (at most five, then a count). */
+export function deleteCopyConfirm(copyName: string, trackTitle: string, playlists: PlaylistCopy[] | null | undefined): string {
+    const base = `Delete the exported file "${copyName}" from disk? This cannot be undone. "${trackTitle}" stays in the library.`;
+    if (!playlists || !playlists.length) return base;
+    const shown = playlists.slice(0, 5).map(c => `  ${playlistCopyText(c)}`);
+    if (playlists.length > shown.length) shown.push(`  and ${playlists.length - shown.length} more`);
+    const linked = playlists.some(c => c.how === 'hardlink');
+    const where = playlists.length === 1 ? 'this playlist folder' : 'these playlist folders';
+    return [
+        base,
+        `The same song stays in ${where}, which this does not touch:\n${shown.join('\n')}`,
+        ...(linked ? ['A hard link is the same file on disk, so its audio is not freed until it is deleted too.'] : []),
+    ].join('\n\n');
 }
 
 /** The label of the toggle that opens a track's exports: "mp3" or "mp3 ×2". */

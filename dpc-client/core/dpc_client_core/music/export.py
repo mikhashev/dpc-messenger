@@ -1131,13 +1131,41 @@ class MusicExporter:
 
     # -- what exists ------------------------------------------------------------------------------
 
+    def _playlist_copies(self, record: Dict[str, Any], single: Path) -> List[Dict[str, Any]]:
+        """The files in playlist folders that hold this export's song: every file of a playlist
+        run of the same preset that lists this source hash and is on disk now. `how` says
+        whether the file is a hard link of the single (the same bytes on disk) or a copy.
+        Deleting the single touches none of them."""
+        out: List[Dict[str, Any]] = []
+        for p in self._load().playlists:
+            if p["preset"] != record["preset"]:
+                continue
+            for f in p["files"]:
+                if not isinstance(f, dict) or not f.get("path") or f.get("source_hash") != record["source_hash"]:
+                    continue
+                path = self._abs(f["path"])
+                try:
+                    if not stat_module.S_ISREG(path.stat().st_mode):
+                        continue
+                except OSError:
+                    continue
+                try:
+                    linked = os.path.samefile(single, path)
+                except OSError:
+                    linked = False
+                out.append({"playlist_id": p["playlist_id"], "playlist_name": p.get("name") or p["playlist_id"],
+                            "folder": path.parent.name, "path": str(path), "name": path.name,
+                            "how": "hardlink" if linked else "copy"})
+        return out
+
     def exports_for(self, hashes: Dict[str, List[str]]) -> Dict[str, List[Dict[str, Any]]]:
         """`{track_id: [export, ...]}` for the single exports whose file is there now, for
         the track ids `hashes` maps each content hash to. The index is checked against the
         disk on every call: a file deleted by hand is left out of the answer (its index
         entry stays, so a later export of the same source finds the name free again and
         encodes it anew); `size_bytes` is the file's size now, `export_id` is what
-        `delete_export` takes."""
+        `delete_export` takes. `playlists` names the playlist-folder files that hold the
+        same song (`_playlist_copies`), so a person sees what a delete leaves behind."""
         with self._lock:
             out: Dict[str, List[Dict[str, Any]]] = {}
             for e in self._load().exports:
@@ -1156,7 +1184,8 @@ class MusicExporter:
                         "preset": e["preset"], "format": e["format"], "path": str(path), "name": path.name,
                         "size_bytes": st.st_size, "exported_at": e.get("exported_at"),
                         "limited_db": limiter.get("ceiling_dbtp") if limiter.get("applied") else None,
-                        "true_peak_out_dbtp": e.get("true_peak_out_dbtp")}
+                        "true_peak_out_dbtp": e.get("true_peak_out_dbtp"),
+                        "playlists": self._playlist_copies(e, path)}
                 for tid in ids:
                     out.setdefault(tid, []).append(dict(item))
             return out
@@ -1210,13 +1239,16 @@ class MusicExporter:
         (`outside_export_root`, `unknown_export`). A file already gone drops the entry
         (`file_missing`). A file another program holds open (Windows) or that cannot be
         removed leaves the entry and raises `file_in_use` / `permission_denied` /
-        `delete_failed`. Playlist copies are not touched: a playlist run owns them."""
+        `delete_failed`. Playlist copies are not touched: a playlist run owns them; the answer
+        names the ones that stay (`playlist_copies`, as `exports_for` lists them), so the caller
+        can say so. A hard-linked copy keeps the audio on disk after the single is gone."""
         if bool(export_id) == bool(path):
             raise ExportError("invalid_params", "give export_id or path, exactly one of them")
         with self._lock:
             record = self._record_by_id_or_path(export_id, path)
             target = self._safe_target(self._abs(record["path"]))
             name = target.name
+            staying = self._playlist_copies(record, target)  # read before the unlink: `how` needs the link
             deleted = False
             if os.path.isdir(target) and not os.path.islink(target):
                 raise ExportError("delete_failed", f"{name} is a folder, not an export file; it is not deleted")
@@ -1238,7 +1270,8 @@ class MusicExporter:
             self._save()
             return {"export_id": export_id_of(record["source_hash"], record["format"], record["preset"]),
                     "path": str(target), "name": name, "preset": record["preset"], "format": record["format"],
-                    "track_id": record.get("track_id"), "deleted": deleted, "file_missing": not deleted}
+                    "track_id": record.get("track_id"), "deleted": deleted, "file_missing": not deleted,
+                    "playlist_copies": staying}
 
 
 @dataclass

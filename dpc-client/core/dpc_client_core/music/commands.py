@@ -1394,7 +1394,8 @@ class MusicCommandsMixin:
         watched_folder, presets, default_preset, exports: {track_id: [{preset, path, name,
         exported_at, limited_db, true_peak_out_dbtp}]}}`, for one track with `track_id`, else
         for every track. Only exports whose file is there now are listed; each carries `export_id`
-        (what `delete_music_export` takes) and `size_bytes`."""
+        (what `delete_music_export` takes), `size_bytes` and `playlists`: the playlist-folder files
+        of the same song, `[{playlist_id, playlist_name, folder, path, name, how: hardlink|copy}]`."""
         try:
             tid = _opt_str(track_id, "track_id", "invalid_params")
             library = await self._music()
@@ -1419,7 +1420,8 @@ class MusicCommandsMixin:
         """Delete one single MP3 export's file and its index entry: `export_id` (from
         `get_music_export_info`) or `path`, exactly one. Only a file the export index lists and
         that lies inside the export root can go. `{status, export_id, path, name, preset, format,
-        deleted, file_missing}`. Errors: `invalid_params`, `unknown_export`,
+        deleted, file_missing, playlist_copies}`; `playlist_copies` lists the playlist-folder files
+        of the same song, which stay. Errors: `invalid_params`, `unknown_export`,
         `outside_export_root`, `file_in_use` (Windows), `permission_denied`, `delete_failed`."""
         try:
             eid = _opt_str(export_id, "export_id", "invalid_params")

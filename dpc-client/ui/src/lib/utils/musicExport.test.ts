@@ -7,14 +7,18 @@ import {
     exportDateText,
     exportFolderWarning,
     exportSizeText,
+    deleteCopyConfirm,
     exportToggleLabel,
     fileNameOf,
     limiterNote,
+    playlistCopiesLine,
+    playlistCopyText,
     playlistExportLine,
     presetShortLabel,
     trackExportLine,
     type MusicExportInfo,
     type MusicExportRecord,
+    type PlaylistCopy,
 } from './musicExport';
 import player from '../components/music/MusicPlayer.svelte?raw';
 import core from '../coreService.ts?raw';
@@ -152,6 +156,49 @@ describe('the exported copies under a track row', () => {
         expect(player).toContain('onclick={() => revealPath(copy.path)}');
         expect(player).toContain("title: 'Delete exported copy'");
         expect(player).toContain('deleteExportedCopy(copy.export_id)');
+    });
+
+    const linked: PlaylistCopy = { playlist_id: 'pl_1', playlist_name: 'Road trip', folder: 'Road trip', path: '/x/Road trip/01 - Band - Song.mp3', name: '01 - Band - Song.mp3', how: 'hardlink' };
+    const copied: PlaylistCopy = { playlist_id: 'pl_2', playlist_name: 'Night', folder: 'Night', path: '/x/Night/03 - Band - Song.mp3', name: '03 - Band - Song.mp3', how: 'copy' };
+
+    it('names the playlist folders that hold the same song, once each', () => {
+        expect(playlistCopyText(linked)).toBe('Road trip / 01 - Band - Song.mp3 (hard link)');
+        expect(playlistCopyText(copied)).toBe('Night / 03 - Band - Song.mp3 (copy)');
+        expect(playlistCopiesLine([linked])).toBe('Also in playlist folder: Road trip');
+        expect(playlistCopiesLine([linked, copied, { ...linked, name: '09 - again.mp3' }])).toBe('Also in playlist folders: Road trip, Night');
+        expect(playlistCopiesLine([])).toBe('');
+        expect(playlistCopiesLine(undefined)).toBe('');
+    });
+
+    it('a Delete confirm without playlist copies is the plain one', () => {
+        const plain = deleteCopyConfirm('Band - Song.mp3', 'Song', []);
+        expect(plain).toBe('Delete the exported file "Band - Song.mp3" from disk? This cannot be undone. "Song" stays in the library.');
+        expect(deleteCopyConfirm('Band - Song.mp3', 'Song', undefined)).toBe(plain);
+    });
+
+    it('a Delete confirm says which playlist copies stay, and that a hard link keeps the audio', () => {
+        const text = deleteCopyConfirm('Band - Song.mp3', 'Song', [linked, copied]);
+        expect(text).toContain('these playlist folders');
+        expect(text).toContain('Road trip / 01 - Band - Song.mp3 (hard link)');
+        expect(text).toContain('Night / 03 - Band - Song.mp3 (copy)');
+        expect(text).toContain('does not touch');
+        expect(text).toContain('same file on disk');
+        const onlyCopy = deleteCopyConfirm('Band - Song.mp3', 'Song', [copied]);
+        expect(onlyCopy).toContain('this playlist folder');
+        expect(onlyCopy).not.toContain('same file on disk');
+    });
+
+    it('a Delete confirm lists at most five playlist files and counts the rest', () => {
+        const many = Array.from({ length: 8 }, (_, i) => ({ ...copied, folder: `P${i}`, name: `0${i}.mp3` }));
+        const text = deleteCopyConfirm('a.mp3', 'S', many);
+        expect(text).toContain('P4 / 04.mp3');
+        expect(text).not.toContain('P5 / 05.mp3');
+        expect(text).toContain('and 3 more');
+    });
+
+    it('the tree shows the playlist line under a copy and Delete uses the confirm text', () => {
+        expect(player).toContain('playlistCopiesLine(copy.playlists)');
+        expect(player).toContain('deleteCopyConfirm(copy.name, entry.title, copy.playlists)');
     });
 
     it('the core door sends the export id, and the library change event reaches both services', () => {

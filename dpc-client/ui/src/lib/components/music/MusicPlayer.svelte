@@ -66,7 +66,10 @@
     exportChip,
     exportCopyDetail,
     exportFolderWarning,
+    deleteCopyConfirm,
     exportToggleLabel,
+    playlistCopiesLine,
+    playlistCopyText,
     presetShortLabel,
     type MusicExportRecord,
   } from '$lib/utils/musicExport';
@@ -391,10 +394,10 @@
     exportsOpen = { ...exportsOpen, [id]: !exportsOpen[id] };
   }
   async function deleteCopy(entry: LibraryEntry, copy: MusicExportRecord) {
-    const yes = await confirmAsync(
-      `Delete the exported file "${copy.name}" from disk? This cannot be undone. "${entry.title}" stays in the library.`,
-      { title: 'Delete exported copy', kind: 'warning' },
-    );
+    const yes = await confirmAsync(deleteCopyConfirm(copy.name, entry.title, copy.playlists), {
+      title: 'Delete exported copy',
+      kind: 'warning',
+    });
     if (!yes) return;
     deletingExport = copy.export_id;
     const failure = await deleteExportedCopy(copy.export_id);
@@ -811,6 +814,10 @@
           <li class="export-copy">
             <span class="export-name" title={copy.path}>{copy.name}</span>
             <span class="muted tiny">{exportCopyDetail(copy)}</span>
+            {#if copy.playlists?.length}
+              <span class="export-playlists muted tiny"
+                title={copy.playlists.map(playlistCopyText).join('\n')}>{playlistCopiesLine(copy.playlists)}</span>
+            {/if}
             <span class="row-actions">
               <button type="button" class="small-btn" onclick={() => revealPath(copy.path)}>Show in folder</button>
               <button type="button" class="small-btn danger" disabled={deletingExport === copy.export_id}
@@ -1569,6 +1576,7 @@
   .export-tree { list-style: none; margin: 0; padding: 0 0 0 12px; display: flex; flex-direction: column; gap: 4px; border-left: 2px solid #22382a; }
   .export-copy { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; min-width: 0; }
   .export-name { min-width: 0; overflow-wrap: anywhere; color: #c9d1d9; }
+  .export-playlists { flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; }
   .warn-line { color: #f0c674; margin: 0; }
 
   .rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
