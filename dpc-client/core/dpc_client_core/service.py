@@ -723,8 +723,21 @@ def keep_agent_chat_attachment(
             kept = _kept_copy_with_digest(files_dir, source.stat().st_size, digest)
         if kept is None:
             kept = keep_copy_under_a_free_name(source, files_dir, source.name)
-            # The kept bytes, not the source's: the source may change after the copy.
-            digest = file_sha256(kept)
+            try:
+                # The copy's own size is held to the cap, not the source's st_size read before
+                # it: a source that grew in between is refused and its copy removed (Zcode #191).
+                refusal = file_transfer_cap_refusal(kept.stat().st_size, max_file_mb)
+                if refusal:
+                    raise ValueError(f"{refusal} (the copy as made)")
+                # The kept bytes, not the source's: the source may change after the copy.
+                digest = file_sha256(kept)
+            except BaseException:
+                kept.unlink(missing_ok=True)
+                raise
+        else:
+            refusal = file_transfer_cap_refusal(kept.stat().st_size, max_file_mb)
+            if refusal:
+                raise ValueError(refusal)
         mime_type = (_AUDIO_MIME_BY_SUFFIX.get(kept.suffix.lower())
                      or mimetypes.guess_type(str(kept))[0] or "application/octet-stream")
         extra["sha256"] = digest

@@ -246,3 +246,67 @@ def test_a_file_that_grew_but_still_fits_is_posted_at_the_size_of_its_copy(world
     out = world.post(source)
     assert out.startswith("Posted take.flac"), out
     assert world.ctx.posted_attachments[0]["size_bytes"] == len(FLAC) + 100
+
+
+# -- Zcode #191 P4: the per-file cap (file_transfer.max_size_mb) is checked on the copy too ------
+
+
+def _small_cap(monkeypatch, mb=0.001):
+    """A per-file cap of about 1 KB, so a few KB of growth crosses it."""
+    monkeypatch.setattr(service_mod, "file_transfer_cap_mb", lambda *a, **k: mb)
+
+
+def test_a_source_that_grew_past_the_per_file_cap_during_the_copy_is_refused_and_its_copy_removed(
+        world, monkeypatch):
+    _small_cap(monkeypatch)
+    source = world.put("take.flac", FLAC)  # 72 bytes: passes the cap on its stat
+    real_copy = service_mod.keep_copy_under_a_free_name
+
+    def grow_then_copy(src, folder, name):
+        source.write_bytes(FLAC + b"\x00" * 4000)  # after every stat, before the bytes are copied
+        return real_copy(src, folder, name)
+
+    monkeypatch.setattr(service_mod, "keep_copy_under_a_free_name", grow_then_copy)
+    out = world.post(source)
+    assert out.startswith("⚠️ chat_post_file refused:"), out
+    assert "File too large" in out and "the copy as made" in out, out
+    assert world.in_files() == [], "the oversize copy was left in the chat's files"
+    assert world.ctx.posted_attachments == [] and world.ctx.posted_new_copies == []
+
+
+def test_a_copy_measured_over_the_per_file_cap_is_refused_even_when_the_turn_cap_has_room(world, monkeypatch):
+    _small_cap(monkeypatch)
+    monkeypatch.setattr(chat_files, "MAX_BYTES_PER_TURN", 10 * 1024 * 1024)
+    source = world.put("take.flac", FLAC)
+    real = service_mod.keep_agent_chat_attachment
+
+    def keep_then_grow(files_dir, attachment, **kw):
+        kept = real(files_dir, attachment, **kw)
+        with open(kept["file_path"], "ab") as f:  # the copy itself changes before it is read back
+            f.write(b"\x00" * 4000)
+        return kept
+
+    monkeypatch.setattr(service_mod, "keep_agent_chat_attachment", keep_then_grow)
+    out = world.post(source)
+    assert out.startswith("⚠️ chat_post_file refused:"), out
+    assert "File too large" in out and "the copy as made" in out, out
+    assert world.in_files() == []
+    assert world.ctx.posted_attachments == []
+
+
+def test_the_keep_itself_holds_the_copy_to_the_per_file_cap(tmp_path, monkeypatch):
+    source = _put(tmp_path / "take.flac", FLAC)
+    files = tmp_path / "files"
+    real_copy = service_mod.keep_copy_under_a_free_name
+
+    def grow_then_copy(src, folder, name):
+        source.write_bytes(FLAC + b"\x00" * 4000)
+        return real_copy(src, folder, name)
+
+    monkeypatch.setattr(service_mod, "keep_copy_under_a_free_name", grow_then_copy)
+    with pytest.raises(ValueError, match="the copy as made"):
+        service_mod.keep_agent_chat_attachment(files, {"kind": "file", "file_path": str(source)},
+                                               voice_mime_types=[], max_voice_seconds=60,
+                                               temp_dir=tmp_path / "temp", max_file_mb=0.001,
+                                               measure_seconds=None)
+    assert list(files.iterdir()) == []

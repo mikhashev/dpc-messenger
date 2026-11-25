@@ -423,10 +423,13 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None,
             # The copy is read again, whole: the source may have changed after the check above
             # (its type, and its size: a file that grew between the stat and the copy). The one
             # read gives the copy's type, its size and its SHA-256, like the group path's
-            # `_checked_temp_copy`; the size counts toward the turn's byte cap, not the
-            # source's earlier st_size (Zcode #184 P4).
+            # `_checked_temp_copy`; the size counts toward the turn's byte cap and is held to
+            # the per-file cap, not the source's earlier st_size (Zcode #184 P4, #191 P4).
             _sha256, copy_size, head = file_digest(Path(kept["file_path"]))
             changed = head_refusal(Path(kept["file_path"]).name, head)
+            if not changed:
+                too_large = service_mod.file_transfer_cap_refusal(copy_size, max_mb)
+                changed = f"{too_large} (the copy as made)." if too_large else None
             if not changed:
                 changed = _turn_bytes_refusal(
                     sum(int(a.get("size_bytes") or 0) for a in posted), copy_size)
