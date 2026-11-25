@@ -171,6 +171,45 @@ def test_the_parent_is_found_by_file_hash_when_the_library_id_changed():
     assert by_id(doc, "edges")[f"{T1}>{E1}"]["kind"] == "edit"
 
 
+def test_the_parent_is_the_stored_source_track_before_any_take_with_the_same_hash():
+    """Review #180 4.2: the parent was looked up by content hash and the stored source_track_id was ignored."""
+    jobs, takes = store()
+    t2 = next(t for t in takes if t["id"] == T2)
+    t2["file"]["content_hash"] = "sha256:" + "2" * 64
+    jobs[2]["track_id"] = "trk_relinked"                      # the job's own id no longer names a take
+    jobs[2]["params"]["source_content_hash"] = "sha256:" + "2" * 64   # and the hash names another take
+    for t in takes:
+        if t["job_id"] == E:
+            t["source_track_id"] = "trk_one"                  # what the takes stored when they were made
+    edges = by_id(lineage.build_lineage(jobs, takes, job_id=E), "edges")
+    assert f"{T1}>{E1}" in edges and f"{T2}>{E1}" not in edges
+    # with no stored source the hash still finds the parent
+    for t in takes:
+        t["source_track_id"] = None
+    assert f"{T2}>{E1}" in by_id(lineage.build_lineage(jobs, takes, job_id=E), "edges")
+
+
+def test_a_cycle_in_the_stored_records_is_broken_and_said_and_the_rest_is_drawn():
+    """Review #180 4.3: one cycle failed the whole graph with no partial render."""
+    X, Y = "job_" + "c" * 16, "job_" + "d" * 16
+    X1, Y1 = "tak_" + "c" * 16, "tak_" + "d" * 16
+    jobs = [job(X, type="edit", action="regenerate_region", track_id="trk_y1", region={"t_start": 1.0, "t_end": 2.0},
+                takes=[X1], created="2026-11-25T10:00:00.000Z", params={"takes": 1}),
+            job(Y, type="edit", action="regenerate_region", track_id="trk_x1", region={"t_start": 3.0, "t_end": 4.0},
+                takes=[Y1], created="2026-11-25T11:00:00.000Z", params={"takes": 1})]
+    takes = [take(X1, X, 1, kind="edit", lib="trk_x1", created="2026-11-25T10:05:00.000Z"),
+             take(Y1, Y, 1, kind="edit", lib="trk_y1", created="2026-11-25T11:05:00.000Z")]
+    doc = lineage.build_lineage(jobs, takes, job_id=X)
+    lineage.validate_lineage(doc)
+    assert set(by_id(doc)) == {X1, Y1} and len(doc["edges"]) == 1
+    [note] = [n for n in doc["notes"] if n.startswith(lineage.CYCLE_NOTE)]
+    assert Y1 in note and X1 in note and "left out" in note
+    gen = {n["id"]: n["generation"] for n in doc["nodes"]}
+    assert gen[X1] == 0 and gen[Y1] == 1
+    # a graph with no cycle carries no such note
+    assert not [n for n in build(track_id="trk_one")["notes"] if n.startswith(lineage.CYCLE_NOTE)]
+
+
 def test_a_comment_only_edit_job_and_other_job_types_are_not_in_the_graph():
     jobs, takes = store()
     jobs.append(job("job_" + "c" * 16, type="edit", action="note", track_id="trk_one"))

@@ -38,6 +38,7 @@
     playableNode,
     qaBadge,
     reasonText,
+    splitNotes,
     type LineageNode,
     type MusicLineage,
   } from '$lib/utils/musicLineage';
@@ -64,6 +65,7 @@
   let startedPlayback = false;
 
   let layout = $derived(doc ? layoutLineage(doc) : null);
+  let notes = $derived(doc ? splitNotes(doc) : { warnings: [], other: [] });
   let selected = $derived<LineageNode | null>(doc ? (doc.nodes.find(n => n.id === selectedId) ?? null) : null);
   let rv = $derived($musicReview);
   // A discarded take's library entry is hidden (Discard hides it); the card still plays it and can restore it.
@@ -207,6 +209,7 @@
         {doc.stats.kept} kept, {doc.stats.discarded} discarded, {doc.stats.pending} pending.
         Dashed red edges lead to a discarded take and say why. Click a take to hear it.
       </p>
+      {#each notes.warnings as w (w)}<p class="small qa-failed" role="status">{w}</p>{/each}
       <div class="graph" tabindex="-1">
         <svg width={layout.width} height={layout.height} viewBox="0 0 {layout.width} {layout.height}" role="group" aria-label="Lineage graph of this track">
           {#each doc.edges as e (e.id)}
@@ -281,7 +284,7 @@
       {/if}
       <div class="form-row">
         <button type="button" class="small-btn" onclick={saveFiles} title="Write lineage.json and a static lineage.html beside the job's generated folder">Save as files</button>
-        <span class="muted tiny">{doc.notes.join(' ')}</span>
+        <span class="muted tiny">{notes.other.join(' ')}</span>
       </div>
     {/if}
     {#if notice}<p class="muted small" role="status" aria-live="polite">{notice}</p>{/if}

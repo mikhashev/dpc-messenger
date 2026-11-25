@@ -14,6 +14,7 @@ import {
     playableNode,
     qaBadge,
     reasonText,
+    splitNotes,
     type LineageEdge,
     type LineageNode,
     type MusicLineage,
@@ -132,6 +133,16 @@ describe('what a node shows', () => {
         expect(playableNode(take('x', 1, { library_track_id: null }))).toBeNull();
         expect(playableNode(DOC.nodes[0])).toBeNull();
         expect(playableNode(null)).toBeNull();
+    });
+});
+
+describe('notes', () => {
+    it('puts a broken cycle in the warnings and the rest in the footnote (review #180 4.3)', () => {
+        const cut = 'Cycle broken: the edit edge tak_b -> tak_a (regenerate_region) closes a loop in the stored records and is left out; the rest of the graph is drawn.';
+        expect(splitNotes({ notes: ['Not recorded yet: prefer events.', cut] })).toEqual({
+            warnings: [cut], other: ['Not recorded yet: prefer events.'],
+        });
+        expect(splitNotes({ notes: [] })).toEqual({ warnings: [], other: [] });
     });
 });
 

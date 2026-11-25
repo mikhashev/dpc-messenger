@@ -26,8 +26,10 @@ discarded take carries `rejected` and the `reason`, so a dead branch says why. *
 person's selections read from the takes: `keep` (with `over_take_ids`, the siblings it was picked over,
 which is the A/B pick) and `discard` (with its reason text and failure class).
 
-**The parent of an edit or a song job** is the take whose library entry is the job's `track_id`, else the
-take whose file hash is the job's `params.source_content_hash`, else a `source` node. Region-edit takes record that
+**The parent of an edit or a song job** is the take whose library entry is the job's stored source track
+(`params.source_track_id`, else the `source_track_id` its takes recorded when they were made, else the
+job's `track_id`), else the take whose file hash is the job's `params.source_content_hash`, else a
+`source` node. Region-edit takes record that
 parent the same way (`parents[0].take_id` in their `mp.provenance/1`, written from the same lookup).
 
 **Not recorded yet** (EVOLUTION.md §13, §14): `prefer` events of a plain A/B without a Keep, the
@@ -241,12 +243,26 @@ class _Index:
             if h:
                 self.by_hash.setdefault(h, []).append(t)
 
+    def source_track_of(self, job: Mapping[str, Any]) -> Optional[str]:
+        """The library track a job started from, as stored: `params.source_track_id`, else the
+        `source_track_id` its takes recorded, else the job's `track_id`."""
+        sid = (job.get("params") or {}).get("source_track_id")
+        if isinstance(sid, str) and sid:
+            return sid
+        for t in self.takes_of.get(job.get("id"), []):
+            if isinstance(t.get("source_track_id"), str) and t["source_track_id"]:
+                return t["source_track_id"]
+        return job.get("track_id")
+
     def parent_of(self, job: Mapping[str, Any]) -> Optional[Tuple[str, str]]:
-        """`("take", take_id)` or `("source", library_track_id)` for an edit or a song job, None for any other."""
+        """`("take", take_id)` or `("source", library_track_id)` for an edit or a song job, None for any other:
+        by the stored source track first, the content hash only when no take holds that track."""
         if job.get("type") != EDIT_TYPE and job.get("type") not in SONG_TYPES:
             return None
-        lib = job.get("track_id")
+        lib = self.source_track_of(job)
         hit = self.by_library.get(lib) if lib else None
+        if hit is None and job.get("track_id") and job.get("track_id") != lib:
+            hit = self.by_library.get(job["track_id"])
         if hit is None:
             h = (job.get("params") or {}).get("source_content_hash")
             found = self.by_hash.get(h) if isinstance(h, str) else None
@@ -389,6 +405,7 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
     # an edge must not point at a node that is not there.
     edges = [e for e in edges if e["from"] in nodes and e["to"] in nodes]
 
+    edges, broken = _break_cycles(nodes, edges)
     _set_generations(nodes, edges)
     _mark_kept_path(nodes, edges)
     events = _events(idx, [nodes[n]["id"] for n in nodes if nodes[n]["kind"] == "take"])
@@ -419,7 +436,7 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
             "branches": sum(1 for n in nodes.values() if n["id"] not in has_out and n["kind"] == "take"),
             "max_generation": max((n["generation"] for n in nodes.values()), default=0),
         },
-        "notes": list(NOTES),
+        "notes": list(NOTES) + broken,
     }
     validate_lineage(doc)
     return doc
@@ -440,6 +457,49 @@ def _focus(idx: _Index, nodes: Mapping[str, Any], track_id: Optional[str], job_i
         if first:
             return first
     return None
+
+
+CYCLE_NOTE = "Cycle broken:"
+
+
+def _break_cycles(nodes: Mapping[str, Mapping[str, Any]],
+                  edges: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """The edges without those that close a loop (a store whose records point in a circle), and a note
+    per edge left out, so the rest of the graph is still drawn. A depth-first walk from the nodes in a
+    fixed order (generation-zero candidates first: no parents, then by time and id) drops each edge that
+    reaches a node still on the walk's path."""
+    children: Dict[str, List[Dict[str, Any]]] = {}
+    has_parent = set()
+    for e in edges:
+        children.setdefault(e["from"], []).append(e)
+        has_parent.add(e["to"])
+    order = sorted(nodes, key=lambda n: (n in has_parent, nodes[n].get("created_at") or "", n))
+    state: Dict[str, int] = {}          # 1 on the path, 2 done
+    dropped: List[Dict[str, Any]] = []
+    for start in order:
+        if state.get(start):
+            continue
+        state[start] = 1
+        stack = [(start, iter(children.get(start, [])))]
+        while stack:
+            node, it = stack[-1]
+            e = next(it, None)
+            if e is None:
+                state[node] = 2
+                stack.pop()
+                continue
+            to = e["to"]
+            if state.get(to) == 1:
+                dropped.append(e)
+            elif not state.get(to):
+                state[to] = 1
+                stack.append((to, iter(children.get(to, []))))
+    if not dropped:
+        return edges, []
+    gone = {id(e) for e in dropped}
+    notes = [f"{CYCLE_NOTE} the {e['kind']} edge {e['from']} -> {e['to']} ({e.get('op') or e['kind']}) closes a "
+             "loop in the stored records and is left out; the rest of the graph is drawn." for e in dropped]
+    return [e for e in edges if id(e) not in gone], notes
 
 
 def _set_generations(nodes: Dict[str, Dict[str, Any]], edges: Sequence[Mapping[str, Any]]) -> None:

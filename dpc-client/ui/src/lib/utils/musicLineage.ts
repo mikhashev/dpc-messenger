@@ -110,6 +110,19 @@ export function hasEvolution(doc: MusicLineage): boolean {
     return doc.nodes.some(n => n.kind === 'take');
 }
 
+/** The note the core adds for each edge it left out to break a loop in the stored records. */
+export const CYCLE_NOTE = 'Cycle broken:';
+
+/** `{warnings, other}`: the core's notes split into the broken-cycle ones (shown as a warning:
+ *  part of the graph is missing) and the rest (the card's quiet footnote). */
+export function splitNotes(doc: Pick<MusicLineage, 'notes'>): { warnings: string[]; other: string[] } {
+    const notes = Array.isArray(doc.notes) ? doc.notes : [];
+    return {
+        warnings: notes.filter(n => n.startsWith(CYCLE_NOTE)),
+        other: notes.filter(n => !n.startsWith(CYCLE_NOTE)),
+    };
+}
+
 export interface LineageLayout {
     positions: Record<string, { x: number; y: number }>;
     width: number;
