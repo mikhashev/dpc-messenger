@@ -53,7 +53,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **L** — [launcher / launcher_kind](#launcher--launcher_kind) · [`layer_audience`](#layer_audience) · [lease line](#lease-line) · [`limit` (local API)](#limit-local-api) · [`link_ping`](#link_ping) · [`LINK_PING`, `LINK_PONG`](#link_ping-link_pong) · [`link_silence_timeout`](#link_silence_timeout) · [`list_cached_peers`](#list_cached_peers) · [live-history boundary](#live-history-boundary) · [local engine swap](#local-engine-swap) · [`local_addresses`](#local_addresses)
 
-**M** — [`MAX_HELLO_FRAME_BYTES`](#max_hello_frame_bytes) · [max_output_tokens](#max_output_tokens) · [`max_proved_connections_per_ip`](#max_proved_connections_per_ip) · [memory layers (L1–L7)](#memory-layers-l1l7) · [memory limit per command](#memory-limit-per-command) · [memory system](#memory-system) · [mention](#mention) · [mention_depth](#mention_depth) · [menu row / menu](#menu-row--menu) · [message signing / preimage](#message-signing--preimage) · [message source](#message-source) · [model download consent](#model-download-consent) · [model files folder](#model-files-folder) · [month summary](#month-summary) · [morning brief](#morning-brief) · [music job `variants`](#music-job-variants) · [music_* tools](#music_-tools)
+**M** — [`MAX_HELLO_FRAME_BYTES`](#max_hello_frame_bytes) · [max_output_tokens](#max_output_tokens) · [`max_proved_connections_per_ip`](#max_proved_connections_per_ip) · [memory layers (L1–L7)](#memory-layers-l1l7) · [memory limit per command](#memory-limit-per-command) · [memory system](#memory-system) · [mention](#mention) · [mention_depth](#mention_depth) · [menu row / menu](#menu-row--menu) · [message signing / preimage](#message-signing--preimage) · [message source](#message-source) · [model download consent](#model-download-consent) · [model files folder](#model-files-folder) · [month summary](#month-summary) · [morning brief](#morning-brief) · [mp.qa/1](#mpqa1) · [music job `variants`](#music-job-variants) · [music QA gate](#music-qa-gate) · [music_* tools](#music_-tools)
 
 **N** — [network](#network) · [New Session](#new-session) · [no_answer](#no_answer) · [node](#node) · [node ledger](#node-ledger) · [node_id](#node_id) · [not_held / busy / not_the_requested_file](#not_held--busy--not_the_requested_file) · [not_offered / upload_limit](#not_offered--upload_limit)
 
@@ -61,7 +61,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **P** — [peer](#peer) · [peer cache](#peer-cache) · [peer_proved](#peer_proved) · [per-reader role derivation](#per-reader-role-derivation) · [pin](#pin) · [prefix_hashes, prefix_chars, call_chars](#prefix_hashes-prefix_chars-call_chars) · [process registry](#process-registry) · [processed message ids](#processed-message-ids) · [Protocol 13](#protocol-13) · [proved connection](#proved-connection) · [proven_on_this_machine](#proven_on_this_machine) · [provider alias](#provider-alias) · [provider_kind](#provider_kind) · [provider_row_facts](#provider_row_facts)
 
-**Q** — [quota block](#quota-block)
+**Q** — [qa_report](#qa_report) · [quota block](#quota-block)
 
 **R** — [reach](#reach) · [reasoning effort](#reasoning-effort) · [refusal code](#refusal-code) · [remote inference](#remote-inference) · [`remote:?:<alias>`](#remotealias) · [request_attachment / file_request_status](#request_attachment--file_request_status) · [requested_by](#requested_by) · [resident budget](#resident-budget) · [resolution](#resolution) · [`resolved_via`](#resolved_via) · [resource peaks](#resource-peaks) · [Review Agent](#review-agent) · [roster](#roster) · [round](#round) · [run gate](#run-gate) · [rung](#rung)
 
@@ -381,6 +381,24 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 - **Met in:** code, screen
 - **Meaning:** `params.variants` of a music job: the number of takes one job makes, a whole number from 1 to 4, default 2 (`VARIANTS_MIN`, `VARIANTS_MAX`, `VARIANTS_DEFAULT`). Not the **variant** of a **menu row**, which is a build name.
 - **Defined in:** [music/job_schemas.py — Limits per engine](../dpc-client/core/dpc_client_core/music/job_schemas.py)
+
+### music QA gate
+
+- **Met in:** code, screen
+- **Meaning:** One of the four deterministic stage-1 checks of a music take: `length`, `clipping`, `true_peak`, `silence`. Each is `pass`, `fail` or `not_measured` in the take's `qa_report.gates`; the verdict is `failed` if any failed, `passed` only if all four passed, and `not_measured` otherwise, so an unmeasured gate is never a pass. A gate flags the take (the review's "QA failed: clipping" badge) and never rejects it. A quiet tail of 1-5 s is not a silence failure; the seam metrics and lyrics WER are advisory and are not gates.
+- **Defined in:** [music/qa.py — the gates and why these numbers](../dpc-client/core/dpc_client_core/music/qa.py)
+
+### qa_report
+
+- **Met in:** code, wire
+- **Meaning:** The take's field beside `qa`: `{stage, verdict, gates, advisory, measurements, thresholds, measured_by, measured_at}`, the stage-1 gates with the numbers that judged them. It exists because **mp.qa/1** has no room for a pass or fail. The runner writes one for every take it makes; a failed measurement is a report whose verdict is `not_measured` with the reason, and a take made before stage-1 QA has none.
+- **Defined in:** [music/job_schemas.py — `mp.take/1.qa_report`](../dpc-client/core/dpc_client_core/music/job_schemas.py)
+
+### mp.qa/1
+
+- **Met in:** code, wire
+- **Meaning:** The SPEC §8 record of the measured numbers of a take (`integrated_lufs`, `true_peak_dbtp`, `loudness_delta_lu`, the three seam fields, `clipped_samples`, `lyrics_wer`, `measured_by`): every field required, no others. A take's `qa` is exactly this or null; it is null when a required number (loudness, true peak, clipped samples) could not be measured, never filled with a made-up one. The edit-only fields and `lyrics_wer` are null for a new take. The loudness-only `loudness` record is not an `mp.qa/1`.
+- **Defined in:** [music/job_schemas.py — `check_qa`](../dpc-client/core/dpc_client_core/music/job_schemas.py), [decisions/051 — stage-1 QA row of the Implementation Status](decisions/051-the-music-player-is-a-dpc-window-over-one-core-music-service.md)
 
 ## Memory, knowledge, and sleep
 
