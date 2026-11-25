@@ -51,7 +51,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **K** — [knowledge](#knowledge) · [knowledge base](#knowledge-base) · [knowledge commit](#knowledge-commit) · [knowledge_extraction_cancelled](#knowledge_extraction_cancelled) · [KV snapshot](#kv-snapshot)
 
-**L** — [launcher / launcher_kind](#launcher--launcher_kind) · [`layer_audience`](#layer_audience) · [lease line](#lease-line) · [`limit` (local API)](#limit-local-api) · [lineage](#lineage) · [`link_ping`](#link_ping) · [`LINK_PING`, `LINK_PONG`](#link_ping-link_pong) · [`link_silence_timeout`](#link_silence_timeout) · [`list_cached_peers`](#list_cached_peers) · [live-history boundary](#live-history-boundary) · [local engine swap](#local-engine-swap) · [`local_addresses`](#local_addresses) · [`lyrics_prep`](#lyrics_prep)
+**L** — [`last_attempt`](#last_attempt) · [launcher / launcher_kind](#launcher--launcher_kind) · [`layer_audience`](#layer_audience) · [lease line](#lease-line) · [`level_guard`](#level_guard) · [`limit` (local API)](#limit-local-api) · [lineage](#lineage) · [`link_ping`](#link_ping) · [`LINK_PING`, `LINK_PONG`](#link_ping-link_pong) · [`link_silence_timeout`](#link_silence_timeout) · [`list_cached_peers`](#list_cached_peers) · [live-history boundary](#live-history-boundary) · [local engine swap](#local-engine-swap) · [`local_addresses`](#local_addresses) · [`lyrics_prep`](#lyrics_prep)
 
 **M** — [`MAX_HELLO_FRAME_BYTES`](#max_hello_frame_bytes) · [max_output_tokens](#max_output_tokens) · [`max_proved_connections_per_ip`](#max_proved_connections_per_ip) · [memory layers (L1–L7)](#memory-layers-l1l7) · [memory limit per command](#memory-limit-per-command) · [memory system](#memory-system) · [mention](#mention) · [mention_depth](#mention_depth) · [menu row / menu](#menu-row--menu) · [message signing / preimage](#message-signing--preimage) · [message source](#message-source) · [`mmproj_kind`](#mmproj_kind) · [model download consent](#model-download-consent) · [model files folder](#model-files-folder) · [month summary](#month-summary) · [morning brief](#morning-brief) · [mp.lineage/1](#mplineage1) · [mp.qa/1](#mpqa1) · [mp.qc/1](#mpqc1) · [music job `variants`](#music-job-variants) · [music QA gate](#music-qa-gate) · [music_* tools](#music_-tools)
 
@@ -63,7 +63,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **Q** — [qa_report](#qa_report) · [QC judge](#qc-judge) · [quota block](#quota-block)
 
-**R** — [reach](#reach) · [reasoning effort](#reasoning-effort) · [refusal code](#refusal-code) · [region edit](#region-edit) · [remote inference](#remote-inference) · [`remote:?:<alias>`](#remotealias) · [request_attachment / file_request_status](#request_attachment--file_request_status) · [requested_by](#requested_by) · [resident budget](#resident-budget) · [resolution](#resolution) · [`resolved_via`](#resolved_via) · [resource peaks](#resource-peaks) · [Review Agent](#review-agent) · [roster](#roster) · [round](#round) · [run gate](#run-gate) · [rung](#rung)
+**R** — [reach](#reach) · [reasoning effort](#reasoning-effort) · [refusal code](#refusal-code) · [region edit](#region-edit) · [`region_too_short`](#region_too_short) · [remote inference](#remote-inference) · [`remote:?:<alias>`](#remotealias) · [request_attachment / file_request_status](#request_attachment--file_request_status) · [requested_by](#requested_by) · [resident budget](#resident-budget) · [resolution](#resolution) · [`resolved_via`](#resolved_via) · [resource peaks](#resource-peaks) · [Review Agent](#review-agent) · [roster](#roster) · [round](#round) · [run gate](#run-gate) · [rung](#rung)
 
 **S** — [sandbox](#sandbox) · [saved_locally / offline_members](#saved_locally--offline_members) · [seconds_left](#seconds_left) · [section / status](#section--status) · [self-wait rule](#self-wait-rule) · [send_without_asking](#send_without_asking) · [served_by](#served_by) · [served_effort](#served_effort) · [serves_images_with_tools](#serves_images_with_tools) · [serving lists](#serving-lists) · [session archive](#session-archive) · [session identifier](#session-identifier) · [session marker](#session-marker) · [shared_proposal_not_editable](#shared_proposal_not_editable) · [shell tier (0/1/2)](#shell-tier-012) · [shell-gate refusal](#shell-gate-refusal) · [skill](#skill) · [sleep consolidation](#sleep-consolidation) · [slot queue](#slot-queue) · [`slow_command`](#slow_command) · [song job](#song-job) · [spawn origin](#spawn-origin) · [speed_summary](#speed_summary) · [sprint log](#sprint-log) · [stale reference](#stale-reference) · [star topology](#star-topology) · [stretch](#stretch) · [successor](#successor) · [switch](#switch)
 
@@ -71,7 +71,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **U** — [unit](#unit) · [unpriceable](#unpriceable) · [unpriced](#unpriced) · [unrated](#unrated) · [untariffed](#untariffed) · [usage row](#usage-row)
 
-**V** — [variant](#variant) · [vendor account](#vendor-account) · [vendor_request_quotas](#vendor_request_quotas) · [verdict (verified / unverified / legacy)](#verdict-verified--unverified--legacy) · [voice-memory](#voice-memory) · [`vram_free_mib`, `vram_total_mib`](#vram_free_mib-vram_total_mib)
+**V** — [variant](#variant) · [vendor account](#vendor-account) · [vendor_request_quotas](#vendor_request_quotas) · [verdict (verified / unverified / legacy)](#verdict-verified--unverified--legacy) · [verdict block](#verdict-block) · [voice-memory](#voice-memory) · [`vram_free_mib`, `vram_total_mib`](#vram_free_mib-vram_total_mib)
 
 **W** — [wait_reason](#wait_reason) · [waiting](#waiting) · [where](#where) · [written call](#written-call)
 
@@ -423,6 +423,30 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 - **Met in:** code, screen
 - **Meaning:** The one exception to the length rule of a **region edit** (SPEC decision 27): a `remove_region` that ends within 10 s of the track's end may, on the person's word only (never an agent's), cut the region out and move what follows earlier. The take is shorter by the region, and the track's stored lyrics are re-timed onto the take (lines inside the cut go, later lines move earlier).
 - **Defined in:** [music/region_edit.py — `remove`, `retime_lines`](../dpc-client/core/dpc_client_core/music/region_edit.py)
+
+### `level_guard`
+
+- **Met in:** code
+- **Meaning:** What kept one crossfade of a **region edit** take under full scale, recorded on the seam (`seams[]` of the edit record and of the advisory seam entry): null when nothing was needed, else `{applied: "gain_normalised", peak_before, peak_after, reason}`. An equal-power fade sums to up to about 1.41x at its midpoint; when that mix would pass the largest 24-bit sample its two gains are divided by their sum inside that fade only, so no sample there is louder than the louder side. Samples outside the fades are untouched.
+- **Defined in:** [music/region_edit.py — `_crossfade`, `Seam`](../dpc-client/core/dpc_client_core/music/region_edit.py)
+
+### `region_too_short`
+
+- **Met in:** code, screen
+- **Meaning:** The refusal of a **region edit** whose region (the intent zone) is shorter than `MIN_REGION_S` (50 ms, more than one 40 ms latent frame of acestep.cpp), given at proposal by `normalize_params_edit`; `remove` also refuses a region under two samples by this name instead of failing with `length_mismatch`.
+- **Defined in:** [music/region_edit.py — `MIN_REGION_S`, `normalize_params_edit`](../dpc-client/core/dpc_client_core/music/region_edit.py)
+
+### `last_attempt`
+
+- **Met in:** code, wire
+- **Meaning:** The failed judge attempt recorded beside a good verdict in a take's `mp.qc/1`: `{status: "failed", error, at, alias}`. A re-judge that fails (a held card, an answer that does not parse) keeps the last `done` judge result instead of overwriting it; a stage-1 refresh keeps both, and the next good verdict clears it. `check_qc` accepts it only beside a `done` judge.
+- **Defined in:** [music/qc.py — the module docstring, `_stage_two`](../dpc-client/core/dpc_client_core/music/qc.py)
+
+### verdict block
+
+- **Met in:** code
+- **Meaning:** The one place a QC judge's answer is read from: the JSON object between `<<<VERDICT_BEGIN nonce>>>` and `<<<VERDICT_END nonce>>>`, where the nonce is fresh per call. The style and lyrics in the prompt are quoted between data markers as data, not instructions. An answer with no such block, with more than one verdict marker, or with anything but one JSON object inside the block is a failed judge, never a guessed score.
+- **Defined in:** [music/qc.py — "Untrusted text in the prompt", `parse_judge_answer`](../dpc-client/core/dpc_client_core/music/qc.py)
 
 ### `lyrics_prep`
 
