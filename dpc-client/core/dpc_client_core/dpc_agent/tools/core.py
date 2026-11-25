@@ -2068,6 +2068,20 @@ def schedule_task(
             return SCHEDULE_RETURN_ONLY_REFUSAL + why
         if not isinstance(data, dict):
             return "⚠️ task_data must be a JSON object"
+        # Every key starting with `_` is core's: where the wake answers, who asked, its
+        # source, its chain depth, its model (Zcode #154 P2). The model's are dropped here,
+        # for every asker: a foreign asker could otherwise name `_reply_conversation_id` of
+        # a chat made only of the owner's nodes, and the wake would run with that room's
+        # class (all layers open) and post there. No owner-asked schedule targets another
+        # chat today (nothing documents or uses it), so there is no owner exception.
+        core_keys = sorted(k for k in data if isinstance(k, str) and k.startswith("_"))
+        for key in core_keys:
+            data.pop(key, None)
+        if core_keys:
+            log.info("schedule_task: dropped core field(s) the model gave in task_data: %s",
+                     ", ".join(core_keys))
+        dropped_note = (f" Fields starting with _ are set by core and were not used: "
+                        f"{', '.join(core_keys)}." if core_keys else "")
 
         # A queue no processor runs would take the task and never run it, while
         # this answered «✓ Scheduled» (chat #114: a check_back on a per-alias
@@ -2152,20 +2166,24 @@ def schedule_task(
             elif _schedule_needs_approval(ctx):
                 when = f"in {delay_seconds}s" if delay_seconds else "immediately"
                 about = str(data.get("text") or data.get("message") or "")[:200]
+                # A Stop while the card is up withdraws it, as it does the music job's and the
+                # gate's (Zcode #92/#103): before, only a Kill did.
                 approved, reason = _await_schedule_approval(
-                    ctx, task_type=task_type, when=when, about=about,
+                    ctx, task_type=task_type, when=when, about=about, void_on_stop=True,
                 )
                 if not approved:
                     return f"⚠️ check_back was not scheduled — {reason}."
 
-        # Inject reply routing so the executor knows where to send the result.
+        # Inject reply routing so the executor knows where to send the result. Always the
+        # context's (the chat the task was scheduled in), never the payload's: the model's
+        # `_` keys were dropped above.
         # _reply_conversation_id: the conversation that triggered this schedule call,
         #   so streaming progress and the final result appear in the right chat.
         # _reply_telegram_chat_id: set when the trigger came from Telegram,
         #   so the result is sent back to that Telegram chat automatically.
-        if "_reply_conversation_id" not in data and ctx.current_task_id:
+        if ctx.current_task_id:
             data["_reply_conversation_id"] = ctx.current_task_id
-        if "_reply_telegram_chat_id" not in data and getattr(ctx, "reply_telegram_chat_id", None):
+        if getattr(ctx, "reply_telegram_chat_id", None):
             data["_reply_telegram_chat_id"] = ctx.reply_telegram_chat_id
         # _message_source: the task runs as the turn that scheduled it. Always the
         #   context's, never the payload's: the model must not name its own source.
@@ -2184,7 +2202,7 @@ def schedule_task(
         )
 
         return (f"✓ Scheduled task {task.id} (type={task_type}, priority={priority}, delay={delay_seconds}s)"
-                + music_return_note)
+                + music_return_note + dropped_note)
 
     except Exception as e:
         return f"⚠️ Error scheduling task: {e}"

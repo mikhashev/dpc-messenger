@@ -191,6 +191,11 @@ class TaskQueue:
                     # trace on the board. With check_back that means a restart
                     # between the person's approval and the wake-up silently
                     # eats a commitment they agreed to.
+                    #
+                    # Coming back is not a promise to run: a task re-queued here is
+                    # pending like any other, and one whose time is already more than
+                    # OVERDUE_SKIP_AFTER_SEC past is skipped as overdue at dispatch,
+                    # with a line in its chat, not run.
                     if task.status == "running":
                         # Only a type that declared itself safe to repeat comes
                         # back. Everything else reached an unknown point before
@@ -228,7 +233,8 @@ class TaskQueue:
             if recovered:
                 log.warning(
                     "Re-queued %d task(s) that were running when the process last "
-                    "stopped — they are retried, not lost", recovered,
+                    "stopped — they are retried, unless one is already overdue, which "
+                    "is skipped as overdue rather than run", recovered,
                 )
             log.info(f"Loaded {len(self._queue)} pending tasks from disk")
         except Exception as e:

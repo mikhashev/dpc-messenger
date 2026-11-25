@@ -456,7 +456,8 @@ async def test_an_overdue_group_task_posts_its_line_into_the_group(managers, hom
     assert RAN == []
     kwargs = send.await_args.kwargs
     assert kwargs["group_id"] == GROUP and kwargs["agent_name"] == "Forge"
-    assert kwargs["text"] == f"A reminder scheduled for {_hhmm(25)} UTC was skipped: it was 25 min overdue."
+    assert kwargs["text"] == (f"A reminder scheduled for {_hhmm(25)} UTC was skipped: it was 25 min "
+                              f"overdue. It said: «see if the render is done»")
     assert not (home / ".dpc" / "conversations" / GROUP).exists()
 
 

@@ -135,6 +135,15 @@ def open_layers(cls: str, audience: Optional[Dict[str, str]] = None) -> frozense
     return frozenset()
 
 
+# How much of an overdue reminder's text its skip line quotes.
+OVERDUE_REMINDER_TEXT_LIMIT = 160
+
+# What DpcAgent.schedule_task raises when its queue has no running processor (Zcode #143).
+NO_TASK_PROCESSOR_ERROR = (
+    "Not scheduled: this agent has no running task processor, so nothing would run the "
+    "task. Nothing was queued.")
+
+
 # Who asked (ADR-053). The room decides what the agent may say (turn_class above); the
 # asker decides what it may do. Code words only.
 ASKER_HUMAN = "human"
@@ -1540,6 +1549,16 @@ class DpcAgent:
             pass
         line = (f"A {task.task_type} scheduled for {when} was skipped: "
                 f"it was {late_min} min overdue.")
+        # A reminder is the person's own text, so the chat sees which one did not come
+        # (Zcode #143); its first line, bounded. Other types carry the agent's own words.
+        if task.task_type == "reminder":
+            data = getattr(task, "data", None) or {}
+            text = str(data.get("text") or data.get("message") or "").strip()
+            first = text.splitlines()[0].strip() if text else ""
+            if first:
+                if len(first) > OVERDUE_REMINDER_TEXT_LIMIT:
+                    first = first[:OVERDUE_REMINDER_TEXT_LIMIT - 1].rstrip() + "…"
+                line += f" It said: «{first}»"
         notice_fn = getattr(self, "_task_notice_fn", None)
         if notice_fn is None:
             log.warning("Task %s skipped as overdue and no chat to say so in: %s", task.id, line)
@@ -2079,6 +2098,14 @@ class DpcAgent:
             Scheduled task
         """
         from datetime import datetime, timedelta, timezone
+
+        # A queue no processor runs would take the task and never run it (chat #114). The
+        # schedule_task tool refuses before its card; this refuses every other caller too,
+        # the Task Board among them (Zcode #143). A stand-in queue with no is_running is
+        # not judged.
+        is_running = getattr(self.queue, "is_running", None)
+        if callable(is_running) and not is_running():
+            raise RuntimeError(NO_TASK_PROCESSOR_ERROR)
 
         scheduled_at = None
         if delay_seconds > 0:
