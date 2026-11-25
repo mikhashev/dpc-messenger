@@ -569,6 +569,11 @@ class GroupTextHandler(MessageHandler):
                 f"preimage {payload.get('preimage_version')})")
             return
         reply_depth = depth + 1 if is_agent_post else 0
+        # Who asked (ADR-053 step 1, D-a): the author node, the verdict and the signed
+        # sender_type. Not verified is foreign and of unknown kind, whatever node it claims.
+        from dpc_client_core.dpc_agent.agent import peer_post_asker
+        asker = peer_post_asker(sender_node_id, sender_name, verification, is_agent_post,
+                                getattr(self.service.p2p_manager, "node_id", None))
 
         mention_names = mentions_in(text)
         self.logger.debug(
@@ -576,11 +581,14 @@ class GroupTextHandler(MessageHandler):
             mention_names, group_id, sender_name)
         if not mention_names:
             return
+        # The signature's verdict is on every wake line (ADR-053 D-a): an asker is an own
+        # node only when it is `verified`.
         if is_agent_post:
             wake_line = ("Group @%s mention from peer agent %s at mention_depth " + str(depth)
-                         + " — %s in group %s")
+                         + f" (signature {verification})" + " — %s in group %s")
         else:
-            wake_line = "Group @%s mention from peer %s — %s in group %s"
+            wake_line = ("Group @%s mention from peer %s" + f" (signature {verification})"
+                         + " — %s in group %s")
         sender_lower = sender_name.lower() if sender_name else ""
 
         # Get allowed agents for this group from metadata
@@ -599,7 +607,7 @@ class GroupTextHandler(MessageHandler):
                                  f"invoking agent {agent_id}", group_id)
                 await self._invoke_agent(group_id, text, sender_name,
                                          message_id, mention_depth=reply_depth,
-                                         sender_node_id=sender_node_id)
+                                         sender_node_id=sender_node_id, asker=asker)
             else:
                 self.logger.debug("Skipping @%s — agent %s not in metadata.agents for %s", agent_name, agent_id, group_id)
 
@@ -618,8 +626,10 @@ class GroupTextHandler(MessageHandler):
         # behaviour stands and says so. The gate arrives per group, on the day
         # somebody fills the field, rather than on a release date.
         cc_name = self.service.get_cc_display_name().lower()
-        # Same rule as the send path: @all is a human's word.
-        mention_all = "all" in mention_names and not is_agent_post
+        # Same rule as the send path: @all is a human's word. A post whose signature did not
+        # verify is of unknown kind (ADR-053 D-a, Zcode's review): it may name an agent, whose
+        # turn then has a foreign asker, but it does not speak for every agent at once.
+        mention_all = "all" in mention_names and not is_agent_post and verification == "verified"
         woken, warn = external_agents_to_wake(
             allowed_agents, mention_names, cc_name,
             mention_all=mention_all,
@@ -651,6 +661,8 @@ class GroupTextHandler(MessageHandler):
                 "mention_depth": reply_depth,
                 # The block the embedded agent above gets.
                 "chat_context": chat_context,
+                # Who asked (ADR-053), as an approval card names it; for the bridge to read.
+                "asker": asker.card_fields(),
             })
 
     def _group_chat_context(self, group_id: str) -> Optional[Dict[str, Any]]:
@@ -661,8 +673,12 @@ class GroupTextHandler(MessageHandler):
     async def _invoke_agent(self, group_id: str, text: str, sender_name: str,
                             trigger_message_id: Optional[str] = None,
                             mention_depth: int = 0,
-                            sender_node_id: Optional[str] = None) -> None:
-        """Invoke the default agent and post response to the group."""
+                            sender_node_id: Optional[str] = None,
+                            asker: Optional[Any] = None) -> None:
+        """Invoke the default agent and post response to the group.
+
+        `asker` (ADR-053) goes to the agent and with its post: an own agent the post
+        wakes on this node inherits it (Q2)."""
         try:
             dpc_provider = self.service.llm_manager.providers.get("dpc_agent")
             if not dpc_provider:
@@ -680,6 +696,7 @@ class GroupTextHandler(MessageHandler):
                 trigger_message_id=trigger_message_id,
                 message_source="group",
                 sender_node_id=sender_node_id,
+                asker=asker,
             )
             if response:
                 agent_display = self.service._get_agent_display_name(agent_id)
@@ -690,6 +707,7 @@ class GroupTextHandler(MessageHandler):
                 stop_notes = take(group_id) if callable(take) else []
                 await self.service.send_group_agent_message(group_id, agent_display, response,
                                                             mention_depth=mention_depth,
+                                                            asker=asker,
                                                             turn_end=trace.get("turn_end"),
                                                             stop_notes=stop_notes or None,
                                                             stopped_by=next((n.get("who") for n in stop_notes

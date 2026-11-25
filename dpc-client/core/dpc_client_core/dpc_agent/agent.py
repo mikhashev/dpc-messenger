@@ -135,6 +135,127 @@ def open_layers(cls: str, audience: Optional[Dict[str, str]] = None) -> frozense
     return frozenset()
 
 
+# Who asked (ADR-053). The room decides what the agent may say (turn_class above); the
+# asker decides what it may do. Code words only.
+ASKER_HUMAN = "human"
+ASKER_AGENT = "agent"
+ASKER_UNKNOWN = "unknown"
+ASKER_KINDS = (ASKER_HUMAN, ASKER_AGENT, ASKER_UNKNOWN)
+
+
+@dataclass(frozen=True)
+class Asker:
+    """The person or agent whose message started a turn (ADR-053 Decision 2).
+
+    `node_id` is the node it belongs to; `verified` says whether that node is known (a
+    peer post whose signature checked out, or anything written on this node) rather than
+    claimed. `is_owner` is set where the asker is computed: by the routing for this node's
+    own doors and its own posts, and by `DpcAgent.resolve_asker` for the nodes in the
+    agent's `own_node_group`, read with the agent's own profile. A claimed node id never
+    makes an owner (D-a). `via` names the own agents that relayed the request, oldest
+    first (Q2): an agent woken by an own agent's post inherits the asker of the turn that
+    wrote the post, and the card reads "Miron via Ark".
+    """
+
+    kind: str = ASKER_UNKNOWN
+    name: str = ""
+    node_id: str = ""
+    is_owner: bool = False
+    verified: bool = False
+    via: tuple = ()
+
+    def relayed_by(self, agent_name: str) -> "Asker":
+        """The same asker, one own agent further down the chain (Q2)."""
+        name = (agent_name or "").strip()
+        if not name or (self.via and self.via[-1] == name):
+            return self
+        return Asker(self.kind, self.name, self.node_id, self.is_owner, self.verified,
+                     tuple(self.via) + (name,))
+
+    def label(self) -> str:
+        """"Miron", "Miron (not verified)", "Miron via Ark": the name a card shows."""
+        who = self.name or (self.node_id[:16] if self.node_id else "") or "someone unknown"
+        if self.node_id and not self.verified and not self.is_owner:
+            who += " (not verified)"  # a peer post whose node is only claimed (D-a)
+        if self.via:
+            who += " via " + " via ".join(self.via)
+        return who
+
+    def card_fields(self) -> Dict[str, Any]:
+        """What an approval card names (ADR-053 2.4): name, node id, human or agent."""
+        return {
+            "name": self.name,
+            "node_id": self.node_id,
+            "kind": self.kind,
+            "verified": bool(self.verified),
+            "via": list(self.via),
+            "label": self.label(),
+            "is_owner": bool(self.is_owner),
+        }
+
+    def to_record(self) -> Dict[str, Any]:
+        """The form a scheduled task stores (Decision 2.9)."""
+        return {"kind": self.kind, "name": self.name, "node_id": self.node_id,
+                "is_owner": bool(self.is_owner), "verified": bool(self.verified),
+                "via": list(self.via)}
+
+    @classmethod
+    def from_record(cls, record: Any) -> Optional["Asker"]:
+        """An Asker from `to_record`'s dict; None for anything that is not one."""
+        if isinstance(record, Asker):
+            return record
+        if not isinstance(record, dict):
+            return None
+        kind = record.get("kind")
+        if kind not in ASKER_KINDS:
+            kind = ASKER_UNKNOWN
+        via = record.get("via") or ()
+        if not isinstance(via, (list, tuple)):
+            via = ()
+        return cls(kind=kind, name=str(record.get("name") or ""),
+                   node_id=str(record.get("node_id") or ""),
+                   is_owner=record.get("is_owner") is True,
+                   verified=record.get("verified") is True,
+                   via=tuple(str(v) for v in via if v))
+
+
+def asker_for_source(message_source: Optional[str], name: str = "",
+                     node_id: str = "") -> Asker:
+    """The asker of a turn from a door other than a group (ADR-053 Decision 2.2, D-f, D-g).
+
+    `ui`, `telegram_owner` and `external_agent` are the owner; a Telegram chat that is not
+    the owner's and Discord are a foreign human; a group with no asker computed (an old
+    scheduled row, D-g) and no source at all are foreign and of unknown kind.
+    """
+    if message_source in ("ui", TELEGRAM_OWNER_MESSAGE_SOURCE):
+        return Asker(ASKER_HUMAN, name or "the owner", node_id, is_owner=True, verified=True)
+    if message_source == "external_agent":
+        return Asker(ASKER_AGENT, name or "an external agent on this node", node_id,
+                     is_owner=True, verified=True)
+    if message_source in ("telegram", "discord"):
+        return Asker(ASKER_HUMAN, name, "", is_owner=False, verified=False)
+    return Asker(ASKER_UNKNOWN, name, node_id, is_owner=False, verified=False)
+
+
+def peer_post_asker(sender_node_id: Optional[str], sender_name: str, verification: str,
+                    is_agent_post: bool, this_node_id: Optional[str] = None) -> Asker:
+    """The asker of a peer's group post (ADR-053 step 1, D-a).
+
+    The node is the author's, as `_authenticate_author` gave it. Only a `verified` post
+    names a known node and a known kind (the signed `sender_type`); any other verdict is a
+    foreign asker of unknown kind, whatever node it claims. Whether a verified node is one
+    of the agent's own nodes is the agent's call (`DpcAgent.resolve_asker`): the own node
+    group is per agent.
+    """
+    verified = verification == "verified"
+    if not verified:
+        return Asker(ASKER_UNKNOWN, sender_name or "", sender_node_id or "",
+                     is_owner=False, verified=False)
+    kind = ASKER_AGENT if is_agent_post else ASKER_HUMAN
+    own = bool(this_node_id) and sender_node_id == this_node_id
+    return Asker(kind, sender_name or "", sender_node_id or "", is_owner=own, verified=True)
+
+
 def tokens_block(usage: Dict[str, Any]) -> Dict[str, Any]:
     """What a finished task cost in tokens, for the record that outlives the log.
 
@@ -442,6 +563,30 @@ class DpcAgent:
         cls = turn_class(message_source, group, self._this_node_id(), own)
         return cls, open_layers(cls, layer_audience(self._memory_settings()))
 
+    def resolve_asker(self, asker: Optional[Asker], message_source: Optional[str],
+                      sender_node_id: Optional[str] = None) -> Asker:
+        """The asker of this turn, with `is_owner` decided (ADR-053 Decision 2.2).
+
+        No asker computed: the door decides (`asker_for_source`); a group turn with only a
+        node id (an older caller) is a foreign asker of unknown kind on that node, and one
+        with nothing is foreign too (D-g). A verified asker on this node or on a node of
+        this agent's `own_node_group`, read now, is the owner. A relayed asker keeps its own
+        verdict: the chain does not make its origin the owner.
+        """
+        if asker is None:
+            if message_source == "group":
+                asker = Asker(ASKER_UNKNOWN, "", sender_node_id or "", False, False)
+            else:
+                this_node = self._this_node_id() or ""
+                asker = asker_for_source(message_source, node_id=this_node)
+        if asker.is_owner or not asker.verified or not asker.node_id:
+            return asker
+        this_node = self._this_node_id()
+        _name, own, _why = self._own_nodes()
+        if asker.node_id == this_node or asker.node_id in own:
+            return Asker(asker.kind, asker.name, asker.node_id, True, True, asker.via)
+        return asker
+
     def _log_own_nodes(self) -> None:
         """One line: the own node group this agent uses and how each chat group resolves.
 
@@ -595,9 +740,12 @@ class DpcAgent:
         reply_telegram_chat_id: Optional[str] = None,
         # Where the turn came from (see is_owner_caller); None is nobody's.
         message_source: Optional[str] = None,
-        # The node that sent a peer's group mention. Nothing reads it yet; it is
-        # here for the group policy that is still undecided.
+        # The node that sent a peer's group mention: read only when no `asker` came with
+        # it, as a foreign asker of unknown kind on that node (resolve_asker).
         sender_node_id: Optional[str] = None,
+        # Who asked (ADR-053): computed where the message was routed and carried here.
+        # Decides which calls of a flagged tool go to the owner (ToolContext.asker).
+        asker: Optional[Asker] = None,
         chat_context: Optional[Dict[str, Any]] = None,
         stop_event: Optional[asyncio.Event] = None,
         reader_identity: Optional[Dict[str, str]] = None,
@@ -681,6 +829,13 @@ class DpcAgent:
         # an owner_only tool is offered, asked now, for scheduled tasks too: the class is
         # recomputed from the stored source and the conversation's members at run time.
         audience_class, layers_open = self.turn_audience(message_source, conversation_id)
+        # Who asked decides what the agent may do (ADR-053), a separate axis from the room.
+        turn_asker = self.resolve_asker(Asker.from_record(asker), message_source, sender_node_id)
+        if not turn_asker.is_owner:
+            log.info("Agent %s turn in %s asked by %s (%s, node %s): not the owner; flagged "
+                     "tools ask the owner first", self.agent_root.name,
+                     conversation_id or message_source or "unnamed source", turn_asker.label(),
+                     turn_asker.kind, (turn_asker.node_id or "-")[:20])
 
         # Get firewall-controlled tool access (needed for both context and tool registry)
         allowed_tools = self._get_allowed_tools(message_source=message_source,
@@ -872,6 +1027,8 @@ class DpcAgent:
                 # Which memory layers this turn may see (ADR-048); the file tools ask it.
                 turn_class=audience_class,
                 open_layers=layers_open,
+                # Who asked (ADR-053): the gate in ToolRegistry.execute reads it.
+                asker=turn_asker,
                 # Where this run came from, for anything that has to ask a person
                 # something (tier-1 shell approval today). The title is whatever the
                 # caller already resolved — group chats carry it in chat_context;
@@ -1116,6 +1273,11 @@ class DpcAgent:
         The firewall's tools (_firewall_allowed_tools) less every owner_only tool
         on a turn that is not the owner's, plus schedule_task wherever a music tool
         is left (with_check_back, ADR-051 D49).
+
+        Since ADR-053 no tool is owner_only: the music tools, ComfyUI and chat_post_file
+        carry `owner_approval_for_others` and stay offered on every turn; a call asked for
+        by someone who is not the owner goes to the owner as a card (ToolRegistry.execute).
+        The owner_only filter stays for a tool that may carry the flag later.
 
         `turn_class` is the class process() computed; not given, it is asked of
         turn_audience. A class that cannot be determined is not the owner's (fail
@@ -1593,6 +1755,7 @@ class DpcAgent:
                 message=prompt,
                 conversation_id=f"task-{definition.task_type}",
                 message_source=task_data.get("_message_source"),
+                asker=task_data.get("_asker"),  # ADR-053 2.9; absent fails closed (D-g)
             )
             return result
 
@@ -1711,11 +1874,20 @@ class DpcAgent:
         sender = getattr(self, "display_name", None) or self.agent_root.name
         turn_end = (getattr(self, "_last_trace", None) or {}).get("turn_end")
         try:
+            # The task's asker goes with the post: an own agent it wakes inherits it (Q2). A
+            # row stored before the asker was (D-g): its door's, or foreign for a group.
+            data = getattr(task, "data", None) or {}
+            relay = Asker.from_record(data.get("_asker"))
+            if relay is None:
+                source = data.get("_message_source")
+                relay = (asker_for_source(source) if source not in (None, "group")
+                         else Asker(ASKER_UNKNOWN))
             posted = await service.send_group_agent_message(
                 group_id=group_id,
                 agent_name=sender,
                 text=post_text,
                 **({"turn_end": turn_end} if turn_end else {}),
+                asker=relay,
             )
         except Exception as e:
             log.warning("Failed to publish %s result to %s: %s", task.task_type, group_id, e)
@@ -1770,6 +1942,8 @@ class DpcAgent:
                 conversation_id=reply_conversation_id,
                 reply_telegram_chat_id=reply_telegram_chat_id,
                 message_source=task.data.get("_message_source"),
+                # Who asked for the turn that scheduled it (ADR-053 2.9; D-g for old rows).
+                asker=task.data.get("_asker"),
                 **live,
             )
 
@@ -1798,6 +1972,8 @@ class DpcAgent:
                 reply_telegram_chat_id=task.data.get("_reply_telegram_chat_id"),
                 check_back_depth=depth,
                 message_source=task.data.get("_message_source"),
+                # Who asked for the turn that scheduled it (ADR-053 2.9; D-g for old rows).
+                asker=task.data.get("_asker"),
                 **live,
             )
 
@@ -1870,6 +2046,7 @@ class DpcAgent:
             prompt,
             conversation_id=reply_conversation_id,
             message_source=data.get("_message_source"),
+            asker=data.get("_asker"),  # ADR-053 2.9; absent fails closed (D-g)
         )
 
         if reply_telegram_chat_id:

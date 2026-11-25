@@ -5712,8 +5712,11 @@ class CoreService(MusicCommandsMixin):
                     # Canonical default from ToolEntry.default_enabled (single source of truth).
                     "default_enabled": entry.default_enabled,
                     # Offered and run only on the owner's own turns (ToolEntry.owner_only,
-                    # ADR-051 D43); the panel's "owner-only" badge reads it.
+                    # ADR-051 D43). No tool carries it since ADR-053.
                     "owner_only": bool(entry.owner_only),
+                    # Asks the owner when someone else asked for the turn (ADR-053); the
+                    # panel's badge reads it.
+                    "owner_approval_for_others": bool(entry.owner_approval_for_others),
                 })
             tools.sort(key=lambda t: t["name"])
             # A tool module that fails to import removes its tools from this
@@ -6268,8 +6271,16 @@ class CoreService(MusicCommandsMixin):
         conversation_id: str = "",
         conversation_title: str = "",
         music: Optional[Dict[str, Any]] = None,
+        asker: Optional[Dict[str, Any]] = None,
+        tool: str = "",
+        details: str = "",
+        cost: str = "",
     ) -> None:
         """Put a queue request in front of every surface that can answer it.
+
+        ADR-053: `asker` names who asked when it was not the owner (name, node id, human
+        or agent, verified, via); `tool`, `details` and `cost` are the owner card's tool,
+        what exactly, and the GPU cost line. All absent on a card the owner caused.
 
         The shell twin below has done this since ADR-030 v2; this one broadcast
         to the interface and nothing else, so a `check_back` asked for from
@@ -6308,6 +6319,11 @@ class CoreService(MusicCommandsMixin):
                 # The card had no deadline to retire on, so it stayed on screen
                 # long after the agent had given up on it.
                 "timeout_seconds": timeout_seconds,
+                # ADR-053: who asked, when not the owner; null otherwise.
+                "asker": dict(asker) if asker else None,
+                "tool": tool or None,
+                "details": details or None,
+                "cost": cost or None,
             })
 
         bridge = self._get_agent_telegram_bridge(agent_id) if telegram_chat_id else None
@@ -6393,8 +6409,13 @@ class CoreService(MusicCommandsMixin):
         telegram_chat_id: str = "",
         conversation_id: str = "",
         conversation_title: str = "",
+        asker: Optional[Dict[str, Any]] = None,
+        cwd: str = "",
     ) -> None:
         """Put a tier-1 approval request in front of every surface that can answer it.
+
+        ADR-053 D-b: a Tier 1 command someone other than the owner asked for has this one
+        card, which names them (`asker`) and the directory it runs in (`cwd`).
 
         The tool that raises the request knows nothing about transports; this is
         where the list of them lives.
@@ -6418,6 +6439,8 @@ class CoreService(MusicCommandsMixin):
                 "agent_name": agent_name,
                 "conversation_id": conversation_id,
                 "conversation_title": origin,
+                "asker": dict(asker) if asker else None,
+                "cwd": cwd or None,
             })
 
         bridge = self._get_agent_telegram_bridge(agent_id) if telegram_chat_id else None
@@ -7816,12 +7839,25 @@ class CoreService(MusicCommandsMixin):
         is_agent_sender: bool = False,
         trigger_message_id: Optional[str] = None,
         mention_depth: int = 0,
+        asker: Optional[Any] = None,
     ) -> None:
         """Detect @agent / @CC / @all mentions in outgoing group messages and route to agents.
 
         `mention_depth` is the sending post's own; an agent woken here inherits
         it, because a hop inside one node is not a cross-node mention.
+
+        `asker` (ADR-053) is who asked for the turn that wrote the post. An agent woken by
+        an own agent's post inherits it for the whole chain, relayed by that agent (Q2,
+        Mike #135: "Miron via Ark"). None is this node's own: its human, or for an agent
+        post one of its own agents or an external agent on this node.
         """
+        from .dpc_agent.agent import ASKER_AGENT, ASKER_HUMAN, Asker
+        if asker is None:
+            asker = Asker(ASKER_AGENT if is_agent_sender else ASKER_HUMAN, sender_name or "",
+                          getattr(self.p2p_manager, "node_id", "") or "",
+                          is_owner=True, verified=True)
+        elif is_agent_sender:
+            asker = asker.relayed_by(sender_name)
         mentions = mentions_in(text)
         logger.debug("_handle_group_agent_mentions: mentions=%s in group %s (agent_sender=%s)",
                       mentions, group_id, is_agent_sender)
@@ -7847,7 +7883,7 @@ class CoreService(MusicCommandsMixin):
                 logger.info("Group @%s mention detected — invoking agent %s in group %s", matched, aid, group_id)
                 asyncio.ensure_future(self._invoke_agent_in_group_serialized(
                     group_id, text, sender_name, aid, trigger_message_id,
-                    mention_depth=mention_depth))
+                    mention_depth=mention_depth, asker=asker))
 
         woken, warn = external_agents_to_wake(
             allowed_agents, mentions, self.get_cc_display_name(),
@@ -7877,12 +7913,15 @@ class CoreService(MusicCommandsMixin):
                 "chat_context": chat_context,
                 # The group counter the UI shows; the bridge prints it as [TOKENS].
                 "token_usage": token_usage,
+                # Who asked (ADR-053), as an approval card names it; for the bridge to read.
+                "asker": asker.card_fields(),
             })
 
     async def _invoke_agent_in_group_serialized(
         self, group_id: str, text: str, sender_name: str, agent_id: str = None,
         trigger_message_id: Optional[str] = None,
         mention_depth: int = 0,
+        asker: Optional[Any] = None,
     ) -> None:
         """Run an agent in a group under the per-group lock — serializes agents so two
         @mentions in the same group queue (one at a time) instead of running in parallel.
@@ -7908,7 +7947,8 @@ class CoreService(MusicCommandsMixin):
             async with hold(self._group_agent_locks[group_id], entry, stoppable=True):
                 await self._invoke_agent_in_group(group_id, text, sender_name, agent_id,
                                                   trigger_message_id,
-                                                  mention_depth=mention_depth)
+                                                  mention_depth=mention_depth,
+                                                  asker=asker)
         except StoppedWhileWaiting:
             logger.info("Agent %s was stopped while waiting for the room in %s", agent_id, group_id)
 
@@ -7916,8 +7956,12 @@ class CoreService(MusicCommandsMixin):
         self, group_id: str, text: str, sender_name: str, agent_id: str = None,
         trigger_message_id: Optional[str] = None,
         mention_depth: int = 0,
+        asker: Optional[Any] = None,
     ) -> None:
-        """Invoke a specific agent and post its response to the group."""
+        """Invoke a specific agent and post its response to the group.
+
+        `asker` (ADR-053) goes to the agent's turn and with its post, so an agent that
+        post wakes inherits it (Q2)."""
         try:
             dpc_provider = self.llm_manager.providers.get("dpc_agent")
             if not dpc_provider:
@@ -7937,6 +7981,7 @@ class CoreService(MusicCommandsMixin):
                 _skip_history=True,
                 trigger_message_id=trigger_message_id,
                 message_source="group",
+                asker=asker,
             )
             if response:
                 agent_name = self._get_agent_display_name(agent_id)
@@ -7953,6 +7998,7 @@ class CoreService(MusicCommandsMixin):
                 stop_notes = take(group_id) if callable(take) else []
                 await self.send_group_agent_message(group_id, agent_name, response, tool_calls=tool_calls,
                                                     mention_depth=mention_depth,
+                                                    asker=asker,
                                                     turn_end=trace.get("turn_end"),
                                                     speed_summary=trace.get("speed_summary"),
                                                     stop_notes=stop_notes or None,
@@ -8177,6 +8223,7 @@ class CoreService(MusicCommandsMixin):
         speed_summary: Optional[Dict[str, Any]] = None,
         stop_notes: Optional[List[Dict[str, Any]]] = None,
         stopped_by: Optional[str] = None,
+        asker: Optional[Any] = None,
     ) -> Optional[str]:
         """Send a group message attributed to an agent.
 
@@ -8205,6 +8252,9 @@ class CoreService(MusicCommandsMixin):
                 in the first line of the post (`loop.group_stop_post_text`); None reads
                 "the user". That line is the room's only sign of a stop: the signed
                 record has no `turn_end`, and a peer routes the post's mentions by depth.
+            asker: Who asked for the turn that wrote this post (dpc_agent.agent.Asker,
+                ADR-053). An agent this post wakes on this node inherits it (Q2); None is
+                an own agent's own post. Never signed, never sent to a peer.
 
         Returns:
             The generated message_id (16-char hex), or None if the group was not found.
@@ -8380,7 +8430,8 @@ class CoreService(MusicCommandsMixin):
         else:
             await self._handle_group_agent_mentions(group_id, text, agent_name, is_agent_sender=True,
                                                     trigger_message_id=message_id,
-                                                    mention_depth=mention_depth)
+                                                    mention_depth=mention_depth,
+                                                    asker=asker)
 
         return message_id
 

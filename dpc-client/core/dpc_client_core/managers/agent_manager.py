@@ -1230,6 +1230,18 @@ class DpcAgentManager:
         monitor.save_history()
         return notice
 
+    def _turn_asker(self, asker: Optional[Any], message_source: Optional[str],
+                    sender_name: str) -> Optional[Any]:
+        """The asker handed to the agent (ADR-053): the routed one, or for a door other
+        than a group the door's own, named after the sender. A group with none stays None:
+        the agent treats it as foreign (DpcAgent.resolve_asker)."""
+        if asker is not None or message_source == "group":
+            return asker
+        from ..dpc_agent.agent import asker_for_source
+        node_id = getattr(getattr(getattr(self, "service", None), "p2p_manager", None), "node_id", "") or ""
+        name = sender_name if sender_name and sender_name != "User" else ""
+        return asker_for_source(message_source, name=name, node_id=node_id)
+
     async def _process_message_guarded(
         self,
         message: str,
@@ -1255,6 +1267,9 @@ class DpcAgentManager:
         message_source: Optional[str] = None,
         # The node that sent a peer's group mention; carried to the agent only.
         sender_node_id: Optional[str] = None,
+        # Who asked (dpc_agent.agent.Asker, ADR-053), computed where the message was
+        # routed. None outside a group: the door decides, with `sender_name` as the name.
+        asker: Optional[Any] = None,
         # Level chosen in a chat header for this call only. The room and the
         # agent's own config are consulted when it is empty.
         reasoning_effort: Optional[str] = None,
@@ -1420,6 +1435,7 @@ class DpcAgentManager:
                     reply_telegram_chat_id=telegram_chat_id,
                     message_source=message_source,
                     sender_node_id=sender_node_id,
+                    asker=self._turn_asker(asker, message_source, sender_name),
                     chat_context=chat_context,
                     stop_event=interrupt_ev,
                     kill_event=kill_ev,
