@@ -512,14 +512,22 @@ def torch_compile_blocker() -> Optional[str]:
     Probed once per process with the import torch's own `torch.compile` runs before compiling
     anything: `torch._dynamo.backends.debugging`, which needs `functorch.compile`'s
     `min_cut_rematerialization_partition` (torch 2.11 defines it in `torch._functorch.partitioners`
-    and `functorch.compile` re-exports it). Only the import chain is probed; nothing is compiled."""
+    and `functorch.compile` re-exports it). Only the import chain is probed; nothing is compiled.
+
+    Triton is probed too. `torch.compile` is lazy: it wraps the model at once and compiles on the
+    first forward, where the default inductor backend needs Triton for CUDA kernels. Without
+    Triton (the usual Windows install) the wrap succeeds and the first transcription raises, so
+    a missing Triton is a blocker here, before any wrap."""
     global _COMPILE_BLOCKER, _COMPILE_BLOCKER_KNOWN
     if _COMPILE_BLOCKER_KNOWN:
         return _COMPILE_BLOCKER
     reason: Optional[str] = None
     try:
         import importlib
+        import importlib.util
         importlib.import_module("torch._dynamo.backends.debugging")
+        if importlib.util.find_spec("triton") is None:
+            reason = "Triton is not installed, which torch.compile's CUDA backend needs on first use"
     except Exception as e:  # noqa: BLE001 - any failure of the chain means "not here"
         reason = f"{type(e).__name__}: {e}"
     _COMPILE_BLOCKER, _COMPILE_BLOCKER_KNOWN = reason, True

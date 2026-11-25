@@ -173,8 +173,23 @@ def test_a_broken_import_chain_blocks_torch_compile_and_is_probed_once(monkeypat
 
 def test_a_working_import_chain_does_not_block(monkeypatch):
     import importlib
+    import importlib.util
     monkeypatch.setattr(importlib, "import_module", lambda name, *a, **k: types.ModuleType(name))
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a, **k: object())
     assert wp.torch_compile_blocker() is None
+
+
+def test_a_working_import_chain_without_triton_still_blocks(monkeypatch):
+    """torch.compile wraps at once and compiles on the first forward, where CUDA needs Triton:
+    without it the first transcription would raise, so the wrap is never made (2026-11-25, after
+    the torch reinstall made the import chain whole on a Windows box with no Triton)."""
+    import importlib
+    import importlib.util
+    monkeypatch.setattr(importlib, "import_module", lambda name, *a, **k: types.ModuleType(name))
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a, **k: None if name == "triton" else object())
+    reason = wp.torch_compile_blocker()
+    assert reason is not None and "Triton" in reason
 
 
 def test_the_skip_is_said_once_with_no_speed_up_promised(caplog):
