@@ -237,29 +237,73 @@ export function insertedMarks(original: string, marked: string): { marks: number
     return i === original.length ? { marks, yo } : null;
 }
 
+/** Max edit distance the undo diff follows; past it the texts are too far apart to relate and undo is not offered. */
+export const UNDO_MAX_EDITS = 4000;
+
+/** For each index of `a`, the index of `b` it is kept at in a shortest edit script (Myers' diff), or -1
+ *  for a character the edits removed. Null when more than `maxEdits` insertions and deletions separate them. */
+export function keptIndexes(a: string, b: string, maxEdits: number = UNDO_MAX_EDITS): Int32Array | null {
+    const n = a.length, m = b.length;
+    const map = new Int32Array(n).fill(-1);
+    let pre = 0;
+    while (pre < n && pre < m && a[pre] === b[pre]) { map[pre] = pre; pre++; }
+    let suf = 0;
+    while (suf < n - pre && suf < m - pre && a[n - 1 - suf] === b[m - 1 - suf]) { map[n - 1 - suf] = m - 1 - suf; suf++; }
+    const A = a.slice(pre, n - suf), B = b.slice(pre, m - suf);
+    const N = A.length, M = B.length;
+    if (N === 0 || M === 0) return map;
+    const max = Math.min(N + M, maxEdits);
+    const off = max + 1;
+    let v = new Int32Array(2 * max + 3);
+    const trace: Int32Array[] = [];
+    let found = -1;
+    for (let d = 0; d <= max && found < 0; d++) {
+        trace.push(v.slice());
+        for (let k = -d; k <= d; k += 2) {
+            let x = (k === -d || (k !== d && v[off + k - 1] < v[off + k + 1])) ? v[off + k + 1] : v[off + k - 1] + 1;
+            let y = x - k;
+            while (x < N && y < M && A[x] === B[y]) { x++; y++; }
+            v[off + k] = x;
+            if (x >= N && y >= M) { found = d; break; }
+        }
+    }
+    if (found < 0) return null;
+    // Walk back through the saved rows, recording the diagonal (kept) runs.
+    let x = N, y = M;
+    for (let d = found; d > 0; d--) {
+        const row = trace[d];
+        const k = x - y;
+        const prevK = (k === -d || (k !== d && row[off + k - 1] < row[off + k + 1])) ? k + 1 : k - 1;
+        const prevX = row[off + prevK], prevY = prevX - prevK;
+        while (x > prevX && y > prevY) { x--; y--; map[pre + x] = pre + y; }
+        x = prevX; y = prevY;
+    }
+    while (x > 0 && y > 0) { x--; y--; map[pre + x] = pre + y; }
+    return map;
+}
+
 /** Undo of "Use marked lyrics" that survives the person's later typing: the text as it is now with the
- *  marks and ё letters the marking added taken back out, wherever the person has not edited since.
- *  The edited span is the part of `current` between its common prefix and suffix with `marked`; a mark
- *  inside it is the person's now and stays. Unchanged text gives back `original` exactly. */
+ *  marks and ё letters the marking added taken back out, wherever they still stand. A character diff
+ *  of `marked` against `current` follows each added mark through every edit, in any number of places
+ *  (Zcode #191: a common prefix and suffix kept the marks between two separate edits). A mark is
+ *  removed only where the diff keeps it and `current` still holds U+0301 there; an ё goes back to е
+ *  only where `current` still holds that ё. A mark the person deleted, moved or typed over is theirs
+ *  now and stays. Unchanged text gives back `original` exactly; a text the marking cannot explain, or
+ *  one too far from `marked` to diff, is given back as it is (Undo is then not offered). */
 export function undoInsertedMarks(original: string, marked: string, current: string): string {
     if (current === marked) return original;
     const changes = insertedMarks(original, marked);
     if (!changes) return current;
-    let pre = 0;
-    while (pre < marked.length && pre < current.length && marked[pre] === current[pre]) pre++;
-    let suf = 0;
-    while (suf < marked.length - pre && suf < current.length - pre
-        && marked[marked.length - 1 - suf] === current[current.length - 1 - suf]) suf++;
-    const shift = current.length - marked.length;   // where a suffix index of `marked` sits in `current`
+    const kept = keptIndexes(marked, current);
+    if (!kept) return current;
     const out = current.split('');
-    const toCurrent = (j: number) => (j < pre ? j : j >= marked.length - suf ? j + shift : -1);
     for (const [j, letter] of changes.yo) {
-        const k = toCurrent(j);
-        if (k >= 0) out[k] = letter;
+        const k = kept[j];
+        if (k >= 0 && current[k] === marked[j]) out[k] = letter;
     }
-    for (const j of [...changes.marks].sort((a, b) => b - a)) {
-        const k = toCurrent(j);
-        if (k >= 0) out.splice(k, 1);
+    for (const j of [...changes.marks].sort((p, q) => kept[q] - kept[p])) {
+        const k = kept[j];
+        if (k >= 0 && current[k] === '\u0301') out.splice(k, 1);
     }
     return out.join('');
 }

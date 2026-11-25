@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     undoInsertedMarks,
+    keptIndexes,
     canUseMarked,
     dictionaryLine,
     lineSegments,
@@ -198,5 +199,32 @@ describe('undo of "Use marked lyrics" (review #180 3.3: it died after the first 
     });
     it('leaves a text it cannot relate to the marking alone', () => {
         expect(undoInsertedMarks(original, 'something else', 'something else!')).toBe('something else!');
+    });
+    it('takes out every added mark after edits in two separate places (Zcode #191)', () => {
+        // the person typed in the first word and in the last word; the added mark after "реки" and the ё
+        // between the two edits used to stay, because they lay inside the common prefix/suffix span
+        const twoEdits = `за${A}мок! у реки${A}\nёлка и домик`;
+        expect(undoInsertedMarks(original, marked, twoEdits)).toBe('замок! у реки\nелка и домик');
+        const threeEdits = `Та за${A}мок у реки${A}\nёлка, и дом.`;
+        expect(undoInsertedMarks(original, marked, threeEdits)).toBe('Та замок у реки\nелка, и дом.');
+    });
+    it('keeps a mark the person deleted or typed over, and a ё they changed, in any of several edits', () => {
+        // first added mark deleted by the person, an edit far away at the end: the second mark still goes
+        const deleted = `замок у реки${A}\nёлка и дом!`;
+        expect(undoInsertedMarks(original, marked, deleted)).toBe('замок у реки\nелка и дом!');
+        // the ё typed over as Ё plus an edit at the start: their letter stays, the marks go
+        const typedOver = `X за${A}мок у реки${A}\nЁлка и дом`;
+        expect(undoInsertedMarks(original, marked, typedOver)).toBe('X замок у реки\nЁлка и дом');
+        // a mark the person added themselves elsewhere is theirs and stays
+        const theirs = `за${A}мок у реки${A}\nёлка и до${A}м`;
+        expect(undoInsertedMarks(original, marked, theirs)).toBe(`замок у реки\nелка и до${A}м`);
+    });
+    it('maps every kept character through a shortest edit script', () => {
+        const map = keptIndexes('abcXdef', 'Zabcdefg');
+        expect(Array.from(map!)).toEqual([1, 2, 3, -1, 4, 5, 6]);
+        expect(Array.from(keptIndexes('abc', 'abc')!)).toEqual([0, 1, 2]);
+        expect(Array.from(keptIndexes('abc', '')!)).toEqual([-1, -1, -1]);
+        expect(keptIndexes('a'.repeat(50), 'b'.repeat(50), 10)).toBeNull();   // too far apart: no mapping
+        expect(undoInsertedMarks('aaaa', `a${A}aaa`, 'b'.repeat(9000))).toBe('b'.repeat(9000));
     });
 });
