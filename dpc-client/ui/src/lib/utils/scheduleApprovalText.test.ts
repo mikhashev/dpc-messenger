@@ -83,3 +83,17 @@ describe('the dialog reads the view, not fixed words', () => {
     expect(dialog).not.toContain('Schedule it');
   });
 });
+
+describe('duration and lyrics on the music card', () => {
+  it('says the length in the sentence', () => {
+    expect(musicJobSentence({ about: '', music: { style: 's', duration_s: 90 } }))
+      .toBe('Run a music job on the GPU: s, 90 s long');
+  });
+  it('adds a Lyrics row only when core sends an excerpt', () => {
+    const base = { task_type: 'music_job', when: 'now', about: '' };
+    const sung = approvalView({ ...base, music: { style: 's', has_lyrics: true, lyrics_excerpt: 'la la la…' } });
+    expect(sung.rows.map(r => r.label)).toEqual(['Request', 'Lyrics']);
+    expect(sung.rows[1].value).toBe('la la la…');
+    expect(approvalView({ ...base, music: { style: 's', instrumental: true } }).rows.map(r => r.label)).toEqual(['Request']);
+  });
+});

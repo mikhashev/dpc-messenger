@@ -25,6 +25,12 @@ export interface MusicJobRequest {
   instrumental?: boolean;
   /** The engine's name; null or absent means the default engine. */
   engine?: string | null;
+  /** The length asked for, in seconds. */
+  duration_s?: number | null;
+  /** The twin of `instrumental`. */
+  has_lyrics?: boolean;
+  /** The lyrics' first characters; present only when there are lyrics. */
+  lyrics_excerpt?: string;
   /** The expected time on the card, in seconds. */
   eta_seconds?: number;
 }
@@ -76,11 +82,20 @@ export function musicJobSentence(request: Pick<ApprovalRequestLike, 'about' | 'm
   if (m && typeof m.instrumental === 'boolean') parts.push(m.instrumental ? 'instrumental' : 'with lyrics');
   if (m && typeof m.engine === 'string' && m.engine.trim()) parts.push(`${m.engine.trim()} engine`);
   else if (m && m.engine === null && parts.length > 0) parts.push('default engine');
+  if (m && typeof m.duration_s === 'number' && Number.isFinite(m.duration_s) && m.duration_s > 0) {
+    parts.push(`${formatEta(m.duration_s)} long`);
+  }
   const eta = formatEta(m?.eta_seconds);
   if (eta) parts.push(`about ${eta}`);
   if (parts.length > 0) return `Run a music job on the GPU: ${parts.join(', ')}`;
   const about = (request.about || '').trim();
   return about || 'Run a music job on the GPU';
+}
+
+/** The lyrics excerpt row, only when core sent one. */
+function lyricsRow(m: MusicJobRequest | null | undefined): ApprovalRow[] {
+  const text = m && typeof m.lyrics_excerpt === 'string' ? m.lyrics_excerpt.trim() : '';
+  return text ? [{ label: 'Lyrics', value: text, long: true }] : [];
 }
 
 export function approvalView(request: ApprovalRequestLike): ApprovalView {
@@ -89,7 +104,10 @@ export function approvalView(request: ApprovalRequestLike): ApprovalView {
       isMusicJob: true,
       ariaLabel: 'Agent asks to run a music job on the GPU',
       headText: 'asks to run a music job',
-      rows: [{ label: 'Request', value: musicJobSentence(request), long: true }],
+      rows: [
+        { label: 'Request', value: musicJobSentence(request), long: true },
+        ...lyricsRow(request.music),
+      ],
       approveLabel: 'Approve',
       refuseLabel: 'Refuse',
     };

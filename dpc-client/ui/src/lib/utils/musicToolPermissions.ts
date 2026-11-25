@@ -49,3 +49,21 @@ export const OWNER_ONLY_HINT =
 export function musicToolKeys(): string[] {
   return MUSIC_TOOL_CATEGORY.tools.map((t) => t.key);
 }
+
+/**
+ * Whether a category's badge shows. The backend's `list_all_tools` carries `owner_only`
+ * per tool: when it does for any of the category's tools, the category is owner-only if
+ * every tool the backend reports for it is. When the field is missing (an older backend)
+ * or none of the tools is listed, the category's own hardcoded `ownerOnly` stands.
+ */
+export function categoryOwnerOnly(
+  category: PermissionCategory,
+  registered: ReadonlyArray<{ name: string; owner_only?: boolean }>,
+): boolean {
+  const keys = new Set(category.tools.map((t) => t.key));
+  const flags = registered
+    .filter((t) => keys.has(t.name) && typeof t.owner_only === 'boolean')
+    .map((t) => t.owner_only as boolean);
+  if (flags.length === 0) return !!category.ownerOnly;
+  return flags.every(Boolean);
+}

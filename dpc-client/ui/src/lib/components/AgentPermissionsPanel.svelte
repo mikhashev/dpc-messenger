@@ -5,7 +5,7 @@
    */
   import { nodeStatus, sendCommand } from '$lib/coreService';
   import { voiceMemoryNote } from '$lib/utils/voiceMemoryExtra';
-  import { MUSIC_TOOL_CATEGORY, OWNER_ONLY_BADGE, OWNER_ONLY_HINT, type PermissionCategory } from '$lib/utils/musicToolPermissions';
+  import { MUSIC_TOOL_CATEGORY, categoryOwnerOnly, OWNER_ONLY_BADGE, OWNER_ONLY_HINT, type PermissionCategory } from '$lib/utils/musicToolPermissions';
   import { openPath } from '@tauri-apps/plugin-opener';
   import { onMount } from 'svelte';
 
@@ -24,7 +24,7 @@
   // Lets the panel surface tools that exist in code but aren't in any
   // hardcoded category below — closes the AGENT-TOOL-FIREWALL-DEFAULT-DRIFT
   // gap from S145 backlog (Mike picked Option 2 in S147 chat).
-  let allRegisteredTools: Array<{name: string; description: string; default_enabled: boolean; is_restricted: boolean}> = [];
+  let allRegisteredTools: Array<{name: string; description: string; default_enabled: boolean; is_restricted: boolean; owner_only?: boolean}> = [];
 
   // Tool modules the backend could not import. Their tools are absent from the
   // list above and from every agent, and until now the only trace was a line in
@@ -974,7 +974,7 @@
         {#each toolCategories as category}
           <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: {category.isDanger ? 'var(--danger)' : 'var(--text-secondary)'};">
             {category.name}
-            {#if category.ownerOnly}
+            {#if categoryOwnerOnly(category, allRegisteredTools)}
               <span class="owner-only-badge" title={OWNER_ONLY_HINT}>{OWNER_ONLY_BADGE}</span>
             {/if}
           </h5>

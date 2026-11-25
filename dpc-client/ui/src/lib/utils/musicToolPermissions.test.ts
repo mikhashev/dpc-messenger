@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MUSIC_TOOL_CATEGORY, musicToolKeys, OWNER_ONLY_BADGE } from './musicToolPermissions';
+import { MUSIC_TOOL_CATEGORY, musicToolKeys, OWNER_ONLY_BADGE, categoryOwnerOnly } from './musicToolPermissions';
 import { getToolLabel, getToolCategory, getCategoryLabel } from './toolDisplay';
 import panel from '../components/AgentPermissionsPanel.svelte?raw';
 
@@ -24,7 +24,7 @@ describe('the Music category', () => {
   });
   it('is in the panel, with the badge, and sets no tool on by itself', () => {
     expect(panel).toContain('MUSIC_TOOL_CATEGORY,');
-    expect(panel).toContain('{#if category.ownerOnly}');
+    expect(panel).toContain('{#if categoryOwnerOnly(category, allRegisteredTools)}');
     expect(panel).toContain('{OWNER_ONLY_BADGE}');
     expect(OWNER_ONLY_BADGE).toBe('owner-only');
     // A tool is on only through the person's toggle (the registry default is off).
@@ -43,5 +43,21 @@ describe('the tool display names', () => {
       expect(getToolLabel(name)).not.toBe(name.replace(/_/g, ' '));
     }
     expect(getCategoryLabel('music')).toBe('MUSIC');
+  });
+});
+
+describe('categoryOwnerOnly', () => {
+  const all = (flag: boolean | undefined) => NAMES.map((name) => ({ name, owner_only: flag }));
+  it('reads the backend flag over the hardcoded one', () => {
+    expect(categoryOwnerOnly(MUSIC_TOOL_CATEGORY, all(false))).toBe(false);
+    expect(categoryOwnerOnly({ name: 'x', tools: [{ key: 'a', label: 'a', desc: 'a' }] }, [{ name: 'a', owner_only: true }])).toBe(true);
+  });
+  it('is not owner-only when one reported tool is not', () => {
+    const mixed = all(true); mixed[2].owner_only = false;
+    expect(categoryOwnerOnly(MUSIC_TOOL_CATEGORY, mixed)).toBe(false);
+  });
+  it('falls back to the hardcoded flag when the field or the tools are missing', () => {
+    expect(categoryOwnerOnly(MUSIC_TOOL_CATEGORY, all(undefined))).toBe(true);
+    expect(categoryOwnerOnly(MUSIC_TOOL_CATEGORY, [])).toBe(true);
   });
 });
