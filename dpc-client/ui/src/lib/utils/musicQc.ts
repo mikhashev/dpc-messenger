@@ -30,6 +30,9 @@ export interface TakeQc {
         error?: string | null;
         judged_at?: string | null;
     };
+    /** A later judge attempt that failed, beside the earlier `done` verdict it left in place
+     *  (core `qc.py`; the next good verdict clears it). */
+    last_attempt?: { status?: string; error?: string | null; at?: string | null; alias?: string | null } | null;
     scores?: TakeQcScores | null;
     issues?: TakeQcIssue[];
     reasons?: string;
@@ -99,6 +102,23 @@ export function qcLine(qc: TakeQc | null | undefined): QcLine | null {
         scores: SCORE_NAMES.filter(([k]) => num(s[k])).map(([k, name]) => ({ name, value: scoreText(s[k]) })),
         details,
     };
+}
+
+/** The muted line under a done verdict when the judge's latest attempt failed (`qc.last_attempt`), or null:
+ *  `Latest judge attempt failed (2026-11-26T10:00:00Z, music_flamingo): the reason`. */
+export function lastAttemptLine(qc: TakeQc | null | undefined): string | null {
+    const att = qc?.last_attempt;
+    if (!att || qc?.judge?.status !== 'done') return null;
+    const reason = (att.error ?? '').trim() || 'no reason given';
+    const when = (att.at ?? '').trim();
+    const who = [when, (att.alias ?? '').trim()].filter(Boolean).join(', ');
+    return `Latest judge attempt failed${who ? ` (${who})` : ''}: ${reason}`;
+}
+
+/** The small error line when `get_music_job_qc` failed: the Judge button and the ranked order depend on it. */
+export function qcUnavailableText(message: string | null | undefined): string {
+    const reason = (message ?? '').trim() || 'no reason given';
+    return `QC info unavailable: ${reason}`;
 }
 
 /** How many issues a done judge heard (a failed or absent judge has none to show). */

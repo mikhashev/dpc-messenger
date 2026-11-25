@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { backfillProblem, judgeOffered, measureQaOffered, orderTakes, qcIssueCount, qcLine, type TakeQc } from './musicQc';
+import { backfillProblem, judgeOffered, lastAttemptLine, measureQaOffered, orderTakes, qcIssueCount, qcLine, qcUnavailableText, type TakeQc } from './musicQc';
 
 const done = (over: Partial<TakeQc> = {}): TakeQc => ({
     judge: { status: 'done', model: 'flamingo', alias: 'music_flamingo', error: null },
@@ -82,5 +82,26 @@ describe('backfillProblem', () => {
         expect(backfillProblem({ outcome: 'no_file' })).toBe('The take has no file to measure.');
         expect(backfillProblem({ outcome: 'failed', error: 'QaError: no ffmpeg' })).toBe('QA could not be measured: QaError: no ffmpeg');
         expect(backfillProblem(undefined)).toBe('The core measured nothing.');
+    });
+});
+
+describe('lastAttemptLine and qcUnavailableText (follow-up 16, Zcode #188 finding 7)', () => {
+    it('shows a failed later attempt beside a done verdict, with its reason, time and alias', () => {
+        const qc = done({ last_attempt: { status: 'failed', error: 'the card stayed busy', at: '2026-11-26T10:00:00Z', alias: 'music_flamingo' } });
+        expect(lastAttemptLine(qc)).toBe('Latest judge attempt failed (2026-11-26T10:00:00Z, music_flamingo): the card stayed busy');
+        expect(qcLine(qc)!.kind).toBe('done');          // the verdict itself is unchanged
+    });
+    it('has no line without an attempt, and none unless a verdict is done', () => {
+        expect(lastAttemptLine(done())).toBeNull();
+        expect(lastAttemptLine(null)).toBeNull();
+        expect(lastAttemptLine({ judge: { status: 'failed', error: 'x' }, last_attempt: { status: 'failed', error: 'x' } })).toBeNull();
+    });
+    it('copes with a missing reason, time and alias', () => {
+        expect(lastAttemptLine(done({ last_attempt: { status: 'failed' } }))).toBe('Latest judge attempt failed: no reason given');
+    });
+    it('words the unavailable QC info with its reason', () => {
+        expect(qcUnavailableText('not_found: no job')).toBe('QC info unavailable: not_found: no job');
+        expect(qcUnavailableText('  ')).toBe('QC info unavailable: no reason given');
+        expect(qcUnavailableText(null)).toBe('QC info unavailable: no reason given');
     });
 });

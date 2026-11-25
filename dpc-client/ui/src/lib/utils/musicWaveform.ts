@@ -107,7 +107,10 @@ export function dragToRegion(
 }
 
 /** The comment under the pointer at `x` px, or null. A point wins over a region and the
- *  nearer point over a farther one; of several regions the narrowest wins. */
+ *  nearer point over a farther one; of several regions the narrowest wins. Every marker is hit
+ *  across at least `MARKER_MIN_HIT_PX`: a `tolerance` under half of it is raised to half of it, and
+ *  a region narrower than it is hit across that width, centred on the region (follow-up 16,
+ *  Zcode #188 finding 11: the minimum was only asserted in a test). */
 export function hitMarker(
     x: number,
     comments: Pick<MusicComment, 'id' | 't_start' | 't_end'>[],
@@ -116,16 +119,18 @@ export function hitMarker(
     tolerance = MARKER_HIT_PX,
 ): string | null {
     if (!(duration > 0) || !(width > 0)) return null;
+    const reach = Math.max(tolerance, MARKER_MIN_HIT_PX / 2);
     let point: { id: string; d: number } | null = null;
     let region: { id: string; w: number } | null = null;
     for (const c of comments) {
         const left = timeToX(c.t_start, duration, width);
         if (c.t_end == null) {
             const d = Math.abs(x - left);
-            if (d <= tolerance && (!point || d < point.d)) point = { id: c.id, d };
+            if (d <= reach && (!point || d < point.d)) point = { id: c.id, d };
         } else {
             const right = timeToX(c.t_end, duration, width);
-            if (x >= left - 1 && x <= right + 1 && (!region || right - left < region.w)) {
+            const pad = Math.max(1, (MARKER_MIN_HIT_PX - (right - left)) / 2);
+            if (x >= left - pad && x <= right + pad && (!region || right - left < region.w)) {
                 region = { id: c.id, w: right - left };
             }
         }

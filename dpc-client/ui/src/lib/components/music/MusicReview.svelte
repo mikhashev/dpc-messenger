@@ -69,10 +69,11 @@
     measureTakeLoudness,
     measureTakeQa,
     musicJobQc,
+    musicJobQcError,
     musicTakes,
     rejectAllTakes,
   } from '$lib/services/musicJobs';
-  import { judgeOffered, measureQaOffered, orderTakes, qcIssueCount, qcLine } from '$lib/utils/musicQc';
+  import { judgeOffered, lastAttemptLine, measureQaOffered, orderTakes, qcIssueCount, qcLine, qcUnavailableText } from '$lib/utils/musicQc';
   import MusicReasonBox from './MusicReasonBox.svelte';
   import MusicComments from './MusicComments.svelte';
   import MusicWaveform from './MusicWaveform.svelte';
@@ -83,6 +84,19 @@
 
   let rawTakes = $derived<MusicTake[]>($musicTakes[job.id] ?? []);
   let jobQc = $derived($musicJobQc[job.id] ?? null);
+  // Why the QC view could not be read: the Judge button and the ranked order depend on it, so say so
+  // (with a retry) instead of letting both vanish.
+  let jobQcError = $derived($musicJobQcError[job.id] ?? '');
+  let qcRetrying = $state(false);
+  async function retryJobQc() {
+    if (qcRetrying) return;
+    qcRetrying = true;
+    try {
+      await fetchJobQc(job.id);
+    } finally {
+      qcRetrying = false;
+    }
+  }
   // Variant order, or the core's ranked order when ranking is on.
   let takes = $derived(orderTakes(rawTakes, jobQc));
   let loadError = $state('');
@@ -356,6 +370,11 @@
   </div>
   {#if loadError}<p class="field-error" role="alert">Could not read the takes: {loadError}</p>{/if}
   {#if !takes.length && !loadError}<p class="muted small">Reading the takes…</p>{/if}
+  {#if jobQcError}
+    <p class="field-error qc-unavailable" role="alert">{qcUnavailableText(jobQcError)}
+      <button type="button" class="small-btn" onclick={retryJobQc} disabled={qcRetrying}>{qcRetrying ? 'Retrying…' : 'Retry'}</button>
+    </p>
+  {/if}
 
   {#if job.type === 'edit' && job.region}
     <p class="muted small edit-line">
@@ -454,6 +473,7 @@
               {#if qcIssueCount(t.qc) > 0}<span class="qc-score">{qcIssueCount(t.qc)} issue{qcIssueCount(t.qc) === 1 ? '' : 's'}</span>{/if}
             </p>
             {#if ql.kind === 'done' && t.qc?.reasons}<p class="muted tiny qc-reasons">{t.qc.reasons}</p>{/if}
+            {#if lastAttemptLine(t.qc)}<p class="muted tiny qc-attempt">{lastAttemptLine(t.qc)}</p>{/if}
           {/if}
           <p class="muted tiny">{takeInfo(t)}</p>
           {#if judgeOffered(jobQc) || measureQaOffered(qa.kind)}
@@ -540,5 +560,7 @@
   .qc-main { font-weight: 600; }
   .qc-score { font-size: 11px; color: #9aa4af; white-space: nowrap; }
   .qc-reasons { margin: 2px 0 0; }
+  .qc-attempt { margin: 2px 0 0; }
+  .qc-unavailable { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; margin: 4px 0; }
   .qc-actions { margin-top: 4px; }
 </style>

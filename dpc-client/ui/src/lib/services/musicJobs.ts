@@ -83,6 +83,10 @@ export const musicTakes = writable<Record<string, MusicTake[]>>({});
 /** Each reviewed job's QC view (`get_music_job_qc`): ranking state, judge alias, display order. */
 export const musicJobQc = writable<Record<string, JobQc>>({});
 
+/** Why a job's QC view could not be read (`get_music_job_qc` failed), by job id; a job that reads fine has none.
+ *  Without it the Judge button disappears and the order falls back to variant order with no word of why. */
+export const musicJobQcError = writable<Record<string, string>>({});
+
 /** The Create form, kept while the panel or the window is closed. */
 export const musicCreateDraft = writable<FromTextForm>(emptyFromTextForm());
 
@@ -356,12 +360,22 @@ export async function stopEngine(engine?: string): Promise<MusicAnswer<{ engine:
 // -- QC of a take (core music/qc_commands.py): the judge and the stage-1 measurement -------------
 
 /** Read a job's QC view (ranking state, judge alias, display order); the takes keep their own `qc`. */
-export async function fetchJobQc(jobId: string): Promise<void> {
-    const a = await getMusicJobQc(jobId);
+export async function fetchJobQc(jobId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    let a: Awaited<ReturnType<typeof getMusicJobQc>>;
+    try {
+        a = await getMusicJobQc(jobId);
+    } catch (e) {
+        a = { ok: false, message: e instanceof Error ? e.message : String(e) } as typeof a;
+    }
     if (a.ok) {
         const { ranking, judge_alias, order, caveat } = a.data;
         musicJobQc.update(m => ({ ...m, [jobId]: { ranking, judge_alias: judge_alias ?? null, order, caveat } }));
+        musicJobQcError.update(({ [jobId]: _gone, ...rest }) => rest);
+        return { ok: true };
     }
+    const message = (a.message ?? '').trim() || 'the core did not answer';
+    musicJobQcError.update(m => ({ ...m, [jobId]: message }));
+    return { ok: false, message };
 }
 
 /** Judge one take with the configured audio judge. A judge that ran and failed is an ok answer whose

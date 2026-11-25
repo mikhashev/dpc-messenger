@@ -105,6 +105,19 @@ describe('marker hit-testing', () => {
         expect(hitMarker(300 - 6, alone, 120, 1200)).toBe('solo');
         expect(hitMarker(300 + 6, alone, 120, 1200)).toBe('solo');
     });
+    it('enforces the 12 px minimum in the code, whatever tolerance a caller passes (follow-up 16)', () => {
+        const alone = [{ id: 'solo', t_start: 30, t_end: null }];
+        expect(hitMarker(300 + 6, alone, 120, 1200, 1)).toBe('solo');
+        expect(hitMarker(300 - 6, alone, 120, 1200, 0)).toBe('solo');
+        expect(hitMarker(300 + 7, alone, 120, 1200, 1)).toBeNull();
+        // a region 2 px wide is hit across 12 px, centred on it
+        const thin = [{ id: 'thin', t_start: 30, t_end: 30.2 }];
+        expect(hitMarker(300 - 5, thin, 120, 1200)).toBe('thin');
+        expect(hitMarker(302 + 5, thin, 120, 1200)).toBe('thin');
+        expect(hitMarker(302 + 7, thin, 120, 1200)).toBeNull();
+        // a wide region keeps its own width (plus the old 1 px of slack)
+        expect(hitMarker(900 + 2, [{ id: 'w', t_start: 60, t_end: 90 }], 120, 1200)).toBeNull();
+    });
     it('takes the nearer of two points', () => {
         expect(hitMarker(308, cs, 120, 1200, 8)).toBe('p2');
     });
