@@ -20,6 +20,8 @@
 //   duration limits; for yue2 the duration is a cap, and the form warns when the cap looks
 //   short for the lyrics (an estimate: ~10 s per sung line plus a ~20 s intro).
 
+import { lyricsPrepFor, type LyricsPrepState } from './musicLyricsPrep';
+
 // -- records from the core (music/job_schemas.py, capabilities.py) -----------------
 
 export type JobState = 'queued' | 'running' | 'review' | 'accepted' | 'rejected' | 'failed' | 'cancelled' | 'unsupported';
@@ -494,6 +496,9 @@ export interface FromTextForm {
     voice?: string;
     voiceMusic?: string | number | null;
     voiceSound?: string | number | null;
+    /** The Prepare lyrics check (music/lyrics_prep.py) and the exact text and engine it describes;
+     *  it becomes the job's `lyrics_prep` only while those still match (`lyricsPrepFor`). */
+    lyricsPrep?: LyricsPrepState | null;
 }
 
 export type FormField = 'lyrics' | 'style' | 'variants' | 'duration' | 'seed' | 'engine' | 'backbone' | 'voice' | 'form';
@@ -565,6 +570,8 @@ export function validateFromTextForm(form: FromTextForm, limits: FromTextLimits 
         }
     }
     if (Object.keys(errors).length) return { ok: false, errors };
+    const prep = lyricsPrepFor(form.lyricsPrep, lyrics, engine);
+    if (Object.keys(prep).length) extra.lyrics_prep = prep;
     return { ok: true, params: { lyrics, style: form.style, variants: v, duration_s: d, seed, engine, ...extra } };
 }
 

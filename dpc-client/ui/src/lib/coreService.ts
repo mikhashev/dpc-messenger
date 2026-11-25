@@ -148,6 +148,7 @@ import { telegramEnabled, telegramConnected, telegramStatus, telegramError, tele
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionCancelled, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
 import type { MusicComment } from './utils/musicComments';
+import type { PrepReport } from './utils/musicLyricsPrep';
 import { callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
 import type { DiscardReason, MusicCapabilities, MusicEngine, MusicJob, MusicTake } from './utils/musicCreate';
 import type { DeleteExportAnswer, MusicExportInfo, PlaylistExportAnswer, TrackExportAnswer } from './utils/musicExport';
@@ -2113,6 +2114,15 @@ export function getMusicTrack(trackId: string): Promise<MusicAnswer<{ entry: Lib
 /** Waveform peaks of a library track: one [min, max] per bucket, each in -1..1. The core decodes with ffmpeg on the first request and caches by content hash. */
 export function getMusicTrackPeaks(trackId: string, n?: number): Promise<MusicAnswer<{ peaks: [number, number][]; duration_s: number; n: number; cached: boolean }>> {
     return callMusic(sendCommand, 'get_music_track_peaks', n ? { track_id: trackId, n } : { track_id: trackId });
+}
+
+/** Lyrics preparation (core music/lyrics_prep.py): syllables, meter, the audit of the stress marks, the stress of each Russian word and the marked text. Read-only: nothing is stored. `choices` maps a word key to the option the person picked for an ambiguous word. */
+export function prepareMusicLyrics(
+    text: string, language = 'auto', choices: Record<string, string> = {}, engine?: string,
+): Promise<MusicAnswer<{ report: PrepReport }>> {
+    return callMusic(sendCommand, 'prepare_music_lyrics', {
+        text, language, choices, ...(engine ? { engine } : {}),
+    });
 }
 
 /** The smart lists (All tracks, Generated), then the person's playlists. */

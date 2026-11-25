@@ -11,7 +11,10 @@
     and sound strengths; lyrics (section tags such as [verse] allowed, sent verbatim), style,
     variants, duration (for YuE2 a cap, with a warning when it looks short for the lyrics:
     an estimate) and an optional seed, checked against the core's limits before sending; a
-    core refusal is shown on the field it names. Generate is off, with the reason, while the
+    core refusal is shown on the field it names. "Prepare lyrics" under the lyrics box opens
+    MusicLyricsPrep.svelte: syllables per line, the meter check, the stress marks and the
+    stress status of each Russian word, and "Use marked lyrics" (YuE2 only), with Undo here;
+    the check is kept as the job's `lyrics_prep` while its text is the text sent. Generate is off, with the reason, while the
     selected engine is not available. With Instrumental ticked on YuE2, a line says what the
     core will choose (`engine_choice_rules`): the instrumental adapter, or acestep.cpp and why;
   - each job row shows its `engine_choice` sentence when a rule chose its engine;
@@ -69,6 +72,8 @@
     stopEngine,
   } from '$lib/services/musicJobs';
   import MusicReview from './MusicReview.svelte';
+  import MusicLyricsPrep from './MusicLyricsPrep.svelte';
+  import { stressMarkNote, type LyricsPrepState } from '$lib/utils/musicLyricsPrep';
 
   const JOB_ROWS = 20;
 
@@ -173,6 +178,34 @@
     } finally {
       generating = false;
     }
+  }
+
+  // -- prepare lyrics (MusicLyricsPrep.svelte; core music/lyrics_prep.py) ------------------
+
+  let prepOpen = $state(false);
+  /** What "Use marked lyrics" replaced, for Undo: the person's text, their check record, the marked text. */
+  let usedMarks = $state<{ lyrics: string; prep: LyricsPrepState | null; marked: string; count: number } | null>(null);
+  let canPrepare = $derived(!$musicCreateDraft.instrumental && $musicCreateDraft.lyrics.trim() !== '');
+  let markNote = $derived(stressMarkNote($musicCreateDraft.lyrics, selectedEngine));
+  let undoable = $derived(usedMarks !== null && usedMarks.marked === $musicCreateDraft.lyrics);
+
+  function onPrepared(state: LyricsPrepState) {
+    musicCreateDraft.update(f => ({ ...f, lyricsPrep: state }));
+  }
+
+  function useMarked(marked: string, state: LyricsPrepState) {
+    const before = $musicCreateDraft;
+    usedMarks = { lyrics: before.lyrics, prep: before.lyricsPrep ?? null, marked, count: state.record.marks_inserted ?? 0 };
+    musicCreateDraft.update(f => ({ ...f, lyrics: marked, lyricsPrep: state }));
+    prepOpen = false;
+    clearError('lyrics');
+  }
+
+  function undoMarks() {
+    if (!usedMarks) return;
+    const u = usedMarks;
+    musicCreateDraft.update(f => ({ ...f, lyrics: u.lyrics, lyricsPrep: u.prep }));
+    usedMarks = null;
   }
 
   // -- jobs ------------------------------------------------------------------------
@@ -311,10 +344,23 @@
       aria-describedby="mc-lyrics-help mc-lyrics-error"
     ></textarea>
     <p id="mc-lyrics-help" class="muted tiny">Section tags such as [verse], [chorus], [bridge] are allowed. The text is sent exactly as written (line breaks and stress marks stay).</p>
-    <label class="check">
-      <input type="checkbox" bind:checked={$musicCreateDraft.instrumental} onchange={() => clearError('lyrics')} />
-      <span class="small">Instrumental (no lyrics)</span>
-    </label>
+    <div class="form-row">
+      <button type="button" class="small-btn" onclick={() => (prepOpen = !prepOpen)} disabled={!canPrepare && !prepOpen}
+        aria-expanded={prepOpen}
+        title="Counts syllables per line, checks the meter and the stress marks, and finds the stress of Russian words">Prepare lyrics</button>
+      <label class="check">
+        <input type="checkbox" bind:checked={$musicCreateDraft.instrumental} onchange={() => { clearError('lyrics'); prepOpen = false; }} />
+        <span class="small">Instrumental (no lyrics)</span>
+      </label>
+    </div>
+    {#if usedMarks && undoable}
+      <p class="muted tiny" role="status">Marked lyrics are in the box: {usedMarks.count} stress {usedMarks.count === 1 ? 'mark' : 'marks'} added.
+        <button type="button" class="small-btn" onclick={undoMarks}>Undo</button></p>
+    {/if}
+    {#if markNote}<p class="warn-text" role="status">{markNote}</p>{/if}
+    {#if prepOpen}
+      <MusicLyricsPrep text={$musicCreateDraft.lyrics} engine={selectedEngine} onprepared={onPrepared} onuse={useMarked} onclose={() => (prepOpen = false)} />
+    {/if}
     {#if instrumentalNote}<p class="muted tiny" role="status">{instrumentalNote}</p>{/if}
     <p id="mc-lyrics-error" class="field-error" role="alert">{errors.lyrics ?? ''}</p>
 
