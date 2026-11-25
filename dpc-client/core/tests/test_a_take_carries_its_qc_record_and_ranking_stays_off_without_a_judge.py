@@ -213,6 +213,22 @@ def test_the_prompt_carries_the_flows_rubric_and_the_lyrics():
 # -- lyrics WER ---------------------------------------------------------------------------
 
 
+def test_a_song_jobs_lyrics_as_a_list_of_lines_are_target_lyrics_too():
+    """A song job (cover, generate_from_lyrics) stores its lyrics as a list of lines: the WER reads them."""
+    lines = ["[verse]", "night drive, city lights", "[chorus]", "we never stop"]
+    as_list = qc.target_lyrics_of({"type": "cover", "params": {"lyrics": lines}})
+    assert as_list == qc.target_lyrics_of({"type": "generate_from_text", "params": {"lyrics": "\n".join(lines)}})
+    assert as_list == "\n".join(lines)
+    assert qc.target_lyrics_of({"type": "cover", "params": {"lyrics": ["[verse]"]}}) is None    # tags only
+    assert qc.target_lyrics_of({"type": "generate_similar", "params": {"lyrics": None}}) is None
+    take = {"file": {"content_hash": "sha256:" + "1" * 64}}
+    stored = {"source": "transcribe", "track_hash": "sha256:" + "1" * 64,
+              "lines": [{"t": 0.0, "text": "night drive, city lights"}, {"t": 2.0, "text": "we never stop"}],
+              "transcription": {"provider": "local_whisper", "model": "large-v3"}}
+    entry = qc.lyrics_wer_entry(as_list, stored, take)
+    assert entry["status"] == "measured" and entry["value"] == 0.0
+
+
 def test_wer_is_read_from_a_stored_transcription_only():
     take = {"file": {"content_hash": "sha256:" + "1" * 64}}
     stored = {"source": "transcribe", "track_hash": "sha256:" + "1" * 64,

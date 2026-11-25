@@ -137,8 +137,11 @@ def word_error_rate(reference: List[str], hypothesis: List[str]) -> float:
 
 def target_lyrics_of(job: Mapping[str, Any]) -> Optional[str]:
     """The lyrics the take was asked to sing, or None (an instrumental, or a flow whose target
-    lyrics this module does not read: an edit's are the track's own)."""
+    lyrics this module does not read: an edit's are the track's own). A text job keeps them as one
+    text; a song job (`similar.py`) as a list of lines, which is joined with line breaks."""
     lyrics = (job.get("params") or {}).get("lyrics")
+    if isinstance(lyrics, list):
+        lyrics = "\n".join(line for line in lyrics if isinstance(line, str))
     return lyrics if isinstance(lyrics, str) and lyrics_words(lyrics) else None
 
 
