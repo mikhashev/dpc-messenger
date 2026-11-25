@@ -497,3 +497,48 @@ async def test_the_real_ffmpeg_flags_the_fake_engines_fifty_milliseconds_as_too_
     assert report["gates"]["length"]["status"] == "fail" and report["verdict"] == "failed"
     assert report["gates"]["length"]["requested_s"] == 30.0
     assert take["decision"] == "pending"
+
+
+# -- follow-up 14 (Zcode #176) -----------------------------------------------------------------
+
+def test_a_loudness_record_without_a_true_peak_is_measured_again_so_true_peak_is_judged():
+    seen = []
+    loud = {"lufs_i": -15.5, "lra": 1.0, "true_peak_dbtp": None}
+    rec = measure_take_qa(Path(__file__), requested_s=8.0, loudness=loud, tools=fake_tools(seen=seen))
+    (cmd, _timeout), = seen
+    assert "ebur128" in cmd[cmd.index("-af") + 1]
+    assert statuses(rec)["true_peak"] == "pass"
+    assert rec["qa"]["true_peak_dbtp"] == -18.1
+    assert rec["qa_report"]["measurements"]["loudness_source"] == "ebur128 in the same ffmpeg pass"
+
+
+def test_a_loudness_record_with_both_numbers_is_still_not_measured_again():
+    seen = []
+    loud = {"lufs_i": -15.5, "lra": 1.0, "true_peak_dbtp": -12.3}
+    rec = measure_take_qa(Path(__file__), requested_s=8.0, loudness=loud, tools=fake_tools(seen=seen))
+    (cmd, _timeout), = seen
+    assert "ebur128" not in cmd[cmd.index("-af") + 1]
+    assert rec["qa"]["true_peak_dbtp"] == -12.3
+
+
+def test_a_short_cap_has_a_floor_of_half_the_cap_not_ten_seconds():
+    # A 6 s YuE2 request: a 5 s take is a song that ended early, not a failure.
+    assert qa.length_gate(6.0, 5.0, "cap")["status"] == "pass"
+    assert qa.length_gate(6.0, 3.5, "cap")["status"] == "pass"
+    short = qa.length_gate(6.0, 2.5, "cap")
+    assert short["status"] == "fail" and short["floor_s"] == 3.0
+    # A long cap keeps the 10 s floor.
+    assert qa.length_gate(180.0, 9.0, "cap")["status"] == "fail"
+    assert qa.length_gate(180.0, 11.0, "cap")["status"] == "pass"
+    assert qa.cap_floor_s(30.0) == 10.0 and qa.cap_floor_s(12.0) == 6.0
+    assert "50% of the cap" in qa.THRESHOLDS["length_cap_min"]
+
+
+def test_a_take_under_the_cap_floor_is_a_valid_record_that_names_the_floor():
+    rec = measure_take_qa(Path(__file__), requested_s=30.0, length_mode="cap", tools=fake_tools())
+    assert statuses(rec)["length"] == "fail"
+    assert rec["qa_report"]["gates"]["length"]["floor_s"] == 10.0
+    assert_valid(rec)
+    short_cap = measure_take_qa(Path(__file__), requested_s=12.0, length_mode="cap", tools=fake_tools())
+    assert statuses(short_cap)["length"] == "pass", "8 s is over half of a 12 s cap"
+    assert_valid(short_cap)

@@ -28,7 +28,9 @@ SPEC §8; each is in the report's `thresholds` so a reader sees the number that 
   must be within `max(2 s, 5 %)` of the request (`exact`). YuE2 ends the song itself at its end
   token and `duration_s` is only a cap (`job_schemas`), so a short take is normal: it fails only
   when it is longer than the cap by more than `LENGTH_EXACT_MIN_TOLERANCE_S` or shorter than
-  `LENGTH_CAP_MIN_S` (10 s, nothing usable) (`cap`). "Well outside": the existing 0.5 s
+  `min(LENGTH_CAP_MIN_S, LENGTH_CAP_MIN_FRACTION x cap)` (10 s, nothing usable; half the cap
+  when the cap is under 20 s, so a short request is not failed by every take, follow-up 14,
+  Zcode #176) (`cap`). "Well outside": the existing 0.5 s
   engine-window check (`runner.length_check_of`) stays advisory; this gate is a bug detector
   for a take that is plainly the wrong length. SPEC §8 lets this gate reject a take; stage 1
   only flags it: no take is rejected or dropped by QA (the person's Keep / Discard stays final).
@@ -85,6 +87,7 @@ TRUE_PEAK_MAX_DBTP = -1.0           # SPEC §8
 LENGTH_EXACT_MIN_TOLERANCE_S = 2.0
 LENGTH_EXACT_TOLERANCE_FRACTION = 0.05
 LENGTH_CAP_MIN_S = 10.0
+LENGTH_CAP_MIN_FRACTION = 0.5       # the floor is never above half the cap (Zcode #176)
 LENGTH_SAME_TOLERANCE_S = 0.001     # an edit take keeps the control's length (decision 23): a frame or so
 LENGTH_EXACT, LENGTH_CAP, LENGTH_SAME = "exact", "cap", "same"
 LENGTH_MODES = (LENGTH_EXACT, LENGTH_CAP, LENGTH_SAME)
@@ -100,6 +103,7 @@ THRESHOLDS: Dict[str, Any] = {
     "true_peak_max_dbtp": TRUE_PEAK_MAX_DBTP,
     "length_exact_tolerance": f"max({LENGTH_EXACT_MIN_TOLERANCE_S:g} s, {LENGTH_EXACT_TOLERANCE_FRACTION:.0%})",
     "length_cap_min_s": LENGTH_CAP_MIN_S,
+    "length_cap_min": f"min({LENGTH_CAP_MIN_S:g} s, {LENGTH_CAP_MIN_FRACTION:.0%} of the cap)",
     "length_same_tolerance_s": LENGTH_SAME_TOLERANCE_S,
 }
 
@@ -235,9 +239,15 @@ def _gate(status: str, detail: str, **values: Any) -> Dict[str, Any]:
     return {"status": status, "detail": detail, **values}
 
 
+def cap_floor_s(requested_s: float) -> float:
+    """The shortest take a `cap` request accepts: `LENGTH_CAP_MIN_S`, or half the cap when that
+    is less (a 6 s request with a fixed 10 s floor failed every take)."""
+    return min(LENGTH_CAP_MIN_S, LENGTH_CAP_MIN_FRACTION * requested_s)
+
+
 def length_gate(requested_s: Optional[float], received_s: Optional[float], mode: str) -> Dict[str, Any]:
     """Received length against the request. `exact`: within `max(2 s, 5 %)` of it. `cap`: not
-    over it by more than the minimum tolerance and not under `LENGTH_CAP_MIN_S`."""
+    over it by more than the minimum tolerance and not under `cap_floor_s(requested_s)`."""
     if received_s is None:
         return _gate(js.GATE_NOT_MEASURED, "the length of the file could not be read", mode=mode)
     if requested_s is None or requested_s <= 0:
@@ -259,9 +269,11 @@ def length_gate(requested_s: Optional[float], received_s: Optional[float], mode:
         if received_s > requested_s + LENGTH_EXACT_MIN_TOLERANCE_S:
             return _gate(js.GATE_FAIL, f"{received_s:.1f} s is longer than the {requested_s:g} s cap",
                          tolerance_s=LENGTH_EXACT_MIN_TOLERANCE_S, **common)
-        if received_s < LENGTH_CAP_MIN_S:
-            return _gate(js.GATE_FAIL, f"{received_s:.1f} s is under {LENGTH_CAP_MIN_S:g} s, too short to be a song",
-                         tolerance_s=LENGTH_EXACT_MIN_TOLERANCE_S, **common)
+        floor = cap_floor_s(requested_s)
+        if received_s < floor:
+            return _gate(js.GATE_FAIL, f"{received_s:.1f} s is under {floor:g} s, too short to be a song "
+                                       f"for a {requested_s:g} s cap",
+                         tolerance_s=LENGTH_EXACT_MIN_TOLERANCE_S, floor_s=round(floor, 2), **common)
         return _gate(js.GATE_PASS, f"{received_s:.1f} s within the {requested_s:g} s cap (the engine ends the song itself)",
                      tolerance_s=LENGTH_EXACT_MIN_TOLERANCE_S, **common)
     if abs(delta) > tol:
@@ -430,7 +442,9 @@ def measure_take_qa(path: Path, *, requested_s: Optional[float], length_mode: st
                     tool_version: Optional[str] = None, tools: Optional[MediaTools] = None,
                     edit: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Measure one take file and return `{qa, qa_report}`. `loudness` is the take's ebur128
-    record when it has one (then ebur128 is not run again); `duration_s` its exact length when
+    record when it has one with both the integrated loudness and the true peak (then ebur128 is
+    not run again; a record missing either is measured again, Zcode #176); `duration_s` its exact
+    length when
     known. `edit` is a region-edit take's `{action, zone: (t0, t1) or None, expects_silence,
     seams: {entry, qa_fields}}` (`region_edit`): the silence gate judges outside the zone and looks
     for a hole inside it, and the seam numbers fill `mp.qa/1`. Blocking: call it through
@@ -438,7 +452,9 @@ def measure_take_qa(path: Path, *, requested_s: Optional[float], length_mode: st
     could not read is a `not_measured` gate."""
     if length_mode not in LENGTH_MODES:
         raise QaError(f"unknown length mode {length_mode!r}")
-    have_loudness = isinstance(loudness, Mapping) and isinstance(loudness.get("lufs_i"), (int, float))
+    have_loudness = (isinstance(loudness, Mapping)
+                     and isinstance(loudness.get("lufs_i"), (int, float))
+                     and isinstance(loudness.get("true_peak_dbtp"), (int, float)))
     err = run_ffmpeg_pass(Path(path), tools, with_loudness=not have_loudness)
     by = f"{tool_version}: ebur128+astats+silencedetect" if tool_version else TOOLS_NAME
 
