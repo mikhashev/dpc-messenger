@@ -1531,11 +1531,11 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     // and ebur128 reads a whole take (up to 10 minutes of audio).
                     timeout = 180000;
                 } else if (command === 'export_music_track') {
-                    // 600s: an MP3 encode of a long track, its ebur128 check and, when it overshoots
+                    // 600s: an MP3 or Opus encode of a long track, its ebur128 check and, when it overshoots
                     // -1 dBTP, up to three more encodes (music/export.py MAX_ENCODES).
                     timeout = 600000;
                 } else if (command === 'export_music_playlist') {
-                    // 1800s: every track of the playlist that has no MP3 yet is encoded in turn.
+                    // 1800s: every track of the playlist that has no file in this preset yet is encoded in turn.
                     timeout = 1800000;
                 } else if (command === 'send_image') {
                     // Image vision analysis timeout: 240s (v0.20.0+), for the plain AI chat;
@@ -2165,18 +2165,27 @@ export function deleteGeneratedMusicFile(trackId: string): Promise<MusicAnswer<{
     return callMusic(sendCommand, 'delete_generated_music_file', { track_id: trackId });
 }
 
-// --- MP3 export (Mike #210; dpc_client_core/music/export.py) ---
+// --- MP3 and Opus export (Mike #210, #171; dpc_client_core/music/export.py) ---
 // The core resolves the file from the library by id and decides the name, the folder and
-// whether the export already exists; the UI sends only ids and a preset.
+// whether the export already exists; the UI sends only ids, a preset and, only when the person
+// switched the true-peak limit off, `limit_true_peak: false` (the core's default is on).
 
-/** Export one track as MP3; the same track and preset again answers the existing file. */
-export function exportMusicTrack(trackId: string, preset?: string): Promise<MusicAnswer<TrackExportAnswer>> {
-    return callMusic(sendCommand, 'export_music_track', preset ? { track_id: trackId, preset } : { track_id: trackId });
+/** Export one track as MP3 or Opus; the same track, preset and limit again answers the existing file. */
+export function exportMusicTrack(trackId: string, preset?: string, limitTruePeak = true): Promise<MusicAnswer<TrackExportAnswer>> {
+    return callMusic(sendCommand, 'export_music_track', {
+        track_id: trackId,
+        ...(preset ? { preset } : {}),
+        ...(limitTruePeak ? {} : { limit_true_peak: false }),
+    });
 }
 
-/** Export a playlist into one folder of numbered MP3s; tracks already exported are linked, not encoded again. */
-export function exportMusicPlaylist(playlistId: string, preset?: string): Promise<MusicAnswer<PlaylistExportAnswer>> {
-    return callMusic(sendCommand, 'export_music_playlist', preset ? { playlist_id: playlistId, preset } : { playlist_id: playlistId });
+/** Export a playlist into one folder of numbered files; tracks already exported are linked, not encoded again. */
+export function exportMusicPlaylist(playlistId: string, preset?: string, limitTruePeak = true): Promise<MusicAnswer<PlaylistExportAnswer>> {
+    return callMusic(sendCommand, 'export_music_playlist', {
+        playlist_id: playlistId,
+        ...(preset ? { preset } : {}),
+        ...(limitTruePeak ? {} : { limit_true_peak: false }),
+    });
 }
 
 /** Delete one single export's file and its index entry; the core refuses anything outside the export folder. */

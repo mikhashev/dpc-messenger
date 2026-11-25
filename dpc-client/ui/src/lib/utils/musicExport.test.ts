@@ -7,7 +7,9 @@ import {
     exportDateText,
     exportFolderWarning,
     exportSizeText,
+    DEFAULT_LIMIT_TRUE_PEAK,
     deleteCopyConfirm,
+    exportFormatName,
     exportToggleLabel,
     fileNameOf,
     limiterNote,
@@ -22,6 +24,7 @@ import {
 } from './musicExport';
 import player from '../components/music/MusicPlayer.svelte?raw';
 import core from '../coreService.ts?raw';
+import store from '../services/musicExports.ts?raw';
 
 const v0: MusicExportRecord = { export_id: 'e0', preset: 'mp3-v0', format: 'mp3', path: 'C:\\Users\\m\\.dpc\\exports\\music\\Band - Song.mp3', name: 'Band - Song.mp3', limited_db: -1 };
 const cbr: MusicExportRecord = { export_id: 'e1', preset: 'mp3-320', format: 'mp3', path: '/home/m/.dpc/exports/music/Band - Song (320 kbps).mp3', name: 'Band - Song (320 kbps).mp3', limited_db: null };
@@ -34,12 +37,24 @@ describe('names and presets', () => {
         expect(fileNameOf(null)).toBe('');
     });
 
-    it('defaults to V0 and offers 320 too', () => {
+    it('defaults to V0 and offers 320 and Opus 160 too', () => {
         expect(DEFAULT_EXPORT_PRESET).toBe('mp3-v0');
-        expect(EXPORT_PRESETS.map(p => p.id)).toEqual(['mp3-v0', 'mp3-320']);
+        expect(EXPORT_PRESETS.map(p => p.id)).toEqual(['mp3-v0', 'mp3-320', 'opus-160']);
         expect(presetShortLabel('mp3-v0')).toBe('MP3 V0');
         expect(presetShortLabel('mp3-320')).toBe('MP3 320');
+        expect(presetShortLabel('opus-160')).toBe('Opus 160');
         expect(presetShortLabel('opus-128')).toBe('opus-128');
+    });
+
+    it('names the format a preset writes, for the buttons and status lines', () => {
+        expect(exportFormatName('mp3-v0')).toBe('MP3');
+        expect(exportFormatName('mp3-320')).toBe('MP3');
+        expect(exportFormatName('opus-160')).toBe('Opus');
+        expect(exportFormatName(undefined)).toBe('MP3');
+    });
+
+    it('keeps the true-peak limit on by default, the way Mike decided', () => {
+        expect(DEFAULT_LIMIT_TRUE_PEAK).toBe(true);
     });
 
     it('names the limiter only when it ran', () => {
@@ -78,6 +93,16 @@ describe('the result lines', () => {
             .toBe('Already exported: mine.mp3 (found under its new name)');
     });
 
+    it('says no limit for an export made with the limit off, on the line, the copy and the chip', () => {
+        expect(trackExportLine({ track_id: 't', path: '/x/a (no limit).opus', name: 'a (no limit).opus', already_exported: false, preset: 'opus-160', limit_true_peak: false, limited_db: null }))
+            .toBe('Exported: a (no limit).opus · no limit');
+        const off: MusicExportRecord = { ...v0, preset: 'opus-160', format: 'opus', name: 'a (no limit).opus', limited_db: null, limit_true_peak: false, size_bytes: 1_048_576 };
+        expect(exportCopyDetail(off)).toBe('Opus 160 · 1.0 MB · no limit');
+        expect(exportChip([off])?.label).toBe('opus');
+        expect(exportChip([off])?.title).toContain('no limit');
+        expect(exportCopyDetail({ ...off, limit_true_peak: true, limited_db: -1 })).toBe('Opus 160 · 1.0 MB · limited to −1 dBTP');
+    });
+
     it('counts a playlist export', () => {
         const line = playlistExportLine({
             playlist_id: 'pl_1', folder: '/x/exports/music/Road trip', preset: 'mp3-v0', removed: ['01 - old.mp3'],
@@ -105,9 +130,26 @@ describe('the result lines', () => {
 describe('the window wiring', () => {
     it('offers Export MP3 in the row menu, on the now-playing card and on a playlist', () => {
         expect(player).toContain('onclick={() => exportRow(row.entry!)}');
-        expect(player).toContain('>Export MP3…</button>');
-        expect(player).toContain('onclick={() => cur && exportTrackMp3(cur.id, cur.title)}');
-        expect(player).toContain('>Export playlist as MP3</button>');
+        expect(player).toContain('>Export…</button>');
+        expect(player).toContain('onclick={() => cur && exportTrackFile(cur.id, cur.title)}');
+        expect(player).toContain('>Export playlist</button>');
+    });
+
+    it('puts the true-peak switch beside every preset select, on by default', () => {
+        const snippet = player.slice(player.indexOf('{#snippet presetSelect'), player.indexOf('{/snippet}', player.indexOf('{#snippet presetSelect')));
+        expect(snippet).toContain('bind:checked={$musicExportLimit}');
+        expect(snippet).toContain('Limit peaks (−1 dBTP)');
+        expect(player).toContain("{@render presetSelect('Export preset for this track')}");
+        expect(player).toContain("{@render presetSelect('Export preset for the playlist export')}");
+        expect(player).toContain('{@render presetSelect(`Export preset for ${row.entry.title}`)}');
+    });
+
+    it('sends limit_true_peak: false only when the switch is off, and never a preset the person did not pick', () => {
+        expect(core).toContain('...(limitTruePeak ? {} : { limit_true_peak: false })');
+        expect(core).toContain('exportMusicTrack(trackId: string, preset?: string, limitTruePeak = true)');
+        expect(core).toContain('exportMusicPlaylist(playlistId: string, preset?: string, limitTruePeak = true)');
+        expect(store).toContain('limitTruePeak ?? get(musicExportLimit)');
+        expect(store).toContain('export const musicExportLimit = writable<boolean>(DEFAULT_LIMIT_TRUE_PEAK);');
     });
 
     it('reveals the file through the existing helper; a row has the copies toggle and the card the chip', () => {
@@ -116,8 +158,8 @@ describe('the window wiring', () => {
         expect(player).toContain('{@render exportChipTag(cur)}');
     });
 
-    it('the core door sends ids only and the export done event reaches the store', () => {
-        expect(core).toContain("callMusic(sendCommand, 'export_music_track', preset ? { track_id: trackId, preset } : { track_id: trackId })");
+    it('the core door sends ids, a preset and the switch only when it is off, and the export done event reaches the store', () => {
+        expect(core).toContain("callMusic(sendCommand, 'export_music_track', {");
         expect(core).toContain("callMusic(sendCommand, 'export_music_playlist'");
         expect(core).toContain('message.event === "music_export_done"');
         expect(core).toContain("command === 'export_music_track'");

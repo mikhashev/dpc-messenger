@@ -582,6 +582,16 @@ consensus 2026-11-20)") and are not decisions.
   in the window. Tests and real ffmpeg runs on Windows only; not yet tried in the app, and
   Linux and macOS not run. A tree of exported copies under the track is a LOW card
   (A-TRACKS-EXPORTED-COPIES-SHOW-ONLY-AS-A-CHIP-AND-A-ONE-TIME-NOTICE-NOT-AS-A-TREE-OF-VERSIONS).*
+  *Update 2026-11-25, **decided by Mike**, AI Studio group #171: the lossy export keeps the -1 dBTP
+  limit by default, with a switch in the export controls to turn it off for one export
+  (`limit_true_peak`; the unlimited file is a separate export, named `... (no limit).<ext>` and
+  tagged `DPC_EXPORT_TP_LIMIT=off`), and an Opus 160 kbps preset is added for sending to messengers.
+  Presets: `mp3-v0`, `mp3-320`, `opus-160`. CC's choice [P] inside that: `opus-160` is libopus VBR in an
+  Ogg container with the `.opus` extension, 48 kHz, tagged with Vorbis comments carrying the same
+  provenance, export marker and lyrics as the MP3 (`LYRICS` for `USLT`); the tag packet is written by
+  hand, as the ID3 tag is. A single track's copies list names the playlist-folder files of the same song
+  and Delete says they stay. Tests with a real ffmpeg (libopus) ran on Windows only; Linux and macOS not
+  run, and Opus playback in the macOS webview is not tried (the export is for other players).*
 
 - **D37. The GPU card in slice 1: the job waits, the person presses "Stop X"; amended by Mike
   #70** (SPEC §12 decision 32; Mike's call 2026-11-20 09:56, defaults as proposed by CC;

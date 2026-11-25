@@ -1,4 +1,4 @@
-// MP3 exports of the Music Player (Mike #210; core: dpc_client_core/music/export.py).
+// MP3 and Opus exports of the Music Player (Mike #210, #171; core: dpc_client_core/music/export.py).
 // One store for what exists (the "mp3" chips, the export folder, its warning), and one for
 // the export that runs or has just finished, keyed by the track or playlist id it was asked
 // for, so the row, the now-playing card and the playlist bar each show their own line. The
@@ -9,6 +9,8 @@ import { writable, get } from 'svelte/store';
 import { deleteMusicExport, exportMusicPlaylist, exportMusicTrack, getMusicExportInfo } from '$lib/coreService';
 import {
     DEFAULT_EXPORT_PRESET,
+    DEFAULT_LIMIT_TRUE_PEAK,
+    exportFormatName,
     playlistExportLine,
     trackExportLine,
     type MusicExportInfo,
@@ -28,6 +30,9 @@ export const musicExportStatus = writable<Record<string, ExportStatus>>({});
 
 /** The preset the person picked last in this session. */
 export const musicExportPreset = writable<string>(DEFAULT_EXPORT_PRESET);
+
+/** The export switch: keep the -1 dBTP true-peak limit (Mike's default, #171) or export the audio as it comes. */
+export const musicExportLimit = writable<boolean>(DEFAULT_LIMIT_TRUE_PEAK);
 
 let loading: Promise<void> | null = null;
 /** A read was asked for while one was under way: that one may predate the change the asker
@@ -84,32 +89,34 @@ export function noteMusicExportsChanged(payload: { reasons?: string[] } | null |
 }
 
 /** Export one track; the line says "Exported", "Already exported" or the core's error. */
-export async function exportTrackMp3(trackId: string, title: string, preset?: string): Promise<void> {
+export async function exportTrackFile(trackId: string, title: string, preset?: string, limitTruePeak?: boolean): Promise<void> {
     const current = get(musicExportStatus)[trackId];
     if (current?.running) return;
-    setStatus(trackId, { running: true, text: `Exporting "${title}" as MP3…`, path: null, error: false });
-    const a = await exportMusicTrack(trackId, preset ?? get(musicExportPreset));
+    const chosen = preset ?? get(musicExportPreset);
+    setStatus(trackId, { running: true, text: `Exporting "${title}" as ${exportFormatName(chosen)}…`, path: null, error: false });
+    const a = await exportMusicTrack(trackId, chosen, limitTruePeak ?? get(musicExportLimit));
     if (a.ok) {
         setStatus(trackId, { running: false, text: trackExportLine(a.data), path: a.data.path, error: false });
         await loadMusicExports();
     } else {
-        const text = a.unavailable ? 'MP3 export is not available on this backend yet.' : a.message;
+        const text = a.unavailable ? 'Export is not available on this backend yet.' : a.message;
         setStatus(trackId, { running: false, text, path: null, error: true });
     }
 }
 
 /** Export a playlist into its own folder; the line counts what was done. */
-export async function exportPlaylistMp3(playlistId: string, name: string, preset?: string): Promise<void> {
+export async function exportPlaylistFiles(playlistId: string, name: string, preset?: string, limitTruePeak?: boolean): Promise<void> {
     const current = get(musicExportStatus)[playlistId];
     if (current?.running) return;
-    setStatus(playlistId, { running: true, text: `Exporting the playlist "${name}" as MP3…`, path: null, error: false });
-    const a = await exportMusicPlaylist(playlistId, preset ?? get(musicExportPreset));
+    const chosen = preset ?? get(musicExportPreset);
+    setStatus(playlistId, { running: true, text: `Exporting the playlist "${name}" as ${exportFormatName(chosen)}…`, path: null, error: false });
+    const a = await exportMusicPlaylist(playlistId, chosen, limitTruePeak ?? get(musicExportLimit));
     if (a.ok) {
         const failed = a.data.tracks.some(t => t.status === 'error');
         setStatus(playlistId, { running: false, text: playlistExportLine(a.data), path: a.data.folder, error: failed });
         await loadMusicExports();
     } else {
-        const text = a.unavailable ? 'MP3 export is not available on this backend yet.' : a.message;
+        const text = a.unavailable ? 'Export is not available on this backend yet.' : a.message;
         setStatus(playlistId, { running: false, text, path: null, error: true });
     }
 }

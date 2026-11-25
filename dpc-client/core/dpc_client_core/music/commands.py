@@ -74,8 +74,11 @@ yue2 (before 2026-11-21 there was only acestep, and a call without `engine` mean
 The person's own changes (propose, cancel, keep, discard, none of these) are broadcast the
 same way, so a second window sees them.
 
-**MP3 export** (`music/export.py`, Mike #210; the design is CC's proposal [P]):
-`export_music_track {track_id, preset?}`, `export_music_playlist {playlist_id, preset?}` and
+**Lossy export** (`music/export.py`, Mike #210 and #171; the design is CC's proposal [P]); presets
+`mp3-v0` (default), `mp3-320` and `opus-160` (Opus 160 kbps in an Ogg `.opus` file for messengers):
+`export_music_track {track_id, preset?, limit_true_peak?}`, `export_music_playlist {playlist_id, preset?,
+limit_true_peak?}` (`limit_true_peak` defaults to true, the -1 dBTP limit Mike decided to keep; false makes
+a separate, unlimited export) and
 `get_music_export_info {track_id?}` and `delete_music_export {export_id | path}`. The source file is always the library's own path for the
 track id; the UI never sends a path. The root is `[music] export_dir`
 (`DPC_MUSIC_EXPORT_DIR`), by default `<DPC home>/exports/music`, outside every watched folder;
@@ -84,7 +87,7 @@ broadcast as `music_export_done {track_id, path}`, a playlist as `{playlist_id, 
 folder). Every change to what the library lists is also broadcast, coalesced to at most one
 per `DEFAULT_CHANGE_DELAY_S` window, as `music_library_changed {version, reasons, track_ids,
 track_ids_truncated}`; the UI re-reads on it instead of polling. The take's measured true peak (`loudness.true_peak_dbtp`) decides whether the -1 dBTP
-limiter runs; its sidecar and stored lyrics go into the MP3's tags.
+limiter runs; its sidecar and stored lyrics go into the file's tags (ID3 in an MP3, Vorbis comments in an Opus).
 **For the agent tools** (music tools part 1, 2026-11-24; the tools call these on `CoreService`, they
 are not on the UI door, except that `propose_music_job` and `cancel_music_job` take an optional
 `requested_by`): `propose_music_job(..., requested_by={kind: "agent", agent_id, conversation_id?,
@@ -173,6 +176,16 @@ def _bad(code: str, field: str, what: str) -> MusicJobError:
 def _need_str(value: Any, field: str, code: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise _bad(code, field, "a non-empty string")
+    return value
+
+
+def _opt_flag(value: Any, field: str, default: bool) -> bool:
+    """An optional boolean command parameter (`default` when it is absent or null); anything but a
+    JSON boolean is `invalid_params`."""
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise MusicLibraryError("invalid_params", f"{field} must be true or false")
     return value
 
 
@@ -1335,20 +1348,23 @@ class MusicCommandsMixin:
         return None
 
     @slow_command
-    async def export_music_track(self, track_id: Any = None, preset: Any = None) -> Dict[str, Any]:
-        """Export one library track as MP3 (`music/export.py`): `{status, track_id, path, name,
-        already_exported, relinked, preset, limited_db, true_peak_out_dbtp}`. The same track
-        and preset again answers the existing file. Slow: ffmpeg encodes and measures.
-        Errors: `unknown_track`, `no_file`, `not_hashed`, `invalid_preset`, `no_ffmpeg`,
-        `no_mp3_encoder`, `encode_failed`, `invalid_export_dir`."""
+    async def export_music_track(self, track_id: Any = None, preset: Any = None,
+                                 limit_true_peak: Any = None) -> Dict[str, Any]:
+        """Export one library track as MP3 or Opus (`music/export.py`): `{status, track_id, path, name,
+        already_exported, relinked, preset, limit_true_peak, limited_db, true_peak_out_dbtp}`. The same
+        track, preset and `limit_true_peak` again answers the existing file; `limit_true_peak` is true
+        unless the person switched it off. Slow: ffmpeg encodes and measures.
+        Errors: `unknown_track`, `no_file`, `not_hashed`, `invalid_preset`, `invalid_params`, `no_ffmpeg`,
+        `no_mp3_encoder`, `no_opus_encoder`, `encode_failed`, `invalid_export_dir`."""
         try:
             tid = _need_str(track_id, "track_id", "invalid_params")
             chosen = MusicExporter.check_preset(_opt_str(preset, "preset", "invalid_preset"))
+            limit = _opt_flag(limit_true_peak, "limit_true_peak", True)
             library = await self._music()
             entry = library.get_entry(tid)
             source = await self._music_export_source(library, entry)
             exporter = self._music_exporter()
-            answer = await asyncio.to_thread(exporter.export_track, source, chosen)
+            answer = await asyncio.to_thread(exporter.export_track, source, chosen, limit)
         except Exception as exc:
             return _error(exc)
         if not answer["already_exported"] or answer["relinked"]:
@@ -1357,8 +1373,9 @@ class MusicCommandsMixin:
         return {"status": "ok", **answer}
 
     @slow_command
-    async def export_music_playlist(self, playlist_id: Any = None, preset: Any = None) -> Dict[str, Any]:
-        """Export a playlist as MP3 into `<root>/<Playlist>/NN - <Artist> - <Title>.mp3`: each
+    async def export_music_playlist(self, playlist_id: Any = None, preset: Any = None,
+                                    limit_true_peak: Any = None) -> Dict[str, Any]:
+        """Export a playlist as MP3 or Opus into `<root>/<Playlist>/NN - <Artist> - <Title>.<ext>`: each
         track is exported once as a single (or found), then linked or copied in; hidden and
         missing tracks are skipped. `{status, folder, tracks: [{track_id, status, path |
         reason}], removed, kept}`. Errors: `unknown_playlist`, `smart_list`,
@@ -1366,6 +1383,7 @@ class MusicCommandsMixin:
         try:
             pid = _need_str(playlist_id, "playlist_id", "invalid_params")
             chosen = MusicExporter.check_preset(_opt_str(preset, "preset", "invalid_preset"))
+            limit = _opt_flag(limit_true_peak, "limit_true_peak", True)
             library = await self._music()
             playlist = next((p for p in library.list_playlists() if p["id"] == pid), None)
             if playlist is None:
@@ -1388,7 +1406,8 @@ class MusicCommandsMixin:
                     items.append(SkippedTrack(tid, entry.get("title"), exc.message, exc.code))
             exporter = self._music_exporter()
             done: List[Dict[str, Any]] = []
-            answer = await asyncio.to_thread(exporter.export_playlist, pid, playlist["name"], items, chosen, done.append)
+            answer = await asyncio.to_thread(exporter.export_playlist, pid, playlist["name"], items, chosen,
+                                             done.append, limit)
         except Exception as exc:
             return _error(exc)
         for single in done:
@@ -1421,7 +1440,7 @@ class MusicCommandsMixin:
                     "default_root": str(default_export_root(self.settings.dpc_home_dir)),
                     "inside_watched_folder": watched is not None, "watched_folder": watched,
                     "presets": [{"id": k, "label": v["label"], "format": v["format"]} for k, v in PRESETS.items()],
-                    "default_preset": DEFAULT_PRESET, "exports": exports}
+                    "default_preset": DEFAULT_PRESET, "limit_true_peak_default": True, "exports": exports}
         except Exception as exc:
             return _error(exc)
 

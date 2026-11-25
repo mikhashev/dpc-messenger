@@ -19,9 +19,10 @@
   for files outside ~/.dpc, `asset:` for files under ~/.dpc on Windows and macOS. The
   one place that decides is `trackPlaybackUrl` in utils/musicPlayer.ts.
 
-  MP3 export (Mike #210; core music/export.py, services/musicExports.ts): "Export MP3" in a
-  row's ⋯ menu and on the now-playing card, "Export playlist as MP3" on a playlist. The
-  core names the file, keeps one export per track and preset, and answers "Already
+  MP3 and Opus export (Mike #210, #171; core music/export.py, services/musicExports.ts): "Export" in a
+  row's ⋯ menu and on the now-playing card, "Export playlist" on a playlist, each with the preset
+  and the true-peak switch (limit to −1 dBTP, on by default). The
+  core names the file, keeps one export per track, preset and limit, and answers "Already
   exported" for a repeat; a track with an export shows an "mp3" toggle that lists its copies
   under the row (Show in folder, Delete), and an "mp3" chip on the card that reveals the file.
 
@@ -54,10 +55,11 @@
   import {
     clearExportStatus,
     deleteExportedCopy,
-    exportPlaylistMp3,
-    exportTrackMp3,
+    exportPlaylistFiles,
+    exportTrackFile,
     loadMusicExports,
     musicExportInfo,
+    musicExportLimit,
     musicExportPreset,
     musicExportStatus,
   } from '$lib/services/musicExports';
@@ -66,6 +68,7 @@
     exportChip,
     exportCopyDetail,
     exportFolderWarning,
+    exportFormatName,
     deleteCopyConfirm,
     exportToggleLabel,
     playlistCopiesLine,
@@ -370,7 +373,7 @@
     if (failure) fail(failure);
   }
 
-  // -- MP3 export (services/musicExports.ts) -----------------------------------------
+  // -- MP3 and Opus export (services/musicExports.ts) -----------------------------------------
   let exportInfo = $derived($musicExportInfo);
   let exportPresets = $derived(exportInfo?.presets?.length ? exportInfo.presets : EXPORT_PRESETS);
   let exportWarning = $derived(exportFolderWarning(exportInfo));
@@ -407,11 +410,11 @@
   }
   function exportRow(entry: LibraryEntry) {
     menuId = null;
-    void exportTrackMp3(entry.id, entry.title);
+    void exportTrackFile(entry.id, entry.title);
   }
   function exportSelectedList() {
     const pl = selectedList;
-    if (pl && pl.kind === 'user') void exportPlaylistMp3(pl.id, pl.name);
+    if (pl && pl.kind === 'user') void exportPlaylistFiles(pl.id, pl.name);
   }
   // The chips: read when the window opens and when the library gains or loses a track.
   $effect(() => {
@@ -843,9 +846,13 @@
 {/snippet}
 
 {#snippet presetSelect(label: string)}
-  <select class="add-to" bind:value={$musicExportPreset} aria-label={label} title="MP3 preset: V0 is the default">
+  <select class="add-to" bind:value={$musicExportPreset} aria-label={label} title="Export preset: MP3 V0 is the default; Opus 160 is small, for sending to messengers">
     {#each exportPresets as preset (preset.id)}<option value={preset.id}>{presetShortLabel(preset.id)}</option>{/each}
   </select>
+  <label class="limit-switch" title="Keep the export under −1 dBTP true peak (the default). Switch off to export the audio exactly as it is; that makes a separate file marked (no limit).">
+    <input type="checkbox" bind:checked={$musicExportLimit} />
+    <span class="muted tiny">Limit peaks (−1 dBTP)</span>
+  </label>
 {/snippet}
 
 {#snippet icon(name: 'prev' | 'next' | 'play' | 'pause' | 'shuffle' | 'repeat' | 'repeat-one')}
@@ -1020,8 +1027,9 @@
                 <div class="modes">{@render modeButtons(false)}</div>
                 <button type="button" class="small-btn" onclick={() => (commentSignal += 1)} disabled={!cur} title="Comment at the current position (C)">Comment</button>
                 <button type="button" class="small-btn" onclick={() => (view = 'create')} title="Make a song from your own text">Create</button>
-                <button type="button" class="small-btn" onclick={() => cur && exportTrackMp3(cur.id, cur.title)} disabled={!cur || cur.missing || exportRunning(cur?.id)}
-                  title="Save this track as MP3 in the export folder ({presetShortLabel($musicExportPreset)}; limited to −1 dBTP when it peaks above)">Export MP3</button>
+                <button type="button" class="small-btn" onclick={() => cur && exportTrackFile(cur.id, cur.title)} disabled={!cur || cur.missing || exportRunning(cur?.id)}
+                  title="Save this track as {exportFormatName($musicExportPreset)} in the export folder ({presetShortLabel($musicExportPreset)}; {$musicExportLimit ? 'limited to −1 dBTP when it peaks above' : 'peaks not limited'})">Export</button>
+                {@render presetSelect('Export preset for this track')}
                 <label class="volume">
                   <span class="muted small">Volume</span>
                   <input type="range" min="0" max="1" step="0.05" value={p.volume} oninput={onVolume} onchange={onVolumeEnd} aria-label="Volume" />
@@ -1100,8 +1108,8 @@
                 <button type="button" class="small-btn primary" onclick={playSelectedList} disabled={!selectedList?.track_ids.length}>Play this list</button>
                 {#if isUserList && selectedList}
                   <button type="button" class="small-btn" onclick={exportSelectedList} disabled={!selectedList.track_ids.length || exportRunning(selectedList.id)}
-                    title="One folder of numbered MP3s in the export folder; tracks already exported are linked, not encoded again">Export playlist as MP3</button>
-                  {@render presetSelect('MP3 preset for the playlist export')}
+                    title="One folder of numbered files in the export folder; tracks already exported are linked, not encoded again">Export playlist</button>
+                  {@render presetSelect('Export preset for the playlist export')}
                 {/if}
                 <input class="text-input filter" type="search" placeholder="Filter tracks" bind:value={filter} aria-label="Filter tracks" />
               </div>
@@ -1190,8 +1198,8 @@
                         {#if menuId === row.id}
                           <button type="button" class="small-btn" onclick={() => hideRow(row.entry!)}>Hide</button>
                           {#if !row.entry.missing}
-                            <button type="button" class="small-btn" onclick={() => exportRow(row.entry!)} disabled={exportRunning(row.id)}>Export MP3…</button>
-                            {@render presetSelect(`MP3 preset for ${row.entry.title}`)}
+                            <button type="button" class="small-btn" onclick={() => exportRow(row.entry!)} disabled={exportRunning(row.id)}>Export…</button>
+                            {@render presetSelect(`Export preset for ${row.entry.title}`)}
                           {/if}
                           {#if row.entry.missing}
                             <button type="button" class="small-btn danger" onclick={() => removeMissingRow(row.entry!)}>Remove from library</button>
@@ -1540,6 +1548,7 @@
   .list-select { flex: 1 1 180px; min-width: 0; }
   .text-input { flex: 1 1 160px; min-width: 0; }
   .add-to { max-width: 130px; }
+  .limit-switch { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
 
   .small-btn {
     padding: 3px 10px;

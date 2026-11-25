@@ -200,7 +200,7 @@ async def test_export_by_track_id_answers_the_file_once_and_info_lists_it(tmp_pa
         info = await service.get_music_export_info()
         assert info["status"] == "ok" and info["export_root"] == str(root)
         assert info["inside_watched_folder"] is False and info["default_preset"] == "mp3-v0"
-        assert [p["id"] for p in info["presets"]] == ["mp3-v0", "mp3-320"]
+        assert [p["id"] for p in info["presets"]] == ["mp3-v0", "mp3-320", "opus-160"]
         assert [x["name"] for x in info["exports"][entry["id"]]] == ["a.mp3"]
         one = await service.get_music_export_info(track_id=entry["id"])
         assert list(one["exports"]) == [entry["id"]]

@@ -1,7 +1,8 @@
-// MP3 export of library tracks (Mike, #210; core: dpc_client_core/music/export.py).
-// Pure helpers for the Music Player: the presets, the "mp3" chip of a track that has an
+// MP3 and Opus export of library tracks (Mike, #210 and #171; core: dpc_client_core/music/export.py).
+// Pure helpers for the Music Player: the presets, the "mp3" / "opus" chip of a track that has an
 // export, and the one line the window shows after an export. The core decides names,
-// folders and duplicates; the UI only names a track id or a playlist id and a preset.
+// folders and duplicates; the UI only names a track id or a playlist id, a preset and whether
+// the -1 dBTP true-peak limit stays on (it does by default; Mike's switch turns it off).
 
 export const DEFAULT_EXPORT_PRESET = 'mp3-v0';
 
@@ -15,12 +16,21 @@ export interface MusicExportPreset {
 export const EXPORT_PRESETS: MusicExportPreset[] = [
     { id: 'mp3-v0', label: 'MP3 V0 (VBR, about 245 kbps)', format: 'mp3' },
     { id: 'mp3-320', label: 'MP3 320 kbps (CBR)', format: 'mp3' },
+    { id: 'opus-160', label: 'Opus 160 kbps (VBR, for messengers)', format: 'opus' },
 ];
+
+export const DEFAULT_LIMIT_TRUE_PEAK = true;
+
+/** "MP3" or "Opus": the format a preset writes, for the button and the status lines. */
+export function exportFormatName(presetId: string | null | undefined): string {
+    return presetId && presetId.startsWith('opus') ? 'Opus' : 'MP3';
+}
 
 /** The short name in a select. */
 export function presetShortLabel(id: string): string {
     if (id === 'mp3-v0') return 'MP3 V0';
     if (id === 'mp3-320') return 'MP3 320';
+    if (id === 'opus-160') return 'Opus 160';
     return id;
 }
 
@@ -47,6 +57,8 @@ export interface MusicExportRecord {
     exported_at?: string | null;
     limited_db?: number | null;
     true_peak_out_dbtp?: number | null;
+    /** False for an export made with the true-peak limit switched off; absent from an older core (limited). */
+    limit_true_peak?: boolean;
     /** The playlist-folder files of the same song; absent from an older core. */
     playlists?: PlaylistCopy[];
 }
@@ -82,6 +94,7 @@ export interface TrackExportAnswer {
     already_exported: boolean;
     relinked?: boolean;
     preset: string;
+    limit_true_peak?: boolean;
     limited_db?: number | null;
     true_peak_out_dbtp?: number | null;
 }
@@ -138,7 +151,7 @@ export function exportDateText(exportedAt: string | null | undefined): string {
 
 /** The facts under a file name in the exports tree: "MP3 V0 · 4.2 MB · 2026-11-24". */
 export function exportCopyDetail(r: MusicExportRecord): string {
-    const limit = limiterNote(r.limited_db);
+    const limit = r.limit_true_peak === false ? 'no limit' : limiterNote(r.limited_db);
     return [presetShortLabel(r.preset), exportSizeText(r.size_bytes), exportDateText(r.exported_at), limit]
         .filter(Boolean)
         .join(' · ');
@@ -184,7 +197,7 @@ export function exportChip(records: MusicExportRecord[] | null | undefined): { l
     if (!records || !records.length) return null;
     const pick = records.find(r => r.preset === DEFAULT_EXPORT_PRESET) ?? records[0];
     const others = records.length > 1 ? ` (+${records.length - 1} more)` : '';
-    const limit = limiterNote(pick.limited_db);
+    const limit = pick.limit_true_peak === false ? 'no limit' : limiterNote(pick.limited_db);
     return {
         label: pick.format || 'mp3',
         path: pick.path,
@@ -198,7 +211,7 @@ export function trackExportLine(a: TrackExportAnswer): string {
     if (a.already_exported) {
         return a.relinked ? `Already exported: ${name} (found under its new name)` : `Already exported: ${name}`;
     }
-    const limit = limiterNote(a.limited_db);
+    const limit = a.limit_true_peak === false ? 'no limit' : limiterNote(a.limited_db);
     return `Exported: ${name}${limit ? ` · ${limit}` : ''}`;
 }
 
@@ -220,7 +233,7 @@ export function playlistExportLine(a: PlaylistExportAnswer): string {
 /** The warning when the export folder is inside a watched folder, or ''. */
 export function exportFolderWarning(info: MusicExportInfo | null | undefined): string {
     if (!info || !info.inside_watched_folder) return '';
-    return `The MP3 export folder ${info.export_root} is inside the watched folder ${info.watched_folder ?? ''}. `
+    return `The export folder ${info.export_root} is inside the watched folder ${info.watched_folder ?? ''}. `
         + 'DPC recognises its own exports by their tag and does not add them to the library again, '
         + 'but other players will see both files.';
 }
