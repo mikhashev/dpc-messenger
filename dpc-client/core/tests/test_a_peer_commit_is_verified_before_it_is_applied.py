@@ -22,6 +22,9 @@ from dpc_client_core.consensus_manager import ConsensusManager
 from dpc_client_core.message_handlers.knowledge_handler import ApplyKnowledgeCommitHandler
 
 SENDER = "dpc-node-relaying-peer"
+US = "dpc-node-us"
+# The retransmit path applies only a commit of a chat both nodes are in.
+GROUP = "group-0a52389f2bb6"
 
 
 def _identity(peers_dir=None):
@@ -58,8 +61,9 @@ def _commit(summary="An RTX 3060 carries 12 GB of VRAM"):
                 source=KnowledgeSource(type="ai_summary"),
             )
         ],
-        participants=["node-a", "node-b"],
-        approved_by=["node-a", "node-b"],
+        conversation_id=GROUP,
+        participants=[US, SENDER],
+        approved_by=[US, SENDER],
         timestamp="2026-08-26T00:00:00+00:00",
     )
     commit.compute_hash()
@@ -83,6 +87,9 @@ class _Applied:
     def __init__(self):
         self.calls = []
 
+    def peer_proposal_roster(self, conversation_id, sender_node_id):
+        return [US, SENDER] if conversation_id == GROUP else None
+
     async def _apply_commit(self, commit, origin="local", judged_here=True):
         self.calls.append((commit, origin))
         return True
@@ -94,7 +101,7 @@ def _handler(applied, sent):
         pcm_core=SimpleNamespace(load_context=lambda: SimpleNamespace(commit_history=[])),
         pending_certificate_requests=set(),
         p2p_manager=SimpleNamespace(
-            node_id="dpc-node-us",
+            node_id=US,
             peers={SENDER: object()},
             send_message_to_peer=lambda peer, msg: sent.append((peer, msg)),
         ),

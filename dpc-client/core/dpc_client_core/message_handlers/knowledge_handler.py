@@ -187,9 +187,10 @@ class KnowledgeCommitResultHandler(MessageHandler):
 
         # Update consensus manager session (if exists)
         session = self.service.consensus_manager.get_session(proposal_id)
-        if session:
-            session.status = status
-            self.logger.debug("Updated local session status to: %s", status)
+        if session and not self.service.consensus_manager.record_peer_result(
+            session, sender_node_id, status
+        ):
+            return None
 
         # Broadcast event to UI
         await self.service.local_api.broadcast_event("knowledge_commit_result", payload)
@@ -363,6 +364,24 @@ class ApplyKnowledgeCommitHandler(MessageHandler):
 
         try:
             commit = KnowledgeCommit.from_dict(payload)
+
+            # Only a commit of a chat this node shares with the sender, and one
+            # that names this node, is ours to apply: the retransmit goes from
+            # the proposer to a participant that never ACKed.
+            me = self.service.p2p_manager.node_id
+            resolve = getattr(self.service.consensus_manager, "peer_proposal_roster", None)
+            roster = resolve(commit.conversation_id or "", sender_node_id) if resolve else None
+            if (
+                not roster or me not in roster or sender_node_id not in roster
+                or me not in (commit.participants or ())
+            ):
+                self.logger.warning(
+                    "Refused APPLY_KNOWLEDGE_COMMIT %s from %s for %s: not a chat this "
+                    "node shares with the sender, or a commit that does not name this node",
+                    commit_id[:12], sender_node_id, commit.conversation_id,
+                )
+                return None
+
             provenance = commit.verify_provenance()
 
             if provenance.is_rejected:

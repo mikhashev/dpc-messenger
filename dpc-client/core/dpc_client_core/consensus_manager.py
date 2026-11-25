@@ -47,6 +47,9 @@ VOTE_VALUES = ("approve", "reject", "request_changes", "abstain")
 # author is the proposer, not this node, and the record says so.
 PEER_PROPOSAL_ORIGIN = "peer_proposal"
 
+# What a finalize ends in (_build_result_payload), and so all a peer's result may say.
+RESULT_OUTCOMES = ("approved", "rejected", "revision_needed", "timeout")
+
 
 def _everyone_answered(session) -> bool:
     """Has every participant of this proposal cast a vote?"""
@@ -689,6 +692,16 @@ class ConsensusManager:
                     origin, commit.commit_id, (commit.commit_hash or "")[:16],
                 )
 
+            # A commit is written once. The same proposal counted again (a
+            # replayed proposal, a session revived after it closed) mints the
+            # same id, and applying it twice would duplicate the topic's entries.
+            if any(e.get('commit_id') == commit.commit_id for e in (context.commit_history or [])):
+                logger.warning(
+                    "Commit %s is already applied here — not applying it again",
+                    commit.commit_id,
+                )
+                return True
+
             # 3. Sign commit with our private key
             node_id, key_path, cert_path = load_identity()
 
@@ -1100,6 +1113,14 @@ class ConsensusManager:
                     sender_node_id, conversation_id, proposal.proposal_id,
                 )
                 return False
+            # A revision reopens a session sent back for changes; nothing reopens a closed one.
+            if existing is not None and existing.status not in ("voting", "revision_needed"):
+                logger.warning(
+                    "Refusing PROPOSE_KNOWLEDGE_COMMIT from %s for %s: proposal %s is "
+                    "already closed here (%s)",
+                    sender_node_id, conversation_id, proposal.proposal_id, existing.status,
+                )
+                return False
 
             resolve = self.peer_proposal_roster
             roster = resolve(conversation_id, sender_node_id) if resolve else None
@@ -1154,6 +1175,30 @@ class ConsensusManager:
         """Did this node make that proposal (rather than receive it from a peer)?"""
         session = self.sessions.get(proposal_id)
         return session is not None and getattr(session, "received_from", None) is None
+
+    def record_peer_result(self, session: VotingSession, sender_node_id: str, status: str) -> bool:
+        """Take a KNOWLEDGE_COMMIT_RESULT a peer sent about one of our sessions.
+
+        False when the sender is not a participant: the result is not this
+        node's business to show or relay. Otherwise True, and the status moves
+        only from "voting" to an outcome. A result never reopens a session —
+        a session back in "voting" counts the next vote to a second finalize.
+        """
+        roster = set(session.proposal.participants or ())
+        if sender_node_id not in roster:
+            logger.warning(
+                "Ignoring KNOWLEDGE_COMMIT_RESULT from %s for %s (%s): not a participant",
+                sender_node_id, session.proposal.proposal_id, session.proposal.conversation_id,
+            )
+            return False
+        if session.status == "voting" and status in RESULT_OUTCOMES:
+            session.status = status
+        elif status != session.status:
+            logger.info(
+                "Not moving proposal %s from %s to %s on a result from %s",
+                session.proposal.proposal_id, session.status, status, sender_node_id,
+            )
+        return True
 
     async def handle_vote_message(
         self,
