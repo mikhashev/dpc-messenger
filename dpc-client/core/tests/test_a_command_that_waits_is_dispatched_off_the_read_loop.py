@@ -331,6 +331,10 @@ class _Walker:
             return []
         if isinstance(recv, ast.Name) and recv.id == "self":
             return [owner]
+        if isinstance(recv, ast.Name) and recv.id in self.ix.classes:
+            # `CoreService._send_group_file(self, ...)`: an explicit class call, used
+            # where test stand-ins borrow only the public method (D50 G, 2890847c).
+            return [recv.id]
         if isinstance(recv, ast.Attribute):
             # `self.a` and the longer `self.service.a`: the coordinators reach
             # CoreService's managers through the `service` they were built with.
