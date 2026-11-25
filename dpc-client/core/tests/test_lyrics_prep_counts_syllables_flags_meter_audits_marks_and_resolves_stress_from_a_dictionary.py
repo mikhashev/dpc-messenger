@@ -4,6 +4,7 @@ the stress resolver, against a tiny `forms.sqlite` built here with the real file
 forms of a homograph joined by `|`)."""
 
 import hashlib
+import os
 import sqlite3
 from pathlib import Path
 
@@ -256,6 +257,18 @@ def test_a_hyphenated_word_is_looked_up_whole_then_part_by_part(dictionary):
     assert w["светит-светит"]["mark"] == f"све{A}тит-све{A}тит"
 
 
+def test_a_hyphenated_word_is_audited_against_the_dictionary_whole_or_part_by_part(dictionary):
+    """Review #180 3.4: a hyphenated word dropped out of the contradiction audit."""
+    whole = lp.prepare_lyrics(f"а-конто{A}", "ru", dictionary=dictionary)          # held whole: а-ко́нто
+    [issue] = whole["issues"]
+    assert issue["kind"] == "contradicts_dictionary" and issue["options"] == [f"а-ко{A}нто"] and "part" not in issue
+    parts = lp.prepare_lyrics(f"ла{A}донь-ко{A}шка", "ru", dictionary=dictionary)  # not held whole
+    [issue] = parts["issues"]
+    assert issue["kind"] == "contradicts_dictionary" and issue["part"] == "ладонь"
+    assert issue["options"] == [f"ладо{A}нь"] and "'ладонь'" in issue["message"]
+    assert lp.prepare_lyrics(f"ладо{A}нь-ко{A}шка а-ко{A}нто", "ru", dictionary=dictionary)["issues"] == []
+
+
 def test_latin_words_and_numbers_are_not_checked_and_a_mixed_line_still_counts(dictionary):
     r = lp.prepare_lyrics("Hello любовь 7", "ru", dictionary=dictionary)
     w = words(r, 1)
@@ -312,6 +325,31 @@ def test_a_dictionary_is_opened_once_and_describes_itself(tmp_path):
         info = d1.info()
         assert info["source"] == "test fixture" and info["lang"] == "ru"
         assert info["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    finally:
+        lp.close_dictionaries()
+
+
+def test_the_dictionary_is_hashed_once_per_process_until_its_size_or_mtime_changes(tmp_path, monkeypatch):
+    """Review #180 3.1: the 120 MB sha256 ran on every (re)open."""
+    path = build_dictionary(tmp_path / "forms.sqlite")
+    hashed = []
+    real = lp._hash_file
+    monkeypatch.setattr(lp, "_hash_file", lambda p: hashed.append(p) or real(p))
+    try:
+        for _ in range(3):
+            d, _, _ = lp.open_dictionary(path)
+            first = d.info()["sha256"]
+            lp.close_dictionaries()                       # the next open is a fresh StressDictionary
+        assert len(hashed) == 1 and first == hashlib.sha256(path.read_bytes()).hexdigest()
+        db = sqlite3.connect(path)                        # the file changes: hashed again
+        db.execute("INSERT INTO forms VALUES ('мир', 'ми́р')")
+        db.commit()
+        db.close()
+        st = path.stat()                                  # a coarse-mtime file system still sees a change
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+        d, _, _ = lp.open_dictionary(path)
+        assert d.info()["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest() != first
+        assert len(hashed) == 2
     finally:
         lp.close_dictionaries()
 

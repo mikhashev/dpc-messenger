@@ -21,7 +21,8 @@ returns a report, and changes nothing. It does four things, none of which needs 
    (a mark with no letter before it), `mark_on_consonant`, `spacing_accent` (a look-alike
    such as the acute sign U+00B4 inside a word, which sets no stress), `two_marks` (two marks
    in one word or one hyphen part), `mark_with_yo` (a mark in a word that has e-diaeresis,
-   which is always stressed) and `contradicts_dictionary` (one mark, in a place none of the
+   which is always stressed) and `contradicts_dictionary` (one mark per word, or per hyphen part when
+   the dictionary does not hold the hyphenated word whole, in a place none of the
    dictionary's forms of the word has).
 4. **A stress resolver for Russian words.** The order is SPEC decision 39's chain, as far
    as it is built: the author's own mark is kept; then the large dictionary; a word with one
@@ -186,7 +187,7 @@ class StressDictionary:
 
     def info(self) -> Dict[str, Any]:
         """What the record says about the dictionary: its `about` rows and its sha256
-        (read once per open, the file is 120 MB)."""
+        (`_dictionary_sha256`: hashed once per process for a given size and mtime)."""
         if self._info is None:
             about: Dict[str, str] = {}
             with self._lock:
@@ -194,23 +195,49 @@ class StressDictionary:
                     about = {str(k): str(v) for k, v in self._db.execute("SELECT k, v FROM about").fetchall()}
                 except sqlite3.Error:
                     about = {}
-            h = hashlib.sha256()
-            with open(self.path, "rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    h.update(chunk)
+            digest = _dictionary_sha256(self.path, self._stamp)
             self._info = {
                 "lang": about.get("lang", "ru"),
                 "source": about.get("source"),
                 "licence": about.get("licence"),
                 "built": about.get("built"),
                 "keys": about.get("keys"),
-                "sha256": h.hexdigest(),
+                "sha256": digest,
             }
         return dict(self._info)
 
 
 _cache_lock = threading.Lock()
 _cache: Dict[str, StressDictionary] = {}
+_sha_lock = threading.Lock()
+_sha_by_stamp: Dict[Tuple[str, int, int], str] = {}
+
+
+def _hash_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _dictionary_sha256(path: Path, stamp: Optional[Tuple[int, int]]) -> str:
+    """The file's sha256, hashed once per process for each (path, size, mtime): the dictionary
+    is ~120 MB and is reopened whenever the cache is closed or the file is touched."""
+    if stamp is None:
+        st = Path(path).stat()
+        stamp = (st.st_size, st.st_mtime_ns)
+    key = (str(Path(path).resolve()), int(stamp[0]), int(stamp[1]))
+    with _sha_lock:
+        known = _sha_by_stamp.get(key)
+    if known is not None:
+        return known
+    digest = _hash_file(Path(path))
+    with _sha_lock:
+        if len(_sha_by_stamp) > 16:
+            _sha_by_stamp.clear()
+        _sha_by_stamp[key] = digest
+    return digest
 
 
 def open_dictionary(path: Path) -> Tuple[Optional[StressDictionary], str, Optional[str]]:
@@ -364,14 +391,34 @@ def _audit_word(raw: str, plain_lower: str, dictionary: Optional[StressDictionar
             issues.append({"kind": "mark_with_yo",
                            "message": "a stress mark in a word with ё, which is always stressed"})
             invalid = True
-    if not invalid and valid == 1 and not has_hyphen and dictionary is not None and _YO not in raw.lower():
-        author = frozenset(i for i, ch in enumerate(_strip_marks_keep_index(raw)) if ch[1])
-        options = _stress_options(dictionary, _fold(plain_lower))
-        if options and not any((o[0] | o[1]) == author for o in options):
-            shown = [_apply_stress(plain_lower, o) for o in options][:MAX_OPTIONS]
-            issues.append({"kind": "contradicts_dictionary", "options": shown,
-                           "message": "the dictionary does not have this stress for the word: " + ", ".join(shown)})
+    if not invalid and valid >= 1 and dictionary is not None and _YO not in raw.lower():
+        whole = _stress_options(dictionary, _fold(plain_lower))
+        if whole and (valid == 1 or has_hyphen):
+            issues.extend(_contradiction(raw, plain_lower, whole))
+        elif has_hyphen and not whole:
+            # Not held whole: each hyphen part with its one mark against that part's own forms.
+            for part in raw.split("-"):
+                if part.count(MARK) != 1:
+                    continue
+                part_lower = _strip_marks(part).lower()
+                issues.extend(_contradiction(part, part_lower, _stress_options(dictionary, _fold(part_lower)),
+                                             part=part_lower))
     return issues, valid, invalid
+
+
+def _contradiction(raw: str, plain_lower: str, options: List[Stress],
+                   part: Optional[str] = None) -> List[Dict[str, Any]]:
+    """A `contradicts_dictionary` issue when the author's marks in `raw` are none of `options`."""
+    author = frozenset(i for i, ch in enumerate(_strip_marks_keep_index(raw)) if ch[1])
+    if not options or any((o[0] | o[1]) == author for o in options):
+        return []
+    shown = [_apply_stress(plain_lower, o) for o in options][:MAX_OPTIONS]
+    issue: Dict[str, Any] = {"kind": "contradicts_dictionary", "options": shown,
+                             "message": ("the dictionary does not have this stress for "
+                                         + (f"the part '{part}': " if part else "the word: ") + ", ".join(shown))}
+    if part:
+        issue["part"] = part
+    return [issue]
 
 
 def _strip_marks_keep_index(raw: str) -> List[Tuple[str, bool]]:
