@@ -1,8 +1,9 @@
 // The note under the lyrics on what the transcript filter did (core: music/lyrics_filter.py).
 //
-// Two sources: the Transcribe answer's `filter` report, which lists the dropped lines, and the stored
-// lyrics' `transcription.filter`, which keeps only the counts (the unfiltered transcript itself stays
-// beside the lyrics on disk, last run only). Nothing here reads or changes the lyrics.
+// Three sources: the Transcribe answer's `filter` report, which lists the dropped lines; the kept
+// unfiltered transcript read back by `get_music_lyrics_transcript_raw` (the report over it lists them
+// too, so they stay visible after the run's answer is gone); and the stored lyrics'
+// `transcription.filter`, which keeps only the counts. Nothing here reads or changes the lyrics.
 
 import { formatTime } from './musicPlayer';
 
@@ -21,6 +22,15 @@ export interface LyricsFilterReport {
     words?: boolean;
     words_unavailable?: boolean;
     dropped_reasons?: Record<string, number>;
+    dropped_lines?: DroppedLine[];
+}
+
+/** The answer of `get_music_lyrics_transcript_raw` (the part the panel uses). */
+export interface RawTranscriptAnswer {
+    present: boolean;
+    stale?: boolean;
+    saved_at?: string;
+    filter?: LyricsFilterReport;
     dropped_lines?: DroppedLine[];
 }
 
@@ -56,14 +66,18 @@ function asReport(value: unknown): LyricsFilterReport | null {
 }
 
 /** The report to show: the run's own (it has the dropped lines) when the panel just ran Transcribe,
- *  else the one stored on the lyrics. Null when neither exists (lyrics from another source, or
- *  written before the filter). */
+ *  else the one over the kept raw transcript (also lists them; not when the file changed since), else
+ *  the one stored on the lyrics. Null when none exists (lyrics from another source, or written before
+ *  the filter). */
 export function filterReportOf(
     info: object | null | undefined,
     lyrics: { source?: string } | null | undefined,
+    persisted?: RawTranscriptAnswer | null,
 ): LyricsFilterReport | null {
     const stored = (lyrics as { transcription?: { filter?: unknown } } | null | undefined)?.transcription;
+    const kept = lyrics?.source === 'transcribe' && persisted?.present && !persisted.stale ? persisted : null;
     return asReport((info as { filter?: unknown } | null | undefined)?.filter)
+        ?? asReport(kept?.filter)
         ?? (lyrics?.source === 'transcribe' ? asReport(stored?.filter) : null);
 }
 

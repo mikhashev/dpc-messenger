@@ -1186,6 +1186,16 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    async def get_music_lyrics_transcript_raw(self, track_id: str) -> Dict[str, Any]:
+        """Read only: the last Transcribe's kept unfiltered transcript for the track and the
+        filter's report over it, including the dropped lines (`MusicLyrics.raw_transcript`),
+        so the lyrics panel can show them after the run's own answer is gone. `present` is
+        false when no Transcribe has run on this track. Writes and sends nothing."""
+        try:
+            return {"status": "ok", **(await (await self._music_lyrics()).raw_transcript(track_id))}
+        except Exception as exc:
+            return _error(exc)
+
     async def save_music_lyrics(self, track_id: str, lrc_text: str) -> Dict[str, Any]:
         """Store the person's LRC as `source: "manual"` under the DPC home."""
         try:
@@ -1470,6 +1480,7 @@ MUSIC_COMMANDS = (
     "update_music_playlist",
     "delete_music_playlist",
     "get_music_lyrics",
+    "get_music_lyrics_transcript_raw",
     "save_music_lyrics",
     "lookup_music_lyrics_lrclib",
     "transcribe_music_lyrics",

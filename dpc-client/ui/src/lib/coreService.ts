@@ -149,6 +149,7 @@ import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitPro
 import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
 import type { MusicComment } from './utils/musicComments';
 import type { PrepReport } from './utils/musicLyricsPrep';
+import type { RawTranscriptAnswer } from './utils/musicLyricsFilter';
 import { callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
 import type { DiscardReason, MusicCapabilities, MusicEngine, MusicJob, MusicTake } from './utils/musicCreate';
 import type { DeleteExportAnswer, MusicExportInfo, PlaylistExportAnswer, TrackExportAnswer } from './utils/musicExport';
@@ -2194,6 +2195,12 @@ export function getMusicExportInfo(trackId?: string): Promise<MusicAnswer<MusicE
  *  .lrc sidecar, embedded tags, then LRCLIB when online lookup is on. */
 export function getMusicLyrics(trackId: string, refresh = false): Promise<MusicAnswer<LyricsAnswer>> {
     return callMusic(sendCommand, 'get_music_lyrics', { track_id: trackId, refresh });
+}
+
+/** Read only: the last Transcribe's kept raw transcript and the filter report over it, with the
+ *  dropped lines (`present: false` when none was kept). */
+export function getMusicLyricsTranscriptRaw(trackId: string): Promise<MusicAnswer<RawTranscriptAnswer>> {
+    return callMusic(sendCommand, 'get_music_lyrics_transcript_raw', { track_id: trackId });
 }
 
 /** Save the person's LRC as `source: manual` (refused while a line has no stamp). */

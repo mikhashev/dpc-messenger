@@ -839,6 +839,64 @@ class MusicLyrics:
     async def load_stored(self, track_id: str) -> Optional[dict]:
         return await asyncio.to_thread(self._read_stored, self.lyrics_path(track_id))
 
+    def _read_raw_transcript(self, track_id: str) -> Optional[dict]:
+        path = self.raw_transcript_path(track_id)
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            logger.warning("music: the raw transcript %s could not be read: %s", path.name, exc)
+            return None
+        return document if isinstance(document, dict) and isinstance(document.get("result"), dict) else None
+
+    async def raw_transcript(self, track_id: str) -> Dict[str, Any]:
+        """Read only: the last Transcribe's unfiltered result as `_keep_raw_transcript` kept it,
+        with the filter report recomputed over it (`dropped_lines` among it, up to
+        `lyrics_filter.MAX_REPORTED_DROPS`), so the dropped lines stay viewable after the run's
+        own answer is gone. Nothing is written. `{"present": False}` without a kept transcript.
+        `raw` keeps text and segment times only (word lists are counted, not returned);
+        `stale` is true when the track's file changed since (its hash is no longer the one the
+        transcript was made from); `filter_version_saved` differs from `filter.version` when
+        the filter changed since the run, in which case `filter` is what the current filter
+        would drop, not what the run dropped."""
+        document = await asyncio.to_thread(self._read_raw_transcript, track_id)
+        if document is None:
+            return {"present": False}
+        result = document["result"]
+        try:
+            _, info = transcript_lyrics(str(document.get("track_hash") or ""), result)
+            report = info["filter"]
+        except MusicLibraryError:  # e.g. no speech left: the filter report is still meaningful
+            _, report = lyrics_filter.clean_transcript(result)
+        except (ValueError, TypeError) as exc:  # a hand-edited file
+            logger.warning("music: the raw transcript of %s is not usable: %s", track_id, exc)
+            return {"present": False}
+        segments = []
+        words = 0
+        for seg in result.get("segments") or []:
+            if not isinstance(seg, dict):
+                continue
+            words += len(seg.get("words") or []) if isinstance(seg.get("words"), list) else 0
+            segments.append({"start": _finite(seg.get("start")), "end": _finite(seg.get("end")),
+                             "text": str(seg.get("text") or "")})
+        try:
+            current_hash = self.library.get_entry(track_id).get("source_hash")
+        except MusicLibraryError:
+            current_hash = None
+        return {
+            "present": True,
+            "track_hash": document.get("track_hash"),
+            "saved_at": document.get("saved_at"),
+            "stale": bool(current_hash and document.get("track_hash") and current_hash != document.get("track_hash")),
+            "filter_version_saved": document.get("filter_version"),
+            "filter": report,
+            "dropped_lines": list(report.get("dropped_lines") or []),
+            "raw": {"provider": result.get("provider"), "model": result.get("model"),
+                    "language": result.get("language"), "text": str(result.get("text") or ""),
+                    "segments": segments, "words": words},
+        }
+
     async def _store(self, track_id: str, record: dict) -> None:
         schemas.validate_lyrics(record)
         await asyncio.to_thread(atomic_write_json, self.lyrics_path(track_id), record)

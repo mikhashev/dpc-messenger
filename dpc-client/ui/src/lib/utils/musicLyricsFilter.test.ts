@@ -63,6 +63,18 @@ describe('filterReportOf', () => {
         expect(filterReportOf(null, stored)?.dropped).toBe(2);
     });
 
+    it('uses the kept raw transcript report, which lists the dropped lines, over the stored counts', () => {
+        const kept = { present: true, filter: { ...base, dropped: 2, dropped_lines: [{ start: 4, text: '[Music]', reason: 'sound_tag' }] } };
+        const report = filterReportOf(null, stored, kept);
+        expect(report?.dropped_lines?.length).toBe(1);
+        expect(filterNote(report)?.lines[0].text).toBe('[Music]');
+        // the run's own answer still wins; a stale, absent or other-source transcript is ignored
+        expect(filterReportOf({ filter: { ...base, dropped: 7 } }, stored, kept)?.dropped).toBe(7);
+        expect(filterReportOf(null, stored, { ...kept, stale: true })?.dropped_lines).toBeUndefined();
+        expect(filterReportOf(null, stored, { present: false })?.dropped_lines).toBeUndefined();
+        expect(filterReportOf(null, { ...stored, source: 'manual' }, kept)).toBeNull();
+    });
+
     it('ignores a stored report on lyrics from another source and a malformed one', () => {
         expect(filterReportOf(null, { ...stored, source: 'lrclib' })).toBeNull();
         expect(filterReportOf({ filter: { dropped: 'x' } }, null)).toBeNull();
@@ -73,7 +85,8 @@ describe('filterReportOf', () => {
 describe('MusicLyrics.svelte shows the note', () => {
     it('renders a collapsed details element from filterNote with the raw view of the dropped lines', () => {
         expect(lyricsPanel).toContain("from '$lib/utils/musicLyricsFilter'");
-        expect(lyricsPanel).toContain('filterNote(filterReportOf(transcribed, lyrics))');
+        expect(lyricsPanel).toContain('filterNote(filterReportOf(transcribed, lyrics, keptRaw))');
+        expect(lyricsPanel).toContain('getMusicLyricsTranscriptRaw(id)');
         expect(lyricsPanel).toMatch(/<details class="filter-note[^"]*"/);
         expect(lyricsPanel).not.toMatch(/<details class="filter-note[^>]*\bopen\b/);
         expect(lyricsPanel).toContain('filterView.lines');

@@ -20,18 +20,19 @@
   track's file (transcribeMusicLyrics) and stores the lines with source "transcribe",
   shown as "transcribed", with the provider and model the record keeps
   (`transcription: {provider, model}`) beside the badge. A collapsed note ("Filtered N lines") says
-  what the transcript filter dropped and how long segments were split, with the dropped lines when the
-  run's own answer is on screen (musicLyricsFilter.ts). Opening a track never runs it. Over the person's own lyrics it
+  what the transcript filter dropped and how long segments were split, with the dropped lines: from the run's own answer
+  while it is on screen, else read back on open from the kept raw transcript
+  (getMusicLyricsTranscriptRaw, musicLyricsFilter.ts). Opening a track never runs it. Over the person's own lyrics it
   asks first (confirmAsync) before it sends overwrite_manual. A run can outlast the
   command's timeout; the panel then follows it through getMusicLyrics (runTranscribe).
 -->
 
 <script lang="ts">
   import { tick, untrack } from 'svelte';
-  import { getMusicLyrics, saveMusicLyrics } from '$lib/coreService';
+  import { getMusicLyrics, getMusicLyricsTranscriptRaw, saveMusicLyrics } from '$lib/coreService';
   import { lookupLyricsOnLrclib, seekTo, transcribeMusicLyrics } from '$lib/services/music';
   import { confirmAsync } from '$lib/utils/dialog';
-  import { filterNote, filterReportOf } from '$lib/utils/musicLyricsFilter';
+  import { filterNote, filterReportOf, type RawTranscriptAnswer } from '$lib/utils/musicLyricsFilter';
   import {
     LRCLIB_EGRESS_TEXT,
     LYRICS_OVERWRITE_CONFIRM_TEXT,
@@ -83,6 +84,8 @@
   let busy = $state<'' | 'lookup' | 'save' | 'refresh' | 'transcribe'>('');
   let transcribeRun = $state<TranscribeRun | null>(null);
   let transcribed = $state<TranscriptionInfo | null>(null);
+  // The kept raw transcript's report (get_music_lyrics_transcript_raw): keeps the dropped lines visible after the run.
+  let keptRaw = $state<RawTranscriptAnswer | null>(null);
   let qArtist = $state('');
   let qTitle = $state('');
   let token = 0;
@@ -116,6 +119,15 @@
     }
     take(a.data);
     status = 'ready';
+    if (a.data.lyrics?.source === 'transcribe') loadKeptRaw(id);
+  }
+
+  // Read only; a failure just leaves the stored counts in the note.
+  async function loadKeptRaw(id: string) {
+    const mine = token;
+    const r = await getMusicLyricsTranscriptRaw(id);
+    if (mine !== token || trackId !== id) return;
+    keptRaw = r.ok ? r.data : null;
   }
 
   // Another track: start over, and read its lyrics (stored, or the chain: sidecar, tags,
@@ -130,6 +142,7 @@
       candidate = null;
       transcribeRun = null;
       transcribed = null;
+      keptRaw = null;
       editing = false;
       editMessage = '';
       message = '';
@@ -318,7 +331,7 @@
 
   // What the transcript filter did: the run's own report (it lists the dropped lines), else the counts
   // stored on the lyrics. Null for lyrics that were not transcribed or ran no filter.
-  let filterView = $derived(filterNote(filterReportOf(transcribed, lyrics)));
+  let filterView = $derived(filterNote(filterReportOf(transcribed, lyrics, keptRaw)));
 
   let emptyText = $derived(
     lrclib && lrclib.result !== 'synced' && lrclib.result !== 'plain'
