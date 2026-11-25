@@ -107,9 +107,10 @@ class TestTheEstimate:
         assert _close(p.expected_seconds(30), seconds_from_ratio(30, warm))
 
     def test_the_cpu_cold_estimate_is_l12s_cold_row(self):
-        # L12's table: 10 s of audio, ≈20 s cold (load + first call ≈ 9 s on top of 11 s warm).
+        # L12's table said 10 s of audio, ≈20 s cold (9 s of load on top of 11 s warm); a clip up to
+        # 16 s now reads the short-clip pair (follow-up 13): 9.0 s load + 0.6 s + 10 / 1.35 s.
         p = _provider("cpu")
-        assert 18.0 < p.expected_seconds(10) < 21.0
+        assert 16.0 < p.expected_seconds(10) < 18.0
 
     @pytest.mark.parametrize("audio_s", [None, 0, 0.0, -5, float("nan")])
     def test_an_unknown_length_is_unknown_never_zero(self, audio_s):

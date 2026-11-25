@@ -61,7 +61,8 @@ class TestThePenaltyByLengthBand:
         # estimate beyond the load as on an object that measured nothing (both just loaded).
         assert p._calls_since_load == 0 and untouched._calls_since_load == 0
         assert _close(p.expected_seconds(10, loaded=True), untouched.expected_seconds(10, loaded=True))
-        assert p.expected_seconds(10, loaded=True) > seconds_from_ratio(10, CUDA["warm"]["<=60"]) + 0.9
+        # (A 10 s clip reads the short-clip first-call pair, 0.7 s + 10 / 15.3 s: follow-up 13.)
+        assert p.expected_seconds(10, loaded=True) > seconds_from_ratio(10, CUDA["warm"]["<=60"]) + 0.8
         # And the 300 s band itself took the measured 0.
         assert _close(p.expected_seconds(300, loaded=True), seconds_from_ratio(300, CUDA["warm"][">180"]))
 

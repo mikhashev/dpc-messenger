@@ -86,6 +86,10 @@ def length_band(audio_s: Any) -> Optional[str]:
 #   cpu penalty_s 0: L12's "load + first call ≈ 9 s" is all in load_first_s 9.0; load_reload_s 1.0
 #     is the running backend's log, "Whisper model loaded in 1.0 seconds (device=cpu)". The 9.0 is
 #     a cold process's: with torch already imported the twin loaded in 1.09 s (Forge #60).
+#   load_imported_s: the first load of a model in this process when the load's imports (torch,
+#     transformers' pipelines) are already paid, as in a backend that has used torch before. cuda
+#     2.2 s (live 2026-11-25 09:58, the dictation whose estimate read 14.0 s with the fresh-process
+#     12.8 s); cpu 1.1 s (Forge #60's 1.09 s, the live "loaded in 1.0 seconds").
 # A device absent here (mps, mlx) is unknown until measured.
 _START_FIGURES: Dict[str, Dict[str, Any]] = {
     "cuda": {"warm": {"<=60": 21.1, "<=120": 27.4, "<=180": 15.9, ">180": 15.9},
@@ -96,12 +100,40 @@ _START_FIGURES: Dict[str, Dict[str, Any]] = {
             "penalty_s": {band: 0.0 for band in _LENGTH_BANDS},
             "load_first_s": 9.0, "load_reload_s": 1.0},
 }
+_LOAD_IMPORTED_S = {"cuda": 2.2, "cpu": 1.1}
+
+# Short clips: a clip up to `_SHORT_CLIP_MAX_AUDIO_S` is estimated as `start_s + audio / ratio`, a
+# pair for a warm call and one for the first call after a load (it replaces `audio / warm +
+# penalty_s` there). The band ratios were measured on 30 s clips and longer and have no fixed
+# start, so a dictation of a few seconds read far off (the live 4.2 s GPU dictation: 14.0 s
+# estimated, 3.2 s taken). Where each pair comes from:
+#   cuda first: 4.2 s clip in 1.0 s (live 2026-11-25 09:58), 10 s in 1.38 s (ru_10, 10 / 21.1 + 0.91):
+#     the line 0.7 s + audio / 15.3. At 16 s it gives 1.75 s against the bands' 0.76 + 1.0 = 1.76 s.
+#   cuda warm: only the 30 s clip is measured (21.1x, 1.42 s); 0.3 s + audio / 26.8 passes through
+#     it, the 0.3 s start is an ESTIMATE.
+#   cpu (warm and first, whose `penalty_s` is 0): 13.9 s in 10.7 s warm, 15.7 s in 13 s with a 1.0 s
+#     load (live 2026-11-25): 0.6 s + audio / 1.35 gives 10.9 s and, plus 1.1 s of load, 13.3 s. Over
+#     16 s the conservative band seeds take over, so the estimate steps up there (Forge: 2.36x at
+#     30 s against the seed's 0.91x).
+_SHORT_CLIP_MAX_AUDIO_S = 16.0
+_SHORT_CLIPS: Dict[str, Dict[str, tuple]] = {
+    "cuda": {"warm": (0.3, 26.8), "first": (0.7, 15.3)},
+    "cpu": {"warm": (0.6, 1.35), "first": (0.6, 1.35)},
+}
 # The (device, model) pairs a Whisper load has run on in this process (any provider object): the next
 # load of that model on that device is a reload. Per process because a providers reload builds new
 # objects; per device and model because the reload figure is a second read of the same weights, which
 # neither the twin's load (for the GPU) nor another model's load is. A pair not loaded yet reads the
 # first-load figure, which errs long where the imports are already paid (ADR-052 S3 follow-ups 6, 7).
 _LOADED_WEIGHTS: set = set()
+
+
+def imports_are_paid() -> bool:
+    """Whether the imports a Whisper load runs (torch, and transformers' `pipelines`) are already in
+    this process, so that a first load costs `load_imported_s`, not the fresh process's
+    `load_first_s`. A question of `sys.modules` only; nothing is imported."""
+    import sys
+    return "torch" in sys.modules and "transformers.pipelines" in sys.modules
 # A batch-descent length (the estimate's) and the decoded length further apart than this are logged
 # (S3 follow-up 6, Ark #49-3): the warm figure is recorded against the decoded one.
 _LENGTH_MISMATCH_S = 1.0
@@ -469,6 +501,42 @@ def set_unloaded_listener(listener: Optional[Callable[[str, str, str], None]]) -
     _unloaded_listener = listener
 
 
+_COMPILE_BLOCKER: Optional[str] = None
+_COMPILE_BLOCKER_KNOWN = False
+_COMPILE_SKIP_SAID = False
+
+
+def torch_compile_blocker() -> Optional[str]:
+    """Why `torch.compile` cannot work in this process, or None when its import chain is there.
+
+    Probed once per process with the import torch's own `torch.compile` runs before compiling
+    anything: `torch._dynamo.backends.debugging`, which needs `functorch.compile`'s
+    `min_cut_rematerialization_partition` (torch 2.11 defines it in `torch._functorch.partitioners`
+    and `functorch.compile` re-exports it). Only the import chain is probed; nothing is compiled."""
+    global _COMPILE_BLOCKER, _COMPILE_BLOCKER_KNOWN
+    if _COMPILE_BLOCKER_KNOWN:
+        return _COMPILE_BLOCKER
+    reason: Optional[str] = None
+    try:
+        import importlib
+        importlib.import_module("torch._dynamo.backends.debugging")
+    except Exception as e:  # noqa: BLE001 - any failure of the chain means "not here"
+        reason = f"{type(e).__name__}: {e}"
+    _COMPILE_BLOCKER, _COMPILE_BLOCKER_KNOWN = reason, True
+    return reason
+
+
+def _say_compile_skipped_once(reason: str) -> None:
+    """One clear line per process: torch.compile is not used, why, and that nothing is lost."""
+    global _COMPILE_SKIP_SAID
+    if _COMPILE_SKIP_SAID:
+        return
+    _COMPILE_SKIP_SAID = True
+    logger.warning(
+        "Whisper runs without torch.compile (%s). Transcription is unaffected; no speed-up was "
+        "promised or measured. This is said once per process.", reason)
+
+
 class LocalWhisperProvider(AIProvider):
     """
     Local Whisper transcription provider with multi-platform GPU support.
@@ -653,6 +721,7 @@ class LocalWhisperProvider(AIProvider):
 
         import time
         logger.info(f"Loading Whisper model '{self.model_name}' (this may take a minute on first use)...")
+        imports_paid = imports_are_paid()
         start_time = time.time()
 
         try:
@@ -768,25 +837,21 @@ class LocalWhisperProvider(AIProvider):
             )
 
             if self.compile_model and device == "cuda":
-                # torch.compile is an optional 4.5x speedup. Wrap it in its own try:
-                # if the installed torch/dynamo is incompatible (e.g. torch 2.11 dropped
-                # functorch.compile.min_cut_rematerialization_partition, breaking
-                # torch._dynamo import chain), we must NOT take down model loading —
-                # the model is already loaded above and runs fine uncompiled. Without
-                # this guard, a compile failure aborts local transcription entirely and
-                # the user has no fallback if the OpenAI key is also unset.
-                try:
-                    logger.info("Applying torch.compile optimization (4.5x speedup)...")
-                    self.pipeline.model = torch.compile(self.pipeline.model)
-                except Exception as compile_err:
-                    logger.warning(
-                        "torch.compile failed (%s) — continuing with uncompiled model. "
-                        "Local transcription will work, just slower.", compile_err
-                    )
+                # Optional, and its speed-up was never measured here. Tried only where the import
+                # chain it needs works, and a failure is said once per process, not at every load.
+                blocker = torch_compile_blocker()
+                if blocker:
+                    _say_compile_skipped_once(blocker)
+                else:
+                    try:
+                        logger.info("Applying torch.compile (optional; its speed-up is not measured here)...")
+                        self.pipeline.model = torch.compile(self.pipeline.model)
+                    except Exception as compile_err:
+                        _say_compile_skipped_once(f"torch.compile failed: {compile_err}")
 
             self.model_loaded = True
             elapsed = time.time() - start_time
-            self._note_load(device, elapsed)
+            self._note_load(device, elapsed, imports_paid)
             logger.info(f"Whisper model loaded in {elapsed:.1f} seconds (device={device})")
 
         except Exception as e:
@@ -798,13 +863,17 @@ class LocalWhisperProvider(AIProvider):
 
     # -- the speed figures (ADR-052 S3a: the producer of `expected_s`) --
 
-    def _note_load(self, device: str, load_s: float) -> None:
+    def _note_load(self, device: str, load_s: float, imports_paid: bool = False) -> None:
         """A load finished on `device` (where the model really is): its time is recorded as this
-        model's first load on that device in this process or as a reload (`_LOADED_WEIGHTS`), and the
-        next call is the first after a load."""
+        model's first load on that device in this process, as one whose imports were already paid
+        when it began (`imports_paid`) or as a reload (`_LOADED_WEIGHTS`), and the next call is the
+        first after a load."""
         self._loaded_device = device
         self._calls_since_load = 0
-        key = "load_reload_s" if (device, self.model_name) in _LOADED_WEIGHTS else "load_first_s"
+        if (device, self.model_name) in _LOADED_WEIGHTS:
+            key = "load_reload_s"
+        else:
+            key = "load_imported_s" if imports_paid else "load_first_s"
         _LOADED_WEIGHTS.add((device, self.model_name))
         seconds = _a_positive(load_s)
         if seconds is not None:
@@ -820,6 +889,9 @@ class LocalWhisperProvider(AIProvider):
         audio, wall, band = _a_positive(audio_s), _a_positive(elapsed), length_band(audio_s)
         if device is None or audio is None or wall is None or band is None:
             return
+        if device in _SHORT_CLIPS and audio <= _SHORT_CLIP_MAX_AUDIO_S:
+            # Also kept as the short clips' own effective ratio, which holds their fixed start.
+            self._measured.setdefault(device, {}).setdefault("short", {})["first" if first else "warm"] = audio / wall
         if first:
             warm = self.speed_figures(device)["warm"].get(band)
             if warm is not None:
@@ -881,7 +953,12 @@ class LocalWhisperProvider(AIProvider):
         for key in ("load_first_s", "load_reload_s"):
             figures[key] = measured.get(key, start.get(key))
         loaded = (device, self.model_name) in _LOADED_WEIGHTS
-        figures["load_s"] = figures["load_reload_s" if loaded else "load_first_s"]
+        if loaded:
+            figures["load_s"] = figures["load_reload_s"]
+        else:
+            imported = measured.get("load_imported_s", _LOAD_IMPORTED_S.get(device))
+            figures["load_s"] = (imported if imports_are_paid() and imported is not None
+                                 else figures["load_first_s"])
         return figures
 
     @staticmethod
@@ -903,6 +980,9 @@ class LocalWhisperProvider(AIProvider):
         """The first call after a load on `device`: `audio / warm[band] + penalty_s[band]`, or None."""
         from ..managers.card_lease import seconds_from_ratio
 
+        short = self._short_clip_seconds(audio_s, device, True)
+        if short is not None:
+            return short
         figures = self.speed_figures(device)
         band = length_band(audio_s)
         work = None if band is None else seconds_from_ratio(audio_s, figures["warm"].get(band))
@@ -923,20 +1003,39 @@ class LocalWhisperProvider(AIProvider):
 
         if loaded is None:
             loaded = self.model_loaded
-        figures = self.speed_figures(device or self._route_device())
+        device = device or self._route_device()
+        figures = self.speed_figures(device)
         band = length_band(audio_s)
-        work = None if band is None else seconds_from_ratio(audio_s, figures["warm"].get(band))
+        first_call = not loaded or self._calls_since_load == 0
+        work = self._short_clip_seconds(audio_s, device, first_call)
         if work is None:
-            return None
-        if not loaded or self._calls_since_load == 0:
-            penalty = figures["penalty_s"].get(band)
-            if penalty is None:
+            work = None if band is None else seconds_from_ratio(audio_s, figures["warm"].get(band))
+            if work is None:
                 return None
-            work += penalty
+            if first_call:
+                penalty = figures["penalty_s"].get(band)
+                if penalty is None:
+                    return None
+                work += penalty
         if loaded:
             return work
         load = figures["load_s"]
         return None if load is None else load + work
+
+    def _short_clip_seconds(self, audio_s: Any, device: str, first_call: bool) -> Optional[float]:
+        """The call's own seconds for a clip up to `_SHORT_CLIP_MAX_AUDIO_S` (`_SHORT_CLIPS`: a fixed
+        start plus audio over a ratio; this provider's own measured effective ratio of a short clip
+        replaces the pair, since it holds the start), or None for any other clip or device."""
+        audio = _a_positive(audio_s)
+        pairs = _SHORT_CLIPS.get(device)
+        if audio is None or pairs is None or audio > _SHORT_CLIP_MAX_AUDIO_S:
+            return None
+        kind = "first" if first_call else "warm"
+        measured = self._measured.get(device, {}).get("short", {}).get(kind)
+        if measured:
+            return audio / measured
+        start_s, ratio = pairs[kind]
+        return start_s + audio / ratio
 
     # -- the card lease (ADR-052 S3b) --
 
@@ -1671,7 +1770,7 @@ class LocalWhisperProvider(AIProvider):
         for device, figures in self._measured.items():
             kept = new._measured.setdefault(device, {})
             for key, value in figures.items():
-                if key in ("warm", "penalty_s"):
+                if key in ("warm", "penalty_s", "short"):
                     for band, figure in value.items():
                         kept.setdefault(key, {}).setdefault(band, figure)
                 else:

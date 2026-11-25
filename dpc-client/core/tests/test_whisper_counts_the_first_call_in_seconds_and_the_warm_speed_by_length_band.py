@@ -115,8 +115,10 @@ class TestTheFirstCallIsSecondsAdded:
     def test_the_cpu_keeps_l12s_cold_row_in_its_load(self):
         cpu = _START_FIGURES["cpu"]
         assert set(cpu["penalty_s"].values()) == {0.0} and cpu["load_first_s"] == 9.0
-        # L12's table: 10 s of audio, 11 s warm, about 20 s cold.
-        assert _close(_provider("cpu").expected_seconds(10), 9.0 + 11.0, 1e-6)
+        # L12's table: 10 s of audio, 11 s warm, about 20 s cold; 30 s is on the table's band
+        # figure still, a clip up to 16 s reads the short-clip pair (follow-up 13).
+        assert _close(_provider("cpu").expected_seconds(30), 9.0 + 30.0 / (10.0 / 11.0), 1e-6)
+        assert _close(_provider("cpu").expected_seconds(10), 9.0 + 0.6 + 10.0 / 1.35, 1e-6)
 
 
 class TestTheWarmFigureByLengthBand:
