@@ -13,9 +13,11 @@ not parse is moved aside and a record that fails its schema is kept aside, never
 
 **When an entry is removed** (`remove_missing_music_tracks`, a folder removal, deleting a
 generated file) its comments file is **kept** on disk when it holds comments: it is a few KB
-of the person's own words. `sweep_orphans` (run once, on the first comments call after the core starts)
-removes only the files of an id the library no longer knows that hold no comment (`[]`): what a
-merge or the deletion of a track's last comment leaves.
+of the person's own words. `sweep_orphans` (run once, on the first comments call after the library's
+initial scan has completed) removes only the files of an id the library no longer knows that hold no
+comment (`[]`): what a merge or the deletion of a track's last comment leaves. Before that scan an id
+missing from memory may be a live track not scanned yet, so the sweep waits for
+`MusicLibrary.initial_scan_done` (Zcode #193) and a call before it leaves every file alone.
 
 **A merge past the cap** (follow-up 16, Zcode #188 finding 9): the moved comments are attached
 to the surviving track even when that takes it over `MAX_COMMENTS_PER_TRACK`; the cap only
@@ -159,9 +161,11 @@ class MusicComments:
         return float(d) if isinstance(d, (int, float)) and not isinstance(d, bool) and d > 0 else None
 
     def _sweep_once(self) -> None:
-        """`sweep_orphans` on the first call only; a failure is logged, never raised."""
+        """`sweep_orphans` on the first call after the library's initial scan has completed (a call
+        before it sweeps nothing and leaves the sweep to a later call); a failure is logged, never
+        raised."""
         with self._file_lock:
-            if self._swept:
+            if self._swept or not getattr(self.library, "initial_scan_done", False):
                 return
             self._swept = True
         try:

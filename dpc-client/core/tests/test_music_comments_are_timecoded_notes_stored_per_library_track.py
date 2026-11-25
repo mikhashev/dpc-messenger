@@ -314,3 +314,64 @@ async def test_an_empty_comments_file_of_an_unknown_track_is_swept_and_one_with_
         assert comments.sweep_orphans() == 0
     finally:
         await service.stop_music_library()
+
+
+@pytest.mark.asyncio
+async def test_the_orphan_sweep_waits_for_the_librarys_initial_scan(tmp_path, no_tools):
+    """Follow-up 17 (Zcode #193 item 12): the sweep judged "the library no longer knows this track" from
+    memory while the initial scan was still running, so the first list could delete the empty comments
+    file of a live track not scanned yet. Until the scan completes the sweep leaves every file alone."""
+    service, _, [entry] = await _setup(tmp_path)
+    tid = entry["id"]
+    comments_dir = tmp_path / "dpc" / "music" / "comments"
+    comments_dir.mkdir(parents=True, exist_ok=True)
+    not_scanned_yet = "trk_" + "d" * 16
+    (comments_dir / f"{not_scanned_yet}.json").write_text("[]", encoding="utf-8")
+    try:
+        library = service._music_library_instance
+        comments = service._music_comments_instance
+        comments._swept = False
+        library.initial_scan_done = False                     # as inside the scan window after a start
+        await service.list_music_comments(track_id=tid)
+        assert (comments_dir / f"{not_scanned_yet}.json").exists()
+        assert comments._swept is False                       # the sweep is left for a later call
+        library.initial_scan_done = True                      # the scan completed; the id is still unknown
+        await service.list_music_comments(track_id=tid)
+        assert not (comments_dir / f"{not_scanned_yet}.json").exists()
+        assert comments._swept is True
+    finally:
+        await service.stop_music_library()
+
+
+@pytest.mark.asyncio
+async def test_the_initial_scan_is_done_only_after_the_poll_loops_first_pass(tmp_path, no_tools, monkeypatch):
+    from dpc_client_core.music.library import MusicLibrary
+    music = tmp_path / "Music"
+    music.mkdir()
+    (music / "a.mp3").write_bytes(b"audio")
+    library = MusicLibrary(tmp_path / "dpc", tools=MediaTools(ffmpeg=None, ffprobe=None), save_delay_s=0.01)
+    await library.open()
+    await library.add_folder(str(music))
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    real = library.rescan_folder
+
+    async def slow_rescan(folder_id):
+        entered.set()
+        await release.wait()
+        return await real(folder_id)
+
+    monkeypatch.setattr(library, "rescan_folder", slow_rescan)
+    assert library.initial_scan_done is False
+    await library.start()
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert library.initial_scan_done is False             # the first pass is still scanning
+        release.set()
+        for _ in range(200):
+            if library.initial_scan_done:
+                break
+            await asyncio.sleep(0.01)
+        assert library.initial_scan_done is True
+    finally:
+        await library.stop()

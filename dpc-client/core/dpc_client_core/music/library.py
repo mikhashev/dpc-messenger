@@ -324,6 +324,11 @@ class MusicLibrary:
         self._playlists: Dict[str, dict] = {}
         self._by_hash: Dict[Tuple[str, str], List[str]] = {}
         self._loaded = False
+        # True once every watched folder has been scanned since this process started (the poll
+        # loop's first pass, or a completed `rescan_all`). Until then an entry missing from memory
+        # may be a live file not scanned yet, so nothing may conclude "the library no longer knows
+        # this track" (`MusicComments.sweep_orphans`, Zcode #193).
+        self.initial_scan_done = False
         self._queue: Deque[str] = deque()
         self._queued: Set[str] = set()
         self._verify: Dict[str, Tuple[str, str]] = {}
@@ -611,6 +616,7 @@ class MusicLibrary:
                     pass  # removed while the loop ran
                 except Exception:
                     logger.exception("music: polling folder %s failed", folder_id)
+            self.initial_scan_done = True
             await asyncio.sleep(self.poll_interval_s)
 
     def _spawn(self, coro) -> None:
@@ -1183,7 +1189,9 @@ class MusicLibrary:
             return copy.deepcopy(folder)
 
     async def rescan_all(self) -> List[dict]:
-        return [await self.rescan_folder(fid) for fid in list(self._folders)]
+        out = [await self.rescan_folder(fid) for fid in list(self._folders)]
+        self.initial_scan_done = True
+        return out
 
     def _wants_reprobe(self, e: dict) -> bool:
         """A present, hashed entry with no duration that was not re-probed in this process."""
