@@ -2,7 +2,8 @@
 (`cover`), a same-style song (`generate_similar`) and a song from the track's lyrics (`generate_from_lyrics`).
 
 The params are checked at the door (`job_schemas.normalize_params_song`, `MusicJobStore._song_params`): a web
-track cannot send its audio (`listen_only_source`), a track still hashing cannot either (`track_not_ready`),
+track's audio waits for the streaming integration (`web_source_pending_integration`), a track still hashing
+cannot send it either (`track_not_ready`),
 a YuE2 cover needs the lyrics (`missing_lyrics`), and the caption and lyrics share the 1 MiB text bound of a
 text job. The runs go to the fake engines as child processes: acestep.cpp's cover is one multipart `/synth`
 with the source as `audio`; a same-style song is `/lm` then `/synth`, with the source as `ref_audio` when it
@@ -75,14 +76,15 @@ def sidecar_of(take) -> dict:
 
 
 def test_a_cover_on_acestep_reuses_the_lyrics_keeps_the_melody_and_is_as_long_as_its_source():
-    p = js.normalize_params_song("cover", {"caption": "jazz piano trio", "lyrics": LINES}, track_id=TRACK, source=LOCAL)
+    p = js.normalize_params_song("cover", {"caption": "jazz piano trio", "lyrics": LINES, "engine": "acestep"},
+                                 track_id=TRACK, source=LOCAL)
     assert p["engine"] == "acestep" and p["lyrics_mode"] == "reuse" and p["kept"] == ["melody", "lyrics"]
     assert p["melody_source"] == "source_audio" and p["reference"] == "audio"
     assert p["reference_uri"] == f"dpc-library:{TRACK}" and p["cover_strength"] == 1.0
     assert p["duration_s"] == 30.5 and p["source_title"] == "Night Drive" and p["source_kind"] == "local"
     assert js.check_params_song("cover", p) is None                         # a stored record normalizes to itself
-    no_lyrics = js.normalize_params_song("cover", {"caption": "punk", "lyrics_mode": "none"}, track_id=TRACK,
-                                         source=LOCAL)
+    no_lyrics = js.normalize_params_song("cover", {"caption": "punk", "lyrics_mode": "none", "engine": "acestep"},
+                                         track_id=TRACK, source=LOCAL)
     assert no_lyrics["kept"] == ["melody"] and no_lyrics["lyrics"] is None  # ACE-Step cover works without lyrics
 
 
@@ -93,7 +95,7 @@ def test_a_yue2_cover_without_lyrics_is_missing_lyrics_and_a_song_from_lyrics_ne
     assert err.value.code == "missing_lyrics"
     p = js.normalize_params_song("cover", {"caption": "x", "engine": "yue2", "lyrics": LINES, "cot": "melody"},
                                  track_id=TRACK, source=LOCAL)
-    assert p["melody_source"] == "sheetsage2:abc" and p["duration_s"] == 31 and "cover_strength" not in p
+    assert p["melody_source"] == "sheetsage2:abc" and p["duration_s"] == 30.5 and "cover_strength" not in p
     with pytest.raises(js.ParamsError, match="cot"):
         js.normalize_params_song("cover", {"caption": "x", "engine": "yue2", "lyrics": LINES, "cot": "off"},
                                  track_id=TRACK, source=LOCAL)
@@ -132,8 +134,8 @@ def test_the_caption_theme_and_lyrics_share_the_one_mebibyte_text_bound_of_a_tex
     with pytest.raises(js.ParamsError, match="not valid text"):
         js.normalize_params_song("generate_similar", {"caption": "x\ud800"}, track_id=TRACK, source=LOCAL)
     with pytest.raises(MusicJobError) as door:
-        store_at(tmp_path).create_job("cover", {"caption": "x" * (js.MAX_SONG_TEXT_BYTES + 1)}, track_id=TRACK,
-                                  base_version_id=VERSION, source=LOCAL)
+        store_at(tmp_path).create_job("cover", {"caption": "x" * (js.MAX_SONG_TEXT_BYTES + 1), "engine": "acestep"},
+                                      track_id=TRACK, base_version_id=VERSION, source=LOCAL)
     assert door.value.code == "invalid_params"
 
 
@@ -143,19 +145,20 @@ def test_the_caption_theme_and_lyrics_share_the_one_mebibyte_text_bound_of_a_tex
 def test_the_door_refuses_a_web_tracks_audio_a_track_still_hashing_and_a_missing_source(tmp_path):
     store = store_at(tmp_path)
     web = {"kind": "web", "content_hash": None, "duration_s": 200.0, "title": "A stream"}
-    for job_type, params in (("cover", {"caption": "punk", "lyrics_mode": "none"}),
+    for job_type, params in (("cover", {"caption": "punk", "lyrics_mode": "none", "engine": "acestep"}),
                              ("generate_similar", {"caption": "punk", "reference": "audio"})):
         with pytest.raises(MusicJobError) as err:
             store.create_job(job_type, params, track_id=TRACK, base_version_id=VERSION, source=web)
-        assert err.value.code == "listen_only_source" and err.value.field == "track_id"
+        assert err.value.code == "web_source_pending_integration" and err.value.field == "track_id"
+        assert "Yandex Music / SoundCloud integration" in err.value.message
     # a same-style song from a web track's description needs no audio: allowed (SPEC: web tracks fully allowed)
     ok = store.create_job("generate_similar", {"caption": "punk"}, track_id=TRACK, base_version_id=VERSION, source=web)
     assert ok["state"] == js.QUEUED and ok["prompt"] == "punk" and ok["params"]["source_kind"] == "web"
     js.validate_job(ok)
     hashing = dict(LOCAL, content_hash=None)
     with pytest.raises(MusicJobError) as err:
-        store.create_job("cover", {"caption": "punk", "lyrics_mode": "none"}, track_id=TRACK, base_version_id=VERSION,
-                         source=hashing)
+        store.create_job("cover", {"caption": "punk", "lyrics_mode": "none", "engine": "acestep"}, track_id=TRACK,
+                         base_version_id=VERSION, source=hashing)
     assert err.value.code == "track_not_ready"
     with pytest.raises(MusicJobError) as err:
         store.create_job("cover", {"caption": "punk"}, track_id=TRACK, base_version_id=VERSION, source=None)
@@ -174,6 +177,10 @@ def test_each_song_type_and_engine_says_whether_it_runs_with_the_reason():
     cover = report["features"]["cover"]["cover_engines"]
     assert cover["acestep"]["status"] == "supported" and "task cover" in cover["acestep"]["reason"]
     assert cover["yue2"]["status"] == "unsupported" and "transcriber" in cover["yue2"]["reason"]
+    assert "acestep.cpp runs without it" in cover["yue2"]["reason"]          # the fallback is offered
+    assert report["features"]["cover"]["default_engine"] == "yue2"
+    assert report["features"]["cover"]["fallback_engine"] == "acestep"
+    assert report["features"]["web_source_audio"]["status"] == "planned"
     ref = report["features"]["audio_reference"]
     assert ref["status"] == "supported" and "timbre" in ref["reason"] and ref["verified"] is False
     assert report["limits"]["song"]["relations"]["cover"] == "cover of"
@@ -224,7 +231,7 @@ async def test_an_acestep_cover_sends_the_source_as_audio_and_makes_new_tracks_t
     async with SongRig(tmp_path) as rig:
         entry, base = await rig.source()
         before = base.read_bytes()
-        job = rig.propose("cover", entry, {"caption": "bossa nova, nylon guitar", "lyrics": LINES,
+        job = rig.propose("cover", entry, {"caption": "bossa nova, nylon guitar", "lyrics": LINES, "engine": "acestep",
                                            "keep": {"bpm": 92}, "cover_strength": 0.6})
         assert job["state"] == js.QUEUED and job["params"]["duration_s"] == 12.0
         done = await rig.wait_for(job["id"], DONE)
@@ -327,8 +334,8 @@ async def test_a_song_from_the_lyrics_on_acestep_sings_the_lines_and_a_changed_s
 
         # the source's hash at the proposal is not the library's now: refused before any engine work
         source = {"kind": "local", "content_hash": "md5:" + "f" * 32, "duration_s": 12.0, "title": "Night Drive"}
-        stale = rig.store.create_job("cover", {"caption": "punk", "lyrics_mode": "none"}, track_id=entry["id"],
-                                     base_version_id=VERSION, source=source)
+        stale = rig.store.create_job("cover", {"caption": "punk", "lyrics_mode": "none", "engine": "acestep"},
+                                     track_id=entry["id"], base_version_id=VERSION, source=source)
         rig.runner.wake()
         refused = await rig.wait_for(stale["id"], DONE)
         assert refused["state"] == js.UNSUPPORTED and refused["state_reason"].startswith("hash_mismatch")
@@ -336,7 +343,7 @@ async def test_a_song_from_the_lyrics_on_acestep_sings_the_lines_and_a_changed_s
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("job_type, params", [
-    ("cover", {"caption": "punk", "lyrics_mode": "none"}),
+    ("cover", {"caption": "punk", "lyrics_mode": "none", "engine": "acestep"}),
     ("generate_similar", {"caption": "synthwave", "reference": "audio", "lyrics_mode": "none", "variants": 1}),
 ])
 async def test_a_source_whose_bytes_changed_behind_the_librarys_back_is_refused_before_it_is_decoded_or_sent(
@@ -389,7 +396,7 @@ async def test_a_yue2_cover_transcribes_the_source_to_a_score_and_sings_it_with_
         job = rig.store.create_job("cover", {"caption": "russian rock, male vocal", "engine": "yue2", "lyrics": LINES,
                                              "cot": "melody", "variants": 1, "seed": 5},
                                    track_id=entry["id"], base_version_id=VERSION, source=source)
-        assert job["state"] == js.QUEUED and job["params"]["duration_s"] == 30   # the cap's floor
+        assert job["state"] == js.QUEUED and job["params"]["duration_s"] == 6.0  # the source's length
         rig.runner.wake()
         done = await rig.wait_for(job["id"], DONE)
         assert done["state"] == js.REVIEW, done.get("state_reason")
@@ -400,6 +407,8 @@ async def test_a_yue2_cover_transcribes_the_source_to_a_score_and_sings_it_with_
         body = json.loads(rig.store.read_payload(job["id"], "synth.v1.request.json"))
         assert body["abc"].startswith("X:1\nT:fake transcription") and body["cot"] == "melody"
         assert body["lyrics"] == "\n".join(LINES) and body["style"] == "russian rock, male vocal" and body["seed"] == 5
+        # as long as the source: the cap one second over it, the floor one second under it (25 frames a second)
+        assert body["duration"] == 7.0 and body["semantic_sampling"] == {"min_tokens": 125}
         take = rig.store.list_takes(job["id"])[0]
         assert take["title"] == "Cover of Night Drive (v1)" and take["engine"] == "yue2.cpp"
         side = sidecar_of(take)
@@ -454,7 +463,7 @@ def test_the_agents_approval_card_names_the_source_the_mode_and_what_of_the_sour
     p = js.normalize_params_song("cover", {"caption": "bossa nova", "lyrics": LINES}, track_id=TRACK, source=LOCAL)
     about = tool._song_about("cover", p)
     assert 'a cover (same melody, new arrangement) of "Night Drive"' in about and TRACK in about
-    assert "its audio (melody and lyrics)" in about and "acestep.cpp" in about and "bossa nova" in about
+    assert "its audio (melody and lyrics)" in about and "yue2.cpp" in about and "bossa nova" in about
     parts = tool._song_parts("cover", p)
     assert parts["source_title"] == "Night Drive" and parts["mode"] == "cover" and parts["relation"] == "cover of"
     assert parts["has_lyrics"] is True and parts["style"] == "bossa nova"

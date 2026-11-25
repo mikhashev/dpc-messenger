@@ -245,9 +245,12 @@ def cap_floor_s(requested_s: float) -> float:
     return min(LENGTH_CAP_MIN_S, LENGTH_CAP_MIN_FRACTION * requested_s)
 
 
-def length_gate(requested_s: Optional[float], received_s: Optional[float], mode: str) -> Dict[str, Any]:
+def length_gate(requested_s: Optional[float], received_s: Optional[float], mode: str, *,
+                same_tolerance_s: Optional[float] = None) -> Dict[str, Any]:
     """Received length against the request. `exact`: within `max(2 s, 5 %)` of it. `cap`: not
-    over it by more than the minimum tolerance and not under `cap_floor_s(requested_s)`."""
+    over it by more than the minimum tolerance and not under `cap_floor_s(requested_s)`. `same`:
+    an edit take within `LENGTH_SAME_TOLERANCE_S` of the control; a cover passes its engine's
+    `same_tolerance_s` against its source's length (music/similar.py `COVER_SAME_TOLERANCE_S`)."""
     if received_s is None:
         return _gate(js.GATE_NOT_MEASURED, "the length of the file could not be read", mode=mode)
     if requested_s is None or requested_s <= 0:
@@ -258,11 +261,14 @@ def length_gate(requested_s: Optional[float], received_s: Optional[float], mode:
     common = {"mode": mode, "requested_s": round(requested_s, 2), "received_s": round(received_s, 2),
               "delta_s": delta}
     if mode == LENGTH_SAME:
-        ok = abs(received_s - requested_s) <= LENGTH_SAME_TOLERANCE_S
+        tol_same = LENGTH_SAME_TOLERANCE_S if same_tolerance_s is None else float(same_tolerance_s)
+        ok = abs(received_s - requested_s) <= tol_same
         words = (f"{received_s:.3f} s against the control's {requested_s:.3f} s "
-                 f"(an edit keeps the length, decision 23)")
+                 f"(an edit keeps the length, decision 23)" if same_tolerance_s is None else
+                 f"{received_s:.3f} s against the source's {requested_s:.3f} s "
+                 f"(a cover is as long as its source, within {tol_same:g} s)")
         return _gate(js.GATE_PASS if ok else js.GATE_FAIL, words if ok else f"length_mismatch: {words}",
-                     tolerance_s=LENGTH_SAME_TOLERANCE_S,
+                     tolerance_s=tol_same,
                      **{**common, "requested_s": round(requested_s, 4), "received_s": round(received_s, 4),
                         "delta_s": round(received_s - requested_s, 4)})
     if mode == LENGTH_CAP:
@@ -440,7 +446,8 @@ def not_measured_record(reason: str, *, requested_s: Optional[float] = None, len
 def measure_take_qa(path: Path, *, requested_s: Optional[float], length_mode: str = LENGTH_EXACT,
                     duration_s: Optional[float] = None, loudness: Optional[Mapping[str, Any]] = None,
                     tool_version: Optional[str] = None, tools: Optional[MediaTools] = None,
-                    edit: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+                    edit: Optional[Mapping[str, Any]] = None,
+                    same_tolerance_s: Optional[float] = None) -> Dict[str, Any]:
     """Measure one take file and return `{qa, qa_report}`. `loudness` is the take's ebur128
     record when it has one with both the integrated loudness and the true peak (then ebur128 is
     not run again; a record missing either is measured again, Zcode #176); `duration_s` its exact
@@ -483,7 +490,7 @@ def measure_take_qa(path: Path, *, requested_s: Optional[float], length_mode: st
         silence = classify_silences(runs, duration)
         zone_silence = inside if zone is not None else None
     gates = {
-        "length": length_gate(requested_s, duration, length_mode),
+        "length": length_gate(requested_s, duration, length_mode, same_tolerance_s=same_tolerance_s),
         "clipping": clip,
         "true_peak": true_peak_gate(peak),
         "silence": silence_gate(silence, zone_silence_s=zone_silence,

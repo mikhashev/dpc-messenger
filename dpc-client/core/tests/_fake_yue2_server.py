@@ -9,7 +9,9 @@ would; the replay request echoes a sent `abc`. No GPU.
 `FAKE_YUE2_MODE` (comma-separated) picks a misbehaviour: `exit_at_start`, `wrong_model`
 (`/props` names another backbone), `fail_synth`, `slow_synth` (stays running until
 cancelled), `skip_instrumental` (an adapter whose name holds "instrumental" is left out, as
-the real server leaves out one it cannot merge). `FAKE_YUE2_RECORD`, when set, is a folder where each `/synth` body is written as
+the real server leaves out one it cannot merge), `native_abc` (`/transcribe` answers a score in
+SheetSage2's native two-voice dialect with named sections, `NATIVE_ABC`), `follow_length` (a track is
+as long as its semantic `min_tokens` floor at 25 frames a second, the length a cover asks for). `FAKE_YUE2_RECORD`, when set, is a folder where each `/synth` body is written as
 `<n>-synth.json` and each cancel as `<n>-cancel.txt`. SIGTERM (POSIX) or SIGBREAK (Windows)
 stops it with exit code 0.
 """
@@ -28,6 +30,13 @@ from aiohttp import web
 from _fake_acestep_server import wav24
 
 BOUNDARY = "yue2-batch-boundary"
+# 4/4 at 120 BPM: a bar is 2 s. An intro bar with no voice, two verse bars, two chorus bars.
+NATIVE_ABC = "\n".join([
+    "X:1", "T:", "M:4/4", "L:1/16", "Q:1/4=120",
+    'V: Vocal clef=treble name="Vocal Melody" snm="Vocal"', 'V: Ins clef=treble name="Ins Melody" snm="Inst."',
+    "K:C", "% intro", "V: Vocal", 'Z|', "V: Ins", "c4d4e4f4|",
+    "% verse", "V: Vocal", '"C"C4D4E4F4|"G"G4A4B4c4|', "V: Ins", "Z2|",
+    "% chorus", "V: Vocal", '"F"c4B4A4G4|"C"F4E4D4C4|', "V: Ins", "e4d4c4B4|Z|", ""])
 
 
 def log(msg):
@@ -111,6 +120,9 @@ def main():
             return bad("lm_batch_size exceeds --max-batch")
         if not 1 <= int(r.get("synth_batch_size", 1)) <= 9:
             return bad("synth_batch_size must be between 1 and 9")
+        sem = dict({"min_tokens": 200, "max_tokens": 9000}, **(r.get("semantic_sampling") or {}))
+        if not 0 <= int(sem["min_tokens"]) <= int(sem["max_tokens"]):
+            return bad("semantic preset outside the protocol bounds")
         names = {a["name"] for a in adapters}
         for a in r.get("adapters") or []:
             if a.get("name") not in names:
@@ -132,7 +144,10 @@ def main():
                           abc=r.get("abc") or "X:1\nK:Em\n|E2 G2|", semantic_tokens=",".join(str(100 + k) for k in range(25)))
             parts += (f"--{BOUNDARY}\r\nContent-Type: application/json\r\n\r\n".encode()
                       + json.dumps(replay, ensure_ascii=False).encode("utf-8") + b"\r\n")
-            audio = wav24(0.05, 300 + 15 * ((seed + i) % 10))
+            seconds = 0.05
+            if "follow_length" in modes and (r.get("semantic_sampling") or {}).get("min_tokens"):
+                seconds = int(r["semantic_sampling"]["min_tokens"]) / 25
+            audio = wav24(seconds, 300 + 15 * ((seed + i) % 10))
             parts += f"--{BOUNDARY}\r\nContent-Type: audio/wav\r\n\r\n".encode() + audio + b"\r\n"
             latent = struct.pack("<64f", *([float(seed + i)] * 64))
             parts += (f"--{BOUNDARY}\r\nContent-Type: application/octet-stream\r\n\r\n".encode() + latent + b"\r\n")
@@ -155,6 +170,8 @@ def main():
             return bad("multipart audio part required")
         jid = secrets.token_hex(8)
         abc = "X:1\nT:fake transcription\nK:C\n" + ("|C D E F|" if melody_only else '|"C"C D "G"E F|')
+        if "native_abc" in modes:
+            abc = NATIVE_ABC
         jobs[jid] = {"status": "done", "body": json.dumps({"abc": abc}).encode("utf-8"), "mime": "application/json"}
         return web.json_response({"id": jid})
 

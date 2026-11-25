@@ -80,6 +80,15 @@ CREATION_NEW_PROCESS_GROUP = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform
 LOOPBACK = "127.0.0.1"
 START_TIMEOUT_S = 60.0
 STOP_GRACE_S = 15.0
+# A multipart upload to a local engine (a source track's WAV, about 17 MB a minute) gets the base time plus
+# a second per MiB, so a long source is not cut off where a short one fits.
+UPLOAD_TIMEOUT_BASE_S = 300.0
+UPLOAD_TIMEOUT_S_PER_MIB = 1.0
+
+
+def upload_timeout_s(size_bytes: int) -> float:
+    """The timeout of a multipart POST of `size_bytes` (`submit_form`)."""
+    return UPLOAD_TIMEOUT_BASE_S + UPLOAD_TIMEOUT_S_PER_MIB * max(0, size_bytes) / (1024 * 1024)
 
 
 def card_wait_words_for_a_start(display: str, estimate: Optional[Dict[str, Any]]) -> str:
@@ -944,8 +953,9 @@ class SupervisedEngine:
                 fh = open(file, "rb")
                 handles.append(fh)
                 parts.append((name, (Path(file).name, fh, ctype)))
+            size = len(request) + sum(os.fstat(fh.fileno()).st_size for fh in handles)
             try:
-                async with self._client(300.0) as client:
+                async with self._client(upload_timeout_s(size)) as client:
                     resp = await client.post(self.base_url + path, files=parts, data=dict(fields or {}))
             except httpx.HTTPError as exc:
                 raise self._unreachable(exc, f"POST {path}") from exc

@@ -21,10 +21,17 @@ run (`listen_only_source`, `track_not_ready`, `missing_lyrics`).
 - `cover` on acestep.cpp: `task_type: cover`, the source as the `audio` part of one `/synth` with every
   variant, no LM (`run_cover`: the source is VAE-encoded and degraded by an FSQ round trip, the caption
   steers the style); `cover_strength` is `audio_cover_strength`. The take is as long as the source.
-- `cover` on yue2.cpp: SheetSage2 transcribes the source to an ABC score (`POST /transcribe`, served
-  when the server runs with `--transcriber`; `melody_only` for `cot` melody), written as payload
-  `transcribe.result.json`; then each variant's `/synth` carries the score as `abc`, the kept lyrics and
-  the target style, through the from-text yue2 path.
+- `cover` on yue2.cpp, the default (Mike 2026-11-26), Ruach Studio's cover chain (`cover_score.py`):
+  the source is heard levelled when it is too loud for the transcriber; SheetSage2 transcribes it to an
+  ABC score (`POST /transcribe`, served when the server runs with `--transcriber`; `melody_only` for
+  `cot` melody, the default), written as payload `transcribe.result.json`; `vocal_only` keeps the
+  score's Vocal voice; the style's tempo and key are made to agree with the score; the lyrics' blocks
+  take the score's section tags by the track's line times (Match sections); each variant's `/synth`
+  carries the score as `abc`, and the source's length as `duration` plus a semantic `min_tokens` a
+  second under it (`yue2_cover_length`), through the from-text yue2 path. QA measures every cover
+  against its source's length (mode `same`, `COVER_SAME_TOLERANCE_S`).
+- A web track's audio comes through `web_sources.fetch_audio` (the streaming integration's one place),
+  which today raises `web_source_pending_integration`; the door says so first.
 
 **One job.** Before the card: the source is looked up in the library (gone, or its audio hash changed
 since the proposal: `unsupported` with the reason); a job that sends audio decodes the source with
@@ -36,7 +43,8 @@ through the runner's shared take path (`_store_take`: FLAC, lossless check, loud
 `mp.qc/1`, provenance, library) dressed by `SongDress`: the title ("Cover of ..."), the library
 lineage (SPEC §4: relation, source_track_id, source_name, caption, engine), and the provenance record's
 `relation`, `parents` (the source, like an edit's base) and `song` block; the source's licence joins the
-take's when its audio or its lyrics went in.
+take's when its audio or its own stored lyrics (`lyrics_source: stored`) went in. DPC's temp files of a
+job (`TEMP_PARTS`) are removed when it ends and swept at runner start (`sweep_temp_parts`).
 """
 
 from __future__ import annotations
@@ -44,12 +52,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from . import cover_score as cs
 from . import job_schemas as js
 from . import provenance as prov
+from . import web_sources
 from .acestep import MODEL_FILES
 from .engine_base import MusicEngineError
 from .jobs import MusicJobError
@@ -60,6 +71,11 @@ SONG_PAYLOAD = "song.request.json"
 SONG_SCHEMA = "dpc.song-job/1"
 TRANSCRIBE_PAYLOAD = "transcribe.result.json"
 SOURCE_PART = "source.wav.part"
+LEVELLED_PART = "transcribe.wav.part"
+MULTIPART_PART = "cover.multipart.part"
+# DPC's own temp files of a song job in `generated/<job>/`: removed when the job ends, swept at runner start
+# (`sweep_temp_parts`) after a crash.
+TEMP_PARTS = (SOURCE_PART, LEVELLED_PART, MULTIPART_PART)
 SOURCE_FORMAT = "wav, PCM 24-bit, 48 kHz, stereo (DPC's ffmpeg decode of the source)"
 INSTRUMENTAL_LYRICS = "[Instrumental]"
 TITLE_PREFIX = {js.GENERATE_SIMILAR: "Same style as", js.COVER: "Cover of",
@@ -68,6 +84,26 @@ TASK_TYPE = {js.GENERATE_SIMILAR: "text2music", js.COVER: "cover", js.GENERATE_F
 ENGINE_IDS = {js.ENGINE_ACESTEP: "acestep.cpp", js.ENGINE_YUE2: "yue2.cpp"}
 # acestep.cpp's LM metadata a kept attribute fills (src/request.h: bpm, keyscale, timesignature).
 KEEP_TO_LM = {"bpm": "bpm", "key": "keyscale", "timesig": "timesignature"}
+# yue2.cpp's semantic preset caps the music at 9000 frames (e646d52 src/sampling.h:47).
+YUE2_SEMANTIC_MAX_TOKENS = 9000
+# How far a cover may land from its source's length before QA flags it (length mode `same`): acestep.cpp
+# renders whole 1920-sample latent frames of the source; yue2.cpp is held between a second under and a
+# second over it (`yue2_cover_length`), so two seconds covers the rounding up of the cap.
+COVER_SAME_TOLERANCE_S = {js.ENGINE_ACESTEP: 0.05, js.ENGINE_YUE2: 2.0}
+
+
+def yue2_cover_length(source_s: float) -> Dict[str, Any]:
+    """The yue2.cpp request fields that make a cover as long as its source, as Ruach Studio sings over a
+    backing (build/tools/console/app.js:11721-11727): `duration` the source's seconds rounded up plus one
+    (the cap the semantic stage stops at, src/pipeline.h:538-547) and `semantic_sampling.min_tokens` a
+    second under the source (the end token is banned until then, src/sampling.h:96), with `max_tokens`
+    raised past the preset's 9000 only when the source needs it."""
+    floor = max(0, math.floor((source_s - 1.0) * js.YUE2_FRAME_RATE))
+    need = math.ceil((source_s + 1.0) * js.YUE2_FRAME_RATE)
+    sampling: Dict[str, int] = {"min_tokens": floor}
+    if need > YUE2_SEMANTIC_MAX_TOKENS:
+        sampling["max_tokens"] = need
+    return {"duration": float(math.ceil(source_s) + 1), "semantic_sampling": sampling}
 
 
 # -- what is sent ------------------------------------------------------------------------------
@@ -141,12 +177,21 @@ def build_cover_body(params: Mapping[str, Any], seed: int) -> bytes:
     return json.dumps(req, ensure_ascii=False).encode("utf-8")
 
 
-def build_yue2_song_body(params: Mapping[str, Any], seed: int, abc: Optional[str] = None) -> bytes:
-    """One variant's yue2.cpp `/synth` body: the from-text body, with the score of a cover as `abc`."""
+def build_yue2_song_body(params: Mapping[str, Any], seed: int, abc: Optional[str] = None, *,
+                         style: Optional[str] = None, lyrics: Optional[str] = None,
+                         source_s: Optional[float] = None) -> bytes:
+    """One variant's yue2.cpp `/synth` body: the from-text body; a cover's score as `abc`, its style and lyrics
+    as prepared against the score (`_cover_on_yue2`), and its length from the source (`yue2_cover_length`)."""
     from .runner import build_yue2_body
     req = json.loads(build_yue2_body(text_view(params), seed).decode("utf-8"))
     if abc is not None:
         req["abc"] = abc
+    if style is not None:
+        req["style"] = style
+    if lyrics is not None:
+        req["lyrics"] = lyrics
+    if source_s is not None:
+        req.update(yue2_cover_length(source_s))
     return json.dumps(req, ensure_ascii=False).encode("utf-8")
 
 
@@ -164,6 +209,8 @@ class SongDress:
     song_payload_sha: Optional[str] = None
     inherit_licence: bool = False
     extra_payloads: Dict[str, str] = field(default_factory=dict)
+    # A cover's QA terms (`runner._measure_qa`): the source's length, mode `same`, the engine's tolerance.
+    qa_override: Optional[Dict[str, Any]] = None
 
     @property
     def relation(self) -> str:
@@ -216,6 +263,29 @@ class _Prepared:
     source_wav: Optional[Path] = None
 
 
+def sweep_temp_parts(generated_root: Path, active: Optional[set] = None) -> List[Path]:
+    """Remove song jobs' temp files (`TEMP_PARTS`, by name only) left in `generated/<job>/` by a crash, except
+    under the jobs in `active`; the removed paths."""
+    removed: List[Path] = []
+    try:
+        folders = [d for d in Path(generated_root).iterdir() if d.is_dir()]
+    except OSError:
+        return removed
+    for folder in folders:
+        if active and folder.name in active:
+            continue
+        for name in TEMP_PARTS:
+            p = folder / name
+            try:
+                p.unlink()
+                removed.append(p)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("music: could not remove the stale %s", p, exc_info=True)
+    return removed
+
+
 async def run_song_job(runner: Any, job: dict) -> None:
     """One song job, from `queued` (module docstring)."""
     from .runner import _CardWait, _Cancelled, _JobFailure
@@ -251,7 +321,7 @@ async def run_song_job(runner: Any, job: dict) -> None:
             engine.card_lease.release_when_empty("its job ended with no engine running", holds=engine.alive)
     finally:
         runner._song_dress.pop(job_id, None)
-        for p in (source_wav, out_dir / "cover.multipart.part"):
+        for p in (out_dir / name for name in TEMP_PARTS):
             try:
                 p.unlink()
             except FileNotFoundError:
@@ -277,7 +347,13 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
     audio: Optional[Dict[str, Any]] = None
     files: List[Tuple[str, Path, str]] = []
     if js.song_needs_audio(job_type, params):
-        path = library.get_track_path(track_id)
+        if (entry.get("source") or {}).get("kind") == "web":
+            try:
+                path = await asyncio.to_thread(web_sources.fetch_audio, entry, out_dir)
+            except web_sources.WebSourceNotAvailable as exc:
+                raise _JobFailure(f"{exc.code}: {exc.message}")
+        else:
+            path = library.get_track_path(track_id)
         if path is None or not Path(path).is_file():
             raise _JobFailure("the source track's file is missing; relink or rescan it and propose the job again")
         # The library's hash can lag the file: the bytes are hashed again now, by the library's own identity
@@ -356,13 +432,18 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
             "lyrics_mode": params["lyrics_mode"], "reference": params["reference"],
             "reference_uri": params.get("reference_uri"), "caption": params["caption"],
             "caption_basis": params.get("caption_basis"), "source_audio": audio}
-    for k in ("kept", "melody_source", "cover_strength", "cot"):
+    for k in ("kept", "melody_source", "cover_strength", "cot", "vocal_only", "lyrics_source"):
         if k in params:
             song[k] = params[k]
     if job_type != js.COVER and params["reference"] == "audio":
         song["reference_role"] = "acestep.cpp ref_audio: a timbre reference; style steering not verified"
+    # The source's licence follows its audio, or its own stored lyrics; lines the caller typed under
+    # `reuse` are not the source's (Zcode #188, finding 1).
     dress = SongDress(job_type, params, parent, song, song_payload_sha=song_sha,
-                      inherit_licence=audio is not None or params["lyrics_mode"] == "reuse")
+                      inherit_licence=audio is not None or params.get("lyrics_source") == "stored")
+    if job_type == js.COVER and audio is not None:
+        dress.qa_override = {"requested_s": audio["frames"] / audio["rate"], "length_mode": "same",
+                             "same_tolerance_s": COVER_SAME_TOLERANCE_S[key]}
     return _Prepared(seed=seed, dress=dress, files=files, lm_body=lm_body,
                      source_wav=source_wav if audio is not None else None)
 
@@ -414,7 +495,7 @@ async def _cover_on_acestep(runner: Any, job: dict, prepared: _Prepared, engine:
     await runner._progress(job_id, 0.1)
     synth_body = await runner._call(runner.store.read_payload, job_id, SYNTH_PAYLOAD)
     out_dir = runner.generated_root / job_id
-    multipart = out_dir / "cover.multipart.part"
+    multipart = out_dir / MULTIPART_PART
     ctype, _ = await runner._engine_job(job_id, engine, "/synth", synth_body, engine_job, dest=multipart,
                                         files=prepared.files)
     await runner._check(job_id)
@@ -492,22 +573,82 @@ async def _transcribe(runner: Any, job_id: str, engine: Any, wav: Path, melody_o
     return raw or b""
 
 
+async def _level_for_transcriber(runner: Any, source_wav: Path, out_dir: Path) -> Tuple[Path, Dict[str, Any]]:
+    """The file SheetSage2 hears and what was done to it: the source as it is, or (too loud for it, the rule of
+    `cover_score.transcriber_gain_db`) one gain on its mono mix, written as `transcribe.wav.part`. A loudness
+    that cannot be measured leaves the source as it is, said."""
+    from . import region_edit as re_
+    try:
+        loud = await asyncio.to_thread(runner._measure, source_wav)
+    except Exception as exc:
+        return source_wav, {"gain_db": None, "measured": False, "reason": f"not measured: {exc}"[:200]}
+    lufs, peak = loud.get("lufs_i"), loud.get("true_peak_dbtp")
+    gain = cs.transcriber_gain_db(lufs, peak)
+    said = {"measured": True, "lufs_i": lufs, "true_peak_dbtp": peak, "gain_db": gain,
+            "rule": "above -14 LUFS or -1 dBFS peak: one gain to -16 LUFS, peak at most -1.5 dBFS (Ruach Studio)"}
+    if gain is None:
+        return source_wav, said
+
+    def write() -> Path:
+        pcm = re_.read_pcm(source_wav)
+        mono = pcm.data.mean(axis=1, keepdims=True) * (10.0 ** (gain / 20.0))
+        dest = out_dir / LEVELLED_PART
+        re_.write_wav_s24(dest, [mono], rate=pcm.rate, channels=1)
+        return dest
+
+    return await asyncio.to_thread(write), said
+
+
+def _timed_rows(lines: List[str], times: List[Optional[float]]) -> List[Dict[str, Any]]:
+    """The sung lines of the lyrics with their start in the source (`cover_score.match_sections` rows)."""
+    rows = []
+    for line, t in zip(lines, times):
+        s = line.strip()
+        if s and s[0] not in "([":
+            rows.append({"text": s, "start": t})
+    return rows
+
+
+def _lyrics_against_score(params: Mapping[str, Any], abc: str) -> Tuple[Optional[str], Dict[str, Any]]:
+    """The lyrics as sent with the score (Match sections, `cover_score`), or None to send them as they are; and
+    what was done, for the take's `song` block."""
+    lines, times = params.get("lyrics") or [], params.get("lyrics_times")
+    if not lines:
+        return None, {"status": "not_run", "reason": "no lyrics"}
+    if not times or all(t is None for t in times):
+        return None, {"status": "not_run", "reason": "the track's lyrics have no line times (not synced)"}
+    tagged = cs.pre_tag(lines, times, abc)
+    try:
+        match = cs.match_sections(abc, tagged or lines, _timed_rows(lines, times))
+    except ValueError as exc:
+        return None, {"status": "not_run", "reason": str(exc)}
+    said = {"status": "unchanged" if match["unchanged"] else "applied", "pre_tagged": tagged is not None,
+            "blocks": cs.counts_of(match["blocks"]), "sections_added": len(match["filled"]),
+            "by": "Match sections after Ruach Studio (build/tools/console/app.js:11199-11305)"}
+    return (None if match["unchanged"] else match["lyrics"]), said
+
+
 async def _cover_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: Any,
                          engine_job: List[Optional[str]]) -> None:
-    """SheetSage2's score of the source, then the from-text yue2 path with the score as each variant's `abc`."""
+    """SheetSage2's score of the source (heard levelled when it is too loud), the Vocal voice alone when asked,
+    the style made to agree with the score and the lyrics matched to its sections, then the from-text yue2 path
+    with the score as each variant's `abc` and the source's length asked for (`yue2_cover_length`)."""
     from .runner import _JobFailure, variant_seed, yue2_request_name
     job_id, params = job["id"], job["params"]
     backbone = params.get("backbone") or js.YUE2_BACKBONE_DEFAULT
+    out_dir = runner.generated_root / job_id
     await runner._progress(job_id, 0.02)
     await runner._start_engine(job_id, js.ENGINE_YUE2, engine, backbone=backbone, adapters=[])
     problem = getattr(engine, "transcriber_problem", lambda: "the supervisor does not report a transcriber")()
     if problem:
-        raise _JobFailure(f"yue2.cpp cannot transcribe the source: {problem}")
+        raise _JobFailure(f"yue2.cpp cannot transcribe the source: {problem}. A cover on acestep.cpp runs without "
+                          "it (engine acestep)")
     have = {p["name"] for p in (await runner._get(job_id) or {}).get("payloads") or []}
+    heard, level = await _level_for_transcriber(runner, prepared.source_wav, out_dir)
     if TRANSCRIBE_PAYLOAD in have:
         raw = await runner._call(runner.store.read_payload, job_id, TRANSCRIBE_PAYLOAD)
     else:
-        raw = await _transcribe(runner, job_id, engine, prepared.source_wav, params.get("cot") == "melody", engine_job)
+        raw = await _transcribe(runner, job_id, engine, heard, params.get("cot") == "melody", engine_job)
         await runner._call(runner.store.write_payload, job_id, TRANSCRIBE_PAYLOAD, raw, endpoint="/transcribe")
     try:
         abc = json.loads(raw.decode("utf-8")).get("abc")
@@ -515,15 +656,29 @@ async def _cover_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: An
         raise _JobFailure(f"the /transcribe answer is not the JSON yue2.cpp returns: {exc}")
     if not isinstance(abc, str) or not abc.strip():
         raise _JobFailure("SheetSage2 heard no score in the source; a cover on yue2.cpp needs one (try acestep)")
+    score = cs.keep_vocal_voice(abc) if params.get("vocal_only") else abc
+    style, style_changes = cs.agree_style(caption_sent(params), score)
+    lyrics, matched = _lyrics_against_score(params, score)
+    source_s = prepared.dress.qa_override["requested_s"] if prepared.dress.qa_override else float(params["duration_s"])
     for index in range(int(params["variants"])):
         name = yue2_request_name(index + 1)
         if name not in have:
-            await runner._call(runner.store.write_payload, job_id, name,
-                               build_yue2_song_body(params, variant_seed(prepared.seed, index), abc), endpoint="/synth")
+            body = build_yue2_song_body(params, variant_seed(prepared.seed, index), score, style=style,
+                                        lyrics=lyrics, source_s=source_s)
+            await runner._call(runner.store.write_payload, job_id, name, body, endpoint="/synth")
     now = await runner._get(job_id)
     sha = next((p["sha256"] for p in (now or {}).get("payloads") or [] if p["name"] == TRANSCRIBE_PAYLOAD), None)
     if sha:
         prepared.dress.extra_payloads[TRANSCRIBE_PAYLOAD] = sha
-    prepared.dress.song["score_abc_sha256"] = prov.text_sha256(abc)
+    song = prepared.dress.song
+    song["score_abc_sha256"] = prov.text_sha256(abc)
+    if score != abc:
+        song["score_sent_sha256"] = prov.text_sha256(score)
+    song["transcribe_level"] = level
+    song["style_sent"] = style
+    song["style_changes"] = style_changes
+    song["section_match"] = matched
+    song["length"] = {"source_s": round(source_s, 3), **yue2_cover_length(source_s),
+                      "by": "Ruach Studio's rule for a song over a backing (build/tools/console/app.js:11721-11727)"}
     await runner._progress(job_id, 0.1)
     await runner._produce_yue2(job_id, text_view(params), prepared.seed, engine, engine_job)

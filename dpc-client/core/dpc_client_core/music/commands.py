@@ -115,7 +115,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -842,19 +842,61 @@ class MusicCommandsMixin:
         lyrics = answer.get("lyrics") if isinstance(answer, dict) else None
         return lyrics if isinstance(lyrics, dict) else None
 
+    async def _music_song_lyrics(self, track_id: str) -> List[Tuple[str, Optional[float]]]:
+        """The track's stored lyrics as `(text, start)` lines, empty lines trimmed at both ends (as the params
+        keep them), `[]` when it has none stored. A store that cannot be read is `lyrics_unreadable`, never
+        taken for an absence (Zcode #188, finding 4)."""
+        try:
+            answer = await (await self._music_lyrics()).get(track_id)
+        except Exception as exc:
+            raise MusicJobError("lyrics_unreadable", f"the track's stored lyrics could not be read: {exc}"[:300],
+                                field="lyrics")
+        lyrics = answer.get("lyrics") if isinstance(answer, dict) else None
+        pairs: List[Tuple[str, Optional[float]]] = []
+        for ln in (lyrics or {}).get("lines") or [] if isinstance(lyrics, dict) else []:
+            if isinstance(ln, dict):
+                t = ln.get("t_start")
+                ok = isinstance(t, (int, float)) and not isinstance(t, bool) and t >= 0
+                pairs.append((str(ln.get("text") or "").rstrip("\r\n"), float(t) if ok else None))
+        while pairs and not pairs[-1][0].strip():
+            pairs.pop()
+        while pairs and not pairs[0][0].strip():
+            pairs.pop(0)
+        return pairs
+
     async def _music_song_params(self, job_type: str, params: Dict[str, Any], track_id: Optional[str]) -> Dict[str, Any]:
         """A song job's params with the track's stored lyrics filled in where they are reused and not
         given (an agent may name `lyrics_mode: reuse` alone). A cover that does not name its lyrics mode
         reuses them when the track has some, else goes without (the core refuses `missing_lyrics` where
-        the engine needs them)."""
+        the engine needs them). Lines given under `reuse` must be the stored ones, else
+        `reuse_lyrics_differ` (Zcode #188, finding 1: the take inherits the source's licence only for its
+        own lyrics); `lyrics_source` and a yue2 cover's `lyrics_times` are this door's to fill."""
         out = dict(params)
+        out.pop("lyrics_source", None)
+        out.pop("lyrics_times", None)
         mode = out.get("lyrics_mode", js.SONG_DEFAULT_LYRICS_MODE.get(job_type))
-        if mode != "reuse" or out.get("lyrics") is not None or not track_id:
+        if mode != "reuse" or not track_id:
             return out
-        stored = await self._music_stored_lyrics(track_id)
-        lines = [str(ln.get("text") or "") for ln in (stored or {}).get("lines") or [] if isinstance(ln, dict)]
-        if any(t.strip() for t in lines):
-            out["lyrics"] = lines
+        pairs = await self._music_song_lyrics(track_id)
+        stored = [text for text, _t in pairs]
+        if out.get("lyrics") is not None:
+            given = out["lyrics"].splitlines() if isinstance(out["lyrics"], str) else out["lyrics"]
+            if isinstance(given, list) and all(isinstance(x, str) for x in given):
+                given = [x.rstrip("\r\n") for x in given]
+                while given and not given[-1].strip():
+                    given.pop()
+                while given and not given[0].strip():
+                    given.pop(0)
+                if given != stored:
+                    raise MusicJobError("reuse_lyrics_differ", "lyrics_mode reuse sends the track's own stored lyrics; "
+                                        "the lines given differ from them (leave lyrics out to reuse the stored ones)",
+                                        field="lyrics")
+        if any(t.strip() for t in stored):
+            out["lyrics"] = stored
+            out["lyrics_source"] = "stored"
+            engine = out.get("engine", js.SONG_DEFAULT_ENGINE.get(job_type))
+            if job_type == js.COVER and engine == js.ENGINE_YUE2 and any(t is not None for _x, t in pairs):
+                out["lyrics_times"] = [t for _x, t in pairs]
         elif job_type == js.COVER and "lyrics_mode" not in out:
             out["lyrics_mode"] = "none"
         return out

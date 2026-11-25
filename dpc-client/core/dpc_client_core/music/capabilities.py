@@ -54,6 +54,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from . import job_schemas as js
 from . import region_edit as re_
+from . import web_sources
 from .qa import THRESHOLDS as QA_THRESHOLDS
 
 logger = logging.getLogger(__name__)
@@ -98,9 +99,13 @@ SONG_WORDS = {
     ("generate_from_lyrics", "yue2"): "yue2.cpp text-to-song with the track's lyrics (one /synth per variant)",
     ("cover", "acestep"): "acestep.cpp task cover: the source's audio and the target caption in one /synth, no LM; "
                           "the take is as long as the source",
-    ("cover", "yue2"): "yue2.cpp: SheetSage2 /transcribe makes the source's ABC score, then /synth sings it with the "
-                       "lyrics in the target style",
+    ("cover", "yue2"): "yue2.cpp (the default cover engine): SheetSage2 /transcribe makes the source's ABC score "
+                       "(levelled first when too loud), then /synth sings it with the lyrics matched to its sections, "
+                       "in the target style agreed with the score's tempo and key, as long as the source (Ruach "
+                       "Studio's cover chain)",
 }
+# What a yue2 cover's refusal offers instead (Mike 2026-11-26: acestep.cpp cover is the fallback).
+COVER_FALLBACK_WORDS = "a cover on acestep.cpp runs without it and needs no lyrics (engine acestep)"
 AUDIO_REFERENCE_WORDS = ("; the source's audio goes as acestep.cpp's ref_audio, a timbre reference (whether it steers "
                          "the style beyond timbre is not verified)")
 
@@ -328,7 +333,7 @@ class MusicCapabilities:
         if job_type == js.COVER and key == js.ENGINE_YUE2:
             problem = self._yue2_transcriber_problem()
             if problem:
-                return {"status": UNSUPPORTED, "reason": f"yue2.cpp cover: {problem}"}
+                return {"status": UNSUPPORTED, "reason": f"yue2.cpp cover: {problem}; {COVER_FALLBACK_WORDS}"}
         return {"status": SUPPORTED, "reason": SONG_WORDS[(job_type, key)]
                 + (AUDIO_REFERENCE_WORDS if needs_audio and job_type != js.COVER else "")}
 
@@ -347,19 +352,29 @@ class MusicCapabilities:
             reasons.append(st["reason"])
         return {"status": UNSUPPORTED, "reason": "; ".join(reasons)}
 
-    def song_features(self, statuses: Optional[Mapping[str, EngineStatus]] = None) -> Dict[str, Dict[str, str]]:
+    def song_features(self, statuses: Optional[Mapping[str, EngineStatus]] = None) -> Dict[str, Dict[str, Any]]:
         """`features.audio_reference` (a same-style song with the source as acestep.cpp's timbre
-        reference) and `features.cover`, per engine for the cover (`cover_engines`)."""
+        reference), `features.cover`, per engine for the cover (`cover_engines`, the default and the fallback
+        engine with why), and `features.web_source_audio` (planned: the streaming integration)."""
         ref = self.song_engine_status(js.GENERATE_SIMILAR, js.ENGINE_ACESTEP, needs_audio=True, statuses=statuses)
         cover = {k: self.song_engine_status(js.COVER, k, needs_audio=True, statuses=statuses)
                  for k in js.SONG_ENGINES[js.COVER]}
         any_cover = next((v for v in cover.values() if v["status"] == SUPPORTED), None)
+        default = js.SONG_DEFAULT_ENGINE[js.COVER]
+        fallback = None
+        if cover[default]["status"] != SUPPORTED:
+            fallback = next((k for k in js.SONG_ENGINES[js.COVER] if k != default
+                             and cover[k]["status"] == SUPPORTED), None)
         return {
             "audio_reference": ref if ref["status"] != SUPPORTED else {
                 "status": SUPPORTED, "reason": AUDIO_REFERENCE_WORDS.lstrip("; "), "verified": False},
             "cover": {**(any_cover or {"status": UNSUPPORTED,
                                        "reason": "; ".join(v["reason"] for v in cover.values())}),
-                      "cover_engines": cover},
+                      "cover_engines": cover, "default_engine": default,
+                      "fallback_engine": fallback,
+                      "fallback_reason": cover[default]["reason"] if fallback else None},
+            # A web track's audio (a cover, an audio reference): the streaming integration (music/web_sources.py).
+            "web_source_audio": web_sources.integration_status(),
         }
 
     def job_type_status(self, job_type: str, engine: Optional[EngineStatus] = None,
@@ -554,7 +569,12 @@ class MusicCapabilities:
                     "variants": {"min": js.VARIANTS_MIN, "max": js.VARIANTS_MAX, "default": js.VARIANTS_DEFAULT},
                     "duration_s": {k: {"min": v[0], "max": v[1]} for k, v in js.DURATION_LIMITS.items()},
                     "cover_strength": {"min": 0.0, "max": 1.0, "default": js.COVER_STRENGTH_DEFAULT},
-                    "cover_length": "acestep: the source's length; yue2: a cap",
+                    "cover_length": "the source's length on both engines: acestep.cpp takes it from the source, "
+                                    "yue2.cpp is asked for it (duration and semantic min_tokens); QA mode same",
+                    "cover_source_s": {js.ENGINE_ACESTEP: {"min": js.ACESTEP_COVER_MIN_S, "max": js.DURATION_MAX_S},
+                                       js.ENGINE_YUE2: {"min": js.YUE2_COVER_MIN_S, "max": js.YUE2_COVER_MAX_S}},
+                    "reference_audio_max_s": js.REFERENCE_AUDIO_MAX_S,
+                    "cover_cot_default": js.COVER_COT_DEFAULT,
                 },
             },
             "qa": {"tool": "ffmpeg", "fields": list(QA_FIELDS),

@@ -636,6 +636,14 @@ class MusicJobRunner:
 
     async def _work(self) -> None:
         assert self._wake is not None
+        # A crash mid-job leaves a song job's decoded source behind; nothing runs yet, so every one is stale.
+        from .similar import sweep_temp_parts
+        try:
+            gone = await asyncio.to_thread(sweep_temp_parts, self.generated_root)
+            if gone:
+                logger.info("music: removed %d stale song-job temp file(s) left by an earlier run", len(gone))
+        except Exception:
+            logger.warning("music: sweeping stale song-job temp files failed", exc_info=True)
         while True:
             job_id = await asyncio.to_thread(self._next_queued)
             if job_id is None:
@@ -1566,6 +1574,8 @@ class MusicJobRunner:
         dress = self._song_dress.get(job_id)
         if dress is not None:   # a song job's take (`similar.SongDress`): its title, lineage and record
             title, lineage, provenance, record = dress.apply(variant, title, lineage, provenance, record)
+            if qa_override is None and getattr(dress, "qa_override", None):
+                qa_override = dict(dress.qa_override)   # a cover: the source's length, mode `same`
         stem = f"{slug}_v{variant}"
         wav_part = out_dir / f"{stem}.wav.part"
         flac_part = out_dir / f"{stem}.flac.part"
@@ -1717,6 +1727,8 @@ class MusicJobRunner:
             requested, mode = override.get("requested_s", requested), override.get("length_mode", mode)
             if override.get("edit") is not None:
                 extra["edit"] = override["edit"]
+            if override.get("same_tolerance_s") is not None:
+                extra["same_tolerance_s"] = override["same_tolerance_s"]
         try:
             version = await self._ffmpeg_version_text()
             record = await asyncio.to_thread(

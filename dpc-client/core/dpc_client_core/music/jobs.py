@@ -92,6 +92,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 from . import job_schemas as js
 from . import qc as qc_
 from . import region_edit as re_
+from . import web_sources
 from .capabilities import MusicCapabilities
 from .schemas import SchemaError
 from .store import atomic_write_text, music_dir_of
@@ -687,8 +688,9 @@ class MusicJobStore:
                      source: Optional[Mapping[str, Any]]) -> dict:
         """The checked params of a song job from a source track (`job_schemas.normalize_params_song`),
         against what the library knows of it. A job that sends the source's audio (a cover, a
-        reference) needs its file: a web track has none here (`listen_only_source`: DPC does not
-        download a web source yet), a file still being hashed is `track_not_ready`."""
+        reference) needs its file: a web track's comes through `web_sources` (until the Yandex Music /
+        SoundCloud integration, the named state `web_source_pending_integration` with its message), a
+        file still being hashed is `track_not_ready`."""
         if not isinstance(source, Mapping):
             raise MusicJobError("invalid_source", f"a {job_type} job needs the library track it starts from (track_id)",
                                 field="track_id")
@@ -700,11 +702,9 @@ class MusicJobStore:
             raise MusicJobError("invalid_params", exc.message, field=exc.field)
         if js.song_needs_audio(job_type, out):
             if out["source_kind"] == "web":
-                raise MusicJobError("listen_only_source", "a web track is listen-only here: DPC does not download a "
-                                                          "web source yet, so its audio cannot go to the engine (a cover "
-                                                          "or a reference); a same-style song from its description works",
-                                    field="track_id")
-            if not out["source_content_hash"]:
+                if not web_sources.can_fetch(source):
+                    raise MusicJobError(web_sources.PENDING_CODE, web_sources.PENDING_MESSAGE, field="track_id")
+            elif not out["source_content_hash"]:
                 raise MusicJobError("track_not_ready", "the track's audio is still being hashed; propose the job again "
                                                        "in a moment", field="track_id")
         return out

@@ -1043,7 +1043,9 @@ def get_tools() -> List[ToolEntry]:
                                           "reference (description or audio: the source as a timbre "
                                           "reference, unverified), engine (acestep or yue2, see "
                                           "music_capabilities song_jobs), variants, duration_s, seed; a cover "
-                                          "also cover_strength (acestep, 0-1). "
+                                          "runs on yue2 by default (it needs the lyrics; acestep needs none), "
+                                          "is as long as its source, and takes cover_strength (acestep, 0-1) or "
+                                          "cot (melody, the default, or full) and vocal_only (yue2). "
                                           "Params core would refuse are refused before the person is asked."},
                 "idempotency_key": {"type": "string",
                                     "description": "Optional; the default comes from the turn."}},

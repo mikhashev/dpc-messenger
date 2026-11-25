@@ -150,7 +150,8 @@ def free_env(monkeypatch, modes="", record=None):
         monkeypatch.delenv("FAKE_ACESTEP_RECORD", raising=False)
 
 
-def fake_qa(flac: Path, *, requested_s=None, length_mode="exact", duration_s=None, loudness=None, tool_version=None) -> dict:
+def fake_qa(flac: Path, *, requested_s=None, length_mode="exact", duration_s=None, loudness=None, tool_version=None,
+            same_tolerance_s=None) -> dict:
     """A stage-1 QA record without ffmpeg: every gate passes, the numbers are the fake loudness's."""
     gates = {name: qa_module._gate(js.GATE_PASS, "fake QA") for name in js.QA_GATES}
     loud = loudness or {}

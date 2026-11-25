@@ -589,8 +589,9 @@ def fallback_params_from_text(params: Mapping[str, Any], engine: str) -> Dict[st
 GENERATE_SIMILAR, COVER, GENERATE_FROM_LYRICS = "generate_similar", "cover", "generate_from_lyrics"
 SONG_TYPES = (GENERATE_SIMILAR, COVER, GENERATE_FROM_LYRICS)
 SONG_ENGINES = {GENERATE_SIMILAR: (ENGINE_ACESTEP,), GENERATE_FROM_LYRICS: (ENGINE_YUE2, ENGINE_ACESTEP),
-                COVER: (ENGINE_ACESTEP, ENGINE_YUE2)}
-SONG_DEFAULT_ENGINE = {GENERATE_SIMILAR: ENGINE_ACESTEP, GENERATE_FROM_LYRICS: ENGINE_YUE2, COVER: ENGINE_ACESTEP}
+                COVER: (ENGINE_YUE2, ENGINE_ACESTEP)}
+# Mike 2026-11-26: a cover runs on yue2.cpp's score chain by default; acestep.cpp `cover` is the second choice.
+SONG_DEFAULT_ENGINE = {GENERATE_SIMILAR: ENGINE_ACESTEP, GENERATE_FROM_LYRICS: ENGINE_YUE2, COVER: ENGINE_YUE2}
 SONG_RELATIONS = {GENERATE_SIMILAR: "same style as", COVER: "cover of",
                   GENERATE_FROM_LYRICS: "new song from the lyrics of"}
 SONG_DEFAULT_LYRICS_MODE = {GENERATE_SIMILAR: "none", GENERATE_FROM_LYRICS: "reuse", COVER: "reuse"}
@@ -603,12 +604,30 @@ KEEP_BPM_MAX = 400
 MELODY_SOURCES = {ENGINE_ACESTEP: "source_audio", ENGINE_YUE2: "sheetsage2:abc"}
 COVER_STRENGTH_DEFAULT = 1.0     # acestep.cpp's `audio_cover_strength` default (src/request.h)
 COVER_COT_MODES = ("full", "melody")
+# CC, following Ruach (build/tools/console/index.html:1250-1254, app.js:11046): the lead melody by default.
+COVER_COT_DEFAULT = "melody"
+# A cover is as long as its source; each engine's real floor and ceiling, read in its source (ADR-051 B5):
+# acestep.cpp 973517b src/pipeline-synth-ops.cpp:152,316 (1920-sample latent frames at 48 kHz); yue2.cpp
+# e646d52 src/sheetsage.h:1094 (1025 samples at 24 kHz), src/prompt.h:29 and src/generate.h:80 (the context
+# holds the semantic frames plus the end token; the score and lyrics share it, so a long one may stop sooner).
+ACESTEP_COVER_MIN_S = 1920 / 48000
+YUE2_COVER_MIN_S = 1025 / 24000
+YUE2_CONTEXT = 24576
+YUE2_FRAME_RATE = 25
+YUE2_COVER_MAX_S = (YUE2_CONTEXT - 1) / YUE2_FRAME_RATE - 1.0
+# The longest source whose audio a song job decodes and uploads as a timbre reference (acestep.cpp `ref_audio`,
+# same style or from lyrics): the engine's longest song (acestep.cpp clamps a duration to 600 s, 973517b
+# src/metadata-fsm.h:669) plus a margin. A cover's own ceiling is its engine's (`_song_duration`).
+SOURCE_AUDIO_MARGIN_S = 30.0
+REFERENCE_AUDIO_MAX_S = DURATION_MAX_S + SOURCE_AUDIO_MARGIN_S
+LYRICS_SOURCES = ("stored", "given")
 SOURCE_URI_PREFIX = "dpc-library:"
 SONG_TEXT_MAX_CHARS = 4000          # one keep value, the caption basis, the source caption, the theme
 _SONG_KEYS = ("source_track_id", "source_kind", "source_title", "source_content_hash", "source_duration_s",
-              "keep", "caption", "caption_basis", "source_caption", "lyrics_mode", "lyrics", "lyrics_theme",
+              "keep", "caption", "caption_basis", "source_caption", "lyrics_mode", "lyrics", "lyrics_source",
+              "lyrics_theme",
               "reference", "reference_uri", "variants", "duration_s", "engine", "seed")
-_SONG_COVER_KEYS = ("kept", "melody_source", "cover_strength")
+_SONG_COVER_KEYS = ("kept", "melody_source", "cover_strength", "vocal_only", "lyrics_times")
 _SONG_SOURCE_KINDS = ("local", "web", "generated")
 
 
@@ -715,22 +734,46 @@ def _song_lyrics(job_type: str, engine: str, params: Mapping[str, Any]) -> Dict[
                                   "from its score with the original lyrics: without them it cannot run (a technical "
                                   "limit; a cover on acestep.cpp works without lyrics)")
     elif mode == "reuse" and lines is None:
+        if job_type == COVER and engine == ENGINE_YUE2:
+            raise SongParamsError("missing_lyrics", "lyrics", "a cover on yue2.cpp sings the source's melody with its "
+                                  "lyrics, and the track has none stored (a technical limit; a cover on acestep.cpp "
+                                  "works without lyrics)")
         raise ParamsError("lyrics", "lyrics_mode reuse needs the track's lyrics lines; the track has none stored")
     if mode != "new" and theme is not None:
         raise ParamsError("lyrics_theme", "lyrics_theme goes with lyrics_mode new only")
-    return {"lyrics_mode": mode, "lyrics": lines, "lyrics_theme": (theme.strip() or None) if theme else None}
+    # `stored`: the lines are the track's own stored lyrics, filled in or checked by the command door; only
+    # then does the take inherit the source's licence for them (music/similar.py). Lines given any other way
+    # are `given`.
+    source = params.get("lyrics_source", "given" if lines is not None else None)
+    if lines is None and source is not None:
+        raise ParamsError("lyrics_source", "lyrics_source names where the lyrics came from; there are none")
+    if lines is not None and source not in LYRICS_SOURCES:
+        raise ParamsError("lyrics_source", f"lyrics_source must be one of {', '.join(LYRICS_SOURCES)}, got {source!r}")
+    return {"lyrics_mode": mode, "lyrics": lines, "lyrics_source": source,
+            "lyrics_theme": (theme.strip() or None) if theme else None}
 
 
 def _song_duration(job_type: str, engine: str, params: Mapping[str, Any], src_s: Optional[float]) -> float:
     dmin, dmax, ddefault = DURATION_LIMITS[engine]
-    if job_type == COVER and engine == ENGINE_ACESTEP:
-        # acestep.cpp docs/ARCHITECTURE.md, Cover: "Duration is determined by the source audio".
+    if job_type == COVER:
+        # acestep.cpp takes the length from the source (docs/ARCHITECTURE.md, Cover); yue2.cpp is asked for it
+        # (music/similar.py `yue2_cover_length`).
         if src_s is None:
             raise SongParamsError("track_not_ready", "track_id", "the source's length is not known yet; propose the "
                                   "cover again once the track is read")
-        if not dmin <= src_s <= dmax:
-            raise ParamsError("duration_s", f"a cover on acestep.cpp is as long as its source, which is {src_s:g} s; "
-                                            f"the engine takes {dmin} to {dmax} s")
+        floor = ACESTEP_COVER_MIN_S if engine == ENGINE_ACESTEP else YUE2_COVER_MIN_S
+        if src_s < floor:
+            why = ("one 1920-sample latent frame at 48 kHz" if engine == ENGINE_ACESTEP
+                   else "the 1025 samples at 24 kHz SheetSage2 needs to write a score")
+            raise SongParamsError("source_too_short", "track_id", f"the source is {src_s:g} s; a cover on "
+                                  f"{ENGINE_IDS[engine]} is as long as its source and needs at least {floor:.4f} s ({why})")
+        ceiling = dmax if engine == ENGINE_ACESTEP else YUE2_COVER_MAX_S
+        if src_s > ceiling:
+            why = (f"DPC's {dmax} s bound for acestep.cpp" if engine == ENGINE_ACESTEP else
+                   f"yue2.cpp's {YUE2_CONTEXT}-position context at {YUE2_FRAME_RATE} frames a second, with a second to "
+                   "spare")
+            raise SongParamsError("source_too_long", "track_id", f"the source is {src_s:g} s; a cover on "
+                                  f"{ENGINE_IDS[engine]} is as long as its source and takes at most {ceiling:g} s ({why})")
         return round(src_s, 3)
     fallback = min(max(math.ceil(src_s), dmin), dmax) if src_s is not None else ddefault
     duration = params.get("duration_s", fallback)
@@ -749,6 +792,8 @@ def _song_cover(engine: str, mode: str, params: Mapping[str, Any]) -> Dict[str, 
     if params.get("melody_source") not in (None, melody):
         raise ParamsError("melody_source", f"a cover on {engine} takes its melody from {melody}")
     out: Dict[str, Any] = {"kept": kept, "melody_source": melody}
+    if engine == ENGINE_YUE2:
+        out.update(_cover_score_choice(params))
     if engine == ENGINE_ACESTEP:
         strength = params.get("cover_strength", COVER_STRENGTH_DEFAULT)
         if not _is_number(strength) or not 0.0 <= strength <= 1.0:
@@ -758,12 +803,31 @@ def _song_cover(engine: str, mode: str, params: Mapping[str, Any]) -> Dict[str, 
     return out
 
 
+def _cover_score_choice(params: Mapping[str, Any]) -> Dict[str, Any]:
+    """A yue2 cover's `vocal_only` (the score's Vocal voice alone; with `cot` melody) and `lyrics_times` (each
+    lyrics line's start in the source, seconds or null, from the track's synced lyrics; the cover matches the
+    lyrics' blocks to the score's sections with them, music/cover_score.py)."""
+    vocal_only = params.get("vocal_only", False)
+    if not isinstance(vocal_only, bool):
+        raise ParamsError("vocal_only", "vocal_only must be true or false")
+    if vocal_only and params.get("cot", COVER_COT_DEFAULT) != "melody":
+        raise ParamsError("vocal_only", "vocal_only keeps the Vocal voice of a melody score: use it with cot melody")
+    times = params.get("lyrics_times")
+    if times is not None:
+        lines = _normalize_lines(params.get("lyrics"))
+        if not isinstance(times, list) or lines is None or len(times) != len(lines) or not all(
+                t is None or (_is_number(t) and t >= 0) for t in times):
+            raise ParamsError("lyrics_times", "lyrics_times must be one start time in seconds (or null) per lyrics "
+                                              "line, or null")
+    return {"vocal_only": vocal_only, "lyrics_times": times}
+
+
 def _song_yue2(job_type: str, params: Mapping[str, Any]) -> Dict[str, Any]:
     backbone = params.get("backbone", YUE2_BACKBONE_DEFAULT)
     if backbone not in YUE2_BACKBONES:
         raise ParamsError("backbone", f"backbone must be one of {', '.join(YUE2_BACKBONES)}, got {backbone!r}")
     modes = COVER_COT_MODES if job_type == COVER else YUE2_COT_MODES
-    cot = params.get("cot", YUE2_COT_DEFAULT)
+    cot = params.get("cot", COVER_COT_DEFAULT if job_type == COVER else YUE2_COT_DEFAULT)
     if cot not in modes:
         raise ParamsError("cot", f"cot must be one of {', '.join(modes)}, got {cot!r}")
     return {"backbone": backbone, "cot": cot}
@@ -818,6 +882,15 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
         raise ParamsError("reference", "yue2.cpp takes no reference audio for a new song; use acestep or "
                                        "reference description")
     out["reference"] = reference
+    if reference == "audio" and job_type != COVER:
+        src_s = out["source_duration_s"]
+        if src_s is None:
+            raise SongParamsError("track_not_ready", "track_id", "the source's length is not known yet; its audio "
+                                  "goes to the engine only once the track is read")
+        if src_s > REFERENCE_AUDIO_MAX_S:
+            raise SongParamsError("source_too_long", "track_id", f"the source is {src_s:g} s; a reference audio takes "
+                                  f"at most {REFERENCE_AUDIO_MAX_S:g} s (acestep.cpp's longest song, {DURATION_MAX_S} s, "
+                                  f"plus {SOURCE_AUDIO_MARGIN_S:g} s)")
     out["reference_uri"] = song_source_uri(out["source_track_id"]) if reference == "audio" else None
     if params.get("reference_uri") not in (None, out["reference_uri"]):
         raise ParamsError("reference_uri", f"reference_uri is the source, {out['reference_uri']}, or null")
@@ -836,7 +909,8 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
         out.update(_song_cover(engine, out["lyrics_mode"], params))
     for k in _SONG_COVER_KEYS:
         if k not in out and k in params:
-            raise ParamsError(k, f"{k} is a cover param" + (" on acestep" if k == "cover_strength" else ""))
+            where = {"cover_strength": " on acestep", "vocal_only": " on yue2", "lyrics_times": " on yue2"}.get(k, "")
+            raise ParamsError(k, f"{k} is a cover param{where}")
     if engine == ENGINE_YUE2:
         out.update(_song_yue2(job_type, params))
     else:
