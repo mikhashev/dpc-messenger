@@ -143,7 +143,7 @@ def test_stderr_is_stored_and_tailed_beside_stdout(monkeypatch, tmp_path):
 def test_run_shell_takes_the_address_the_loop_put_on_its_context(monkeypatch, tmp_path):
     _fake(monkeypatch, SupervisedRun(timed_out=True, stdout=_numbers(100),
                                      killed="the command and its descendants were killed"))
-    ctx = ToolContext(agent_root=tmp_path)
+    ctx = ToolContext(agent_root=tmp_path, internal_call=True)  # follow-up 13: no turn is not the owner; this test means an internal call
     ctx.tool_output_turn, ctx.tool_output_name = TURN, CALL
     monkeypatch.setattr(shell, "_validate_command", lambda *a, **k: None)
     text = shell.run_shell(ctx, "x", timeout=90)
@@ -212,7 +212,7 @@ def test_the_loop_gives_each_call_the_address_it_stores_that_call_under(tmp_path
             return {"role": "assistant", "content": "", "tool_calls": calls}, usage
 
     class _Tools:
-        _ctx = ToolContext(agent_root=tmp_path)
+        _ctx = ToolContext(agent_root=tmp_path, internal_call=True)  # follow-up 13: no turn is not the owner; this test means an internal call
 
         def schemas(self, core_only=False, include_restricted=False):
             return [{"type": "function", "function": {"name": "run_shell", "parameters": {}}}]

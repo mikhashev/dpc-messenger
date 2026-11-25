@@ -87,11 +87,17 @@ class Ask:
 # Who asked
 # ---------------------------------------------------------------------------
 
-def _is_bare_context(ctx: Any) -> bool:
-    """A context no turn made: no asker, no source, no class. A test or a probe
-    (agent._extended_path_allowed builds one), not a turn, and not gated: the same rule
-    `tools.core.turn_audience` applies to the room axis. DpcAgent.process sets all three."""
-    return (getattr(ctx, "asker", None) is None
+def _is_internal_call(ctx: Any) -> bool:
+    """A context a builder marked as an internal call (`ToolContext.internal_call`), carrying
+    no asker, no source and no class. Only such a context is not gated.
+
+    The absence of the three fields alone used to be enough (Zcode's review of ADR-053,
+    #154): a context that lost them on its way was waved through as the owner's. Now it
+    fails closed, and the few builders that mean "no turn, nobody asked" say so. A real
+    asker or source always wins over the marker. DpcAgent.process sets all three on every
+    turn and never sets the marker."""
+    return (getattr(ctx, "internal_call", False) is True
+            and getattr(ctx, "asker", None) is None
             and getattr(ctx, "message_source", None) is None
             and getattr(ctx, "turn_class", None) is None)
 
@@ -107,8 +113,12 @@ def turn_asker(ctx: Any) -> Any:
 
 
 def asker_is_owner(ctx: Any) -> bool:
-    """Did the owner ask for this turn (ADR-053 2.2)? A bare context is not gated."""
-    if ctx is None or _is_bare_context(ctx):
+    """Did the owner ask for this turn (ADR-053 2.2)? No context, or a context with no asker,
+    no source and no class, is nobody's turn and not the owner (fail closed); only a context
+    marked `internal_call` is not gated."""
+    if ctx is None:
+        return False
+    if _is_internal_call(ctx):
         return True
     return bool(turn_asker(ctx).is_owner)
 

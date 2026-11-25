@@ -85,7 +85,7 @@ def _registry(tmp_path, **handlers):
 def _ctx(tmp_path, task="task-003"):
     root = tmp_path / task
     root.mkdir(exist_ok=True)
-    return ToolContext(agent_root=root)
+    return ToolContext(agent_root=root, internal_call=True)  # follow-up 13: no turn is not the owner; this test means an internal call
 
 
 def test_a_refused_fetch_never_reaches_the_handler_and_is_recorded(tmp_path):

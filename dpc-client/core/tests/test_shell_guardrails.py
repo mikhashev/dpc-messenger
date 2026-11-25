@@ -314,7 +314,7 @@ class TestCwdEnforcement:
     """cwd must be within agent sandbox (agent_root + sandbox_extensions)."""
 
     def _make_ctx(self, agent_root: pathlib.Path) -> ToolContext:
-        ctx = ToolContext(agent_root=agent_root)
+        ctx = ToolContext(agent_root=agent_root, internal_call=True)  # follow-up 13: no turn is not the owner; this test means an internal call
         ctx.firewall = None
         return ctx
 

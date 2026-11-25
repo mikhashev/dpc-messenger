@@ -590,6 +590,8 @@ class _Firewall:
 class _Ctx:
     """A sandbox that is one directory, which is what the real one resolves to."""
 
+    internal_call = True  # follow-up 13: no turn is not the owner; an internal call here
+
     def __init__(self, sandbox, whitelist=None):
         self.firewall = _Firewall(whitelist or [])
         self.agent_root = str(sandbox)

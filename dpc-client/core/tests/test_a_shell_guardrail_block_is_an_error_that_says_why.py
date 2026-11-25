@@ -14,7 +14,7 @@ from dpc_client_core.dpc_agent.tools.shell import run_shell
 
 
 def _ctx(root):
-    ctx = ToolContext(agent_root=root)
+    ctx = ToolContext(agent_root=root, internal_call=True)  # follow-up 13: no turn is not the owner; this test means an internal call
     ctx.firewall = None
     return ctx
 

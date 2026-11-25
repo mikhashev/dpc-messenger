@@ -480,6 +480,14 @@ def _effective_params(graph: dict) -> str:
 
 def comfyui_submit(ctx: ToolContext, workflow: str = "", prompt: str = "", workflow_json: dict = None, save_prefix: str = "", api_url: str = DEFAULT_API_URL) -> str:
     """Submit a ComfyUI workflow. Pass workflow filename + prompt, or raw workflow_json."""
+    # The second check (Zcode #154 P3): a direct call bypasses the registry's gate, so a
+    # foreign asker runs only with the gate's per-call approval of this very call.
+    from ..owner_approval import may_run_owner_tool, turn_asker
+    if not may_run_owner_tool(ctx):
+        who = turn_asker(ctx).label()
+        log.warning("comfyui_submit refused: a call of %s the owner did not approve", who)
+        return (f"⚠️ Not run: comfyui_submit on a request of {who}, who is not the owner, "
+                f"runs only after the owner approves this very call.")
     loop = ctx.agent_event_loop
     if loop is None:
         return "Error: no event loop available (agent_event_loop not set)."

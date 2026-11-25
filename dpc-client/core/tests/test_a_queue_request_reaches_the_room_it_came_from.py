@@ -50,6 +50,9 @@ def _ctx(service, *, telegram_chat_id="", loop=None):
         current_task_id="task-1",
         agent_root=types.SimpleNamespace(name="agent_iris_63f1b6bf"),
         _agent=None,
+        # The owner's run (follow-up 13: a context with no asker is foreign, and a foreign
+        # asker's card is not offered on a Telegram chat with no telegram_owner_user_id).
+        internal_call=True,
     )
 
 

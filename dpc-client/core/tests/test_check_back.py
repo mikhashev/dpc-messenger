@@ -55,6 +55,7 @@ def _ctx(depth=0, queued=(), firewall=None):
     return SimpleNamespace(
         _agent=agent, current_task_id=CONV, check_back_depth=depth,
         reply_telegram_chat_id=None, _scheduled=scheduled,
+        internal_call=True,  # follow-up 13: no turn is not the owner; the owner's own here
         firewall=firewall if firewall is not None else _NoApproval(),
     )
 

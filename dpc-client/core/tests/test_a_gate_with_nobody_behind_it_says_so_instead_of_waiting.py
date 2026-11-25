@@ -47,6 +47,9 @@ def _ctx(tmp_path, *, has_clients=None, telegram_chat_id="", service=True):
         reply_telegram_chat_id=telegram_chat_id,
         _event_loop=None,
         _agent=None,
+        # The owner's run (follow-up 13: a context with no asker is foreign, and a foreign
+        # asker's card is not offered on a Telegram chat with no telegram_owner_user_id).
+        internal_call=True,
     )
 
 

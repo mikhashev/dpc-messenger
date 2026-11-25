@@ -276,6 +276,9 @@ async def _one_run(args: argparse.Namespace, task: str, preserve: bool) -> Dict[
         agent_root=agent_root,
         current_task_id="ab-reasoning-carry",
         current_task_type="chat",
+        # The operator's own run, no turn behind it: follow-up 13 makes a context with no
+        # asker, source or class foreign unless it says it is an internal call.
+        internal_call=True,
     ))
 
     wall_started = time.perf_counter()

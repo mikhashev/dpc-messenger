@@ -581,6 +581,14 @@ class DpcAgent:
         with nothing is foreign too (D-g). A verified asker on this node or on a node of
         this agent's `own_node_group`, read now, is the owner. A relayed asker keeps its own
         verdict: the chain does not make its origin the owner.
+
+        `is_owner` is recomputed every time and the given flag is never read (Zcode #154): a
+        stored asker (a scheduled task's `_asker`) says `is_owner: true` as it was when the
+        task was queued, and the own node group may have changed since, or the row may have
+        been written by hand. At the owner's own doors (`ui`, `telegram_owner`,
+        `external_agent`, D-f) the door is the owner, unless the asker names a node this
+        agent knows is neither this node nor an own node; everywhere else only a verified
+        node that is this node or an own node is the owner.
         """
         if asker is None:
             if message_source == "group":
@@ -588,13 +596,18 @@ class DpcAgent:
             else:
                 this_node = self._this_node_id() or ""
                 asker = asker_for_source(message_source, node_id=this_node)
-        if asker.is_owner or not asker.verified or not asker.node_id:
-            return asker
         this_node = self._this_node_id()
         _name, own, _why = self._own_nodes()
-        if asker.node_id == this_node or asker.node_id in own:
-            return Asker(asker.kind, asker.name, asker.node_id, True, True, asker.via)
-        return asker
+        on_own_node = bool(asker.node_id) and (asker.node_id == this_node or asker.node_id in own)
+        if is_owner_caller(message_source):
+            foreign_node = bool(asker.node_id) and bool(this_node) and not on_own_node
+            is_owner = not foreign_node
+        else:
+            is_owner = bool(asker.verified) and on_own_node
+        if is_owner == asker.is_owner and (asker.verified or not is_owner):
+            return asker
+        return Asker(asker.kind, asker.name, asker.node_id, is_owner,
+                     True if is_owner else asker.verified, asker.via)
 
     def _log_own_nodes(self) -> None:
         """One line: the own node group this agent uses and how each chat group resolves.

@@ -2898,6 +2898,18 @@ def _run_shell_approval(ctx: ToolContext, args: dict):
     return Ask(clip(f"command: {command}\ncwd: {_resolved_cwd(ctx, cwd)}"))
 
 
+def _not_the_owners_call(ctx: ToolContext, command: str) -> str:
+    """Why run_shell may not run this call for its asker, or "" (the second check)."""
+    from ..owner_approval import may_run_owner_tool, turn_asker
+    if may_run_owner_tool(ctx):
+        return ""
+    who = turn_asker(ctx).label()
+    log.warning("run_shell refused, a foreign asker's call the owner did not approve: %r (%s)",
+                command, who)
+    return (f"⚠️ Not run: run_shell on a request of {who}, who is not the owner, runs only "
+            f"after the owner approves this very call. `{command}`")
+
+
 def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "") -> str:
     # ADR-053 2.7: a path closed to this turn is refused before anything else, no card.
     closed = _closed_shell_path(ctx, command, cwd)
@@ -2917,8 +2929,22 @@ def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "")
                 f"Not run: `{command}`"
             )
         elif tier == "tier1":
+            # The second check (below) before the tool's own card: the gate marks a foreign
+            # asker's Tier 1 call as on its way to this card.
+            refusal = _not_the_owners_call(ctx, command)
+            if refusal:
+                return refusal
             log.warning("run_shell TIER1 (approval needed): %r — %s", command, reason)
             return _request_approval(ctx, command, reason, cwd, timeout)
+
+    # The second check (Zcode #154 P3), like music's `_not_owner`: the registry's gate asks
+    # the owner first when someone else asked for the turn, but a direct call of this
+    # handler bypasses ToolRegistry.execute. Then a foreign asker runs only with the gate's
+    # per-call mark: the owner approved this very call. After the Tier 2 refusal, which is a
+    # fixed rule for everybody.
+    refusal = _not_the_owners_call(ctx, command)
+    if refusal:
+        return refusal
 
     working_dir: str | None = None
     if cwd:

@@ -343,6 +343,13 @@ class ToolContext:
     # turn and is not the owner (fail closed).
     asker: Optional[Any] = None
 
+    # An internal call that no turn made and nobody asked for (a test, a probe). Only a
+    # context with this marker and no asker, no source and no class passes the owner
+    # approval gate as the owner's; the absence of the three fields alone is foreign
+    # (owner_approval.asker_is_owner, Zcode #154). A real asker or source wins over it.
+    # DpcAgent.process never sets it.
+    internal_call: bool = False
+
     # Skill store for execute_skill tool (set by DpcAgent.process())
     skill_store: Optional[Any] = None
 

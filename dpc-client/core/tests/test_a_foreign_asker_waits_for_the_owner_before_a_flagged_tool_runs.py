@@ -267,12 +267,17 @@ async def test_an_approval_that_comes_after_the_call_timed_out_starts_nothing(re
 
 
 @pytest.mark.asyncio
-async def test_a_bare_context_is_a_test_or_a_probe_and_is_not_gated(registry, tmp_path):
+async def test_only_a_context_marked_internal_is_not_gated(registry, tmp_path):
+    # Follow-up 13 (Zcode #154): the absence of asker, source and class is no longer enough.
     root = tmp_path / "bare"
     root.mkdir()
-    ctx = ToolContext(agent_root=root)
+    ctx = ToolContext(agent_root=root, internal_call=True)
     await _run(registry, "write_file", {"path": "x.txt", "content": "x"}, ctx)
     assert (root / "x.txt").exists()
+    owner_approval._reset_for_tests()
+    bare = ToolContext(agent_root=root)
+    result = await _run(registry, "write_file", {"path": "y.txt", "content": "y"}, bare)
+    assert result.startswith("⚠️") and not (root / "y.txt").exists()
 
 
 @pytest.mark.asyncio
