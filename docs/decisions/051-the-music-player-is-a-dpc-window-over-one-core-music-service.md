@@ -679,7 +679,8 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
     (`tools/core.py`, around line 247), never through a bare `validate_extended_path`: the
     first checks the "Extended path read" switch and the audience gate of the turn, the second
     skips both.
-  - It is refused to every turn class that D43 refuses.
+  - It runs on the owner's turns and on a call the owner approved; since ADR-053 a request of
+    someone else shows the owner's card instead of being refused (see D43's amendment).
   - **A music take is posted by `take_id` instead of `path`** (added at `64b793ac`, for the
     interface's "Open in player"): `chat_post_file(take_id, caption?)`. Core resolves the id
     through `get_music_take` into the take's own file (D44), so neither `_resolve_file_path`
@@ -693,10 +694,19 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
     or `accepted`), the take is not rejected and its library entry, when it has one, is not
     hidden (`get_music_take` now says `library_hidden`); otherwise it is refused with the
     state. A file that runs or opens something when clicked is never posted, by one constant
-    (`REFUSED_EXTENSIONS`: .exe .bat .cmd .com .lnk .ps1 .vbs .scr .msi .sh .app .dmg). A DPC
+    (`REFUSED_EXTENSIONS`: .exe .bat .cmd .com .lnk .ps1 .vbs .scr .msi .sh .app .dmg; replaced in
+    follow-up 13, below). A DPC
     home that cannot be resolved refuses (fail closed). The files a turn copied anew are removed
     again when its answer record is not written (the loop raised, or the record failed); a file
     whose bytes were already in the chat is never removed. **Built at `e2cef2da`, not observed live.**
+  - **Follow-up 13 (Zcode's review of follow-up 12, P3):** the deny-list became an allow-list,
+    checked by the file's first bytes as well as its suffix: audio (flac, wav, mp3, ogg, m4a),
+    image (png, jpg, webp, gif), pdf, and plain text (txt, md, json, csv); anything else is
+    refused with the list in the message, and so is a program renamed to an allowed name, or a
+    file whose content is another allowed group than its name says. The copy is read again after
+    it is made, since the source may change after the check. A copy that was cancelled or failed
+    part way (the hashing and the ffprobe measure come after the bytes are copied) leaves no half
+    file in the chat's `files/`. Not observed live.
 
   **Built at `e3b0ea6c` (part 3), `take_id` at `64b793ac`; not observed live.**
 - **D42. The `music_*` family: ten names, a timeout and a wait budget with each** (letter H,
@@ -729,6 +739,8 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   the first cut). **Built at `29383864` (part 2, `dpc_agent/tools/music.py`) and `e3b0ea6c`
   (`chat_post_file`), with the timeouts above; not observed live.**
 - **D43. Only the owner's turns may use the family; the rule is declarative and written once**
+  (*amended by ADR-053, see the last paragraph of this decision: a request of someone else is no
+  longer refused, it asks the owner's card; `owner_only` is carried by no tool now*)
   (letters A, B and L: Mike #46 and #53-#57; Zcode #51 correction 6 and its note on A).
   - **Refused:** turn classes `other_node` and `stranger`: a peer, or a group that has a
     foreign node in it. A group of only the person's own nodes is owner class
@@ -767,9 +779,18 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   outside the sandbox would be a third way round it that the glossary's **sandbox** row does
   not know, and it would need a `sandbox_extensions` path (Q1). *Correction (Zcode #68): the
   reason first written here, that `generated/` holds every job's request JSON with its prompts
-  and lyrics, is wrong. The request JSON lives in `music/jobs/<job>/job.json` and its
-  `payload/` folder (`music/jobs.py`); `generated/` holds the audio and its sidecars. Decision
-  D stands on the two grounds above.* Core resolves `take_id` to the take's file; this
+  and lyrics, is wrong as far as the request is concerned: the request JSON lives in
+  `music/jobs/<job>/job.json` and its `payload/` folder (`music/jobs.py`); `generated/` holds
+  the audio and its sidecars. Decision D stands on the two grounds above.*
+  *Second correction (follow-up 13, Zcode): the sidecars are not free of lyrics either. The
+  sidecar JSON beside each take (`<name>.json`, `dpc.take-sidecar/1`, `music/export.py`) and the
+  take's own tags (a FLAC Vorbis comment `DPC_PROVENANCE`, a WAV `LIST/INFO` item `DPCP`,
+  `music/provenance.py`) carry the provenance record, whose `lyrics` field is the lyrics as sent and
+  `lyrics_prep` what the engine changed them to, with the style the song was asked for.
+  So `generated/` does hold prompts and lyrics, in those two places (not the job's request
+  file or its payload), and a take posted by `chat_post_file` carries its lyrics in its tags.
+  It is the person's own song, so this changes no rule, but D44 must not be read as saying a
+  take's files hold no lyrics.* Core resolves `take_id` to the take's file; this
   also gives "only takes in `review`" a meaning (today `review` is a job state, not a take
   state). The tools need no `sandbox_extensions` entry for `~/.dpc/music`; Q1's remark that the
   agent needs write access there is dropped for them. **Built at `8c5b51c4` (part 1:
