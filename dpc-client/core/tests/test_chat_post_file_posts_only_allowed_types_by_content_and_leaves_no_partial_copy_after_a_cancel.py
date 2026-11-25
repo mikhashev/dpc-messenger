@@ -210,3 +210,39 @@ def test_discard_partial_copy_removes_only_the_free_name_the_copy_claimed(tmp_pa
     assert sorted(p.name for p in folder.iterdir()) == [
         "other.flac", "take.flac", "take.txt", "take_1.flac", "take_x.flac"]
     assert chat_files.discard_partial_copy(tmp_path / "missing", set(), "take.flac") == 0
+
+
+# -- Zcode #184 P4: the turn's byte cap is checked on the copy, not on the source's stat ---------
+
+
+def test_a_source_that_grew_between_the_stat_and_the_copy_is_counted_at_the_size_of_its_copy(
+        world, monkeypatch):
+    monkeypatch.setattr(chat_files, "MAX_BYTES_PER_TURN", 1000)
+    source = world.put("take.flac", FLAC)  # small: passes the cap on its stat
+    real = service_mod.keep_agent_chat_attachment
+
+    def grow_then_keep(files_dir, attachment, **kw):
+        source.write_bytes(FLAC + b"\x00" * 2000)  # between the stat and the copy
+        return real(files_dir, attachment, **kw)
+
+    monkeypatch.setattr(service_mod, "keep_agent_chat_attachment", grow_then_keep)
+    out = world.post(source)
+    assert out.startswith("⚠️ chat_post_file refused:"), out
+    assert "would take it past" in out, out
+    assert world.in_files() == [], "the oversize copy was left in the chat's files"
+    assert world.ctx.posted_attachments == [] and world.ctx.posted_new_copies == []
+
+
+def test_a_file_that_grew_but_still_fits_is_posted_at_the_size_of_its_copy(world, monkeypatch):
+    monkeypatch.setattr(chat_files, "MAX_BYTES_PER_TURN", 1000)
+    source = world.put("take.flac", FLAC)
+    real = service_mod.keep_agent_chat_attachment
+
+    def grow_then_keep(files_dir, attachment, **kw):
+        source.write_bytes(FLAC + b"\x00" * 100)
+        return real(files_dir, attachment, **kw)
+
+    monkeypatch.setattr(service_mod, "keep_agent_chat_attachment", grow_then_keep)
+    out = world.post(source)
+    assert out.startswith("Posted take.flac"), out
+    assert world.ctx.posted_attachments[0]["size_bytes"] == len(FLAC) + 100

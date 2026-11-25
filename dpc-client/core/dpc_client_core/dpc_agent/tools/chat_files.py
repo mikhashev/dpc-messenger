@@ -420,8 +420,18 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None,
             raise
         reused = kept["filename"] in before
         try:
-            # The copy is read again: the source may have changed after the check above.
-            changed = content_refusal(Path(kept["file_path"]))
+            # The copy is read again, whole: the source may have changed after the check above
+            # (its type, and its size: a file that grew between the stat and the copy). The one
+            # read gives the copy's type, its size and its SHA-256, like the group path's
+            # `_checked_temp_copy`; the size counts toward the turn's byte cap, not the
+            # source's earlier st_size (Zcode #184 P4).
+            _sha256, copy_size, head = file_digest(Path(kept["file_path"]))
+            changed = head_refusal(Path(kept["file_path"]).name, head)
+            if not changed:
+                changed = _turn_bytes_refusal(
+                    sum(int(a.get("size_bytes") or 0) for a in posted), copy_size)
+        except OSError as e:
+            changed = f"the copy could not be read to check it ({e.__class__.__name__})."
         except BaseException:
             if not reused:
                 discard_partial_copy(files_dir, before, source.name)
@@ -430,6 +440,9 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None,
             if not reused:
                 discard_partial_copy(files_dir, before, source.name)
             return _refusal(changed)
+        if int(kept.get("size_bytes") or 0) != copy_size:
+            kept["size_bytes"] = copy_size
+            kept["size_mb"] = round(copy_size / (1024 * 1024), 2)
         if caption and caption.strip():
             kept["caption"] = " ".join(caption.split())[:MAX_CAPTION_CHARS]
         if music:
