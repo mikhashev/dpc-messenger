@@ -21,9 +21,10 @@
 const LOCAL_PREFIX = 'local:';
 
 /**
- * The alias a message in this chat asks its agent to run on, or `null`. The Agent row
- * means the agent's configured alias; any other row in an agent chat is what the message
- * runs on, for this chat only. Without it the backend has no alias to go by.
+ * The alias a message in this chat asks its agent to run on, or `null`: the agent's
+ * configured alias. Until 2026-11-25 an agent chat's Text selector could name another
+ * alias for that chat only (a second agent on it); the selector is gone and the model
+ * is set in Agent Configuration, so an alias left in the map from then is not sent.
  *
  * @param chatProvider what the map holds for this chat
  * @param configuredAlias the chat's record of the agent's alias
@@ -33,8 +34,8 @@ export function agentAliasToSend(
     configuredAlias: string | null | undefined,
     isAgentChat: boolean,
 ): string | null {
-    if (chatProvider === 'dpc_agent') return configuredAlias || null;
-    return isAgentChat ? chatProvider : null;
+    if (chatProvider === 'dpc_agent' || isAgentChat) return configuredAlias || null;
+    return null;
 }
 
 /**

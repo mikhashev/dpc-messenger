@@ -101,6 +101,9 @@ async def test_the_rows_still_say_what_they_said_before():
         "supports_vision": False,
         "context_window": 4096,
         "supports_voice": False,
+        # Where the model runs, added by follow-up 13 for the chat's model list.
+        "route": "local",
+        "provider_kind": "self_hosted",
     }
     assert rows["dpc_agent"]["peer_id"] == "dpc-node-abc"
     assert rows["dpc_agent"]["remote_model"] == "qwen3.8"

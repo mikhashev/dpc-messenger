@@ -5,6 +5,8 @@
   import { menuSummary, priceLine, settingsLines, vendorLine, type MenuRow } from './peerMenu';
   import { effectiveAgentVisionModel, visionFollowingText } from './agentVisionModel';
   import { agentHostDisplay } from './agentComputeHost';
+  import { providerOptionText } from '$lib/utils/providerPlace';
+  import { agentConfigLine } from './agentConfigLine';
 
   // Provider type definition: one row of PROVIDERS_RESPONSE (DPTP §3.5), which
   // since `ec686608` carries `tariff` and `settings` beside the capabilities.
@@ -62,7 +64,14 @@
 
     // The agent chat's own `compute_host` (peer node_id; empty = this node). For
     // an agent chat this, not the page-global selectedComputeHost, is the host.
-    agentComputeHost = ""
+    agentComputeHost = "",
+
+    // An agent chat's model, reasoning level, Vision and Voice are set in Agent
+    // Configuration (Mike, 2026-11-25): the header states them and opens it.
+    agentReasoning = "",
+    agentVisionAlias = "",
+    agentVoiceAlias = "",
+    onOpenAgentConfig = undefined
   }: {
     selectedComputeHost?: string;
     selectedTextProvider?: string;
@@ -78,6 +87,10 @@
     agentLlmProvider?: string;
     isAgentChat?: boolean;
     agentComputeHost?: string;
+    agentReasoning?: string;
+    agentVisionAlias?: string;
+    agentVoiceAlias?: string;
+    onOpenAgentConfig?: () => void;
   } = $props();
 
   // The host the requests go to: an agent chat's stored compute_host, otherwise
@@ -89,8 +102,8 @@
   // Phase 2.3: Add uniqueId to track provider source for remote vision routing
   const mergedProviders = $derived(() => {
     const local = (providersList || []).map(p => {
-      // Special display for dpc_agent: show underlying provider
-      let displayText = `${p.alias} (${p.model}) - local`;
+      // Labelled by where the model runs, not by which node calls it.
+      let displayText = providerOptionText(p, 'local');
       if (p.alias === 'dpc_agent') {
         if (agentLlmProvider) {
           // Show the actual LLM provider configured for this agent (local or remote)
@@ -116,7 +129,7 @@
     const remote = (peerProviders.get(host) || []).map(p => ({
       ...p,
       source: 'remote' as const,
-      displayText: `${p.alias} (${p.model}) - remote`,
+      displayText: providerOptionText(p, 'remote'),
       uniqueId: `remote:${host}:${p.alias}`  // Include node_id for routing
     }));
 
@@ -127,14 +140,28 @@
   const mergedVisionProviders = $derived(() => mergedProviders().filter(p => p.supports_vision));
   const mergedVoiceProviders = $derived(() => mergedProviders().filter(p => p.supports_voice));
 
+  // The agent's own Vision model stands in for the global one when its Main LLM cannot see.
   const agentVision = $derived(() => effectiveAgentVisionModel(
     agentLlmProvider,
     providersList || [],
-    defaultProviders?.vision_provider || '',
+    agentVisionAlias || defaultProviders?.vision_provider || '',
     agentComputeHost,
     peerProviders,
     hostDisplay().shortName
   ));
+
+  const agentLine = $derived(() => agentConfigLine({
+    alias: agentLlmProvider,
+    fallbackAlias: defaultProviders?.agent_provider || defaultProviders?.default_provider || '',
+    providers: providersList || [],
+    peerRows: agentComputeHost ? (peerProviders.get(agentComputeHost) || []) : [],
+    reasoning: agentReasoning,
+    host: hostDisplay(),
+    vision: agentVision(),
+    visionIsAgentOwn: !!agentVisionAlias,
+    voiceAlias: agentVoiceAlias,
+    globalVoiceAlias: defaultProviders?.voice_provider || '',
+  }));
 
   // What the guest is about to call on someone else's machine. A local alias
   // needs no such panel — the settings are this node's own and the call is
@@ -181,26 +208,31 @@
   });
 </script>
 
-{#if isAIChat && providersList.length > 0}
+{#if isAIChat && isAgentChat}
+  <!-- An agent chat: the model, its level and its host are the agent's own,
+       set in Agent Configuration (Mike, 2026-11-25), so the header states them
+       and opens that dialog instead of offering AI Host / Text / Vision / Voice. -->
+  <div class="provider-selector-block">
+    <div class="provider-selector-header agent-config-line">
+      <span class="provider-row-label">Agent:</span>
+      <span class="vision-effective agent-config-text" title={agentLine().title}>{agentLine().text}</span>
+      {#if onOpenAgentConfig}
+        <button
+          type="button"
+          class="agent-config-open"
+          title="Open this agent's configuration: Main LLM, reasoning, Vision and Voice models"
+          onclick={() => onOpenAgentConfig?.()}
+        >Configure</button>
+      {/if}
+    </div>
+  </div>
+{:else if isAIChat && providersList.length > 0}
   <!-- One flex item in the chat header, so the peer panel stacks under the
        dropdowns instead of competing with them for the row. -->
   <div class="provider-selector-block">
     <div class="provider-selector-header">
       <!-- AI Host Selector (Phase 2: Remote Vision) -->
       <div class="provider-row-header">
-        {#if isAgentChat}
-          <!-- The agent's requests go to its own compute_host (ChatPanel send
-               path), so state it; the page-global value says nothing about it. -->
-          <span class="provider-row-label">AI Host:</span>
-          <span
-            class="vision-effective"
-            title={hostDisplay().connected
-              ? "This agent's requests go to this host."
-              : "This agent is bound to this host, but it is not connected now."}
-          >
-            {hostDisplay().label}
-          </span>
-        {:else}
         <label for="ai-host-header">AI Host:</label>
         <select id="ai-host-header" bind:value={selectedComputeHost}>
           <option value="local">Local</option>
@@ -217,7 +249,6 @@
             </optgroup>
           {/if}
         </select>
-        {/if}
       </div>
 
       <!-- Text Provider Selector (Phase 2.3: uses uniqueId for local/remote tracking) -->
@@ -243,28 +274,14 @@
 
       <!-- Vision Provider Selector (Phase 2.3: uses uniqueId for local/remote tracking) -->
       <div class="provider-row-header">
-        {#if isAgentChat}
-          <span class="provider-row-label">Vision:</span>
-          <!-- 2026-09-18: the backend routes an agent's images by the agent's own
-               model, never by this header, so state the outcome. -->
-          <span
-            class="vision-effective"
-            title={agentVision().isGlobal
-              ? "This agent's model has no vision, so images go to the global vision provider."
-              : "This agent's own model supports vision, so images go to it."}
-          >
-            {agentVision().label}
-          </span>
-        {:else}
-          <label for="vision-provider-header">Vision:</label>
-          <select id="vision-provider-header" bind:value={selectedVisionProvider}>
-            {#each mergedVisionProviders() as provider}
-              <option value={provider.uniqueId}>
-                {provider.displayText}
-              </option>
-            {/each}
-          </select>
-        {/if}
+        <label for="vision-provider-header">Vision:</label>
+        <select id="vision-provider-header" bind:value={selectedVisionProvider}>
+          {#each mergedVisionProviders() as provider}
+            <option value={provider.uniqueId}>
+              {provider.displayText}
+            </option>
+          {/each}
+        </select>
       </div>
 
       <!-- Voice Provider Selector (v0.13.0+) -->
@@ -356,11 +373,37 @@
     gap: 0.4rem;
   }
 
-  .provider-row-header .provider-row-label {
+  .provider-row-label {
     font-size: 0.85rem;
     font-weight: 500;
     color: #666;
     white-space: nowrap;
+  }
+
+  .agent-config-line {
+    flex-wrap: nowrap;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+
+  .agent-config-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .agent-config-open {
+    padding: 0.3rem 0.6rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background: white;
+    cursor: pointer;
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+
+  .agent-config-open:hover {
+    border-color: #4CAF50;
   }
 
   /* 2026-09-18: reads as a statement, not a control — an agent chat has no choice here. */

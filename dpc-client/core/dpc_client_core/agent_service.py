@@ -24,6 +24,8 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# The provider types service.transcribe_audio can transcribe with.
+VOICE_PROVIDER_TYPES = ("local_whisper", "openai", "openai_compatible")
 
 
 def _name_refusal(name):
@@ -273,6 +275,11 @@ class AgentService:
                         agent["compute_host"] = cfg["compute_host"]
                     if cfg.get("reasoning_effort"):
                         agent["reasoning_effort"] = cfg["reasoning_effort"]
+                    # The agent chat's header states these and its voice input uses
+                    # the voice one; absent = the node's global provider.
+                    for key in ("vision_provider_alias", "voice_provider_alias"):
+                        if cfg.get(key):
+                            agent[key] = cfg[key]
 
             return {
                 "status": "success",
@@ -947,6 +954,10 @@ class AgentService:
                 "compaction_provider": config.get("compaction_provider"),
                 "compaction_threshold": config.get("compaction_threshold", 0.8),
                 "reasoning_effort": config.get("reasoning_effort", ""),
+                "vision_provider_alias": config.get("vision_provider_alias", ""),
+                "voice_provider_alias": config.get("voice_provider_alias", ""),
+                "global_vision_provider": getattr(self.llm_manager, "vision_provider", None) or "",
+                "global_voice_provider": getattr(self.llm_manager, "voice_provider", None) or "",
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "providers": providers_list,
@@ -956,6 +967,33 @@ class AgentService:
         except Exception as e:
             logger.error("get_agent_model_config failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    def _local_media_alias_refusal(self, vision_alias: Optional[str],
+                                   voice_alias: Optional[str]) -> Optional[str]:
+        """Why a per-agent Vision or Voice alias cannot be saved; None when it can.
+
+        Both run on this node (the image is described here, the voice is transcribed
+        here), so each must be a local provider that does the job. '' and None pass.
+        """
+        providers = getattr(getattr(self, "llm_manager", None), "providers", None) or {}
+        if vision_alias:
+            provider = providers.get(vision_alias)
+            if provider is None:
+                return f"Vision model '{vision_alias}' is not a provider on this node."
+            try:
+                sees = bool(provider.supports_vision())
+            except Exception:
+                sees = False
+            if not sees:
+                return f"Vision model '{vision_alias}' does not read images."
+        if voice_alias:
+            provider = providers.get(voice_alias)
+            if provider is None:
+                return f"Voice model '{voice_alias}' is not a provider on this node."
+            kind = (getattr(provider, "config", None) or {}).get("type", "")
+            if kind not in VOICE_PROVIDER_TYPES:
+                return f"Voice model '{voice_alias}' does not transcribe (type '{kind}')."
+        return None
 
     async def _refresh_live_agent_manager(self, agent_id: str, config: Dict[str, Any]) -> Optional[int]:
         """Push an updated config into the running agent manager (if any) so a model switch takes effect (1:1 + group counters) without a backend restart; returns the resolved context window."""
@@ -982,6 +1020,8 @@ class AgentService:
         retrieval_vector: str = None,
         retrieval_text: str = None,
         reasoning_effort: str = None,
+        vision_provider_alias: str = None,
+        voice_provider_alias: str = None,
         providers_getter=None,
     ) -> Dict[str, Any]:
         """Save per-agent model configuration (Main LLM + Sleep LLM +
@@ -992,6 +1032,11 @@ class AgentService:
             if not registry.get_agent(agent_id):
                 return {"status": "error", "message": f"Agent not found: {agent_id}"}
             config = load_agent_config(agent_id)
+            # Vision and Voice run on this node: a name this node does not hold, or
+            # one that cannot see or transcribe, is refused before anything is written.
+            refused = self._local_media_alias_refusal(vision_provider_alias, voice_provider_alias)
+            if refused:
+                return {"status": "error", "message": refused}
             if provider_alias is not None:
                 previous_alias = config.get("provider_alias")
                 previous_host = config.get("compute_host") or ""
@@ -1061,6 +1106,11 @@ class AgentService:
                 config["retrieval_vector"] = retrieval_vector
             if retrieval_text is not None:
                 config["retrieval_text"] = retrieval_text
+            # '' is the panel's «Default (global)»; None leaves the field alone.
+            if vision_provider_alias is not None:
+                config["vision_provider_alias"] = vision_provider_alias
+            if voice_provider_alias is not None:
+                config["voice_provider_alias"] = voice_provider_alias
             # '' is the panel's «Default (global)»: drop the agent's own level so
             # the alias decides again. None means the caller left the field alone.
             if reasoning_effort is not None:
@@ -1084,6 +1134,8 @@ class AgentService:
                 "compaction_provider": config.get("compaction_provider"),
                 "compaction_threshold": config.get("compaction_threshold", 0.8),
                 "reasoning_effort": config.get("reasoning_effort", ""),
+                "vision_provider_alias": config.get("vision_provider_alias", ""),
+                "voice_provider_alias": config.get("voice_provider_alias", ""),
                 "retrieval_vector": config.get("retrieval_vector", "native"),
                 "retrieval_text": config.get("retrieval_text", "native"),
                 "context_window": context_window,

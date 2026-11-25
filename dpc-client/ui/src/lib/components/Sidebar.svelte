@@ -61,7 +61,16 @@
   let modelConfigCompactionEnabled = $state<boolean>(false);
   let modelConfigCompactionProvider = $state('');
   let modelConfigCompactionThreshold = $state<number>(0.8);
-  let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string, route?: string, provider_kind?: string, host_scope?: string}[]>([]);
+  let modelConfigProvidersList = $state<{alias: string, model: string, type: string, is_remote?: boolean, peer_id?: string, route?: string, provider_kind?: string, host_scope?: string, supports_vision?: boolean, supports_voice?: boolean}[]>([]);
+  // The agent's own Vision and Voice models ('' = the node's global one), and what
+  // the global ones are, for the "Default (global)" option to name.
+  let modelConfigVisionProvider = $state('');
+  let modelConfigVoiceProvider = $state('');
+  let modelConfigGlobalVision = $state('');
+  let modelConfigGlobalVoice = $state('');
+  // Both run on this node: a peer's row is never offered.
+  let modelConfigVisionRows = $derived(modelConfigProvidersList.filter(p => !p.is_remote && p.supports_vision));
+  let modelConfigVoiceRows = $derived(modelConfigProvidersList.filter(p => !p.is_remote && p.supports_voice));
   let modelConfigSaving = $state(false);
   let modelConfigError = $state('');
   let modelConfigReasoningEffort = $state('');
@@ -290,6 +299,11 @@
     return `${p.alias} (${p.model}) @ ${peerName}`;
   }
 
+  /** Opens the agent's configuration dialog; the agent 1:1 chat header's Configure calls it. */
+  export function openAgentConfiguration(agentId: string) {
+    return handleModelConfig(agentId);
+  }
+
   // Handle model config badge click
   async function handleModelConfig(agentId: string) {
     modelConfigAgentId = agentId;
@@ -317,6 +331,10 @@
         : 0.8;
       modelConfigProvidersList = result.providers || [];
       modelConfigReasoningEffort = result.reasoning_effort || '';
+      modelConfigVisionProvider = result.vision_provider_alias || '';
+      modelConfigVoiceProvider = result.voice_provider_alias || '';
+      modelConfigGlobalVision = result.global_vision_provider || '';
+      modelConfigGlobalVoice = result.global_voice_provider || '';
       modelConfigRetrievalVector = (result.retrieval_vector === 'grafeo') ? 'grafeo' : 'native';
       modelConfigRetrievalText = (result.retrieval_text === 'grafeo') ? 'grafeo' : 'native';
       if (hostOffline(modelConfigComputeHost)) await loadKnownPeerNames();
@@ -341,6 +359,8 @@
         retrievalVector: modelConfigRetrievalVector,
         retrievalText: modelConfigRetrievalText,
         reasoningEffort: modelConfigReasoningEffort,
+        visionProvider: modelConfigVisionProvider,
+        voiceProvider: modelConfigVoiceProvider,
         loadedProviderAlias: modelConfigLoaded.main,
       }));
       showModelConfigPopup = false;
@@ -496,7 +516,7 @@
     onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
     onSetAgentTelegramEnabled?: (agentId: string, enabled: boolean) => Promise<void>;
     onGetAgentModelConfig: (agentId: string) => Promise<any>;
-    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string | null; sleep_provider_alias: string | null; snapshot_summarize_provider?: string | null; snapshot_summarize_threshold?: number | null; compaction_enabled?: boolean; compaction_provider?: string | null; compaction_threshold?: number | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo' }) => Promise<void>;
+    onSaveAgentModelConfig: (agentId: string, config: { provider_alias: string | null; sleep_provider_alias: string | null; snapshot_summarize_provider?: string | null; snapshot_summarize_threshold?: number | null; compaction_enabled?: boolean; compaction_provider?: string | null; compaction_threshold?: number | null; retrieval_vector?: 'native' | 'grafeo'; retrieval_text?: 'native' | 'grafeo'; vision_provider_alias?: string; voice_provider_alias?: string }) => Promise<void>;
   } = $props();
 
   // The agent whose dialog is open, and the two states it can be in. Being
@@ -1296,6 +1316,38 @@
           {:else}
             This model names no words of its own, so the list is the shared scale and the provider folds it onto whatever its model can do. Off is the one value all of them accept.
           {/if}
+        </p>
+
+        <label for="agent-vision" class="dialog-label">Vision model:</label>
+        <select id="agent-vision" class="dialog-input" bind:value={modelConfigVisionProvider}>
+          <option value="">Default (global{modelConfigGlobalVision ? `: ${modelConfigGlobalVision}` : ''})</option>
+          {#if modelConfigVisionProvider && !modelConfigVisionRows.some(p => p.alias === modelConfigVisionProvider)}
+            <option value={modelConfigVisionProvider}>{modelConfigVisionProvider} — not available now</option>
+          {/if}
+          {#each modelConfigVisionRows as p}
+            <option value={p.alias}>{optionText(p)}</option>
+          {/each}
+        </select>
+        <p class="dialog-hint">
+          Who looks at an image sent to this agent (in its chat, from Telegram, or with describe_image) when
+          its Main LLM cannot read images; a Main LLM that can read them sees the image itself. Runs on this
+          node. "Default" uses the global vision provider.
+        </p>
+
+        <label for="agent-voice" class="dialog-label">Voice model:</label>
+        <select id="agent-voice" class="dialog-input" bind:value={modelConfigVoiceProvider}>
+          <option value="">Default (global{modelConfigGlobalVoice ? `: ${modelConfigGlobalVoice}` : ': automatic'})</option>
+          {#if modelConfigVoiceProvider && !modelConfigVoiceRows.some(p => p.alias === modelConfigVoiceProvider)}
+            <option value={modelConfigVoiceProvider}>{modelConfigVoiceProvider} — not available now</option>
+          {/if}
+          {#each modelConfigVoiceRows as p}
+            <option value={p.alias}>{optionText(p)}</option>
+          {/each}
+        </select>
+        <p class="dialog-hint">
+          Who transcribes your voice for this agent: dictation in its chat, voice messages to its Telegram
+          bot, and the default of its transcribe_audio_file tool. Runs on this node. "Default" uses the
+          global voice provider.
         </p>
 
         <label for="sleep-llm" class="dialog-label">Sleep feature LLM:</label>

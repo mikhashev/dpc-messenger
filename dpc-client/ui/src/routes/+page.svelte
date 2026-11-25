@@ -227,6 +227,8 @@
 
   // Map: AI chat ID -> backend agent_id (for agent chats)
   let agentChatToAgentId = $state<Map<string, string>>(new Map());
+  // The sidebar holds the Agent Configuration dialog; an agent chat's header opens it.
+  let sidebarRef = $state<any>(null);
 
   // Instruction Sets state
   type InstructionSets = {
@@ -570,6 +572,11 @@
   let isAgentChatHeader = $derived(
     $chatProviders.get(activeChatId) === 'dpc_agent' ||
     (agentChatToAgentId.get(activeChatId) ?? activeChatId).startsWith('agent_')
+  );
+
+  // The agents-list row of the agent behind this chat: its level, Vision and Voice.
+  let activeAgentRow = $derived(
+    $agentsList.find((a: any) => a.agent_id === (agentChatToAgentId.get(activeChatId) ?? activeChatId)) as any
   );
 
   // Reactive: Check if current chat is a group chat (v0.19.0)
@@ -1086,6 +1093,7 @@
   <div class="grid">
     <!-- Sidebar -->
     <Sidebar
+      bind:this={sidebarRef}
       connectionStatus={$connectionStatus}
       nodeStatus={$nodeStatus}
       aiChats={$aiChats}
@@ -1236,6 +1244,10 @@
             agentLlmProvider={$aiChats.get(activeChatId)?.llm_provider || ""}
             isAgentChat={isAgentChatHeader}
             agentComputeHost={$aiChats.get(activeChatId)?.compute_host || ""}
+            agentReasoning={activeAgentRow?.reasoning_effort || ""}
+            agentVisionAlias={activeAgentRow?.vision_provider_alias || ""}
+            agentVoiceAlias={activeAgentRow?.voice_provider_alias || ""}
+            onOpenAgentConfig={() => sidebarRef?.openAgentConfiguration(agentChatToAgentId.get(activeChatId) ?? activeChatId)}
           />
           {/if}
 

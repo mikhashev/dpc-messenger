@@ -39,6 +39,7 @@
     sendGroupFile,
     userMessageConfirmed,
     coreMessages,
+    agentsList,
   } from '$lib/coreService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
   import { showNotificationIfBackground } from '$lib/notificationService';
@@ -242,6 +243,11 @@
   // A 1:1 agent chat: a recording can go to the agent as audio and the paperclip
   // attaches a file for it (ADR-051 Phase 0). Never a group (ADR-032 Part B stands).
   let agentTakesAttachments = $derived(takesAgentAttachments(activeChatId, isAgentChat));
+  // The agent's own Voice model (Agent Configuration); '' = the node's automatic choice.
+  let agentVoiceAlias = $derived(
+    (($agentsList || []).find((a: any) => a.agent_id === (agentChatToAgentId.get(activeChatId) ?? activeChatId)) as any)
+      ?.voice_provider_alias || ''
+  );
   let currentTokenUsage = $derived(tokenUsageMap.get(activeChatId) || { used: 0, limit: 0 });
   let effectiveTokenUsage = $derived({
     used: currentTokenUsage.used,
@@ -659,9 +665,10 @@
           filename: imageData.filename,
           caption: text,
           provider_alias: visionProvider.alias,
-          chat_provider: get(chatProviders).get(activeChatId) || null,
+          // An agent chat's image goes to its agent, whatever the map was left holding.
+          chat_provider: isAgentChat ? 'dpc_agent' : (get(chatProviders).get(activeChatId) || null),
         };
-        if (visionProvider.source === 'remote' && visionProvider.nodeId) {
+        if (!isAgentChat && visionProvider.source === 'remote' && visionProvider.nodeId) {
           payload.compute_host = visionProvider.nodeId;
         }
         await sendCommand('send_image', payload);
@@ -808,7 +815,9 @@
     const chatSpecificEffort = get(chatEfforts).get(activeChatId);
     if (chatSpecificEffort) payload.reasoning_effort = chatSpecificEffort;
 
-    const chatSpecificProvider = get(chatProviders).get(activeChatId);
+    // An agent chat runs on the agent's own configuration (Agent Configuration,
+    // 2026-11-25): an alias left in the map by the removed Text selector is not sent.
+    const chatSpecificProvider = isAgentChat ? 'dpc_agent' : get(chatProviders).get(activeChatId);
     if (chatSpecificProvider) {
       payload.provider = chatSpecificProvider;
       if (chatMeta?.compute_host) payload.compute_host = chatMeta.compute_host;
@@ -1253,7 +1262,11 @@
     try {
       fileOfferToastMessage = 'Transcribing voice message...';
       showFileOfferToast = true;
-      const selectedProviderId = selectedVoiceProvider || selectedTextProvider;
+      // An agent chat dictates with the agent's own Voice model (Agent Configuration);
+      // none set = the node's automatic choice. Other chats use the header's Voice.
+      const selectedProviderId = isAgentChat
+        ? (agentVoiceAlias || '')
+        : (selectedVoiceProvider || selectedTextProvider);
       // duration_seconds: the recorder's length, which the backend uses for the card's estimate
       // only when it cannot read the file's own (ADR-052 L10; a WebM without ffprobe).
       let transcribeArgs: Record<string, string | number>;

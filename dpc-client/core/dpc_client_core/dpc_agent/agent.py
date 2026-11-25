@@ -408,6 +408,10 @@ class DpcAgent:
             llm_manager, provider_alias=provider_alias, compute_host=compute_host,
             caller=self.agent_root.name, caller_kind="agent",
         )
+        # The agent's own Voice model (config voice_provider_alias), the default of
+        # transcribe_audio_file; None = the first Whisper provider. Set per turn by
+        # the agent manager, as llm.vision_alias is.
+        self.voice_provider_alias: Optional[str] = None
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
         generate_smart_index(self.agent_root / "knowledge")

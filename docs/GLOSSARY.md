@@ -329,7 +329,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 - **Term note:** (`alias_roles`, `missing_aliases`)
 - **Met in:** code, screen
-- **Meaning:** One of the four places an agent's `config.json` names a **provider alias**: main (`provider_alias`), sleep (`sleep_provider_alias`), snapshot (`snapshot_summarize_provider`), compaction (`compaction_provider`). `list_agents` gives each agent `alias_roles` (role to alias) and `missing_aliases` (the roles whose alias is no longer in `providers.json`); the agents panel marks an agent "not available now" only when main is missing and names the other missing roles in the tooltip. Not the people roles of `protocol-13-public.md`.
+- **Meaning:** One of the six places an agent's `config.json` names a **provider alias**: main (`provider_alias`), sleep (`sleep_provider_alias`), snapshot (`snapshot_summarize_provider`), compaction (`compaction_provider`), vision (`vision_provider_alias`, who describes an image when main cannot see) and voice (`voice_provider_alias`, who transcribes the person's voice for this agent); vision and voice always run on this node. `list_agents` gives each agent `alias_roles` (role to alias) and `missing_aliases` (the roles whose alias is no longer in `providers.json`); the agents panel marks an agent "not available now" only when main is missing and names the other missing roles in the tooltip. Not the people roles of `protocol-13-public.md`.
 - **Defined in:** [provider_alias_refs.py](../dpc-client/core/dpc_client_core/provider_alias_refs.py)
 
 ### music_* tools

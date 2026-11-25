@@ -113,3 +113,20 @@ describe('agent model config payload', () => {
     expect(changed.provider_alias).toBe('deepseek_flash');
   });
 });
+
+describe('the agent\'s own Vision and Voice models (follow-up 13)', () => {
+  it('sends a chosen model and the empty choice as they are', () => {
+    const chosen = buildAgentModelConfigPayload({ ...base, visionProvider: 'qwen-vl', voiceProvider: 'whisper' });
+    expect(chosen.vision_provider_alias).toBe('qwen-vl');
+    expect(chosen.voice_provider_alias).toBe('whisper');
+    const cleared = buildAgentModelConfigPayload({ ...base, visionProvider: '', voiceProvider: '' });
+    expect(cleared.vision_provider_alias).toBe('');
+    expect(cleared.voice_provider_alias).toBe('');
+  });
+
+  it('says nothing about them when the caller did not mention them', () => {
+    const payload = buildAgentModelConfigPayload(base);
+    expect('vision_provider_alias' in payload).toBe(false);
+    expect('voice_provider_alias' in payload).toBe(false);
+  });
+});

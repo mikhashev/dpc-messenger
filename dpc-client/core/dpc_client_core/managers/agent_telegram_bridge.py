@@ -1753,9 +1753,13 @@ Send a voice message and it will be transcribed and processed\\.
             with open(voice_path, "rb") as f:
                 audio_base64 = base64.b64encode(f.read()).decode("utf-8")
 
+            # The agent's own Voice model (Agent Configuration); none = the node's
+            # automatic choice, as before.
+            own_voice = (getattr(self._agent_manager, "config", None) or {}).get("voice_provider_alias")
             transcription_result = await service.transcribe_audio(
                 audio_base64=audio_base64,
-                mime_type="audio/ogg"
+                mime_type="audio/ogg",
+                **({"provider_alias": own_voice} if own_voice else {}),
             )
 
             transcription_text = transcription_result.get("text", "")

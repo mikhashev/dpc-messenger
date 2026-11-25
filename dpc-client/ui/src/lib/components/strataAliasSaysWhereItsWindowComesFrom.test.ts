@@ -80,8 +80,8 @@ describe('what an agent chat sends for the Text selector', () => {
     expect(agentAliasToSend('dpc_agent', undefined, true)).toBeNull();
   });
 
-  it('another alias picked in an agent chat is the alias the message runs on', () => {
-    expect(agentAliasToSend('small', 'flash', true)).toBe('small');
+  it('an alias left from the removed Text selector is not sent: the agent config decides', () => {
+    expect(agentAliasToSend('small', 'flash', true)).toBe('flash');
   });
 
   it('a chat with no agent names no agent alias', () => {

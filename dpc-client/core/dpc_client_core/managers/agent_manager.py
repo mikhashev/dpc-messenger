@@ -1452,6 +1452,7 @@ class DpcAgentManager:
 
             # Phase 3: Get provider-specific agent if agent_llm_provider is specified
             agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
+            self._apply_media_aliases(agent)
             self._last_used_agent = agent
             self._remember_chat_alias(conversation_id, agent_llm_provider)
 
@@ -2030,6 +2031,22 @@ class DpcAgentManager:
             self._chat_aliases[conversation_id] = requested
         else:
             getattr(self, "_chat_aliases", {}).pop(conversation_id, None)
+
+    def _apply_media_aliases(self, agent: Any) -> None:
+        """The agent's own Vision and Voice models (config vision_provider_alias,
+        voice_provider_alias; '' or absent = the node's global) onto the agent
+        about to run, read from the config this manager holds."""
+        config = getattr(self, "config", None) or {}
+        llm = getattr(agent, "llm", None)
+        if llm is not None:
+            try:
+                llm.vision_alias = config.get("vision_provider_alias") or None
+            except Exception:
+                pass
+        try:
+            agent.voice_provider_alias = config.get("voice_provider_alias") or None
+        except Exception:
+            pass
 
     def _host_of_alias(self, alias: str) -> str:
         """The peer a per-alias agent dials: the agent's own, unless a chat picked a local alias of another name."""

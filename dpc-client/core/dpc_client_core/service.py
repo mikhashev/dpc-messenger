@@ -3464,6 +3464,17 @@ class CoreService(MusicCommandsMixin):
                 # template would: the reader chooses on this field.
                 provider_dict["reasoning_default"] = effective_reasoning_default(provider)
 
+            # Where the model runs (route, provider_kind, host_scope), the words the
+            # agent dialog already shows, so a chat's model list can label each row
+            # by place rather than calling every row on this node "local".
+            try:
+                from .dpc_agent.provider_facts import provider_row_facts
+                own = getattr(getattr(self, "p2p_manager", None), "own_addresses", None)
+                provider_dict.update(provider_row_facts(
+                    provider_dict, self.llm_manager, getattr(self, "peer_metadata", None), own))
+            except Exception as e:
+                logger.debug("No place facts for provider %s: %s", alias, e)
+
             # v0.18.1+: Add remote inference fields for dpc_agent provider
             if alias == "dpc_agent":
                 provider_dict["peer_id"] = getattr(provider, 'peer_id', None)
@@ -12191,6 +12202,8 @@ class CoreService(MusicCommandsMixin):
         retrieval_vector: str = None,
         retrieval_text: str = None,
         reasoning_effort: str = None,
+        vision_provider_alias: str = None,
+        voice_provider_alias: str = None,
     ) -> Dict[str, Any]:
         """Delegated to AgentService."""
         if not self.agent_service:
@@ -12209,6 +12222,8 @@ class CoreService(MusicCommandsMixin):
             retrieval_vector=retrieval_vector,
             retrieval_text=retrieval_text,
             reasoning_effort=reasoning_effort,
+            vision_provider_alias=vision_provider_alias,
+            voice_provider_alias=voice_provider_alias,
             providers_getter=self.get_providers_list,
         )
 

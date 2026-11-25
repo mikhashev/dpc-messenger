@@ -81,7 +81,10 @@ def _pick_provider(ctx: ToolContext, model: Optional[str]) -> tuple[Optional[Any
             'type "local_whisper" in ~/.dpc/providers.json.'
         )
     if not model:
-        alias = sorted(candidates)[0]
+        # The agent's own Voice model (Agent Configuration, follow-up 13) when it
+        # is one of the Whisper providers here; else the first one.
+        own = getattr(getattr(ctx, "_agent", None), "voice_provider_alias", None)
+        alias = own if own in candidates else sorted(candidates)[0]
         return candidates[alias], None
 
     for alias in sorted(candidates):

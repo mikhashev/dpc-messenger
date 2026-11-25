@@ -5,6 +5,7 @@
   import { createEventDispatcher } from 'svelte';
   import { sendCommand, nodeStatus, peerProviders } from '$lib/coreService';
   import { confirmAsync } from '$lib/utils/dialog';
+  import { providerOptionText } from '$lib/utils/providerPlace';
 
   // Svelte 5 runes mode - use $props() instead of export let
   let { open = $bindable(false) }: { open: boolean } = $props();
@@ -84,7 +85,7 @@
     const local = wizardLocalProviders.map((p: any) => ({
       ...p,
       source: 'local' as const,
-      displayText: `${p.alias} - ${p.model} - local`,
+      displayText: providerOptionText(p, 'local'),
       uniqueId: `local:${p.alias}`
     }));
 
@@ -97,7 +98,7 @@
     const remote = remotePeerProviders.map((p: any) => ({
       ...p,
       source: 'remote' as const,
-      displayText: `${p.alias} - ${p.model} - remote`,
+      displayText: providerOptionText(p, 'remote'),
       uniqueId: `remote:${wizardComputeHost}:${p.alias}`,
       nodeId: wizardComputeHost
     }));
