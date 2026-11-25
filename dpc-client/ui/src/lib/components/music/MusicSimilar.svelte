@@ -9,25 +9,33 @@
     core fills them), and description or the source's audio as a reference (a timbre reference, marked
     unverified);
   - Cover (`cover`): "kept from the source: melody and lyrics", a required target style, the engine
-    (acestep.cpp cover, or yue2.cpp's score-based chain with its caveats), the cover strength on acestep.
+    (yue2.cpp's score chain by default, after Ruach Studio, with its caveats, the score choice and Ruach's
+    attribution; acestep.cpp cover, the fallback the report names when yue2 cannot run), the cover strength
+    on acestep. A yue2 cover without lyrics offers "Use acestep cover (no lyrics needed)".
 
-  Variants and duration (a cover on acestep is as long as its source). Create is off, with the reason,
-  while the capability report says the mode cannot run (a web track cannot send its audio, a yue2 cover
-  without the transcriber). The job joins the jobs list; its takes are reviewed in Create like any other.
+  Variants, and a duration for a same-style song (a cover is as long as its source). Create is off, with
+  the reason shown, while the capability report says the mode cannot run (a web track's audio waits for the
+  Yandex Music / SoundCloud integration, a yue2 cover without the transcriber). The job joins the jobs list;
+  its takes are reviewed in Create like any other.
 -->
 
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { musicJobs, proposeSong, refreshCapabilities } from '$lib/services/musicJobs';
   import {
+    ACESTEP_COVER_OFFER,
     KEEP_KEYS,
     KEEP_LABELS,
     REFERENCE_NOTE,
+    RUACH_ATTRIBUTION,
     YUE2_COVER_CAVEATS,
     captionFromKeep,
+    defaultCoverEngine,
     emptySimilarForm,
+    offersAcestepCover,
     similarFieldOf,
     songSupport,
+    useAcestepCover,
     validateSimilarForm,
     type SimilarErrors,
     type SimilarForm,
@@ -44,6 +52,7 @@
 
   let form = $state<SimilarForm>(untrack(() => emptySimilarForm(source, mode)));
   let errors = $state<SimilarErrors>({});
+  let refusalCode = $state('');
   let busy = $state(false);
   let done = $state('');
   let caps = $derived($musicJobs.capabilities);
@@ -51,6 +60,29 @@
   let shownCaption = $derived(form.captionEdited || form.mode === 'cover' ? form.caption : captionFromKeep(form));
 
   onMount(() => { void refreshCapabilities(); });
+
+  // The cover engine follows the report (yue2, or acestep when yue2 cannot run) until the person picks one.
+  $effect(() => {
+    if (caps && !form.engineChosen) {
+      const engine = defaultCoverEngine(caps);
+      if (untrack(() => form.engine) !== engine) form.engine = engine;
+    }
+  });
+
+  let offerAcestep = $derived(offersAcestepCover(form, errors.form, refusalCode));
+
+  function pickEngine(e: Event) {
+    form.engine = (e.currentTarget as HTMLSelectElement).value as SimilarForm['engine'];
+    form.engineChosen = true;
+    errors = { ...errors, form: undefined };
+    refusalCode = '';
+  }
+
+  function takeAcestep() {
+    form = useAcestepCover(form);
+    errors = { ...errors, form: undefined };
+    refusalCode = '';
+  }
 
   // Another track or mode asked for while open: start over on it.
   let lastKey = untrack(() => `${source.id}:${mode}`);
@@ -89,6 +121,7 @@
   async function create() {
     if (busy) return;
     done = '';
+    refusalCode = '';
     const v = validateSimilarForm({ ...form, caption: shownCaption, captionEdited: true });
     if (!v.ok) {
       errors = v.errors;
@@ -100,6 +133,7 @@
       const a = await proposeSong(v.type, v.trackId, v.params, newKey());
       if (!a.ok) {
         errors = { [similarFieldOf(a.field)]: a.message };
+        refusalCode = a.code;
         return;
       }
       done = a.data.job.state === 'unsupported'
@@ -190,11 +224,21 @@
     <div class="form-row">
       <label class="field">
         <span class="field-label">Engine</span>
-        <select class="list-select" bind:value={form.engine}>
-          <option value="acestep">acestep.cpp · cover</option>
+        <select class="list-select" value={form.engine} onchange={pickEngine}>
           <option value="yue2">yue2.cpp · SheetSage2 score</option>
+          <option value="acestep">acestep.cpp · cover</option>
         </select>
       </label>
+      {#if form.engine === 'yue2'}
+        <label class="field">
+          <span class="field-label">Score</span>
+          <select class="list-select" bind:value={form.coverScore}>
+            <option value="melody">Lead melody (voice + instruments)</option>
+            <option value="vocal">Vocal melody only</option>
+            <option value="full">Melody and chords</option>
+          </select>
+        </label>
+      {/if}
       <label class="field">
         <span class="field-label">Lyrics</span>
         <select class="list-select" bind:value={form.coverLyrics}>
@@ -210,7 +254,10 @@
         </label>
       {/if}
     </div>
-    {#if form.engine === 'yue2'}<p class="muted tiny">{YUE2_COVER_CAVEATS}</p>{/if}
+    {#if form.engine === 'yue2'}
+      <p class="muted tiny">{YUE2_COVER_CAVEATS}</p>
+      <p class="muted tiny" translate="no">{RUACH_ATTRIBUTION}</p>
+    {/if}
     {#if form.engine === 'acestep'}<p class="muted tiny">The cover is as long as the source; it works without lyrics.</p>{/if}
   {/if}
 
@@ -219,15 +266,20 @@
       <span class="field-label">Variants</span>
       <input class="text-input num" type="number" min="1" max="4" step="1" bind:value={form.variants} aria-invalid={!!errors.variants} />
     </label>
-    {#if !(form.mode === 'cover' && form.engine === 'acestep')}
+    {#if form.mode !== 'cover'}
       <label class="field">
-        <span class="field-label">Duration (s){form.mode === 'cover' ? ', a cap' : ''}</span>
+        <span class="field-label">Duration (s)</span>
         <input class="text-input num" type="text" inputmode="decimal" bind:value={form.durationS} aria-invalid={!!errors.duration} />
       </label>
     {/if}
   </div>
   <p class="field-error" role="alert">{errors.variants ?? errors.duration ?? ''}</p>
   <p class="field-error" role="alert">{errors.source ?? errors.form ?? ''}</p>
+  {#if offerAcestep}
+    <div class="form-row">
+      <button type="button" class="small-btn" onclick={takeAcestep}>{ACESTEP_COVER_OFFER}</button>
+    </div>
+  {/if}
 
   <div class="form-row">
     <button type="button" class="small-btn primary" onclick={create} disabled={busy || !support.ok}
