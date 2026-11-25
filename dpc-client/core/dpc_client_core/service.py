@@ -53,6 +53,7 @@ from .local_api import ENV_VAR_NAME_RE as _ENV_VAR_NAME, LocalApiServer, sends_o
 from .file_server import FileServer
 from .card_lease_commands import CardLeaseCommandsMixin
 from .music.commands import MusicCommandsMixin
+from .music.qc_commands import MusicQcCommandsMixin
 from .gateway import (
     GATEWAY_HOST,
     GATEWAY_KEY_NAME,
@@ -921,7 +922,7 @@ def local_wake_sender(sender_name: str, is_agent_sender: bool, asker: Any,
     return words
 
 
-class CoreService(MusicCommandsMixin, CardLeaseCommandsMixin):
+class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMixin):
     """
     The main orchestrating class for the D-PC client's backend.
     Manages all sub-components and the application's lifecycle.

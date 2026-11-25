@@ -89,6 +89,14 @@ record without them is valid against both shapes:
   `not_measured` otherwise (a gate that could not be measured is never a pass). The advisory
   entries never gate (decision 29). A report always exists on a take made by the runner; a
   failed QA run is a report whose verdict is `not_measured` with the reason.
+- `mp.take/1.qc`: the take's `mp.qc/1` (SPEC §8.1), or absent on a take written before it
+  (`check_qc`, `qc.py`). DPC's record keeps the SPEC's keys and declares these extensions:
+  `judge` carries `status` (`absent`, `done` or `failed`), `alias`, `error` and `judged_at`
+  beside `model`, `runtime` and `rubric`, and `model`/`runtime` are null while no judge ran;
+  `scores` and `confidence` are null unless the judge is `done`; `stage1` is the stage-1
+  summary (`qa.qa_summary`); `lyrics_wer` the advisory WER entry (`status` measured or
+  not_measured, never a gate); `caveat` the line the UI shows; `assembled_at`. QC never accepts
+  or rejects a take: no key here is a decision.
 - `mp.take/1`: `loudness`, `{lufs_i, lra, true_peak_dbtp, measured_by, measured_at}` or
   null: the ffmpeg ebur128 measurement the level-matched A/B needs (decision 37,
   `loudness.py`). It is not `qa`, because a loudness-only record is not a valid `mp.qa/1`
@@ -251,6 +259,18 @@ QA_VERDICTS = (QA_PASSED, QA_FAILED, QA_NOT_MEASURED)
 _QA_REPORT_KEYS = {"stage", "verdict", "gates", "advisory", "measurements", "thresholds", "measured_by", "measured_at",
                    "note"}
 _FILE_KEYS = {"uri", "content_hash", "sample_rate", "channels", "duration_s"}
+
+# mp.qc/1 (SPEC §8.1) as DPC writes it; the extensions are in the module docstring.
+QC = "mp.qc/1"
+QC_FLOWS = ("edit", "same_style", "cover", "lyrics", "melody", "voice_clone")
+QC_SCORE_KEYS = ("style_match", "mood", "vocal_clarity", "artifacts", "structure", "overall")
+JUDGE_ABSENT, JUDGE_DONE, JUDGE_FAILED = "absent", "done", "failed"
+JUDGE_STATUSES = (JUDGE_ABSENT, JUDGE_DONE, JUDGE_FAILED)
+_QC_REQUIRED = ("schema", "take_id", "flow", "deterministic", "judge", "scores", "issues", "reasons", "confidence")
+_QC_KEYS = set(_QC_REQUIRED) | {"simulated", "stage1", "lyrics_wer", "caveat", "assembled_at"}
+_QC_JUDGE_KEYS = {"status", "model", "runtime", "rubric", "alias", "error", "judged_at"}
+_QC_ISSUE_KEYS = {"t_start", "t_end", "kind", "note", "expected_pronunciation"}
+_QC_WER_KEYS = {"status", "value", "raw", "reason", "advisory", "transcription"}
 
 
 class ParamsError(ValueError):
@@ -746,6 +766,9 @@ def validate_take(take: Any) -> None:
         check_qa(take["qa"], s)
     if take.get("qa_report") is not None:
         check_qa_report(take["qa_report"], s)
+    if take.get("qc") is not None:
+        check_qc(take["qc"], s)
+        _expect(s, take["qc"]["take_id"] == take["id"], "'qc.take_id' must be the take's id")
     if take["kind"] == "new_track":
         for k in ("variant", "title", "source_track_id"):
             _expect(s, k in take, f"a new_track take needs '{k}'")
@@ -874,6 +897,89 @@ def check_qa_report(report: Any, schema: str = TAKE) -> None:
         _expect(schema, _is_str(report[k]) and bool(report[k]), f"'qa_report.{k}' must be text")
     if "note" in report:
         _expect(schema, report["note"] is None or _is_str(report["note"]), "'qa_report.note' must be text or null")
+
+
+def check_qc_issue(issue: Any, schema: str = TAKE, where: str = "qc.issues[]") -> None:
+    """Raise `SchemaError` unless `issue` is one `mp.qc/1` issue: `t_start` and `t_end` numbers
+    >= 0 in order, `kind` and `note` text, `expected_pronunciation` text and only on a
+    `pronunciation` issue."""
+    _expect(schema, isinstance(issue, Mapping), f"'{where}' must be an object")
+    missing = sorted({"t_start", "t_end", "kind", "note"} - set(issue))
+    extra = sorted(set(issue) - _QC_ISSUE_KEYS)
+    _expect(schema, not missing, f"'{where}' lacks: {', '.join(missing)}")
+    _expect(schema, not extra, f"'{where}' has undeclared key(s): {', '.join(extra)}")
+    for k in ("t_start", "t_end"):
+        _expect(schema, _is_number(issue[k]) and issue[k] >= 0, f"'{where}.{k}' must be a number >= 0")
+    _expect(schema, issue["t_end"] >= issue["t_start"], f"'{where}.t_end' must not be before t_start")
+    _expect(schema, _is_str(issue["kind"]) and bool(issue["kind"].strip()), f"'{where}.kind' must be text")
+    _expect(schema, _is_str(issue["note"]), f"'{where}.note' must be text")
+    if "expected_pronunciation" in issue:
+        _expect(schema, issue["kind"] == "pronunciation" and _is_str(issue["expected_pronunciation"]),
+                f"'{where}.expected_pronunciation' is text on a pronunciation issue only")
+
+
+def check_qc_scores(scores: Any, schema: str = TAKE) -> None:
+    """Raise `SchemaError` unless `scores` holds exactly the six `mp.qc/1` scores, each 0-10."""
+    _expect(schema, isinstance(scores, Mapping) and set(scores) == set(QC_SCORE_KEYS),
+            f"'qc.scores' must have exactly {list(QC_SCORE_KEYS)}")
+    for k in QC_SCORE_KEYS:
+        _expect(schema, _is_number(scores[k]) and 0 <= scores[k] <= 10,
+                f"'qc.scores.{k}' must be a number from 0 to 10")
+
+
+def check_qc(qc: Any, schema: str = TAKE) -> None:
+    """Raise `SchemaError` unless `qc` is an `mp.qc/1` as DPC writes it (SPEC §8.1 plus the
+    extensions in the module docstring): `deterministic` an `mp.qa/1` or null (no stage-1
+    numbers), the judge's status deciding whether `scores` and `confidence` are set, the
+    issues valid, the advisory WER never a gate."""
+    _check_keys(QC, qc, _QC_REQUIRED, _QC_KEYS)  # also checks 'schema' == mp.qc/1
+    _expect(schema, _is_str(qc["take_id"]) and bool(TAKE_ID_RE.match(qc["take_id"])),
+            "'qc.take_id' must be a take id")
+    _expect(schema, qc["flow"] in QC_FLOWS, f"'qc.flow' must be one of {QC_FLOWS}")
+    if qc["deterministic"] is not None:
+        check_qa(qc["deterministic"], schema)
+    judge = qc["judge"]
+    _expect(schema, isinstance(judge, Mapping) and set(judge) == _QC_JUDGE_KEYS,
+            f"'qc.judge' must have exactly {sorted(_QC_JUDGE_KEYS)}")
+    _expect(schema, judge["status"] in JUDGE_STATUSES, f"'qc.judge.status' must be one of {JUDGE_STATUSES}")
+    _expect(schema, _is_str(judge["rubric"]) and bool(judge["rubric"]), "'qc.judge.rubric' must be text")
+    for k in ("model", "runtime", "alias", "error", "judged_at"):
+        _expect(schema, judge[k] is None or _is_str(judge[k]), f"'qc.judge.{k}' must be text or null")
+    done = judge["status"] == JUDGE_DONE
+    if done:
+        _expect(schema, _is_str(judge["model"]) and bool(judge["model"]), "a done judge names its model")
+        check_qc_scores(qc["scores"], schema)
+        _expect(schema, _is_number(qc["confidence"]) and 0 <= qc["confidence"] <= 1,
+                "'qc.confidence' must be a number from 0 to 1")
+    else:
+        _expect(schema, qc["scores"] is None and qc["confidence"] is None,
+                "'qc.scores' and 'qc.confidence' are null unless the judge is done")
+    if judge["status"] == JUDGE_FAILED:
+        _expect(schema, _is_str(judge["error"]) and bool(judge["error"]),
+                "a failed judge says why ('qc.judge.error')")
+    _expect(schema, isinstance(qc["issues"], list), "'qc.issues' must be a list")
+    _expect(schema, done or not qc["issues"], "'qc.issues' come from the judge: empty unless it is done")
+    for i, issue in enumerate(qc["issues"]):
+        check_qc_issue(issue, schema, f"qc.issues[{i}]")
+    _expect(schema, _is_str(qc["reasons"]), "'qc.reasons' must be text")
+    if "simulated" in qc:
+        _expect(schema, isinstance(qc["simulated"], bool), "'qc.simulated' must be a boolean")
+    if "stage1" in qc:
+        st = qc["stage1"]
+        _expect(schema, isinstance(st, Mapping) and st.get("verdict") in QA_VERDICTS,
+                f"'qc.stage1.verdict' must be one of {QA_VERDICTS}")
+    if "lyrics_wer" in qc:
+        wer = qc["lyrics_wer"]
+        _expect(schema, isinstance(wer, Mapping) and set(wer) <= _QC_WER_KEYS,
+                f"'qc.lyrics_wer' keys must be within {sorted(_QC_WER_KEYS)}")
+        _expect(schema, wer.get("status") in ("measured", GATE_NOT_MEASURED),
+                "'qc.lyrics_wer.status' must be 'measured' or 'not_measured': it never gates")
+        if wer.get("status") == "measured":
+            _expect(schema, _is_number(wer.get("value")) and 0 <= wer["value"] <= 1,
+                    "'qc.lyrics_wer.value' must be a number from 0 to 1")
+    for k in ("caveat", "assembled_at"):
+        if k in qc:
+            _expect(schema, _is_str(qc[k]) and bool(qc[k]), f"'qc.{k}' must be text")
 
 
 def job_reason_needed(state: str) -> bool:

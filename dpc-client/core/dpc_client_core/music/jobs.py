@@ -90,6 +90,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from . import job_schemas as js
+from . import qc as qc_
 from .capabilities import MusicCapabilities
 from .schemas import SchemaError
 from .store import atomic_write_text, music_dir_of
@@ -1005,6 +1006,10 @@ class MusicJobStore:
                 take["engine_window_s"] = engine_window_s
                 take["length_check"] = length_check
                 take["length_delta_s"] = length_delta_s
+            if take["qa_report"] is not None:
+                take["qc"] = self._stage_one_qc(take, job)
+                if take["qc"] is None:
+                    del take["qc"]
             try:
                 js.validate_take(take)
             except SchemaError as exc:
@@ -1033,6 +1038,37 @@ class MusicJobStore:
             def change(job: dict) -> None:
                 take = next(t for t in self._takes[job_id] if t["id"] == take_id)
                 take["loudness"] = dict(loudness)
+            self._change(job_id, change)
+            return copy.deepcopy(self._take(take_id)[1])
+
+    @staticmethod
+    def _stage_one_qc(take: dict, job: dict) -> Optional[dict]:
+        """The take's `mp.qc/1` once stage 1 is done (judge absent, `qc.stage_one`), or None. QC
+        is a record beside the take, so a QC that cannot be assembled is logged and left out; it
+        never refuses the take."""
+        try:
+            return qc_.stage_one(take, job)
+        except Exception:
+            logger.warning("music: the QC record of a take of job %s was not assembled", job["id"], exc_info=True)
+            return None
+
+    def set_take_qc(self, take_id: str, qc: Mapping[str, Any]) -> dict:
+        """Record a take's `mp.qc/1` (`qc.py`: a stage-1 refresh or a judge's result), in any job
+        state and for any decision: it is advice about the file, never a decision. A later record
+        replaces an earlier one. Raises `MusicJobError` (`not_found`, `invalid_params`)."""
+        try:
+            js.check_qc(qc)
+        except SchemaError as exc:
+            raise MusicJobError("invalid_params", str(exc), field="qc")
+        if qc.get("take_id") != take_id:
+            raise MusicJobError("invalid_params", "the QC record is of another take", field="qc")
+        with self._lock:
+            self._ready()
+            job_id, _ = self._take(take_id)
+
+            def change(job: dict) -> None:
+                take = next(t for t in self._takes[job_id] if t["id"] == take_id)
+                take["qc"] = copy.deepcopy(dict(qc))
             self._change(job_id, change)
             return copy.deepcopy(self._take(take_id)[1])
 

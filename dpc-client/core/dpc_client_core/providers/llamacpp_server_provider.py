@@ -115,6 +115,93 @@ _FLAG_KEYS = (
 )
 
 
+# What the alias's projector feeds, before a child's /props can say (`mmproj_kind`): an
+# image projector (the default, every alias written before audio), an audio projector
+# (Music Flamingo's `musicflamingo` mmproj), or one that does both (an omni model).
+MMPROJ_VISION, MMPROJ_AUDIO, MMPROJ_BOTH = "vision", "audio", "vision+audio"
+MMPROJ_KINDS = (MMPROJ_VISION, MMPROJ_AUDIO, MMPROJ_BOTH)
+
+# The audio containers the pinned server decodes (b12110 tools/mtmd/mtmd-helper.cpp
+# `audio_helpers::is_audio_file`: RIFF/WAVE, ID3 or an MPEG sync word, fLaC; miniaudio decodes
+# them), read from the bytes' own header, never from a filename.
+AUDIO_FORMATS = ("wav", "mp3", "flac")
+# cpp-httplib's default request cap in the pinned build is 100 MiB (CPPHTTPLIB_PAYLOAD_MAX_LENGTH;
+# tools/server does not raise it), and base64 makes the bytes 4/3 larger: 64 MiB of audio is a
+# ~85 MiB body, under the cap with room for the prompt.
+MAX_AUDIO_BYTES = 64 * 1024 * 1024
+
+
+def mmproj_kind_of(alias: str, config: Dict[str, Any]) -> Optional[str]:
+    """The alias's `mmproj_kind`, None when it names no projector. Absent means `vision`
+    (aliases written before audio); a value outside `MMPROJ_KINDS` is refused, since a wrong
+    word would offer images to a model that hears or the other way round."""
+    raw = config.get("mmproj_kind")
+    if raw is not None and raw not in MMPROJ_KINDS:
+        raise ValueError(
+            f"llamacpp_server provider '{alias}': mmproj_kind must be one of {list(MMPROJ_KINDS)}, "
+            f"not {raw!r}")
+    if not config.get("mmproj"):
+        return None
+    return raw or MMPROJ_VISION
+
+
+def audio_format_of(data: bytes) -> Optional[str]:
+    """`wav`, `mp3` or `flac` from the header bytes, the same checks the pinned server makes
+    before it decodes; None for anything else."""
+    head = bytes(data[:12])
+    if len(head) < 12:
+        return None
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "wav"
+    if head[:4] == b"fLaC":
+        return "flac"
+    if head[:3] == b"ID3" or (head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
+        return "mp3"
+    return None
+
+
+def audio_part(audio: Union[bytes, bytearray, str, Path], alias: str) -> Tuple[Dict[str, Any], int]:
+    """`(the input_audio content part, the byte count)` for raw bytes or a local file path.
+
+    The part is the OpenAI-compatible shape the pinned llama-server reads (b12110
+    tools/server/server-common.cpp `oaicompat_content_load_media`, type `input_audio`):
+    `{"type": "input_audio", "input_audio": {"data": <raw base64>, "format": <wav|mp3|flac>}}`.
+    The server takes `data` (or `url`) as raw base64 or a data URI and decodes the container
+    from its header; `format` is ignored there ("redundant") and sent for OpenAI-shaped
+    readers. Refused here, before any call: a path that is not a file, an empty or oversized
+    body, a container the server cannot decode."""
+    import base64
+
+    if isinstance(audio, (str, Path)):
+        path = Path(audio)
+        if not path.is_file():
+            raise ValueError(f"Provider '{alias}' was given an audio path that is not a file")
+        size = path.stat().st_size
+        if size > MAX_AUDIO_BYTES:
+            raise ValueError(
+                f"Provider '{alias}': the audio is {size / (1024 * 1024):.0f} MiB, above the "
+                f"{MAX_AUDIO_BYTES // (1024 * 1024)} MiB a request to llama-server can carry")
+        data = path.read_bytes()
+    elif isinstance(audio, (bytes, bytearray)):
+        data = bytes(audio)
+    else:
+        raise ValueError(f"Provider '{alias}' was given audio that is neither bytes nor a file path")
+    if not data:
+        raise ValueError(f"Provider '{alias}' was given empty audio")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise ValueError(
+            f"Provider '{alias}': the audio is {len(data) / (1024 * 1024):.0f} MiB, above the "
+            f"{MAX_AUDIO_BYTES // (1024 * 1024)} MiB a request to llama-server can carry")
+    fmt = audio_format_of(data)
+    if fmt is None:
+        raise ValueError(
+            f"Provider '{alias}' was given audio that is not WAV, MP3 or FLAC (the containers "
+            "llama-server decodes); convert it first")
+    part = {"type": "input_audio",
+            "input_audio": {"data": base64.b64encode(data).decode("ascii"), "format": fmt}}
+    return part, len(data)
+
+
 def _flags_of(config: Dict[str, Any]) -> tuple:
     """The flag-bearing keys, as the supervisor would merge them.
 
@@ -341,6 +428,8 @@ class LlamaServerProvider(DeepSeekProvider):
         # early reasoning and stop revising when a tool result contradicts it.
         self.preserve_reasoning = bool(config.get("preserve_reasoning", False))
         self._mmproj = config.get("mmproj")
+        # What the projector feeds (images, audio or both) until a live child's /props says.
+        self._mmproj_kind = mmproj_kind_of(alias, config)
         # What the alias asked the child to cap one image at, or None when the
         # flag is not sent. It is the configured value, not a read-back of what
         # the child kept; the pixel limit that follows from it is not computed
@@ -1221,18 +1310,48 @@ class LlamaServerProvider(DeepSeekProvider):
 
     # --- capability surface ----------------------------------------------------
 
+    def _live_modality(self, name: str) -> Optional[bool]:
+        """`/props` `modalities.<name>` of a live child (`vision`, `audio`, `video`; b12110
+        server-context.cpp writes all three from the loaded projector), None while no child
+        has answered or the key is absent."""
+        props = getattr(self.supervisor, "props", None) if self.supervisor is not None else None
+        if not props:
+            return None
+        modal = props.get("modalities")
+        if not isinstance(modal, dict) or name not in modal:
+            return None
+        return bool(modal.get(name))
+
+    def _configured_kind(self) -> Optional[str]:
+        kind = self.__dict__.get("_mmproj_kind")
+        if kind is None and self.__dict__.get("_mmproj"):
+            return MMPROJ_VISION  # a test double built without `__init__`
+        return kind
+
     def supports_vision(self) -> bool:
-        """True when the alias names an mmproj, or a live child advertises it.
+        """Whether this alias takes images.
 
         /props is the authority once the server is up (probed 2026-08-19:
-        `modalities: {vision: true, video: true}` with the projector blob);
-        before that, the alias's mmproj is the honest yes — a child started
-        without --mmproj serves text and nothing else."""
-        if self.supervisor is not None and self.supervisor.props:
-            modal = self.supervisor.props.get("modalities") or {}
-            if isinstance(modal, dict) and modal.get("vision"):
-                return True
-        return bool(self._mmproj)
+        `modalities: {vision: true, video: true}` with the projector blob), a
+        yes and a no alike: the projector that loaded is what the child serves.
+        Before that, the alias's projector and its `mmproj_kind`: an mmproj
+        that feeds images (`vision`, the default, or `vision+audio`) is the
+        honest yes; an audio projector (`mmproj_kind: audio`, Music Flamingo)
+        is not, and neither is a child started without --mmproj."""
+        live = self._live_modality("vision")
+        if live is not None:
+            return live
+        return self._configured_kind() in (MMPROJ_VISION, MMPROJ_BOTH)
+
+    def supports_audio(self) -> bool:
+        """Whether this alias takes audio (`input_audio` parts): /props
+        `modalities.audio` of a live child, else an alias whose projector is
+        declared `mmproj_kind: audio` or `vision+audio`. An undeclared projector
+        is read as an image one, so audio is never offered on a guess."""
+        live = self._live_modality("audio")
+        if live is not None:
+            return live
+        return self._configured_kind() in (MMPROJ_AUDIO, MMPROJ_BOTH)
 
     def server_window(self) -> Optional[int]:
         """`/props` `default_generation_settings.n_ctx` of a running child; otherwise
@@ -1867,6 +1986,81 @@ class LlamaServerProvider(DeepSeekProvider):
                 return await self._retry_with_backoff(_call, e)
             raise RuntimeError(
                 f"llamacpp_server vision failed for '{self.alias}': "
+                f"{type(e).__name__}: {e}"
+            ) from e
+
+    @_in_one_slot_call
+    async def generate_with_audio(self, prompt: str, audio: Union[bytes, bytearray, str, Path],
+                                  **kwargs) -> str:
+        """Audio on the DPC-owned child, the twin of `generate_with_vision`: one
+        user message, the clip as an `input_audio` part (`audio_part`) and then
+        the prompt. It starts the child through the same `_ensure_for` as every
+        call here (card lease, slot queue, supervisor start).
+
+        `audio` is the file's bytes or a local path (WAV, MP3 or FLAC). Refused
+        before the call: an alias that takes no audio, and audio the server
+        could not decode. Thinking is off unless the caller or the alias names
+        a rung, as on the vision path."""
+        if not self.supports_audio():
+            raise ValueError(
+                f"llamacpp_server provider '{self.alias}' takes no audio: its projector is not "
+                "declared an audio one (mmproj_kind audio or vision+audio) and no live child says "
+                "modalities.audio")
+        self._last_thinking = None
+        self._last_usage = None
+        part, size = audio_part(audio, self.alias)
+        content: List[Dict[str, Any]] = [part, {"type": "text", "text": prompt}]
+        messages = [{"role": "user", "content": content}]
+
+        async def _call():
+            client = await self._ensure_for(messages)
+            import time as _time
+            _t0 = _time.perf_counter()  # after ensure: cold start stays out of the number
+            effort = kwargs.get("reasoning_effort")
+            per_call_budget = kwargs.get("reasoning_budget_tokens")
+            if effort is None and per_call_budget is None and not self._reasoning_effort_raw:
+                extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+            else:
+                extra_body = self._build_extra_body(
+                    effort, per_call_budget,
+                    effective_max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                )
+            params: Dict[str, Any] = {
+                "model": self._model_name(),
+                "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+                "messages": messages,
+                "extra_body": extra_body,
+                **self._sampling_on_the_wire(extra_body, self._sampling_params(kwargs.get("temperature"))),
+            }
+            async with self.supervisor.call_slot():
+                self._mark_sent()  # synchronous: nothing between the slot and the send
+                resp = await client.chat.completions.create(**params)
+            _choice = resp.choices[0]
+            msg = _choice.message
+            self._last_thinking = getattr(msg, "reasoning_content", None)
+            self._record_usage(
+                getattr(resp, "usage", None),
+                path="audio",
+                conversation_id=kwargs.get("conversation_id"),
+                effort=self._effort_label(effort, extra_body),
+                served_effort=self._served_effort(extra_body),
+                reasoning_text=self._last_thinking,
+                elapsed_s=_time.perf_counter() - _t0,
+                finish_reason=getattr(_choice, "finish_reason", None),
+                max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                engine_timings=(getattr(resp, "model_extra", None) or {}).get("timings"),
+            )
+            logger.info("llamacpp audio: alias=%s sent %d bytes (%s)", self.alias, size,
+                        part["input_audio"]["format"])
+            return msg.content or ""
+
+        try:
+            return await _call()
+        except Exception as e:
+            if self._is_retryable(e):
+                return await self._retry_with_backoff(_call, e)
+            raise RuntimeError(
+                f"llamacpp_server audio failed for '{self.alias}': "
                 f"{type(e).__name__}: {e}"
             ) from e
 

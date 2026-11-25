@@ -53,7 +53,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **L** — [launcher / launcher_kind](#launcher--launcher_kind) · [`layer_audience`](#layer_audience) · [lease line](#lease-line) · [`limit` (local API)](#limit-local-api) · [lineage](#lineage) · [`link_ping`](#link_ping) · [`LINK_PING`, `LINK_PONG`](#link_ping-link_pong) · [`link_silence_timeout`](#link_silence_timeout) · [`list_cached_peers`](#list_cached_peers) · [live-history boundary](#live-history-boundary) · [local engine swap](#local-engine-swap) · [`local_addresses`](#local_addresses) · [`lyrics_prep`](#lyrics_prep)
 
-**M** — [`MAX_HELLO_FRAME_BYTES`](#max_hello_frame_bytes) · [max_output_tokens](#max_output_tokens) · [`max_proved_connections_per_ip`](#max_proved_connections_per_ip) · [memory layers (L1–L7)](#memory-layers-l1l7) · [memory limit per command](#memory-limit-per-command) · [memory system](#memory-system) · [mention](#mention) · [mention_depth](#mention_depth) · [menu row / menu](#menu-row--menu) · [message signing / preimage](#message-signing--preimage) · [message source](#message-source) · [model download consent](#model-download-consent) · [model files folder](#model-files-folder) · [month summary](#month-summary) · [morning brief](#morning-brief) · [mp.lineage/1](#mplineage1) · [mp.qa/1](#mpqa1) · [music job `variants`](#music-job-variants) · [music QA gate](#music-qa-gate) · [music_* tools](#music_-tools)
+**M** — [`MAX_HELLO_FRAME_BYTES`](#max_hello_frame_bytes) · [max_output_tokens](#max_output_tokens) · [`max_proved_connections_per_ip`](#max_proved_connections_per_ip) · [memory layers (L1–L7)](#memory-layers-l1l7) · [memory limit per command](#memory-limit-per-command) · [memory system](#memory-system) · [mention](#mention) · [mention_depth](#mention_depth) · [menu row / menu](#menu-row--menu) · [message signing / preimage](#message-signing--preimage) · [message source](#message-source) · [model download consent](#model-download-consent) · [model files folder](#model-files-folder) · [month summary](#month-summary) · [morning brief](#morning-brief) · [mp.lineage/1](#mplineage1) · [`mmproj_kind`](#mmproj_kind) · [mp.qa/1](#mpqa1) · [mp.qc/1](#mpqc1) · [music job `variants`](#music-job-variants) · [music QA gate](#music-qa-gate) · [music_* tools](#music_-tools)
 
 **N** — [network](#network) · [New Session](#new-session) · [no_answer](#no_answer) · [node](#node) · [node ledger](#node-ledger) · [node_id](#node_id) · [not_held / busy / not_the_requested_file](#not_held--busy--not_the_requested_file) · [not_offered / upload_limit](#not_offered--upload_limit)
 
@@ -61,7 +61,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **P** — [peer](#peer) · [peer cache](#peer-cache) · [peer_proved](#peer_proved) · [per-reader role derivation](#per-reader-role-derivation) · [pin](#pin) · [prefix_hashes, prefix_chars, call_chars](#prefix_hashes-prefix_chars-call_chars) · [process registry](#process-registry) · [processed message ids](#processed-message-ids) · [pronunciation status](#pronunciation-status) · [Protocol 13](#protocol-13) · [proved connection](#proved-connection) · [proven_on_this_machine](#proven_on_this_machine) · [provider alias](#provider-alias) · [provider_kind](#provider_kind) · [provider_row_facts](#provider_row_facts)
 
-**Q** — [qa_report](#qa_report) · [quota block](#quota-block)
+**Q** — [qa_report](#qa_report) · [QC judge](#qc-judge) · [quota block](#quota-block)
 
 **R** — [reach](#reach) · [reasoning effort](#reasoning-effort) · [refusal code](#refusal-code) · [remote inference](#remote-inference) · [`remote:?:<alias>`](#remotealias) · [request_attachment / file_request_status](#request_attachment--file_request_status) · [requested_by](#requested_by) · [resident budget](#resident-budget) · [resolution](#resolution) · [`resolved_via`](#resolved_via) · [resource peaks](#resource-peaks) · [Review Agent](#review-agent) · [roster](#roster) · [round](#round) · [run gate](#run-gate) · [rung](#rung)
 
@@ -423,6 +423,24 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 - **Met in:** code, wire, screen
 - **Meaning:** The JSON document `get_music_lineage` answers (and `write_music_lineage_files` writes as `lineage.json` beside a job's generated folder, with a static `lineage.html`): `{schema, generated_at, root, nodes, edges, events, jobs, stats, notes}`. Nodes are `intent` (a generate job's request: style and the shape of the lyrics, never their text), `take` (engine, params summary, stage-1 QA verdict, decision keep / discard / pending with reason) and `source`; edges are `generate` or `edit` (`op` the edit action, `region`, `group` the edit job whose takes are siblings, `rejected` and `reason`); events are the person's Keep (with the takes it was picked over) and Discard. It is read-only. Not recorded yet, and named in `notes`: a plain A/B preference without a Keep, the delta and N_delta of an edge, and a clone / mutate kind.
 - **Defined in:** [music/lineage.py — the module docstring and `validate_lineage`](../dpc-client/core/dpc_client_core/music/lineage.py)
+
+### mp.qc/1
+
+- **Met in:** code, wire
+- **Meaning:** The SPEC §8.1 QC record of one take, stored as the take's `qc`: stage 1 is `deterministic` (a copy of the take's **mp.qa/1**, null when it has none) with `stage1` (the **music QA gate** summary, so a clipped take is flagged whatever a judge says) and the advisory `lyrics_wer` (read from a stored transcription only, never a warning, gate or rank); stage 2 is the **QC judge**'s `judge`, `scores` (six, 0-10), `issues` with times, `reasons` and `confidence`, with the judge `absent` until someone asks. A take whose stage-1 QA is done gets the record when it is added; a judge's result or a refresh replaces it. QC never accepts or rejects a take and never blocks Keep or Discard. Ranking by `scores.overall` is off by default (SPEC decision 26).
+- **Defined in:** [music/qc.py](../dpc-client/core/dpc_client_core/music/qc.py), [music/job_schemas.py — `check_qc`](../dpc-client/core/dpc_client_core/music/job_schemas.py)
+
+### QC judge
+
+- **Met in:** code, rules
+- **Meaning:** The stage-2 audio model of **mp.qc/1**: the provider alias named by `[music] qc_judge_alias`, an audio-capable llama-server alias (Music Flamingo with `mmproj_kind: audio`), asked one take at a time with its flow's rubric prompt and answering one JSON object. It runs only on the `judge_music_take` command, never when a take arrives; an answer that does not parse is a `failed` judge with the reason and stage 1 stays. With no alias configured the judge is `absent`, and takes are ranked only when an alias is set and `[music] qc_ranking` is on.
+- **Defined in:** [music/qc.py — the judge and ranking](../dpc-client/core/dpc_client_core/music/qc.py), [music/qc_commands.py](../dpc-client/core/dpc_client_core/music/qc_commands.py)
+
+### `mmproj_kind`
+
+- **Met in:** code, rules
+- **Meaning:** A llamacpp_server alias field saying what its projector (`mmproj`) feeds before a child's `/props` can say: `vision` (the default, every alias written before audio), `audio` (Music Flamingo's projector) or `vision+audio`. It decides `supports_vision` and `supports_audio` until a live child answers; then `/props` `modalities` decides, a yes and a no alike. Any other value refuses the alias at load.
+- **Defined in:** [providers/llamacpp_server_provider.py — `mmproj_kind_of`, `supports_audio`](../dpc-client/core/dpc_client_core/providers/llamacpp_server_provider.py)
 
 ## Memory, knowledge, and sleep
 
