@@ -144,8 +144,12 @@ def test_the_second_owner_check_refuses_a_call_nobody_approved(tmp_path):
     ctx = ToolContext(agent_root=tmp_path, message_source="group", turn_class=OTHER_NODE_TURN,
                       asker=FRIEND)
     assert "only after the owner approves" in music_tools._not_owner(ctx, "music_check")
-    ctx.conversation_id = tmp_path.name
-    assert "did not approve this call" in chat_files.turn_refusal(ctx)
+    # In the agent's own 1:1 chat, where only the owner check is left to refuse it.
+    own = tmp_path / "agent_ark"
+    own.mkdir()
+    one_to_one = ToolContext(agent_root=own, message_source="ui", turn_class="owner",
+                             asker=FRIEND, conversation_id="agent_ark")
+    assert "did not approve this call" in chat_files.turn_refusal(one_to_one)
 
 
 def test_the_second_owner_check_lets_the_owner_through_in_a_mixed_room(tmp_path):
