@@ -31,7 +31,7 @@ has, grep before you coin.
 
 Every term, alphabetically; a leading underscore or backtick is ignored for the order.
 
-**A** — [accepted_request](#accepted_request) · [Active Recall](#active-recall) · [ADR](#adr) · [agent](#agent) · [agent alias role](#agent-alias-role) · [agent profile](#agent-profile) · [agent_lifetime_tokens](#agent_lifetime_tokens) · [already_received](#already_received) · [`archive_include_groups`](#archive_include_groups) · [asker / who asked](#asker--who-asked) · [available / content_verified](#available--content_verified) · [awaiting_permission](#awaiting_permission) · [axis](#axis)
+**A** — [accepted_request](#accepted_request) · [Active Recall](#active-recall) · [ADR](#adr) · [agent](#agent) · [agent alias role](#agent-alias-role) · [agent profile](#agent-profile) · [agent_lifetime_tokens](#agent_lifetime_tokens) · [already_received](#already_received) · [approved origin / moved-off mark](#approved-origin--moved-off-mark) · [`archive_include_groups`](#archive_include_groups) · [asker / who asked](#asker--who-asked) · [available / content_verified](#available--content_verified) · [awaiting_permission](#awaiting_permission) · [axis](#axis)
 
 **B** — [background call](#background-call) · [`before_message_id`](#before_message_id) · [billing](#billing) · [Block / Unblock](#block--unblock) · [`block_peer` / `unblock_peer`](#block_peer--unblock_peer) · [`blocked_nodes`](#blocked_nodes) · [board / backlog](#board--backlog) · [bridge](#bridge) · [burst](#burst) · [bytes_per_second](#bytes_per_second)
 
