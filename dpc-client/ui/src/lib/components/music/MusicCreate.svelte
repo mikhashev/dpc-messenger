@@ -74,7 +74,7 @@
   import MusicReview from './MusicReview.svelte';
   import { editJobLine } from '$lib/utils/musicEdit';
   import MusicLyricsPrep from './MusicLyricsPrep.svelte';
-  import { stressMarkNote, type LyricsPrepState } from '$lib/utils/musicLyricsPrep';
+  import { stressMarkNote, undoInsertedMarks, type LyricsPrepState } from '$lib/utils/musicLyricsPrep';
 
   const JOB_ROWS = 20;
 
@@ -188,7 +188,9 @@
   let usedMarks = $state<{ lyrics: string; prep: LyricsPrepState | null; marked: string; count: number } | null>(null);
   let canPrepare = $derived(!$musicCreateDraft.instrumental && $musicCreateDraft.lyrics.trim() !== '');
   let markNote = $derived(stressMarkNote($musicCreateDraft.lyrics, selectedEngine));
-  let undoable = $derived(usedMarks !== null && usedMarks.marked === $musicCreateDraft.lyrics);
+  // Undo lasts past the person's typing: it takes out only the marks the marking added (undoInsertedMarks).
+  let undoable = $derived(usedMarks !== null && !$musicCreateDraft.instrumental
+    && undoInsertedMarks(usedMarks.lyrics, usedMarks.marked, $musicCreateDraft.lyrics) !== $musicCreateDraft.lyrics);
 
   function onPrepared(state: LyricsPrepState) {
     musicCreateDraft.update(f => ({ ...f, lyricsPrep: state }));
@@ -205,7 +207,11 @@
   function undoMarks() {
     if (!usedMarks) return;
     const u = usedMarks;
-    musicCreateDraft.update(f => ({ ...f, lyrics: u.lyrics, lyricsPrep: u.prep }));
+    musicCreateDraft.update(f => {
+      const edited = f.lyrics !== u.marked;
+      // Edited since: the check record no longer describes the text, so it goes; untouched: the old one is back.
+      return { ...f, lyrics: undoInsertedMarks(u.lyrics, u.marked, f.lyrics), lyricsPrep: edited ? null : u.prep };
+    });
     usedMarks = null;
   }
 

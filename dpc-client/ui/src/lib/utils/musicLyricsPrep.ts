@@ -219,6 +219,51 @@ export function useMarkedLabel(r: PrepReport | null): string {
     return n > 0 ? `Use marked lyrics (${plural(n, 'mark')})` : 'Use marked lyrics';
 }
 
+/** What "Use marked lyrics" changed in `original` to make `marked`: the U+0301 marks it inserted
+ *  (indexes into `marked`) and the letters it turned into ё (indexes into `marked`, with the letter that
+ *  was there). Null when `marked` is not `original` plus such changes. */
+export function insertedMarks(original: string, marked: string): { marks: number[]; yo: Array<[number, string]> } | null {
+    const marks: number[] = [];
+    const yo: Array<[number, string]> = [];
+    let i = 0;
+    for (let j = 0; j < marked.length; j++) {
+        const m = marked[j];
+        const o = original[i];
+        if (o === m) { i++; continue; }
+        if (m === '\u0301') { marks.push(j); continue; }
+        if ((m === 'ё' && o === 'е') || (m === 'Ё' && o === 'Е')) { yo.push([j, o]); i++; continue; }
+        return null;
+    }
+    return i === original.length ? { marks, yo } : null;
+}
+
+/** Undo of "Use marked lyrics" that survives the person's later typing: the text as it is now with the
+ *  marks and ё letters the marking added taken back out, wherever the person has not edited since.
+ *  The edited span is the part of `current` between its common prefix and suffix with `marked`; a mark
+ *  inside it is the person's now and stays. Unchanged text gives back `original` exactly. */
+export function undoInsertedMarks(original: string, marked: string, current: string): string {
+    if (current === marked) return original;
+    const changes = insertedMarks(original, marked);
+    if (!changes) return current;
+    let pre = 0;
+    while (pre < marked.length && pre < current.length && marked[pre] === current[pre]) pre++;
+    let suf = 0;
+    while (suf < marked.length - pre && suf < current.length - pre
+        && marked[marked.length - 1 - suf] === current[current.length - 1 - suf]) suf++;
+    const shift = current.length - marked.length;   // where a suffix index of `marked` sits in `current`
+    const out = current.split('');
+    const toCurrent = (j: number) => (j < pre ? j : j >= marked.length - suf ? j + shift : -1);
+    for (const [j, letter] of changes.yo) {
+        const k = toCurrent(j);
+        if (k >= 0) out[k] = letter;
+    }
+    for (const j of [...changes.marks].sort((a, b) => b - a)) {
+        const k = toCurrent(j);
+        if (k >= 0) out.splice(k, 1);
+    }
+    return out.join('');
+}
+
 /** A line under the lyrics box when the text holds U+0301 marks and the engine is not one that reads them. */
 export function stressMarkNote(lyrics: string, engine: string): string {
     if (engine === 'yue2' || !lyrics.includes('́')) return '';

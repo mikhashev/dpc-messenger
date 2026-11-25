@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+    undoInsertedMarks,
     canUseMarked,
     dictionaryLine,
     lineSegments,
@@ -173,5 +174,29 @@ describe('the job params', () => {
         expect(none.ok && 'lyrics_prep' in none.params).toBe(false);
         expect(lyricsPrepFor(null, 'x', 'yue2')).toEqual({});
         expect(markedState(report({ records: { plain: {}, marked: null } }), 'yue2')).toBeNull();
+    });
+});
+
+describe('undo of "Use marked lyrics" (review #180 3.3: it died after the first keystroke)', () => {
+    const A = '́';
+    const original = 'замок у реки\nелка и дом';
+    const marked = `за${A}мок у реки${A}\nёлка и дом`;   // two marks added, one е turned into ё
+    it('gives the person\'s text back when nothing was typed since', () => {
+        expect(undoInsertedMarks(original, marked, marked)).toBe(original);
+    });
+    it('takes out only the added marks and keeps what was typed after', () => {
+        const typed = marked + '\nновая строка';
+        expect(undoInsertedMarks(original, marked, typed)).toBe(original + '\nновая строка');
+        const inside = `за${A}мок у широкой реки${A}\nёлка и дом`;
+        expect(undoInsertedMarks(original, marked, inside)).toBe('замок у широкой реки\nелка и дом');
+    });
+    it('keeps a mark inside the span the person edited: it is theirs now', () => {
+        const moved = `за${A}мок у ре${A}ки\nёлка и дом`;          // the person moved the mark in "реки"
+        expect(undoInsertedMarks(original, marked, moved)).toBe(`замок у ре${A}ки\nелка и дом`);
+        const capital = `за${A}мок у рекИ${A}\nёлка и дом`;        // an edit beside an added mark leaves it added
+        expect(undoInsertedMarks(original, marked, capital)).toBe('замок у рекИ\nелка и дом');
+    });
+    it('leaves a text it cannot relate to the marking alone', () => {
+        expect(undoInsertedMarks(original, 'something else', 'something else!')).toBe('something else!');
     });
 });
