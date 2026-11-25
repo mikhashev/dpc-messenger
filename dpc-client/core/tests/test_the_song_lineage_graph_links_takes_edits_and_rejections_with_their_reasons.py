@@ -399,3 +399,35 @@ def test_the_lineage_commands_are_on_the_door_list_and_the_local_api_allowlist()
     from dpc_client_core.music.commands import MUSIC_COMMANDS
     for name in ("get_music_lineage", "write_music_lineage_files"):
         assert name in MUSIC_COMMANDS and name in ALLOWED_COMMANDS
+
+
+def test_selections_in_the_same_millisecond_follow_the_store_order_never_the_take_id():
+    """Follow-up 17: events were sorted by (decided_at, event id); a Keep and a Discard stamped in the same
+    millisecond came out in either order, because take ids are random."""
+    J = "job_" + "9" * 16
+    late_id, early_id = "tak_" + "f" * 16, "tak_" + "0" * 16       # the id order is the reverse of the store's
+    same = "2026-11-25T10:30:00.000Z"
+    jobs = [job(J, takes=[late_id, early_id])]
+    takes = [take(late_id, J, 1, decision="accepted", decided=same),
+             take(early_id, J, 2, decision="rejected", reason_text="flat", decided=same)]
+    events = lineage.build_lineage(jobs, takes, job_id=J)["events"]
+    assert [(e["kind"], e["take_id"]) for e in events] == [("keep", late_id), ("discard", early_id)]
+    # the same records in another order give the same events
+    again = lineage.build_lineage(jobs, list(reversed(takes)), job_id=J)["events"]
+    assert [e["id"] for e in again] == [e["id"] for e in events]
+    # a later decision still comes after an earlier one whatever the take order
+    takes[0]["decided_at"] = "2026-11-25T10:30:00.001Z"
+    assert [e["kind"] for e in lineage.build_lineage(jobs, takes, job_id=J)["events"]] == ["discard", "keep"]
+
+
+def test_a_real_store_keep_and_discard_in_the_same_millisecond_come_out_in_one_order(tmp_path):
+    from tests._music_jobs_helpers import job_in_review, store_at
+    for n in range(8):                                   # fresh random take ids each round
+        real = store_at(tmp_path / f"dpc{n}")
+        j, takes = job_in_review(real, variants=2)
+        real._now = lambda: "2026-11-25T10:30:00.000Z"
+        real.keep_take(takes[0]["id"])
+        real.discard_take(takes[1]["id"], reason_text="muddy low end", reason_class="sel")
+        jobs = real.list_jobs()
+        doc = lineage.build_lineage(jobs, [t for x in jobs for t in real.list_takes(x["id"])], job_id=j["id"])
+        assert [e["take_id"] for e in doc["events"]] == [takes[0]["id"], takes[1]["id"]]

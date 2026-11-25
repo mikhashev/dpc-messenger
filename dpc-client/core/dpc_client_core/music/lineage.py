@@ -233,6 +233,7 @@ class _Index:
 
     def __init__(self, jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str, Any]]):
         self.jobs = {j["id"]: j for j in jobs if isinstance(j, Mapping) and isinstance(j.get("id"), str)}
+        self.job_order = {jid: i for i, jid in enumerate(self.jobs)}
         self.takes = {t["id"]: t for t in takes if isinstance(t, Mapping) and isinstance(t.get("id"), str)}
         self.takes_of: Dict[str, List[Mapping[str, Any]]] = {}
         self.by_library: Dict[str, Mapping[str, Any]] = {}
@@ -588,8 +589,21 @@ def _events(idx: _Index, take_ids: Sequence[str]) -> List[Dict[str, Any]]:
         out.append({"id": f"sel:{tid}", "at": t.get("decided_at"), "kind": decision, "take_id": tid,
                     "job_id": t.get("job_id"), "over_take_ids": siblings if decision == "keep" else [],
                     "ab": bool(siblings), "reason": _reason(t), "decided_by": {"kind": "person"}})
-    out.sort(key=lambda e: (e["at"] or "", e["id"]))
+    out.sort(key=lambda e: (e["at"] or "", *_store_order(idx, e["take_id"])))
     return out
+
+
+def _store_order(idx: _Index, take_id: str) -> Tuple[int, int, int]:
+    """The tie-break of two decisions stamped in the same millisecond: the store keeps no sequence of
+    decisions, so they follow the store's own order, the job's place among the jobs passed in, then the
+    take's place in its job (`take_ids`, else its variant). Never the take id, which is random: two
+    selections in one millisecond came out in either order from run to run (follow-up 17)."""
+    take = idx.takes[take_id]
+    jid = take.get("job_id")
+    job_pos = idx.job_order.get(jid, len(idx.job_order))
+    ids = list((idx.jobs.get(jid) or {}).get("take_ids") or [])
+    variant = take.get("variant") if isinstance(take.get("variant"), int) else 1 << 30
+    return job_pos, ids.index(take_id) if take_id in ids else len(ids) + variant, variant
 
 
 # -- validating ------------------------------------------------------------------------------------
