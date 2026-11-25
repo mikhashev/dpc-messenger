@@ -29,6 +29,9 @@
   Under Now playing sits the Lyrics area (MusicLyrics.svelte): the lyrics chain of
   the core (.lrc sidecar, file tags, LRCLIB, manual edit) for the current track.
 
+  "Same style…" and "Cover…" in the track header, and "Similar…" in the mini-player (it restores the
+  window), open the generate-similar dialog (MusicSimilar.svelte, SPEC flows 10 and 17) on the current
+  track, under the player card.
   The Create button in the controls row opens the Create panel (MusicCreate.svelte: a song from
   your own text, its jobs, and the A/B review of its takes) in place of the listening
   columns; Listen is the default view on every opening. Keys inside the panel are the
@@ -47,6 +50,8 @@
   import MusicCreate from './MusicCreate.svelte';
   import MusicComments from './MusicComments.svelte';
   import MusicEvolution from './MusicEvolution.svelte';
+  import MusicSimilar from './MusicSimilar.svelte';
+  import type { SongMode, SongSource } from '$lib/utils/musicSimilar';
   import MusicWaveform from './MusicWaveform.svelte';
   import MarqueeText from '../MarqueeText.svelte';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
@@ -210,6 +215,8 @@
 
   // Listen is the default view; Create is opened from the controls row, Listen from the header.
   let view = $state<'listen' | 'create'>('listen');
+  // The generate-similar dialog's mode while it is open on the current track (null: closed).
+  let similarMode = $state<SongMode | null>(null);
 
   // Each opening takes the remembered boxes, fitted to the viewport as it is now.
   $effect(() => {
@@ -707,6 +714,16 @@
 
   let p = $derived($musicPlayback);
   let cur = $derived($musicCurrentEntry);
+  let similarSource = $derived<SongSource | null>(cur ? {
+    id: cur.id, title: cur.title, kind: cur.source?.kind ?? 'local', durationS: cur.duration_s ?? null,
+    hashState: cur.hash_state ?? null,
+  } : null);
+
+  function openSimilar(mode: SongMode) {
+    if (minimised) toggleMinimised();
+    view = 'listen';
+    similarMode = mode;
+  }
   let curComments = $derived($musicComments[cur?.id ?? ''] ?? []);
   $effect(() => {
     ensureComments(cur?.id);
@@ -932,6 +949,8 @@
           </span>
           {#if $musicPosition && miniShows.position}<span class="mini-pos" title="Track k of n in Up next">{$musicPosition}</span>{/if}
           {#if miniShows.modes}{@render modeButtons(true)}{/if}
+          {#if cur}<button type="button" class="mini-similar" onclick={() => openSimilar('same_style')}
+            title="Generate a similar song (same style or cover) from this track">Similar…</button>{/if}
         </div>
       {:else}
         <div class="mp-title">
@@ -1002,6 +1021,12 @@
                   {@render originBadge(cur)}
                   {@render exportChipTag(cur)}
                   {#if curProblem}<span class="tag warn" title={curProblem.reason}>{curProblem.problem === 'missing' ? 'missing' : 'not playable yet'}</span>{/if}
+                  <span class="head-actions">
+                    <button type="button" class="small-btn" onclick={() => openSimilar('same_style')}
+                      title="A new song in the style of this track">Same style…</button>
+                    <button type="button" class="small-btn" onclick={() => openSimilar('cover')}
+                      title="The same melody and lyrics, a new arrangement">Cover…</button>
+                  </span>
                 {/if}
               </div>
               {#if curProblem}<p class="muted small">{curProblem.reason}</p>{/if}
@@ -1039,6 +1064,10 @@
               {@render exportLine(cur?.id)}
               <p class="muted tiny">Space play/pause · N next · P previous · Shift+S shuffle · Shift+R repeat · ← → seek · C comment · R region</p>
             </section>
+
+            {#if similarMode && similarSource}
+              <MusicSimilar source={similarSource} mode={similarMode} onclose={() => (similarMode = null)} />
+            {/if}
 
             <MusicLyrics entry={cur} currentTime={loaded ? p.currentTime : 0} duration={shownDuration} {loaded} />
 
@@ -1473,6 +1502,9 @@
   }
 
   .now-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .head-actions { display: inline-flex; gap: 6px; margin-left: auto; }
+  .mini-similar { padding: 2px 8px; border-radius: 6px; border: 1px solid #3a3f46; background: transparent; color: #c9d1d9; font-size: 12px; cursor: pointer; white-space: nowrap; }
+  .mini-similar:hover { background: #2c3036; color: #ffffff; }
   .now-title { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
   .track-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .track-title.big { font-size: 18px; font-weight: 600; }

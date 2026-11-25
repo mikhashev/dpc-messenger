@@ -89,6 +89,8 @@ describe('edges', () => {
 
     it('labels what was done and where, and a rejected edge says why', () => {
         expect(edgeLabelText(DOC.edges[0])).toBe('generated');
+        expect(edgeLabelText({ ...DOC.edges[0], kind: 'derive', op: 'cover of' })).toBe('cover of');
+        expect(edgeLabelText({ ...DOC.edges[0], op: 'cover' })).toBe('generated (cover)');
         expect(edgeLabelText(DOC.edges[1])).toBe('generated · rejected: vocals sound robotic / opt');
         expect(edgeLabelText(DOC.edges[2])).toBe('repaint 20.0-30.0 s');
         expect(edgeLabelText(DOC.edges[3])).toBe('repaint 20.0-30.0 s · rejected: seam clicks');

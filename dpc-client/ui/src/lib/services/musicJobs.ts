@@ -31,6 +31,7 @@ import {
     measureMusicTakeLoudness,
     proposeMusicEdit,
     proposeMusicJob,
+    proposeMusicSong,
     rejectAllMusicTakes,
     startMusicEngine,
     stopLocalEngine,
@@ -230,6 +231,15 @@ export async function proposeEdit(args: Parameters<typeof proposeMusicEdit>[0]):
  *  or `unsupported` with the reason; either way it is in the list. */
 export async function proposeFromText(params: Record<string, any>, idempotencyKey: string): Promise<MusicAnswer<{ job: MusicJob }>> {
     const a = await proposeMusicJob(FROM_TEXT, params, idempotencyKey);
+    if (a.ok) putJob(a.data.job);
+    return a;
+}
+
+/** A song from a library track (Same style, Cover; SPEC flows 10, 17): the job joins the list like any other,
+ *  and its takes are reviewed in the Create panel. */
+export async function proposeSong(type: string, trackId: string, params: Record<string, unknown>, idempotencyKey: string):
+        Promise<MusicAnswer<{ job: MusicJob }>> {
+    const a = await proposeMusicSong(type, trackId, params, idempotencyKey);
     if (a.ok) putJob(a.data.job);
     return a;
 }

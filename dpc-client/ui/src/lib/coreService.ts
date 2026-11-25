@@ -2243,6 +2243,15 @@ export function proposeMusicEdit(args: {
     return callMusic(sendCommand, 'propose_music_job', { type: 'edit', ...args });
 }
 
+/** Propose a song from a library track (`generate_similar`, `cover`, `generate_from_lyrics`; ADR-051 row B5, music/similar.py):
+ *  the core fills the source's facts and, where they are reused, the stored lyrics. */
+export function proposeMusicSong(type: string, trackId: string, params: Record<string, unknown>, idempotencyKey?: string):
+        Promise<MusicAnswer<{ job: MusicJob }>> {
+    const args: Record<string, unknown> = { type, track_id: trackId, params };
+    if (idempotencyKey) args.idempotency_key = idempotencyKey;
+    return callMusic(sendCommand, 'propose_music_job', args);
+}
+
 export function getMusicJob(jobId: string): Promise<MusicAnswer<{ job: MusicJob }>> {
     return callMusic(sendCommand, 'get_music_job', { job_id: jobId });
 }

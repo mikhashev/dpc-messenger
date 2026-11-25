@@ -63,7 +63,8 @@ export interface LineageEdge {
     id: string;
     from: string;
     to: string;
-    kind: 'generate' | 'edit';
+    /** derive: the source track to a song job's intent (op: "cover of", "same style as", ...). */
+    kind: 'generate' | 'edit' | 'derive';
     op: string;
     job_id: string;
     group: string;
@@ -186,6 +187,9 @@ export function reasonText(reason: LineageReason | null | undefined): string {
 
 const OP_WORDS: Record<string, string> = {
     generate_from_text: 'generated',
+    generate_similar: 'generated (same style)',
+    cover: 'generated (cover)',
+    generate_from_lyrics: 'generated (from lyrics)',
     regenerate_region: 'repaint',
     fix_seam: 'fix seam',
     remove_region: 'remove region',
