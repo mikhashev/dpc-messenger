@@ -272,7 +272,8 @@ QC_SCORE_KEYS = ("style_match", "mood", "vocal_clarity", "artifacts", "structure
 JUDGE_ABSENT, JUDGE_DONE, JUDGE_FAILED = "absent", "done", "failed"
 JUDGE_STATUSES = (JUDGE_ABSENT, JUDGE_DONE, JUDGE_FAILED)
 _QC_REQUIRED = ("schema", "take_id", "flow", "deterministic", "judge", "scores", "issues", "reasons", "confidence")
-_QC_KEYS = set(_QC_REQUIRED) | {"simulated", "stage1", "lyrics_wer", "caveat", "assembled_at"}
+_QC_KEYS = set(_QC_REQUIRED) | {"simulated", "stage1", "lyrics_wer", "caveat", "assembled_at", "last_attempt"}
+_QC_ATTEMPT_KEYS = {"status", "error", "at", "alias"}
 _QC_JUDGE_KEYS = {"status", "model", "runtime", "rubric", "alias", "error", "judged_at"}
 _QC_ISSUE_KEYS = {"t_start", "t_end", "kind", "note", "expected_pronunciation"}
 _QC_WER_KEYS = {"status", "value", "raw", "reason", "advisory", "transcription"}
@@ -976,6 +977,13 @@ def check_qc(qc: Any, schema: str = TAKE) -> None:
     _expect(schema, _is_str(qc["reasons"]), "'qc.reasons' must be text")
     if "simulated" in qc:
         _expect(schema, isinstance(qc["simulated"], bool), "'qc.simulated' must be a boolean")
+    if "last_attempt" in qc:
+        att = qc["last_attempt"]
+        _expect(schema, done and isinstance(att, Mapping) and set(att) == _QC_ATTEMPT_KEYS,
+                f"'qc.last_attempt' sits beside a done judge and has exactly {sorted(_QC_ATTEMPT_KEYS)}")
+        _expect(schema, att["status"] == JUDGE_FAILED and _is_str(att["error"]) and bool(att["error"])
+                and _is_str(att["at"]) and (att["alias"] is None or _is_str(att["alias"])),
+                "'qc.last_attempt' is a failed attempt with its error, time and alias")
     if "stage1" in qc:
         st = qc["stage1"]
         _expect(schema, isinstance(st, Mapping) and st.get("verdict") in QA_VERDICTS,
