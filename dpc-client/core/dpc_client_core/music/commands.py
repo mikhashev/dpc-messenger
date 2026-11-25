@@ -96,6 +96,14 @@ resolves a take to its file path and facts without the job's request. A caller t
 `requested_by` is the person.
 "Stop X" on a job waiting for the card is the existing `stop_local_engine` command with the
 holder's alias from `job.card_wait.holders`; nothing here stops another engine.
+
+**Lyrics preparation** (`prepare_music_lyrics {text, language?, choices?, engine?}`, music/lyrics_prep.py): read-only,
+changes nothing, stores nothing. It answers `{report}`: syllables per line, a meter check per section, the
+audit of the author's U+0301 marks, the stress status of every Russian word, the marked text, and the two
+`records` the Create form puts in `params.lyrics_prep` (the one for the plain text, the one for the marked text
+when the engine takes marks). The Russian stress dictionary is read from
+`<model files folder>/lyrics/stress/ru/forms.sqlite` (`[local_engines] model_files_dir`, default `<DPC home>/models`);
+without it the answer says `dictionary.state: "missing"` and the meter and audit still work.
 """
 
 from __future__ import annotations
@@ -124,6 +132,7 @@ from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
 from .loudness import LoudnessError, measure_loudness
 from .qa import qa_summary
 from .lyrics import MusicLyrics
+from . import lyrics_prep
 from .peaks import PeaksError, get_peaks
 from .runner import MusicJobRunner
 from .stream import DEFAULT_STREAM_PORT, MusicStreamServer
@@ -135,6 +144,8 @@ DEFAULT_LOCAL_TRANSCRIPTION_MAX_MB = 25
 logger = logging.getLogger(__name__)
 
 DEFAULT_LRCLIB_ENABLED = True
+# The longest lyrics `prepare_music_lyrics` takes (a long song is a few thousand characters).
+MAX_PREP_TEXT_CHARS = 50000
 _TRUE = ("1", "true", "yes", "on")
 _FALSE = ("0", "false", "no", "off", "")
 
@@ -1072,6 +1083,45 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    # -- lyrics preparation (music/lyrics_prep.py): read-only ------------------------------
+
+    def _music_model_files_dir(self) -> Path:
+        """The model files folder: `settings.get_model_files_dir()`, else `<DPC home>/models`."""
+        fn = getattr(self.settings, "get_model_files_dir", None)
+        if callable(fn):
+            try:
+                return Path(fn())
+            except Exception:
+                logger.warning("music: reading the model files folder failed; using <DPC home>/models")
+        return Path(self.settings.dpc_home_dir) / "models"
+
+    @slow_command
+    async def prepare_music_lyrics(self, text: Any = None, language: Any = None, choices: Any = None,
+                                   engine: Any = None) -> Dict[str, Any]:
+        """The lyrics preparation report on `text` (module docstring above). The first call
+        opens the 120 MB dictionary and reads its sha256, so the work runs in a thread."""
+        try:
+            if not isinstance(text, str):
+                raise _bad("invalid_text", "text", "a string")
+            if len(text) > MAX_PREP_TEXT_CHARS:
+                raise _bad("text_too_long", "text", f"at most {MAX_PREP_TEXT_CHARS} characters")
+            lang = _opt_str(language, "language", "invalid_language") or "auto"
+            if choices is not None and not (isinstance(choices, dict)
+                                            and all(isinstance(k, str) for k in choices)):
+                raise _bad("invalid_choices", "choices", "an object mapping a word key to one of its options")
+            eng = _opt_str(engine, "engine", "invalid_engine")
+            path = lyrics_prep.default_dictionary_path(self._music_model_files_dir())
+
+            def work() -> Dict[str, Any]:
+                dictionary, state, message = lyrics_prep.open_dictionary(path)
+                return lyrics_prep.prepare_lyrics(
+                    text, lang, dictionary=dictionary, dictionary_state=state, dictionary_message=message,
+                    choices=choices, engine=eng)
+
+            return {"status": "ok", "report": await asyncio.to_thread(work)}
+        except Exception as exc:
+            return _error(exc)
+
     # -- listening notes: timecoded comments (`mp.comment/1`, music/comments.py) ----------
 
     async def _music_comments(self) -> MusicComments:
@@ -1426,6 +1476,7 @@ MUSIC_COMMANDS = (
     "add_music_comment",
     "update_music_comment",
     "delete_music_comment",
+    "prepare_music_lyrics",
     "export_music_track",
     "export_music_playlist",
     "get_music_export_info",

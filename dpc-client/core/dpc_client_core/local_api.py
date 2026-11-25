@@ -158,6 +158,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Timecoded listening notes on a library track (mp.comment/1)
     "get_music_track_peaks",
     "list_music_comments", "add_music_comment", "update_music_comment", "delete_music_comment",
+    # Lyrics preparation (music/lyrics_prep.py): syllables, meter, stress marks; read-only
+    "prepare_music_lyrics",
     # MP3 export (music/export.py, Mike #210): one root, an index against duplicates
     "export_music_track", "export_music_playlist", "get_music_export_info", "delete_music_export",
     "list_strata_models",
