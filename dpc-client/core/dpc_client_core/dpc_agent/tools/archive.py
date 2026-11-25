@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from ..bm25_index import TOKENIZE_FILE, TOKENIZE_VERSION, BM25Index, tokenize
 from .registry import ToolEntry, ToolContext
+from ._tool_calls_view import bounded_calls, counts_by_name, search_text
 
 log = logging.getLogger(__name__)
 
@@ -321,7 +322,27 @@ def _skipped_session(filename: str, reason: str) -> str:
 # re-read; a file gone from disk takes its rows with it.
 
 INDEX_DIR = "bm25"
-_FIELDS = ("content", "thinking")
+_FIELDS = ("content", "thinking", "tool_calls")
+# Which fields the stored rows were built from. A store without this file, or with
+# another number, was built before tool_calls were indexed and is rebuilt.
+ROWS_FILE = "archive_rows.json"
+ROWS_VERSION = 2
+_SCOPES = {
+    "content": ("content",),
+    "thinking": ("thinking",),
+    "both": ("content", "thinking"),
+    "tool_calls": ("tool_calls",),
+    "all": ("content", "thinking", "tool_calls"),
+}
+
+
+def _field_text(m: Dict[str, Any], field: str) -> Optional[str]:
+    """The searchable text of one field of a message: tool_calls is read as tool
+    names and arguments, one call per line."""
+    if field == "tool_calls":
+        return search_text(m)
+    text = m.get(field)
+    return text if isinstance(text, str) else None
 
 
 def _rows(data: Optional[Dict[str, Any]], filename: str) -> tuple:
@@ -335,7 +356,7 @@ def _rows(data: Optional[Dict[str, Any]], filename: str) -> tuple:
         if not isinstance(m, dict):
             continue
         for field in _FIELDS:
-            text = m.get(field)
+            text = _field_text(m, field)
             if isinstance(text, str) and text.strip():
                 texts.append(text)
                 metas.append({"source_file": f"{filename}#{i}#{field}", "filename": filename,
@@ -351,6 +372,14 @@ def _stored_tokenize_version(index_dir: Path) -> Optional[int]:
         return None
 
 
+def _stored_rows_version(index_dir: Path) -> Optional[int]:
+    try:
+        doc = json.loads((index_dir / ROWS_FILE).read_text(encoding="utf-8"))
+        return int(doc.get("rows_version"))
+    except Exception:
+        return None
+
+
 def _index_of(archive_dir: Path) -> BM25Index:
     """The archive's index brought up to date with its session files. Runs on the
     folder's index writer, which serialises every load and save of it."""
@@ -361,7 +390,8 @@ def _index_of(archive_dir: Path) -> BM25Index:
     indexed: Dict[str, List[str]] = {}
     # The tokenizer file is written last by `save` and removed before it, so a store
     # cut mid-save reads as another version and is rebuilt.
-    current = _stored_tokenize_version(index_dir) == TOKENIZE_VERSION and index.load()
+    current = (_stored_tokenize_version(index_dir) == TOKENIZE_VERSION
+               and _stored_rows_version(index_dir) == ROWS_VERSION and index.load())
     if current:
         try:
             for meta in index._chunk_metas:
@@ -394,7 +424,10 @@ def _index_of(archive_dir: Path) -> BM25Index:
             index.build(texts, metas)
     index_dir.mkdir(parents=True, exist_ok=True)
     (index_dir / TOKENIZE_FILE).unlink(missing_ok=True)
+    (index_dir / ROWS_FILE).unlink(missing_ok=True)
     index.save()
+    (index_dir / ROWS_FILE).write_text(json.dumps({"rows_version": ROWS_VERSION}),
+                                       encoding="utf-8")
     return index
 
 
@@ -438,7 +471,8 @@ def _snippet(text: str, at: int, length: int, snippet_chars: int) -> str:
     return snippet
 
 
-def read_session_archive(ctx: ToolContext, last_n: int = 3, offset: int = 0) -> str:
+def read_session_archive(ctx: ToolContext, last_n: int = 3, offset: int = 0,
+                         include_tool_calls: bool = False) -> str:
     """
     Read summaries of the last N archived sessions, optionally skipping the
     most recent `offset` sessions for navigation into older history.
@@ -453,6 +487,8 @@ def read_session_archive(ctx: ToolContext, last_n: int = 3, offset: int = 0) -> 
         offset: Skip the N most recent sessions (default 0). Use for
                 paging into older archives: offset=10 reads sessions 11-13
                 counting from the newest.
+        include_tool_calls: If True, each session also counts its tool calls
+                (`tool_calls`: total and per tool name).
 
     Returns:
         JSON string with session summaries (includes offset, total_archives)
@@ -527,7 +563,7 @@ def read_session_archive(ctx: ToolContext, last_n: int = 3, offset: int = 0) -> 
                 if name:
                     participants.add(name)
 
-            sessions.append({
+            summary = {
                 "conversation_id": conversation_id,
                 "file": archive_path.name,
                 "archived_at": data.get("archived_at", ""),
@@ -536,7 +572,11 @@ def read_session_archive(ctx: ToolContext, last_n: int = 3, offset: int = 0) -> 
                 "duration_mins": duration_mins,
                 "participants": sorted(participants),
                 "user_message_previews": user_previews,
-            })
+            }
+            if include_tool_calls:
+                by_name = counts_by_name(messages)
+                summary["tool_calls"] = {"count": sum(by_name.values()), "by_name": by_name}
+            sessions.append(summary)
 
         except Exception as e:
             sessions.append({
@@ -564,6 +604,7 @@ def read_session_detail(
     max_message_chars: int = 4000,
     include_thinking: bool = False,
     conversation_id: Optional[str] = None,
+    include_tool_calls: bool = False,
 ) -> str:
     """
     Read detailed content of a specific archived session with message-level
@@ -589,6 +630,10 @@ def read_session_detail(
         conversation_id: The conversation the file belongs to, as the listing and
                 search results name it. Default: the current conversation. A
                 conversation this turn may not read is refused.
+        include_tool_calls: If True, each message that made tool calls carries
+                them (`tool_calls`: name, args, output, round), args and output
+                cut to 300 chars and at most 20 calls per message;
+                `tool_calls_omitted` counts the calls left out.
 
     Returns:
         JSON string with session messages (includes offset, total_messages)
@@ -664,6 +709,12 @@ def read_session_detail(
                 if len(thinking) > max_message_chars:
                     thinking = thinking[:max_message_chars] + f"... ({len(thinking)} chars total)"
                 msg["thinking"] = thinking
+            if include_tool_calls:
+                view = bounded_calls(m)
+                if view["calls"]:
+                    msg["tool_calls"] = view["calls"]
+                if view["omitted"]:
+                    msg["tool_calls_omitted"] = view["omitted"]
             truncated_messages.append(msg)
 
         return json.dumps({
@@ -692,7 +743,8 @@ def search_session_archives(
     Search across all archived sessions for messages matching a query, best first.
 
     Ranked by BM25 over the words of the query in `content` (default), `thinking`,
-    or `both` scope, from the index beside each archive. Returns matched messages
+    `both` (content and thinking), `tool_calls` (the tool names and arguments of
+    the agent's own calls) or `all` scope, from the index beside each archive. Returns matched messages
     with filename, message_index, score, snippet (±snippet_chars around the first
     query word found), timestamp, and which scope field matched, each with its
     conversation_id. Use read_session_detail(filename, offset=message_index,
@@ -706,7 +758,7 @@ def search_session_archives(
     Args:
         ctx: Tool context
         query: Words to search for (case-insensitive, min 2 chars)
-        scope: "content" (default), "thinking", or "both"
+        scope: "content" (default), "thinking", "both", "tool_calls" or "all"
         last_n: Maximum matches to return per call (1-50, default 20)
         offset: Skip first N matches across all archives (default 0)
         snippet_chars: Context window around match (default 100, min 20)
@@ -721,7 +773,7 @@ def search_session_archives(
             "matches": [],
         })
 
-    scope = scope if scope in ("content", "thinking", "both") else "content"
+    scope = scope if scope in _SCOPES else "content"
     last_n = min(max(1, last_n), 50)
     offset = max(0, offset)
     snippet_chars = max(20, snippet_chars)
@@ -742,7 +794,7 @@ def search_session_archives(
             loaded[(cid, path)] = _read_json(path)
         return loaded[(cid, path)]
 
-    fields = ("content", "thinking") if scope == "both" else (scope,)
+    fields = _SCOPES[scope]
     words = tokenize(query)
     page: List[Dict[str, Any]] = []
     fallback: Optional[str] = None
@@ -759,7 +811,7 @@ def search_session_archives(
             messages = (session(conversation_id, path) or {}).get("messages") or []
             m = messages[msg_idx] if 0 <= msg_idx < len(messages) else {}
             m = m if isinstance(m, dict) else {}
-            text = m.get(field) or ""
+            text = _field_text(m, field) or ""
             low = text.lower()
             found = [(at, w) for w in words for at in (low.find(w),) if at >= 0]
             at, word = min(found) if found else (0, "")
@@ -782,8 +834,10 @@ def search_session_archives(
             if data is None:
                 continue
             for msg_idx, m in enumerate(data.get("messages", [])):
+                if not isinstance(m, dict):
+                    continue
                 for field in fields:
-                    text = m.get(field, "") or ""
+                    text = _field_text(m, field) or ""
                     if not text:
                         continue
                     hit = text.lower().find(query_lower)
@@ -855,6 +909,14 @@ def get_tools() -> List[ToolEntry]:
                                 "Use for paging into older archives."
                             ),
                             "default": 0,
+                        },
+                        "include_tool_calls": {
+                            "type": "boolean",
+                            "description": (
+                                "If True, each session also counts your tool calls in it "
+                                "(total and per tool name). Default False."
+                            ),
+                            "default": False,
                         },
                     },
                     "required": []
@@ -928,6 +990,17 @@ def get_tools() -> List[ToolEntry]:
                                 "conversation)."
                             ),
                         },
+                        "include_tool_calls": {
+                            "type": "boolean",
+                            "description": (
+                                "If True, each message that made tool calls carries them: "
+                                "tool name, arguments, a short output and the round. "
+                                "Arguments and output are cut to 300 chars, at most 20 "
+                                "calls per message (`tool_calls_omitted` counts the rest). "
+                                "Default False."
+                            ),
+                            "default": False,
+                        },
                     },
                     "required": ["filename"]
                 }
@@ -962,11 +1035,14 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "scope": {
                             "type": "string",
-                            "enum": ["content", "thinking", "both"],
+                            "enum": ["content", "thinking", "both", "tool_calls", "all"],
                             "description": (
                                 "Which message field to search. 'content' (default) "
                                 "is the visible message text; 'thinking' is the "
-                                "reasoning trace; 'both' searches both fields."
+                                "reasoning trace; 'both' searches content and thinking; "
+                                "'tool_calls' searches the names and arguments of your "
+                                "own past tool calls (e.g. 'read_file service.py' finds "
+                                "where you read that file); 'all' searches all three."
                             ),
                             "default": "content",
                         },

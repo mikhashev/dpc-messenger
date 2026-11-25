@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
+from ._tool_calls_view import tool_call_lines
 from ..run_gate import turn_waits_for
 from ...process_registry import SPAWN_ORIGIN, get_registry
 from ..memory import _BACKFILL_SKIP
@@ -1011,7 +1012,8 @@ This file tracks the agent's self-understanding and evolving identity.
         return f"⚠️ Error updating identity: {e}"
 
 
-def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_internals: bool = False) -> str:
+def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_internals: bool = False,
+                 include_tool_calls: bool = False) -> str:
     """
     Read conversation messages (user and assistant turns).
 
@@ -1023,6 +1025,10 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
         limit: Max messages to return. 0 = all messages (default).
         offset: Start position. -1 = from end/newest (default).
                 0+ = from start/oldest (e.g. offset=0 returns oldest messages first).
+        include_internals: also show the first 500 chars of thinking and raw stream.
+        include_tool_calls: also show each assistant message's own tool calls
+                (name, args, output, round), args and output cut to 300 chars
+                and at most 20 calls per message, each cut stated.
 
     Examples:
         chat_history()                    → all messages (full session review)
@@ -1066,6 +1072,8 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
                     output_lines.append(f"  [THINKING]: {thinking[:500]}")
                 if streaming_raw:
                     output_lines.append(f"  [RAW]: {streaming_raw[:500]}")
+            if include_tool_calls:
+                output_lines.extend(tool_call_lines(msg))
 
         return "\n".join(output_lines)
 
@@ -3038,6 +3046,16 @@ def get_tools() -> List[ToolEntry]:
                         "include_internals": {
                             "type": "boolean",
                             "description": "Include thinking and streaming_raw blocks in output",
+                            "default": False
+                        },
+                        "include_tool_calls": {
+                            "type": "boolean",
+                            "description": (
+                                "Include your own past tool calls of this session under each "
+                                "assistant message: tool name, arguments, a short output and "
+                                "the round. Arguments and output are cut to 300 chars, at most "
+                                "20 calls per message; every cut is stated."
+                            ),
                             "default": False
                         }
                     },

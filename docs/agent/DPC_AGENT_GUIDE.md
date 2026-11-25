@@ -382,7 +382,7 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 | `update_scratchpad` | Update working memory | ✅ |
 | `update_identity` | Update self-understanding | ✅ |
 | `get_dpc_context` | Get DPC personal/device context | ⛔ opt-in |
-| `chat_history` | Read the current conversation history | ✅ |
+| `chat_history` | Read the current conversation history; `include_tool_calls` adds your own past tool calls (name, args, short output, round; cut and stated) | ✅ |
 
 > `get_dpc_context` has `default_enabled=True` on its registration, but the firewall removes it from an agent's allowed set unless `personal_context_access` or `device_context_access` is granted (both default-deny since S204). Net default: **disabled**. The tool then checks the switch for the type asked, so an agent with only Device access gets device context and a refusal for personal. Since 2026-09-18 this tool is the only way an agent sees either context: nothing is injected into its prompt, whatever the chat's context checkbox says. Personal comes back without `knowledge` and `commit_history`, which are counted; a path to read them is named only when the agent's own `read_file` gates would open it. Same pattern: `import_skill_from_agent` requires `accept_peer_skills`.
 
@@ -517,9 +517,9 @@ Agent-controlled image/video generation via a ComfyUI backend. Opt-in.
 
 | Tool | Description | Default |
 |------|-------------|---------|
-| `read_session_archive` | Read an archived session summary | ✅ |
-| `read_session_detail` | Read a specific archived session's full detail | ✅ |
-| `search_session_archives` | Search across archived sessions | ✅ |
+| `read_session_archive` | Read an archived session summary; `include_tool_calls` counts tool calls per name | ✅ |
+| `read_session_detail` | Read a specific archived session's full detail; `include_tool_calls` adds each message's tool calls, bounded | ✅ |
+| `search_session_archives` | Search across archived sessions; scope `tool_calls` (or `all`) matches tool names and arguments | ✅ |
 
 ### Audio Tools
 
