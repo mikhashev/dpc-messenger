@@ -53,7 +53,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **L** — [`last_attempt`](#last_attempt) · [launcher / launcher_kind](#launcher--launcher_kind) · [`layer_audience`](#layer_audience) · [lease line](#lease-line) · [`level_guard`](#level_guard) · [`limit` (local API)](#limit-local-api) · [lineage](#lineage) · [`link_ping`](#link_ping) · [`LINK_PING`, `LINK_PONG`](#link_ping-link_pong) · [`link_silence_timeout`](#link_silence_timeout) · [`list_cached_peers`](#list_cached_peers) · [live-history boundary](#live-history-boundary) · [local engine swap](#local-engine-swap) · [`local_addresses`](#local_addresses) · [`lyrics_prep`](#lyrics_prep)
 
-**M** — [`MAX_HELLO_FRAME_BYTES`](#max_hello_frame_bytes) · [max_output_tokens](#max_output_tokens) · [`max_proved_connections_per_ip`](#max_proved_connections_per_ip) · [memory layers (L1–L7)](#memory-layers-l1l7) · [memory limit per command](#memory-limit-per-command) · [memory system](#memory-system) · [mention](#mention) · [mention_depth](#mention_depth) · [menu row / menu](#menu-row--menu) · [message signing / preimage](#message-signing--preimage) · [message source](#message-source) · [`mmproj_kind`](#mmproj_kind) · [model download consent](#model-download-consent) · [model files folder](#model-files-folder) · [month summary](#month-summary) · [morning brief](#morning-brief) · [mp.lineage/1](#mplineage1) · [mp.qa/1](#mpqa1) · [mp.qc/1](#mpqc1) · [music job `variants`](#music-job-variants) · [music QA gate](#music-qa-gate) · [music_* tools](#music_-tools)
+**M** — [Match sections](#match-sections) · [`MAX_HELLO_FRAME_BYTES`](#max_hello_frame_bytes) · [max_output_tokens](#max_output_tokens) · [`max_proved_connections_per_ip`](#max_proved_connections_per_ip) · [memory layers (L1–L7)](#memory-layers-l1l7) · [memory limit per command](#memory-limit-per-command) · [memory system](#memory-system) · [mention](#mention) · [mention_depth](#mention_depth) · [menu row / menu](#menu-row--menu) · [message signing / preimage](#message-signing--preimage) · [message source](#message-source) · [`mmproj_kind`](#mmproj_kind) · [model download consent](#model-download-consent) · [model files folder](#model-files-folder) · [month summary](#month-summary) · [morning brief](#morning-brief) · [mp.lineage/1](#mplineage1) · [mp.qa/1](#mpqa1) · [mp.qc/1](#mpqc1) · [music job `variants`](#music-job-variants) · [music QA gate](#music-qa-gate) · [music_* tools](#music_-tools)
 
 **N** — [network](#network) · [New Session](#new-session) · [no_answer](#no_answer) · [node](#node) · [node ledger](#node-ledger) · [node_id](#node_id) · [not_held / busy / not_the_requested_file](#not_held--busy--not_the_requested_file) · [not_offered / upload_limit](#not_offered--upload_limit)
 
@@ -73,7 +73,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **V** — [variant](#variant) · [vendor account](#vendor-account) · [vendor_request_quotas](#vendor_request_quotas) · [verdict (verified / unverified / legacy)](#verdict-verified--unverified--legacy) · [verdict block](#verdict-block) · [voice-memory](#voice-memory) · [`vram_free_mib`, `vram_total_mib`](#vram_free_mib-vram_total_mib)
 
-**W** — [wait_reason](#wait_reason) · [waiting](#waiting) · [where](#where) · [written call](#written-call)
+**W** — [wait_reason](#wait_reason) · [waiting](#waiting) · [web_source_pending_integration](#web_source_pending_integration) · [where](#where) · [written call](#written-call)
 
 ## Direction, decisions, and the board
 
@@ -415,7 +415,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 ### song job
 
 - **Met in:** code, screen, wire
-- **Meaning:** A music job that makes a new song from a library track: `generate_similar` (Same style: acestep.cpp text2music with the kept attributes in the caption and BPM, key and time signature as LM metadata), `cover` (the melody and, when reused, the lyrics kept, a target style: acestep.cpp's `cover` task, or yue2.cpp's SheetSage2 score sung again) and `generate_from_lyrics` (the track's lyrics on yue2.cpp or acestep.cpp). Opened from the player's "Same style…", "Cover…" and the mini-player's "Similar…", or by an agent's `music_propose_job`. Its takes are `new_track` takes, new library entries with lineage `same style as`, `cover of` or `new song from the lyrics of`; the source track is never changed. A web track's audio cannot be sent (`listen_only_source`); a YuE2 cover without lyrics is `missing_lyrics`.
+- **Meaning:** A music job that makes a new song from a library track: `generate_similar` (Same style: acestep.cpp text2music with the kept attributes in the caption and BPM, key and time signature as LM metadata), `cover` (the melody and, when reused, the lyrics kept, a target style, as long as the source: yue2.cpp's SheetSage2 score sung again, the default since Mike's 2026-11-26 decision and built after Ruach Studio's cover chain, or acestep.cpp's `cover` task) and `generate_from_lyrics` (the track's lyrics on yue2.cpp or acestep.cpp). Opened from the player's "Same style…", "Cover…" and the mini-player's "Similar…", or by an agent's `music_propose_job`. Its takes are `new_track` takes, new library entries with lineage `same style as`, `cover of` or `new song from the lyrics of`; the source track is never changed. A web track's audio waits for the streaming integration (**web_source_pending_integration**); a YuE2 cover without lyrics is `missing_lyrics`, and the dialog offers an acestep cover instead.
 - **Defined in:** [music/similar.py — the module docstring](../dpc-client/core/dpc_client_core/music/similar.py), [music/job_schemas.py — `normalize_params_song`](../dpc-client/core/dpc_client_core/music/job_schemas.py)
 
 ### timbre reference
@@ -423,6 +423,18 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 - **Met in:** code, screen
 - **Meaning:** The source track's audio sent with a same-style **song job** when the person picks "Use audio as reference": acestep.cpp's `ref_audio` part, which its timbre encoder turns into one embedding that conditions the generation on the source's tonal quality. The SPEC called it "audio as reference" and left open whether it steers the style; the engine's source says timbre, and whether it steers the style beyond timbre is still not verified, so the UI marks it unverified.
 - **Defined in:** [music/similar.py — "What each engine does"](../dpc-client/core/dpc_client_core/music/similar.py)
+
+### Match sections
+
+- **Met in:** code, wire
+- **Meaning:** The step of a YuE2 **song job** cover that tags the lyrics' blocks with the sections of the source's score: each block takes the tag of the section it is sung in, by where its first line is sung (the stored synced lyrics' line times, `lyrics_times`); a section with no voice becomes an instrumental tag, and a sung section the lyrics skip gets the last block of its kind again. Words never change. Ported from Ruach Studio (its "Match sections" button, after YuE2-Studio and HOT-Step's Cover Studio); recorded on the take as `song.section_match`.
+- **Defined in:** [music/cover_score.py — `match_sections`, `pre_tag`](../dpc-client/core/dpc_client_core/music/cover_score.py)
+
+### web_source_pending_integration
+
+- **Met in:** code, wire, screen
+- **Meaning:** The named state a **song job** gets when it would send a web track's audio (a cover, or an audio reference): DPC cannot listen to or download web tracks until the Yandex Music / SoundCloud integration, and the message says so. It replaces `listen_only_source` for song jobs (an edit of a web track stays `listen_only_source`). `music/web_sources.py` is the one place that integration plugs in; the capability report shows it as `features.web_source_audio: planned`.
+- **Defined in:** [music/web_sources.py](../dpc-client/core/dpc_client_core/music/web_sources.py)
 
 ### cut with shift
 
