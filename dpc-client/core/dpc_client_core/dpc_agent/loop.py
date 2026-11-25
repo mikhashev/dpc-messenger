@@ -2042,6 +2042,42 @@ def _end_killed_turn(origin: SpawnOrigin) -> None:
     threading.Thread(target=_run, name="dpc_agent_kill", daemon=True).start()
 
 
+def _end_foreign_turn(ctx: Any, agent_id: str) -> Optional[threading.Thread]:
+    """After a turn someone other than the owner asked for: close the agent's interactive
+    browser window (Zcode #154 on ADR-053).
+
+    A window kept open (`browse_page(keep_open=True)`) under the owner's login lived until
+    Kill or the idle sweep, and the read-only browser tools ask nobody, so a later foreign
+    turn could read the page. The close runs on a thread of its own, as the Kill's does: it
+    waits for the browser to go. Returns the thread, or None when there is nothing to close
+    (the owner asked, or the agent has no window). Never raises."""
+    try:
+        from .owner_approval import asker_is_owner
+        if asker_is_owner(ctx):
+            return None
+        from .tools.browser import close_browser_sessions_of, get_active_browser_sessions
+        if not agent_id or agent_id not in get_active_browser_sessions():
+            return None
+    except Exception:
+        log.warning("End of a foreign turn: could not check the browser of %s", agent_id,
+                    exc_info=True)
+        return None
+
+    def _run() -> None:
+        try:
+            closed = asyncio.run(close_browser_sessions_of(
+                agent_id, interactive_only=True, why="End of a turn the owner did not ask for"))
+            if closed:
+                log.info("End of a foreign turn: closed the browser window of %s", agent_id)
+        except Exception:
+            log.warning("End of a foreign turn: closing the browser of %s failed", agent_id,
+                        exc_info=True)
+
+    thread = threading.Thread(target=_run, name="dpc_agent_foreign_turn_end", daemon=True)
+    thread.start()
+    return thread
+
+
 async def _one_finalising_call(
     llm: DpcLlmAdapter,
     messages: List[Dict[str, Any]],
@@ -3427,6 +3463,9 @@ async def run_llm_loop(
                 agent_id=_divergence_agent, conversation_id=conversation_id or "",
                 turn_id=turn_id,
             ))
+        else:
+            # A turn the owner did not ask for leaves no window under his login (Zcode #154).
+            _end_foreign_turn(_loop_ctx, _divergence_agent)
         # A person's Stop (or Kill) cancels the music jobs this turn proposed that are still
         # queued (ADR-051 D48); a running one is left alone. Nothing for a turn without one.
         if (stop_event is not None and stop_event.is_set()) or llm_trace.get("turn_end") == "killed":

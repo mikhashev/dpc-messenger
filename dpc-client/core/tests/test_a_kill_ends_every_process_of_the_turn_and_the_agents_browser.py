@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -68,10 +69,12 @@ class _Tools:
     """`run_shell` and `git_tool` each register a fake pid under the origin the
     loop set, `strata` registers a subsystem the same way, `hang` blocks."""
 
-    _ctx = None
     PIDS = {"run_shell": 7_991_001, "git_tool": 7_991_002, "strata": 7_991_003}
 
     def __init__(self):
+        # The owner's turn: a turn the owner did not ask for closes the agent's browser at
+        # its end (follow-up 13), which is not what a Stop is tested for here.
+        self._ctx = types.SimpleNamespace(message_source="ui")
         self.origins: list = []
         self.running = threading.Event()
         self.release = threading.Event()

@@ -870,6 +870,26 @@ async def hash_and_note_group_file(service, group_id: str, message_id: str, path
         logger.warning("Could not hash the kept group file %s: %s", path.name, e)
 
 
+def local_wake_sender(sender_name: str, is_agent_sender: bool, asker: Any,
+                      this_node_id: str) -> str:
+    """The sender words of a local-path wake line: name, node, human or agent, verdict.
+
+    A post on the local path was written on this node, so its verdict is that; when it
+    carries the asker of an earlier turn (an own agent relaying a request), the line names
+    that asker too, with its own signature verdict, so a wake can be counted by who started
+    the chain."""
+    kind = "agent" if is_agent_sender else "human"
+    words = (f"{sender_name or 'someone'} (node {(this_node_id or '?')[:20]}, {kind}, "
+             f"written on this node)")
+    if asker is not None:
+        verdict = ("this node" if getattr(asker, "is_owner", False)
+                   else "verified" if getattr(asker, "verified", False) else "not verified")
+        node = (getattr(asker, "node_id", "") or "?")[:20]
+        words += (f", asked by {getattr(asker, 'name', '') or 'someone'} (node {node}, "
+                  f"{getattr(asker, 'kind', '') or 'unknown'}, signature {verdict})")
+    return words
+
+
 class CoreService(MusicCommandsMixin):
     """
     The main orchestrating class for the D-PC client's backend.
@@ -7852,6 +7872,10 @@ class CoreService(MusicCommandsMixin):
         post one of its own agents or an external agent on this node.
         """
         from .dpc_agent.agent import ASKER_AGENT, ASKER_HUMAN, Asker
+        # Who wrote the post, for the wake line (follow-up 13): wakes are counted by human
+        # vs agent, and a relayed request names its origin with its signature's verdict.
+        sender_words = local_wake_sender(sender_name, is_agent_sender, asker,
+                                         getattr(self.p2p_manager, "node_id", "") or "")
         if asker is None:
             asker = Asker(ASKER_AGENT if is_agent_sender else ASKER_HUMAN, sender_name or "",
                           getattr(self.p2p_manager, "node_id", "") or "",
@@ -7880,7 +7904,8 @@ class CoreService(MusicCommandsMixin):
                 continue
             if mention_all or aname in mentions or aid in mentions:
                 matched = "all" if mention_all else (aname if aname in mentions else aid)
-                logger.info("Group @%s mention detected — invoking agent %s in group %s", matched, aid, group_id)
+                logger.info("Group @%s mention detected from %s — invoking agent %s in group %s",
+                            matched, sender_words, aid, group_id)
                 asyncio.ensure_future(self._invoke_agent_in_group_serialized(
                     group_id, text, sender_name, aid, trigger_message_id,
                     mention_depth=mention_depth, asker=asker))

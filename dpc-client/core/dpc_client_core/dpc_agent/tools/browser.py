@@ -1120,7 +1120,8 @@ async def cleanup_idle_browser_sessions() -> int:
     return closed
 
 
-async def close_browser_sessions_of(agent_id: str) -> int:
+async def close_browser_sessions_of(agent_id: str, *, interactive_only: bool = False,
+                                    why: str = "Kill") -> int:
     """The user's Kill: close this agent's browser sessions, interactive and fetch.
 
     The orderly close first, so the cookies are written back and the process
@@ -1128,24 +1129,28 @@ async def close_browser_sessions_of(agent_id: str) -> int:
     `KILL_CLOSE_TIMEOUT_SECONDS` (often because the killed call itself still
     holds the session thread), the browser's processes are killed instead.
     A session a sweep has already taken is left to that sweep. Returns the
-    number of sessions closed."""
+    number of sessions closed.
+
+    `interactive_only` with `why`: the end of a turn someone other than the owner asked
+    for (loop._end_foreign_turn, Zcode #154) closes the interactive window only; the fetch
+    browser carries no identity."""
     closed = 0
-    for registry, label in (
-        (_active_browser_sessions, "browser session"),
-        (_fetch_sessions, "fetch browser"),
-    ):
+    registries = [(_active_browser_sessions, "browser session")]
+    if not interactive_only:
+        registries.append((_fetch_sessions, "fetch browser"))
+    for registry, label in registries:
         session = registry.get(agent_id)
         if session is None or not _take_session(registry, agent_id, session):
             continue
-        log.info("Kill: closing the %s of %s", label, agent_id)
+        log.info("%s: closing the %s of %s", why, label, agent_id)
         try:
             await _run_in_session(
                 session, "close", _touch=False, _timeout=KILL_CLOSE_TIMEOUT_SECONDS,
             )
         except Exception as e:
             log.warning(
-                "Kill: the %s of %s did not close (%s: %s); killing its processes",
-                label, agent_id, type(e).__name__, e,
+                "%s: the %s of %s did not close (%s: %s); killing its processes",
+                why, label, agent_id, type(e).__name__, e,
             )
             session._force_kill_process()
             _active_camoufox_browsers.discard(session)
@@ -5557,6 +5562,7 @@ async def browse_page(
                 session = await _navigate_with_recovery(
                     session, agent_id, url, [use_auth],
                 )
+                _note_turn_of_binding(session, ctx)
                 html = await _run_in_session(session, "get_page_html")
             else:
                 # headed=False, so this browser stays gated: the route gate
@@ -5959,6 +5965,38 @@ def _get_session_or_error(agent_id: str) -> Optional["AuthBrowser"]:
     return session
 
 
+def _note_turn_of_binding(session: Any, ctx: ToolContext) -> None:
+    """Record whether the page this session shows was last opened on the owner's own turn
+    (browse_page keep_open, browser_navigate). A foreign turn's opening was approved by the
+    owner for that turn, so its page may be read on it; an owner turn's may not."""
+    from ..owner_approval import asker_is_owner
+    try:
+        session._bound_on_owner_turn = asker_is_owner(ctx)
+    except Exception:
+        pass
+
+
+def _owner_page_refusal(ctx: ToolContext, session: Any, tool: str) -> Optional[str]:
+    """Why a read-only tool may not read this page for this turn's asker, or None (Zcode #154).
+
+    A window kept open under the owner's login (a scoped, not anonymous session) whose page
+    was last opened on the owner's own turn is not read on a turn someone else asked for:
+    the read-only browser tools ask nobody (Mike's answer to Q3, #138). A session with no
+    record of the turn that opened it counts as the owner's (fail closed)."""
+    if not getattr(session, "_etld1s", None) or getattr(session, "_anonymous", False):
+        return None
+    if getattr(session, "_bound_on_owner_turn", True) is False:
+        return None
+    from ..owner_approval import asker_is_owner, turn_asker
+    if asker_is_owner(ctx):
+        return None
+    who = turn_asker(ctx).label()
+    log.info("%s refused for %s: the page was opened logged in as the owner on his own turn",
+             tool, who)
+    return (f"⚠️ {tool} was not run: the open page was opened logged in as the owner on the "
+            f"owner's own turn, and {who}, who asked for this turn, is not the owner.")
+
+
 def _format_scrollable_hints(containers: list[dict]) -> str:
     """Format detected scrollable containers as CSS hints for the agent."""
     if not containers:
@@ -5984,6 +6022,9 @@ async def browser_snapshot(ctx: ToolContext, raw: bool = False) -> str:
     session = _get_session_or_error(agent_id)
     if session is None:
         return _NO_SESSION_MSG
+    refusal = _owner_page_refusal(ctx, session, "browser_snapshot")
+    if refusal:
+        return refusal
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
@@ -6031,6 +6072,7 @@ async def browser_navigate(ctx: ToolContext, url: str) -> str:
                 agent_id, type(e).__name__, str(e).split(chr(10))[0],
             )
             return f"⚠️ Navigate failed: {type(e).__name__}: {e}"
+        _note_turn_of_binding(session, ctx)
     status_note = ""
     if snapshot.startswith(HTTP_ERROR_PREFIX):
         head, _, snapshot = snapshot.partition("\n\n")
@@ -6372,6 +6414,9 @@ async def browser_extract(ctx: ToolContext, save_to: Optional[str] = None) -> st
     session = _get_session_or_error(agent_id)
     if session is None:
         return _NO_SESSION_MSG
+    refusal = _owner_page_refusal(ctx, session, "browser_extract")
+    if refusal:
+        return refusal
     lock = _get_session_lock(agent_id)
     async with lock:
         try:
@@ -6423,6 +6468,9 @@ async def browser_screenshot(
     session = _get_session_or_error(agent_id)
     if session is None:
         return _NO_SESSION_MSG
+    refusal = _owner_page_refusal(ctx, session, "browser_screenshot")
+    if refusal:
+        return refusal
     screenshots_dir = ctx.agent_root / "screenshots"
     screenshots_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

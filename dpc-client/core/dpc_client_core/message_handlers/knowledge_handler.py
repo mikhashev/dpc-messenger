@@ -321,6 +321,31 @@ class CommitAckHandler(MessageHandler):
 _COMMIT_CARDS_PENDING: set = set()
 
 
+# How many entries an owner card for a peer's unvoted commit lists, and how much of each.
+COMMIT_CARD_ENTRIES = 5
+COMMIT_CARD_ENTRY_CHARS = 120
+
+
+def commit_entries_preview(entries: Any) -> str:
+    """The first line of each of a commit's first entries, bounded, for the owner's card;
+    "" for none. Entries past the bound are counted, not listed."""
+    entries = list(entries or [])
+    lines = []
+    for entry in entries[:COMMIT_CARD_ENTRIES]:
+        content = entry.get("content") if isinstance(entry, dict) else getattr(entry, "content", "")
+        text = str(content or "").strip()
+        first = text.splitlines()[0].strip() if text else ""
+        if not first:
+            continue
+        if len(first) > COMMIT_CARD_ENTRY_CHARS:
+            first = first[:COMMIT_CARD_ENTRY_CHARS - 1].rstrip() + "…"
+        lines.append(f"- {first}")
+    more = len(entries) - COMMIT_CARD_ENTRIES
+    if more > 0:
+        lines.append(f"(and {more} more)")
+    return ("\nEntries:\n" + "\n".join(lines)) if lines else ""
+
+
 class ApplyKnowledgeCommitHandler(MessageHandler):
     """Handles APPLY_KNOWLEDGE_COMMIT — the recovery/retransmit path (Gap 3 + Gap 5).
 
@@ -352,6 +377,7 @@ class ApplyKnowledgeCommitHandler(MessageHandler):
         import pathlib
         from types import SimpleNamespace
         from ..dpc_agent.agent import ASKER_UNKNOWN, Asker
+        from ..dpc_agent.owner_approval import clip
         from ..dpc_agent.tools.core import _await_schedule_approval
 
         commit_id = (getattr(commit, "commit_id", "") or "")[:12]
@@ -379,12 +405,15 @@ class ApplyKnowledgeCommitHandler(MessageHandler):
         )
         topic = getattr(commit, "topic", "") or "(no topic)"
         summary = getattr(commit, "summary", "") or ""
-        details = f"topic {topic}" + (f": {summary}" if summary else "") + f" (commit {commit_id})"
+        headline = f"topic {topic}" + (f": {summary}" if summary else "") + f" (commit {commit_id})"
+        # What would be written, not only its title (Zcode #154): the first line of each
+        # entry, bounded, so the owner decides on the content.
+        details = clip(headline + commit_entries_preview(getattr(commit, "entries", None)))
         _COMMIT_CARDS_PENDING.add(sender_node_id)
         try:
             approved, reason = await loop.run_in_executor(None, functools.partial(
                 _await_schedule_approval, ctx, task_type="knowledge_commit", when="now",
-                about=f"{peer_name} sent a knowledge commit this node did not vote on: {details}",
+                about=f"{peer_name} sent a knowledge commit this node did not vote on: {headline}",
                 card={"tool": "APPLY_KNOWLEDGE_COMMIT", "details": details}))
         except Exception as e:
             approved, reason = False, f"the card could not be shown: {e}"
