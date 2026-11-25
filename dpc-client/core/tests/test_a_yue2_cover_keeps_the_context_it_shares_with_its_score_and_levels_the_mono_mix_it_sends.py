@@ -40,18 +40,29 @@ def _door(seconds, **params):
                                     source=dict(LOCAL, duration_s=seconds))
 
 
+def _door_top(sent_bytes):
+    """The longest source the door takes for a text of `sent_bytes`: the tempo and the section-tag reserves
+    (follow-up 21) count with it, and the tag reserve grows with the source."""
+    text = sent_bytes + js.YUE2_COVER_TEMPO_RESERVE_BYTES
+    top = js.yue2_cover_door_max_s(text)
+    while top > js.yue2_cover_door_max_s(text + js.yue2_cover_tag_reserve_bytes(top)):
+        top -= 1
+    return top, text + js.yue2_cover_tag_reserve_bytes(top)
+
+
 def test_the_door_leaves_room_in_the_context_for_the_score_and_the_text():
-    top = js.yue2_cover_door_max_s(len("x") + len("la la la"))
+    top, counted = _door_top(len("x\nla la la"))
     assert top < js.YUE2_COVER_MAX_S and 500 < top < 600           # 982 s was frames only
     assert _door(top)["duration_s"] == top
     with pytest.raises(js.SongParamsError) as err:
         _door(top + 2)
     assert err.value.code == "source_too_long" and err.value.field == "track_id"
     assert "score" in err.value.message and "shared" in err.value.message
-    # At the ceiling the three parts add up to the context: the frames, a score at the reserved rate, the text.
+    # At the ceiling the three parts add up to the context: the frames, a score at the reserved rate, the text
+    # with what the run may add to it.
     frames = js.yue2_cover_frames(top)
     score = top * js.YUE2_SCORE_TOKENS_PER_S
-    text = js.YUE2_PROMPT_FIXED_TOKENS + math.ceil(8 * js.YUE2_TEXT_TOKENS_PER_BYTE)
+    text = js.YUE2_PROMPT_FIXED_TOKENS + math.ceil(counted * js.YUE2_TEXT_TOKENS_PER_BYTE)
     assert frames + score + text + 1 <= js.YUE2_CONTEXT
     frames, score = js.yue2_cover_frames(top + 2), (top + 2) * js.YUE2_SCORE_TOKENS_PER_S
     assert frames + score + text + 1 > js.YUE2_CONTEXT

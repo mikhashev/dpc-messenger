@@ -682,6 +682,31 @@ def yue2_cover_door_max_s(text_bytes: int) -> float:
         text_bytes * YUE2_TEXT_TOKENS_PER_BYTE)
     # one frame second is for the ceiling of the frames, one of them is `yue2_cover_frames`' second over the source
     return min(YUE2_COVER_MAX_S, math.floor((fixed - YUE2_FRAME_RATE) / (YUE2_FRAME_RATE + YUE2_SCORE_TOKENS_PER_S)))
+
+
+# Match sections (`cover_score.match_sections`) adds a tag line for each of the score's sections the lyrics do not
+# cover; a section copy's body is dropped at run time when it would not fit (`similar._cover_on_yue2`), so the door
+# reserves only the tags. One tag line, `\n\n[pre-chorus]` and the like, is at most 16 bytes; a section is taken
+# to last at least 12 s (six bars of 4/4 at 120 BPM), an estimate on the side of more sections.
+YUE2_SECTION_TAG_BYTES = 16
+YUE2_SECTION_MIN_S = 12.0
+
+
+def yue2_cover_tag_reserve_bytes(source_s: float) -> int:
+    """The bytes the door keeps for the section tags Match sections may add to a cover's lyrics."""
+    return math.ceil(max(0.0, float(source_s)) / YUE2_SECTION_MIN_S) * YUE2_SECTION_TAG_BYTES
+
+
+def yue2_song_context(sent_bytes: int, duration_s: float, abc_bytes: int = 0) -> Dict[str, int]:
+    """The context numbers of a yue2.cpp `/synth` whose text is `sent_bytes` and whose `duration` is
+    `duration_s` (the semantic budget the body carries, `yue2_semantic_budget`): `left` is negative when the
+    prompt, the budget and the end token do not fit (src/generate.h:77-83)."""
+    budget = yue2_semantic_budget({"duration": duration_s})
+    prompt = yue2_prompt_tokens(sent_bytes, abc_bytes)
+    return {"context": YUE2_CONTEXT, "prompt_tokens_est": prompt, "budget_tokens": budget,
+            "left": yue2_context_left(budget, prompt), "text_bytes": sent_bytes, "score_bytes": abc_bytes}
+
+
 # The longest source whose audio a song job decodes and uploads as a timbre reference (acestep.cpp `ref_audio`,
 # same style or from lyrics): the engine's longest song (acestep.cpp clamps a duration to 600 s, 973517b
 # src/metadata-fsm.h:669) plus a margin. A cover's own ceiling is its engine's (`_song_duration`).
@@ -841,11 +866,15 @@ def _song_duration(job_type: str, engine: str, params: Mapping[str, Any], src_s:
                    else "the 1025 samples at 24 kHz SheetSage2 needs to write a score")
             raise SongParamsError("source_too_short", "track_id", f"the source is {src_s:g} s; a cover on "
                                   f"{ENGINE_IDS[engine]} is as long as its source and needs at least {floor:.4f} s ({why})")
+        if engine == ENGINE_YUE2:
+            text_bytes += yue2_cover_tag_reserve_bytes(src_s)   # the tags Match sections may add
         ceiling = dmax if engine == ENGINE_ACESTEP else yue2_cover_door_max_s(text_bytes)
         if engine == ENGINE_YUE2 and ceiling < YUE2_COVER_MIN_S:
-            raise SongParamsError("context_exceeded", "lyrics", f"the caption and the lyrics are {text_bytes} bytes; with "
-                                  f"the score a cover on yue2.cpp needs, they leave no room in its {YUE2_CONTEXT}-position "
-                                  "context for the music (shorten the text, or cover on acestep)")
+            raise SongParamsError("context_exceeded", "lyrics",
+                                  f"the caption and the lyrics, with what the run may add (the tempo, section tags), "
+                                  f"are {text_bytes} bytes; with the score a cover on yue2.cpp needs, they leave no "
+                                  f"room in its {YUE2_CONTEXT}-position context for the music (shorten the text, or "
+                                  "cover on acestep)")
         if src_s > ceiling:
             why = (f"DPC's {dmax} s bound for acestep.cpp" if engine == ENGINE_ACESTEP else
                    f"yue2.cpp's {YUE2_CONTEXT}-position context is shared: {YUE2_FRAME_RATE} frames a second of music, "
@@ -943,16 +972,15 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
         raise ParamsError("engine", f"a {job_type} job runs on {' or '.join(SONG_ENGINES[job_type])}, got {engine!r}")
     out["engine"] = engine
     out.update(_song_lyrics(job_type, engine, params))
-    # The text that goes into the engine body: the same bound as a text job's (`MAX_SONG_TEXT_BYTES`).
+    # The text the synth request will carry (`song_text_sent`), joiners and the theme's words included: both the
+    # size bound (`MAX_SONG_TEXT_BYTES`, as a text job's) and the context count it, not the parts raw.
     try:
-        text_bytes = sum(len(x.encode("utf-8")) for x in [caption, out["lyrics_theme"] or "", *(out["lyrics"] or [])])
+        sent_bytes = len(song_text_sent(song_caption_sent(caption, out["lyrics_theme"]),
+                                        "\n".join(out["lyrics"]) if out["lyrics"] else None).encode("utf-8"))
     except UnicodeEncodeError:
         raise ParamsError("lyrics", "the caption or the lyrics hold a character that is not valid text (a lone surrogate)")
-    # The context counts the text the synth request will carry (`song_text_sent`), not the three parts raw.
-    sent_bytes = len(song_text_sent(song_caption_sent(caption, out["lyrics_theme"]),
-                                    "\n".join(out["lyrics"]) if out["lyrics"] else None).encode("utf-8"))
-    if text_bytes > MAX_SONG_TEXT_BYTES:
-        raise ParamsError("lyrics", f"the caption, theme and lyrics are {text_bytes} bytes together; the limit is "
+    if sent_bytes > MAX_SONG_TEXT_BYTES:
+        raise ParamsError("lyrics", f"the caption, theme and lyrics come to {sent_bytes} bytes as sent; the limit is "
                                     f"{MAX_SONG_TEXT_BYTES} bytes (about a megabyte of text): shorten them")
 
     reference = "audio" if job_type == COVER else params.get("reference", "description")
@@ -984,6 +1012,16 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
     out["variants"] = variants
     out["duration_s"] = _song_duration(job_type, engine, params, out["source_duration_s"],
                                        sent_bytes + YUE2_COVER_TEMPO_RESERVE_BYTES)
+    if engine == ENGINE_YUE2 and job_type != COVER:
+        # A new song on yue2.cpp shares the context too: its text, the frames its duration cap lets run and the
+        # end token (no score). The run checks it again before /synth (`similar.check_song_context`).
+        room = yue2_song_context(sent_bytes, out["duration_s"])
+        if room["left"] < 0:
+            raise SongParamsError("context_exceeded", "lyrics", f"the caption and the lyrics are {sent_bytes} bytes as "
+                                  f"sent, about {room['prompt_tokens_est']} tokens; with the {room['budget_tokens']} "
+                                  f"music positions a {out['duration_s']:g} s cap asks for and the end token that is "
+                                  f"{-room['left']} over yue2.cpp's {YUE2_CONTEXT}-position context (shorten the "
+                                  "lyrics or the cap, or use acestep)")
     seed = params.get("seed")
     if seed is not None and (not _is_int(seed) or not SEED_MIN <= seed <= SEED_MAX):
         raise ParamsError("seed", f"seed must be a whole number from {SEED_MIN} to {SEED_MAX}, or null to draw one")

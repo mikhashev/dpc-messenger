@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from . import provenance as _provenance
-from .audio_tags import WAV_INFO_PROVENANCE_KEY, flac_read_comments, wav_read_provenance
+from .audio_tags import WAV_INFO_PROVENANCE_KEY, WAV_RECORD_READ_MAX, flac_read_comments, wav_read_provenance
 from .schemas import HASH_KIND_AUDIO, HASH_KIND_FILE, HASH_KIND_FLAC
 
 logger = logging.getLogger(__name__)
@@ -286,7 +286,7 @@ def embedded_provenance(path: Path) -> Optional[Dict[str, Any]]:
         if suffix == ".flac":
             raw = flac_read_comments(path, max_block_bytes=2 * 1024 * 1024).get(_provenance.TAG)
         elif suffix == ".wav":
-            raw = wav_read_provenance(path, max_item_bytes=2 * 1024 * 1024)
+            raw = wav_read_provenance(path, max_item_bytes=WAV_RECORD_READ_MAX)
         else:
             return None
         return _provenance.read_summary(raw, where=Path(path).name) if raw else None

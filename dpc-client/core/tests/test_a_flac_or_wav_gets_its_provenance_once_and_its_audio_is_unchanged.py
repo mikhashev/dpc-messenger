@@ -411,7 +411,7 @@ def junk_chunk(cid: bytes, kind: str) -> bytes:
     body = {"garbage": b"this is not an ID3 tag at all, just bytes!!",
             "short": b"ID3",
             "unsynchronised": b"ID3\x04\x00\x80" + b"\0\0\0\x10" + b"\0" * 16,
-            "oversize": b"ID3\x04\x00\x00\0\0\0\0" + b"\0" * (256 * 1024 + 64 * 1024 + 100)}[kind]
+            "oversize": b"ID3\x04\x00\x00\0\0\0\0" + b"\0" * (at.WAV_RECORD_READ_MAX + 64 * 1024 + 100)}[kind]
     return cid + struct.pack("<I", len(body)) + body + (b"\0" if len(body) & 1 else b"")
 
 
@@ -473,3 +473,45 @@ def test_a_legacy_info_record_migrates_past_a_junk_id3_chunk(tmp_path):
     assert at.wav_migrate_provenance(wav) is True
     assert at.wav_provenance_state(wav) == {"status": "present", "text": '{"old":1}', "where": "id3", "reason": None}
     assert junk_bytes_of(wav, b"ID3 ") == [junk_body]
+
+
+# -- one cap for the writer and the readers; junk over 16 MiB is streamed, not refused (Zcode #204) ----------
+
+
+def test_a_valid_id3_chunk_between_the_old_and_the_shared_cap_takes_the_record_and_no_second_chunk(tmp_path):
+    """The writer judged a chunk by 256 KB, the library and migration readers by 2 MB: a 400 KB chunk (cover
+    art, say) was junk to the writer, which added a second chunk, and the scan then read the file as
+    ambiguous."""
+    from dpc_client_core.music import identity
+    art = txxx_frame("cover_art", "x" * (400 * 1024))
+    wav = put_before_data(make_wav(tmp_path / "a.wav"), id3_chunk(b"id3 ", [art]))
+    assert 256 * 1024 + 64 * 1024 < len(junk_bytes_of(wav, b"id3 ")[0]) < at.WAV_RECORD_READ_MAX
+    md5_before = pcm_md5(wav)
+    at.wav_add_provenance(wav, '{"ours":1}')
+    (tag,) = junk_bytes_of(wav, b"id3 ")                                   # one chunk: the record joined the art
+    assert b"cover_art" in tag and b"DPC_PROVENANCE" in tag
+    assert at.wav_provenance_state(wav) == {"status": "present", "text": '{"ours":1}', "where": "id3", "reason": None}
+    assert pcm_md5(wav) == md5_before
+    seen = []
+    real_read = identity.wav_read_provenance
+    identity.wav_read_provenance = lambda path, max_item_bytes: seen.append(max_item_bytes) or real_read(path, max_item_bytes)
+    try:
+        identity.embedded_provenance(wav)                                  # the library scan's reader
+    finally:
+        identity.wav_read_provenance = real_read
+    assert seen == [at.WAV_RECORD_READ_MAX]
+
+
+def test_a_junk_id3_chunk_over_16_mib_is_left_byte_for_byte_and_the_record_gets_its_own_chunk(tmp_path):
+    """The writer raised TagError on any ID3 chunk over 16 MiB before its readability filter, while the reader
+    skipped it: the file read as `absent` and could never be tagged. Now the writer skips it as the reader
+    does, and the rewrite streams it through."""
+    big = b"not an ID3 tag" + b"\0" * (16 * 1024 * 1024)
+    junk = b"ID3 " + struct.pack("<I", len(big)) + big
+    wav = put_before_data(make_wav(tmp_path / "a.wav"), junk)
+    assert at.wav_provenance_state(wav)["status"] == "absent"
+    md5_before = pcm_md5(wav)
+    at.wav_add_provenance(wav, '{"ours":1}')
+    assert junk_bytes_of(wav, b"ID3 ") == [big]
+    assert at.wav_provenance_state(wav) == {"status": "present", "text": '{"ours":1}', "where": "id3", "reason": None}
+    assert pcm_md5(wav) == md5_before and not list(tmp_path.glob("*.tagging"))

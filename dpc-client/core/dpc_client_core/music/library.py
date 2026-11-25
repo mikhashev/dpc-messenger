@@ -331,6 +331,11 @@ class MusicLibrary:
         # may conclude "the library no longer knows this track" (`MusicComments.sweep_orphans`,
         # Zcode #193).
         self.initial_scan_done = False
+        # Folder ids whose last walk in this process went to the end (`rescan_folder`); the flag above is
+        # raised only when every watched folder is in it, so a folder added after a pass began holds it down.
+        self._scanned_clean: Set[str] = set()
+        # The first scans `add_folder` started in the background: `wait_hashed` waits for them too.
+        self._first_scans: Set[asyncio.Task] = set()
         self._queue: Deque[str] = deque()
         self._queued: Set[str] = set()
         self._verify: Dict[str, Tuple[str, str]] = {}
@@ -608,41 +613,50 @@ class MusicLibrary:
                 # Shutdown goes on; what was not written is lost, and the log says so.
                 logger.exception("music: the final save at shutdown failed")
 
-    def _watched_folders_scanned_clean(self) -> bool:
-        """Whether every watched folder has been walked to the end: none is over the folder limit
-        (never scanned), none is `unavailable` (refused, unreadable, or only partly read). The comment
-        sweep reads `initial_scan_done` as "every live track is in memory", which a folder that was not
-        scanned cannot promise (follow-up 19, Zcode #199 finding 1). A folder with watching off is
-        not polled and does not hold the flag back: its tracks come from the saved library."""
-        for f in self._folders.values():
-            if not f["watch"]:
-                continue
-            if f["id"] in self._over_limit or f.get("watch_state") == "unavailable":
+    def _watched_folders_scanned_clean(self, folder_ids: Optional[Iterable[str]] = None) -> bool:
+        """Whether every watched folder has been walked to the end in this process: none is over the
+        folder limit (never scanned), none is `unavailable` (refused, unreadable, or only partly read),
+        and none is still waiting for its first clean walk (`_scanned_clean`: a folder added while a
+        poll pass ran was not in that pass, Zcode #204). The comment sweep reads `initial_scan_done` as
+        "every live track is in memory", which a folder that was not scanned cannot promise (follow-up
+        19, Zcode #199 finding 1). `folder_ids` is a pass's own snapshot, checked as well as the live
+        list. A folder with watching off is not polled and does not hold the flag back: its tracks come
+        from the saved library."""
+        ids = {f["id"] for f in self._folders.values() if f["watch"]}
+        ids |= {fid for fid in (folder_ids or []) if fid in self._folders and self._folders[fid]["watch"]}
+        for fid in ids:
+            f = self._folders[fid]
+            if fid in self._over_limit or f.get("watch_state") == "unavailable" or fid not in self._scanned_clean:
                 return False
         return True
 
+    async def _poll_pass(self) -> None:
+        """One poll pass: every watched folder of the snapshot taken at its start, then the flag."""
+        failed = False
+        snapshot = [f["id"] for f in self._folders.values() if f["watch"] and f["id"] not in self._over_limit]
+        for folder_id in snapshot:
+            try:
+                await self.rescan_folder(folder_id)
+            except MusicLibraryError:
+                pass  # removed while the loop ran
+            except Exception:
+                failed = True
+                logger.exception("music: polling folder %s failed", folder_id)
+        # Raised once and kept: only a pass in which every watched folder scanned cleanly
+        # counts; otherwise the flag waits for a later clean pass.
+        if not failed and self._watched_folders_scanned_clean(snapshot):
+            self.initial_scan_done = True
+
     async def _poll_loop(self) -> None:
         while True:
-            failed = False
-            for folder_id in [f["id"] for f in self._folders.values()
-                              if f["watch"] and f["id"] not in self._over_limit]:
-                try:
-                    await self.rescan_folder(folder_id)
-                except MusicLibraryError:
-                    pass  # removed while the loop ran
-                except Exception:
-                    failed = True
-                    logger.exception("music: polling folder %s failed", folder_id)
-            # Raised once and kept: only a pass in which every watched folder scanned cleanly
-            # counts; otherwise the flag waits for a later clean pass.
-            if not failed and self._watched_folders_scanned_clean():
-                self.initial_scan_done = True
+            await self._poll_pass()
             await asyncio.sleep(self.poll_interval_s)
 
-    def _spawn(self, coro) -> None:
+    def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.get_running_loop().create_task(coro)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+        return task
 
     # -- change events -----------------------------------------------------------
 
@@ -948,9 +962,18 @@ class MusicLibrary:
             self.notify_changed("hash", [e["id"]])
 
     async def wait_hashed(self, timeout: float = 60.0) -> None:
-        """Wait until the hash queue is empty (tests, and a caller that needs ids final)."""
+        """Wait until the first scans `add_folder` started have walked their folders and the hash queue
+        is empty (tests, and a caller that needs ids final). A call right after `add_folder(scan=True)`
+        used to find the queue idle, since the walk had queued nothing yet, and return with the folder
+        unscanned. Raises `asyncio.TimeoutError`; a scan still running then is left running."""
         self._ensure_primitives()
-        await asyncio.wait_for(self._idle.wait(), timeout)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while self._first_scans:
+            _done, pending = await asyncio.wait(set(self._first_scans), timeout=max(0.0, deadline - loop.time()))
+            if pending:
+                raise asyncio.TimeoutError(f"{len(pending)} folder scan(s) still running")
+        await asyncio.wait_for(self._idle.wait(), max(0.0, deadline - loop.time()))
 
     def _apply_identity(self, track_id: str, hashed_path: str, ident: Identity) -> None:
         e = self._entries.get(track_id)
@@ -1115,7 +1138,9 @@ class MusicLibrary:
         self.notify_changed("folder")
         await self.flush()
         if scan:
-            self._spawn(self.rescan_folder(folder["id"]))
+            task = self._spawn(self.rescan_folder(folder["id"]))
+            self._first_scans.add(task)
+            task.add_done_callback(self._first_scans.discard)
         return copy.deepcopy(folder)
 
     async def remove_folder(self, folder_id: str) -> int:
@@ -1127,6 +1152,7 @@ class MusicLibrary:
             raise MusicLibraryError("unknown_folder", f"no watched folder {folder_id}")
         fkey = path_key(folder["path"])
         del self._folders[folder_id]
+        self._scanned_clean.discard(folder_id)
         removed = 0
         for e in list(self._entries.values()):
             alts = e.get("alt_paths") or []
@@ -1182,6 +1208,7 @@ class MusicLibrary:
                         f"refused on rescan ({exc.code}), so it was not scanned and no track "
                         f"was marked missing: {exc.message}"
                     )
+                    self._scanned_clean.discard(folder_id)
                     self._mark_dirty()
                     if was != (folder["watch_state"], folder["state_reason"]):
                         self.notify_changed("folder")
@@ -1191,6 +1218,7 @@ class MusicLibrary:
                     was = (folder.get("watch_state"), folder.get("state_reason"))
                     folder["watch_state"] = "unavailable"
                     folder["state_reason"] = f"cannot read the folder: {exc}"
+                    self._scanned_clean.discard(folder_id)
                     self._mark_dirty()
                     if was != (folder["watch_state"], folder["state_reason"]):
                         self.notify_changed("folder")
@@ -1203,14 +1231,19 @@ class MusicLibrary:
                 reprobe = bool(tools.ffprobe)  # only when ffprobe can answer now
             before = self._signature() if self.on_changed is not None else None
             self._apply_scan(folder, found, alt_stats, failed=failed, reprobe=reprobe)
+            if folder.get("watch_state") == "unavailable":
+                self._scanned_clean.discard(folder_id)
+            else:
+                self._scanned_clean.add(folder_id)
             self._mark_dirty()
             if before is not None and before != self._signature():
                 self.notify_changed("scan")
             return copy.deepcopy(folder)
 
     async def rescan_all(self) -> List[dict]:
-        out = [await self.rescan_folder(fid) for fid in list(self._folders)]
-        if self._watched_folders_scanned_clean():
+        snapshot = list(self._folders)
+        out = [await self.rescan_folder(fid) for fid in snapshot]
+        if self._watched_folders_scanned_clean(snapshot):
             self.initial_scan_done = True
         return out
 

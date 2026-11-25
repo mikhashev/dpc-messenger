@@ -27,9 +27,9 @@ run (`listen_only_source`, `track_not_ready`, `missing_lyrics`).
   `cot` melody, the default), written as payload `transcribe.result.json`; `vocal_only` keeps the
   score's Vocal voice; the style's tempo and key are made to agree with the score; the lyrics' blocks
   take the score's section tags by the track's line times (Match sections); each variant's `/synth`
-  carries the score as `abc`, and the source's length as `duration` plus a semantic `min_tokens` a
-  second under it (`yue2_cover_length`), through the from-text yue2 path. QA measures every cover
-  against its source's length (mode `same`, `COVER_SAME_TOLERANCE_S`).
+  carries the score as `abc`, and the source's length as `duration` plus a semantic `min_tokens` at the
+  source's own length (`yue2_cover_length`; Ruach's is a second under it), through the from-text yue2
+  path. QA measures every cover against its source's length (mode `same`, `COVER_SAME_TOLERANCE_S`).
 - A web track's audio comes through `web_sources.fetch_audio` (the streaming integration's one place),
   which today raises `web_source_pending_integration`; the door says so first.
 
@@ -92,7 +92,7 @@ KEEP_TO_LM = {"bpm": "bpm", "key": "keyscale", "timesig": "timesignature"}
 # yue2.cpp's semantic preset caps the music at 9000 frames (e646d52 src/sampling.h:47).
 YUE2_SEMANTIC_MAX_TOKENS = 9000
 # How far a cover may land from its source's length before QA flags it (length mode `same`): acestep.cpp
-# renders whole 1920-sample latent frames of the source; yue2.cpp is held between a second under and a
+# renders whole 1920-sample latent frames of the source; yue2.cpp is held between the source's length and a
 # second over it (`yue2_cover_length`), so two seconds covers the rounding up of the cap.
 COVER_SAME_TOLERANCE_S = {js.ENGINE_ACESTEP: 0.05, js.ENGINE_YUE2: 2.0}
 # `/transcribe` is given time that grows with the source, the way `/synth` is (`MusicJobRunner._produce_yue2`: six
@@ -107,12 +107,17 @@ def transcribe_timeout_s(flat_s: float, source_s: float) -> float:
 
 
 def yue2_cover_length(source_s: float) -> Dict[str, Any]:
-    """The yue2.cpp request fields that make a cover as long as its source, as Ruach Studio sings over a
-    backing (build/tools/console/app.js:11721-11727): `duration` the source's seconds rounded up plus one
-    (the cap the semantic stage stops at, src/pipeline.h:538-547) and `semantic_sampling.min_tokens` a
-    second under the source (the end token is banned until then, src/sampling.h:96), with `max_tokens`
-    raised past the preset's 9000 only when the source needs it."""
-    floor = max(0, math.floor((source_s - 1.0) * js.YUE2_FRAME_RATE))
+    """The yue2.cpp request fields that make a cover as long as its source: `duration` the source's seconds
+    rounded up plus one (the cap the semantic stage stops at, src/pipeline.h:538-547, as Ruach Studio sings
+    over a backing, build/tools/console/app.js:11721-11727) and `semantic_sampling.min_tokens` the source's
+    own frame count rounded up (the end token is banned until then, src/sampling.h:96), with `max_tokens`
+    raised past the preset's 9000 only when the source needs it.
+
+    Not Ruach's floor: Ruach bans the end token only until a second under the source, `floor((s - 1) x 25)`,
+    and the model ended right there in the live probe (step 3007 of a 121.319 s source, 1.04 s short), so
+    that floor set the length. `ceil(s x 25)` lets the take reach the source and stays under the cap of
+    `(ceil(s) + 1) x 25` frames, so the semantic budget and the context check are unchanged."""
+    floor = max(0, math.ceil(source_s * js.YUE2_FRAME_RATE))
     need = js.yue2_cover_frames(source_s)
     sampling: Dict[str, int] = {"min_tokens": floor}
     if need > YUE2_SEMANTIC_MAX_TOKENS:
@@ -435,6 +440,7 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
         await runner._call(runner.store.write_payload, job_id, SYNTH_PAYLOAD, build_cover_body(params, seed),
                            endpoint="/synth")
     elif key == js.ENGINE_YUE2 and job_type != js.COVER:
+        check_song_context(params)
         for index in range(int(params["variants"])):
             name = yue2_request_name(index + 1)
             if name not in have:
@@ -460,6 +466,10 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
     if job_type == js.COVER and audio is not None:
         dress.qa_override = {"requested_s": audio["frames"] / audio["rate"], "length_mode": "same",
                              "same_tolerance_s": COVER_SAME_TOLERANCE_S[key]}
+        # The source's peaks beside the take's (`qa.compare_with_source`): a cover keeps its own verdict.
+        peaks = await runner._measure_source(source_wav, job_id, "the source")
+        if peaks is not None:
+            dress.qa_override["source"] = {"relation": "cover", "peaks": peaks}
     return _Prepared(seed=seed, dress=dress, files=files, lm_body=lm_body,
                      source_wav=source_wav if audio is not None else None)
 
@@ -673,9 +683,11 @@ def _timed_rows(lines: List[str], times: List[Optional[float]]) -> List[Dict[str
     return rows
 
 
-def _lyrics_against_score(params: Mapping[str, Any], abc: str) -> Tuple[Optional[str], Dict[str, Any]]:
+def _lyrics_against_score(params: Mapping[str, Any], abc: str, *,
+                          copy_bodies: bool = True) -> Tuple[Optional[str], Dict[str, Any]]:
     """The lyrics as sent with the score (Match sections, `cover_score`), or None to send them as they are; and
-    what was done, for the take's `song` block."""
+    what was done, for the take's `song` block. `copy_bodies` False gives an unsung section its tag alone
+    (`cover_score.match_sections`)."""
     lines, times = params.get("lyrics") or [], params.get("lyrics_times")
     if not lines:
         return None, {"status": "not_run", "reason": "no lyrics"}
@@ -683,13 +695,27 @@ def _lyrics_against_score(params: Mapping[str, Any], abc: str) -> Tuple[Optional
         return None, {"status": "not_run", "reason": "the track's lyrics have no line times (not synced)"}
     tagged = cs.pre_tag(lines, times, abc)
     try:
-        match = cs.match_sections(abc, tagged or lines, _timed_rows(lines, times))
+        match = cs.match_sections(abc, tagged or lines, _timed_rows(lines, times), copy_bodies=copy_bodies)
     except ValueError as exc:
         return None, {"status": "not_run", "reason": str(exc)}
     said = {"status": "unchanged" if match["unchanged"] else "applied", "pre_tagged": tagged is not None,
             "blocks": cs.counts_of(match["blocks"]), "sections_added": len(match["filled"]),
+            "sections_copied": sum(1 for f in match["filled"] if f.get("copied_from") is not None),
             "by": "Match sections after Ruach Studio (build/tools/console/app.js:11199-11305)"}
     return (None if match["unchanged"] else match["lyrics"]), said
+
+
+def cover_context(params: Mapping[str, Any], source_s: float, style: Optional[str], lyrics: Optional[str],
+                  score: str) -> Dict[str, int]:
+    """The context numbers of a cover's `/synth`: the text as sent, the score and the semantic budget its body
+    carries (`yue2_cover_length`); `left` negative when it does not fit."""
+    text = js.song_text_sent(style if style is not None else caption_sent(params),
+                             lyrics if lyrics is not None else lyrics_text(params))
+    text_bytes, abc_bytes = len(text.encode("utf-8")), len(score.encode("utf-8"))
+    budget = js.yue2_semantic_budget(yue2_cover_length(source_s))
+    prompt = js.yue2_prompt_tokens(text_bytes, abc_bytes)
+    return {"context": js.YUE2_CONTEXT, "prompt_tokens_est": prompt, "budget_tokens": budget,
+            "left": js.yue2_context_left(budget, prompt), "text_bytes": text_bytes, "score_bytes": abc_bytes}
 
 
 def check_cover_context(params: Mapping[str, Any], source_s: float, style: Optional[str], lyrics: Optional[str],
@@ -700,21 +726,49 @@ def check_cover_context(params: Mapping[str, Any], source_s: float, style: Optio
     `/synth` is sent. The counts are conservative estimates (`job_schemas.yue2_prompt_tokens`); the answer is the
     numbers for the take's `song.length.context`."""
     from .runner import _JobFailure
-    text = js.song_text_sent(style if style is not None else caption_sent(params),
-                             lyrics if lyrics is not None else lyrics_text(params))
-    text_bytes, abc_bytes = len(text.encode("utf-8")), len(score.encode("utf-8"))
-    budget = js.yue2_semantic_budget(yue2_cover_length(source_s))
-    prompt = js.yue2_prompt_tokens(text_bytes, abc_bytes)
-    left = js.yue2_context_left(budget, prompt)
-    numbers = {"context": js.YUE2_CONTEXT, "prompt_tokens_est": prompt, "budget_tokens": budget, "left": left,
-               "text_bytes": text_bytes, "score_bytes": abc_bytes}
+    numbers = cover_context(params, source_s, style, lyrics, score)
+    left, budget, prompt = numbers["left"], numbers["budget_tokens"], numbers["prompt_tokens_est"]
     if left < 0:
         raise _JobFailure(f"context_exceeded: the source is {source_s:g} s, which asks for {budget} music positions "
-                          f"({js.YUE2_FRAME_RATE} a second), and the score ({abc_bytes} bytes) and the text "
-                          f"({text_bytes} bytes) take about {prompt} more; with the end token that is "
+                          f"({js.YUE2_FRAME_RATE} a second), and the score ({numbers['score_bytes']} bytes) and the text "
+                          f"({numbers['text_bytes']} bytes) take about {prompt} more; with the end token that is "
                           f"{prompt + budget + 1} of the {js.YUE2_CONTEXT} yue2.cpp holds, {-left} over. The take would "
                           "stop short of its source; shorten the lyrics, or cover on acestep")
     return numbers
+
+
+def check_song_context(params: Mapping[str, Any]) -> Dict[str, int]:
+    """The door's context check of a new song on yue2.cpp (`generate_from_lyrics`, `generate_similar`) again
+    before its `/synth` bodies are written: the text as the body carries it (`text_view`), the frames its
+    `duration_s` cap lets run and the end token, no score. `context_exceeded` with the numbers otherwise."""
+    from .runner import _JobFailure
+    view = text_view(params)
+    sent = len(js.song_text_sent(view["style"], view["lyrics"]).encode("utf-8"))
+    numbers = js.yue2_song_context(sent, float(params["duration_s"]))
+    if numbers["left"] < 0:
+        raise _JobFailure(f"context_exceeded: the text is {sent} bytes, about {numbers['prompt_tokens_est']} tokens, and "
+                          f"the {params['duration_s']:g} s cap asks for {numbers['budget_tokens']} music positions; with "
+                          f"the end token that is {-numbers['left']} over the {js.YUE2_CONTEXT} yue2.cpp holds (shorten "
+                          "the lyrics or the cap, or use acestep)")
+    return numbers
+
+
+def _fit_without_copies(params: Mapping[str, Any], source_s: float, style: str, score: str,
+                        lyrics: Optional[str], matched: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any]]:
+    """The lyrics and their record once more without the section copies when only those make the cover not fit:
+    Match sections fills an unsung section with a whole earlier block (a chorus), which the door cannot know
+    before the score; their tags stay. Unchanged when it fits as it is, or does not fit even without them."""
+    if not matched.get("sections_copied") or cover_context(params, source_s, style, lyrics, score)["left"] >= 0:
+        return lyrics, matched
+    bare, said = _lyrics_against_score(params, score, copy_bodies=False)
+    if cover_context(params, source_s, style, bare, score)["left"] < 0:
+        return lyrics, matched
+    said["sections_copied"] = 0
+    said["copies_dropped"] = {"sections": matched["sections_copied"],
+                              "bytes": len((lyrics or "").encode("utf-8")) - len((bare or "").encode("utf-8")),
+                              "reason": "with the copied sections the cover did not fit yue2.cpp's context; their "
+                                        "tags stay"}
+    return bare, said
 
 
 async def _cover_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: Any,
@@ -749,6 +803,7 @@ async def _cover_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: An
     score = cs.keep_vocal_voice(abc) if params.get("vocal_only") else abc
     style, style_changes = cs.agree_style(caption_sent(params), score)
     lyrics, matched = _lyrics_against_score(params, score)
+    lyrics, matched = _fit_without_copies(params, source_s, style, score, lyrics, matched)
     context = check_cover_context(params, source_s, style, lyrics, score)
     for index in range(int(params["variants"])):
         name = yue2_request_name(index + 1)
@@ -769,7 +824,8 @@ async def _cover_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: An
     song["style_changes"] = style_changes
     song["section_match"] = matched
     song["length"] = {"source_s": round(source_s, 3), **yue2_cover_length(source_s),
-                      "by": "Ruach Studio's rule for a song over a backing (build/tools/console/app.js:11721-11727)",
+                      "by": "the cap by Ruach Studio's rule for a song over a backing (build/tools/console/app.js:"
+                            "11721-11727); the floor at the source's own length, not a second under it",
                       "context": context}
     await runner._progress(job_id, 0.1)
     await runner._produce_yue2(job_id, text_view(params), prepared.seed, engine, engine_job)

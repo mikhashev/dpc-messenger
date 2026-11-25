@@ -166,6 +166,8 @@ def test_a_request_the_door_takes_at_its_ceiling_does_not_fail_on_its_text_after
         sent = js.song_text_sent(js.song_caption_sent(caption, None), "\n".join(lines))
         counted = len(sent.encode("utf-8")) + js.YUE2_COVER_TEMPO_RESERVE_BYTES
         top = js.yue2_cover_door_max_s(counted)
+        while top > js.yue2_cover_door_max_s(counted + js.yue2_cover_tag_reserve_bytes(top)):
+            top -= 1                                                    # the section-tag reserve (follow-up 21)
         normalized = _door(top, caption=caption, lyrics_mode="reuse", lyrics=lines)
         assert normalized["duration_s"] == top
         score = "A" * int(top * js.YUE2_SCORE_TOKENS_PER_S / js.YUE2_ABC_TOKENS_PER_BYTE)

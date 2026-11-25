@@ -1386,6 +1386,13 @@ class LlamaServerProvider(DeepSeekProvider):
             return live
         return self._configured_kind() in (MMPROJ_AUDIO, MMPROJ_BOTH)
 
+    def supports_json_schema(self) -> bool:
+        """Whether a call here can be held to a JSON schema: yes for every alias, since the pinned server
+        turns `response_format: {type: json_schema, json_schema: {schema}}` into a sampling grammar whatever
+        the model (b12110 tools/server/server-common.cpp:1384-1396, common/chat.cpp:1541 and :1670).
+        `generate_with_audio` passes `response_format` through (the QC judge, music/qc.py)."""
+        return True
+
     def server_window(self) -> Optional[int]:
         """`/props` `default_generation_settings.n_ctx` of a running child; otherwise
         what the start it would make holds. None when neither says."""
@@ -2033,7 +2040,11 @@ class LlamaServerProvider(DeepSeekProvider):
         `audio` is the file's bytes or a local path (WAV, MP3 or FLAC). Refused
         before the call: an alias that takes no audio, and audio the server
         could not decode. Thinking is off unless the caller or the alias names
-        a rung, as on the vision path."""
+        a rung, as on the vision path.
+
+        `response_format` (optional, the OpenAI shape) goes into the request as
+        it is, so the server holds the answer to its JSON schema
+        (`supports_json_schema`; the QC judge, music/qc.py)."""
         if not self.supports_audio():
             raise ValueError(
                 f"llamacpp_server provider '{self.alias}' takes no audio: its projector is not "
@@ -2069,6 +2080,8 @@ class LlamaServerProvider(DeepSeekProvider):
                 "extra_body": extra_body,
                 **self._sampling_on_the_wire(extra_body, self._sampling_params(kwargs.get("temperature"))),
             }
+            if kwargs.get("response_format") is not None:
+                params["response_format"] = kwargs["response_format"]
             async with self.supervisor.call_slot():
                 self._mark_sent()  # synchronous: nothing between the slot and the send
                 resp = await client.chat.completions.create(**params)

@@ -27,11 +27,13 @@ unless they are equal.
 checked, not only the first; a WAV with more than one *readable* ID3 chunk is not written at all and
 its record reads as `ambiguous` with the reason (`wav_provenance_state`), never as the first chunk's
 (Zcode #191). Readable means what the record collector can look into: a chunk within the size caps
-that starts with a v2.3 or v2.4 ID3 header (no tag-wide unsynchronisation). A junk, cut-short or
-oversize `id3 ` / `ID3 ` chunk is not one (follow-up 19, Zcode #199 finding 2): it does not count
-toward `ambiguous`, so a real record next to it reads as present and a write into the one readable
-chunk (or a new chunk when there is none) goes ahead, and the junk chunk stays byte for byte as it
-was. A write is still refused when any chunk holds the record. The new file is written next to the
+(`WAV_RECORD_READ_MAX`, the same for the writer and every reader) that starts with a v2.3 or v2.4 ID3
+header (no tag-wide unsynchronisation). A junk, cut-short or oversize `id3 ` / `ID3 ` chunk is not
+one (follow-up 19, Zcode #199 finding 2): it does not count toward `ambiguous`, so a real record next
+to it reads as present and a write into the one readable chunk (or a new chunk when there is none)
+goes ahead, and the junk chunk stays byte for byte as it was, at any size (a chunk over 16 MiB is
+streamed through, never loaded). A write is still refused when any chunk up to 16 MiB holds the
+record; a bigger one is as unreadable to the writer as to the reader. The new file is written next to the
 old one under a name that is not an audio extension and moved over it only when complete and
 verified.
 
@@ -60,7 +62,10 @@ WAV_ID3_CHUNK_IDS = (b"id3 ", b"ID3 ")  # the RIFF chunk that holds an ID3v2 tag
 WAV_ID3_WRITE_ID = b"id3 "
 _WAV_CHUNK_READ_MAX = 16 * 1024 * 1024
 _ID3_SLACK = 64 * 1024                  # a tag may be this much bigger than the record it carries
-_WAV_ID3_DEFAULT_MAX = 256 * 1024       # the reader's default record cap, which the writer judges a chunk by
+# The one record cap of a WAV's ID3 chunk, for the writer and every reader alike (library scan, migration,
+# re-tag, export): a chunk the writer judged junk at one cap and a reader found readable at another made a
+# second chunk, and the record just written read as `ambiguous` (Zcode #204).
+WAV_RECORD_READ_MAX = 2 * 1024 * 1024
 
 
 class AlreadyTagged(Exception):
@@ -409,7 +414,7 @@ def _wav_id3_chunks(chunks: List[Tuple[bytes, int, int]]) -> List[int]:
     return [i for i, (c, _o, _n) in enumerate(chunks) if c in WAV_ID3_CHUNK_IDS]
 
 
-def wav_read_id3(path: Path, max_item_bytes: int = 256 * 1024) -> Dict[str, str]:
+def wav_read_id3(path: Path, max_item_bytes: int = WAV_RECORD_READ_MAX) -> Dict[str, str]:
     """The `TXXX` frames (description -> value) of a WAV's `id3 ` (or `ID3 `) chunk; a value over
     `max_item_bytes` is skipped, and so is a tag more than 64 KB bigger than that. {} for a file that
     is not a readable WAV or has no such chunk."""
@@ -464,7 +469,7 @@ def _wav_id3_records(path: Path, max_item_bytes: int) -> Tuple[int, List[str]]:
     return readable, records
 
 
-def wav_provenance_state(path: Path, max_item_bytes: int = 256 * 1024) -> Dict[str, Optional[str]]:
+def wav_provenance_state(path: Path, max_item_bytes: int = WAV_RECORD_READ_MAX) -> Dict[str, Optional[str]]:
     """`{status, text, where, reason}` for a WAV's provenance record. `status` is `present` (`where`
     is `id3`, or `info` for the old `LIST/INFO` item `DPCP`), `absent`, or `ambiguous`: the WAV has
     more than one readable `id3 ` / `ID3 ` chunk, so which one is the record would be a guess (Zcode
@@ -487,7 +492,7 @@ def wav_provenance_state(path: Path, max_item_bytes: int = 256 * 1024) -> Dict[s
     return {"status": "absent", "text": None, "where": None, "reason": None}
 
 
-def wav_read_provenance(path: Path, max_item_bytes: int = 256 * 1024) -> Optional[str]:
+def wav_read_provenance(path: Path, max_item_bytes: int = WAV_RECORD_READ_MAX) -> Optional[str]:
     """The provenance record text of a WAV: the `TXXX:DPC_PROVENANCE` frame of its `id3 ` chunk, else
     the old `LIST/INFO` item `DPCP`, else None. An ambiguous file (`wav_provenance_state`) gives None
     and a log line with the reason. Defensive (rule 6): never raises."""
@@ -520,11 +525,12 @@ def wav_add_provenance(path: Path, text: str) -> None:
     other chunk is copied byte for byte and the PCM is verified equal before the file is replaced
     (atomic, temp then `os.replace`). Raises `AlreadyTagged` when any `id3 ` / `ID3 ` chunk already
     holds the record (rule 7; every chunk is checked, not only the first), `TagError` for a WAV it
-    cannot rebuild safely: a readable `id3 ` chunk that is not a plain ID3v2.4 tag, a chunk too big
-    to check, or more than one readable ID3 chunk (writing into one would leave a file whose record
-    is ambiguous, Zcode #191). A junk or oversize chunk the reader skips is neither counted nor
-    touched: it stays byte for byte, and with no readable chunk the record goes in a new one
-    (Zcode #199 finding 2). The file is left as it was in every refusal."""
+    cannot rebuild safely: a readable `id3 ` chunk that is not a plain ID3v2.4 tag, or more than one
+    readable ID3 chunk (writing into one would leave a file whose record is ambiguous, Zcode #191).
+    Readable is judged at `WAV_RECORD_READ_MAX`, the readers' cap. A junk or oversize chunk the reader
+    skips is neither counted nor touched: it stays byte for byte (one over `_WAV_CHUNK_READ_MAX` is not
+    even loaded, the rewrite streams it), and with no readable chunk the record goes in a new one
+    (Zcode #199 finding 2, #204). The file is left as it was in every refusal."""
     path = Path(path)
     new_frame = txxx_frame(PROVENANCE_TAG, text)
 
@@ -537,12 +543,12 @@ def wav_add_provenance(path: Path, text: str) -> None:
         for i in at:
             _c, off, n = chunks[i]
             if n > _WAV_CHUNK_READ_MAX:
-                raise TagError("the WAV's ID3 chunk is too big to check or rebuild")
+                continue   # never loaded, as the reader skips it; the rewrite streams it through untouched
             src.seek(off)
             tags[i] = src.read(n)
             if parse_id3_txxx(tags[i][:10], tags[i][10:]).get(PROVENANCE_TAG):
                 raise AlreadyTagged(f"{path.name} already holds {PROVENANCE_TAG}")
-        readable = [i for i in at if _id3_chunk_readable(chunks[i][2], tags[i][:10], _WAV_ID3_DEFAULT_MAX)]
+        readable = [i for i in tags if _id3_chunk_readable(chunks[i][2], tags[i][:10], WAV_RECORD_READ_MAX)]
         if not readable:
             # Only chunks the reader skips: they stay as they are and the record gets its own chunk.
             return replace, _riff_chunk(WAV_ID3_WRITE_ID, build_id3v24([new_frame], ID3_PADDING))
@@ -560,7 +566,7 @@ def wav_add_provenance(path: Path, text: str) -> None:
     _wav_rewrite(path, plan)
 
 
-def wav_migrate_provenance(path: Path, max_item_bytes: int = 2 * 1024 * 1024) -> bool:
+def wav_migrate_provenance(path: Path, max_item_bytes: int = WAV_RECORD_READ_MAX) -> bool:
     """Move a record held in the old `LIST/INFO` item `DPCP` into the `id3 ` chunk, verbatim, and drop
     the old item. True when the file changed; False when there was no old item. When the `id3 ` chunk
     already holds a record the old item is only dropped (the new form wins). Never rewrites a record.

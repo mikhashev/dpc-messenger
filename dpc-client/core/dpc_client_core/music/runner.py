@@ -156,7 +156,8 @@ from .engines import MusicEngines
 from .identity import MediaTools, read_flac_streaminfo
 from .jobs import MusicJobError, MusicJobStore
 from .loudness import LoudnessError, LoudnessMeter, ffmpeg_loudness_meter
-from .qa import LENGTH_CAP, LENGTH_EXACT, LENGTH_SAME, QaError, QaMeter, ffmpeg_qa_meter, not_measured_record
+from .qa import (EDIT as QA_EDIT, LENGTH_CAP, LENGTH_EXACT, LENGTH_SAME, QaError, QaMeter, SourceMeter,
+                 compare_with_source, ffmpeg_qa_meter, ffmpeg_source_meter, not_measured_record)
 from .store import atomic_write_text, music_dir_of
 
 logger = logging.getLogger(__name__)
@@ -553,6 +554,7 @@ class MusicJobRunner:
         draw_seed: Optional[Callable[[], int]] = None,
         loudness_meter: Optional[LoudnessMeter] = None,
         qa_meter: Optional[QaMeter] = None,
+        source_meter: Optional[SourceMeter] = None,
         device_probe: Optional[Callable[[], Dict[str, Any]]] = None,
         control_decoder: Optional[ControlDecoder] = None,
         lyrics_get: Optional[LyricsGet] = None,
@@ -566,6 +568,10 @@ class MusicJobRunner:
         self._convert = converter or ffmpeg_converter()
         self._measure = loudness_meter or ffmpeg_loudness_meter()
         self._qa_measure = qa_meter or ffmpeg_qa_meter()
+        # The peaks of an edit's control or a cover's source, measured once per job (`qa.compare_with_source`).
+        # A stand-in take meter with no stand-in source meter makes no comparison: both are measured one way.
+        self._source_measure: Optional[SourceMeter] = (
+            source_meter if source_meter is not None else (ffmpeg_source_meter() if qa_meter is None else None))
         self._device_probe = device_probe or prov.device_identity
         self._decode_control = control_decoder or ffmpeg_control_decoder()
         self._lyrics_get = lyrics_get
@@ -1344,7 +1350,8 @@ class MusicJobRunner:
                 await self._call(self.store.write_payload, job_id, SYNTH_PAYLOAD, synth, endpoint="/synth")
             self._emit(await self._get(job_id))
         return {"entry": entry, "path": Path(path), "control": control, "pcm": pcm, "control_sha": control_sha,
-                "zones": zones, "request": request, "parent": parent}
+                "zones": zones, "request": request, "parent": parent,
+                "source_peaks": await self._measure_source(control, job_id, "the control")}
 
     async def _edit_start(self, job_id: str) -> bool:
         try:
@@ -1469,6 +1476,8 @@ class MusicJobRunner:
             qa_override = {"requested_s": control_s, "length_mode": LENGTH_SAME,
                            "edit": {"action": action, "zone": zone, "expects_silence": action == re_.REMOVE_REGION,
                                     "seams": seams}}
+            if prepared.get("source_peaks") is not None:
+                qa_override["source"] = {"relation": QA_EDIT, "peaks": prepared["source_peaks"]}
             base_title = " ".join(str(entry.get("title") or "track").split())[:60]
             words = re_.region_words(action, job["region"])
             title = f"{base_title} ({words}, v{variant})"
@@ -1734,6 +1743,9 @@ class MusicJobRunner:
             record = await asyncio.to_thread(
                 self._qa_measure, path, requested_s=requested, length_mode=mode, duration_s=duration_s,
                 loudness=loudness, tool_version=version, **extra)
+            source = (override or {}).get("source")
+            if source is not None:
+                record = compare_with_source(record, source["peaks"], source["relation"])
             js.check_qa_report(record["qa_report"])
             if record["qa"] is not None:
                 js.check_qa(record["qa"])
@@ -1748,6 +1760,17 @@ class MusicJobRunner:
                 logger.exception("music: measuring the QA of variant %s of job %s failed", variant, job_id)
             return not_measured_record(f"stage-1 QA could not run: {exc}"[:300], requested_s=requested,
                                        length_mode=mode)
+
+    async def _measure_source(self, path: Path, job_id: str, what: str) -> Optional[Dict[str, Any]]:
+        """The source's peaks for `qa.compare_with_source`, never an exception: `{measured: False, reason}`
+        when they cannot be measured, None when this runner makes no comparison (a stand-in take meter)."""
+        if self._source_measure is None:
+            return None
+        try:
+            return dict(await asyncio.to_thread(self._source_measure, Path(path)))
+        except Exception as exc:
+            logger.warning("music: the peaks of %s of job %s could not be measured: %s", what, job_id, exc)
+            return {"measured": False, "reason": f"{what} could not be measured: {exc}"[:300]}
 
     async def _ffmpeg_version_text(self) -> Optional[str]:
         """ffmpeg's version line for the record's post step; asked once, None when it cannot be read."""

@@ -58,6 +58,11 @@ with `INTERNAL_SILENCE_MAX_S` or more of silence fails as a hole (silence instea
 gate 5). QC ranking is off by default and
 stage 2 does not exist (no judge): nothing here ranks takes.
 
+**Against the source** (`compare_with_source`, follow-up 21): an edit take copies its control bit for bit
+outside the zone, so its clipping and true-peak gates fail only for overs the take adds over the
+control's (measured once per job, `measure_source_peaks`); inherited overs pass with
+`inherited_from_source`. A cover keeps its own verdict and carries the source's figures beside it.
+
 The report holds numbers and words only: no path, nothing of the request.
 """
 
@@ -89,6 +94,8 @@ LENGTH_EXACT_TOLERANCE_FRACTION = 0.05
 LENGTH_CAP_MIN_S = 10.0
 LENGTH_CAP_MIN_FRACTION = 0.5       # the floor is never above half the cap (Zcode #176)
 LENGTH_SAME_TOLERANCE_S = 0.001     # an edit take keeps the control's length (decision 23): a frame or so
+SOURCE_PEAK_TOLERANCE_DB = 0.1      # an edit take may sit this much over its source's peaks before it "adds" overs
+EDIT, COVER = "edit", "cover"       # the two takes that have a source to compare with (`compare_with_source`)
 LENGTH_EXACT, LENGTH_CAP, LENGTH_SAME = "exact", "cap", "same"
 LENGTH_MODES = (LENGTH_EXACT, LENGTH_CAP, LENGTH_SAME)
 MAX_RUNS_KEPT = 8                   # silent runs listed in the report
@@ -105,6 +112,7 @@ THRESHOLDS: Dict[str, Any] = {
     "length_cap_min_s": LENGTH_CAP_MIN_S,
     "length_cap_min": f"min({LENGTH_CAP_MIN_S:g} s, {LENGTH_CAP_MIN_FRACTION:.0%} of the cap)",
     "length_same_tolerance_s": LENGTH_SAME_TOLERANCE_S,
+    "source_peak_tolerance_db": SOURCE_PEAK_TOLERANCE_DB,
 }
 
 TOOLS_NAME = "ffmpeg ebur128+astats+silencedetect"
@@ -397,6 +405,18 @@ def _seam_number(value: Any) -> Optional[float]:
     return float(value)
 
 
+def thresholds_of(gates: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
+    """The report's `thresholds`: `THRESHOLDS`, with the same-length tolerance the length gate actually
+    used (a cover's 0.05 s or 2 s, `similar.COVER_SAME_TOLERANCE_S`; the probe of 2026-11-26 found the
+    record saying 0.001 beside a gate that had judged with 0.05)."""
+    out = dict(THRESHOLDS)
+    length = gates.get("length") or {}
+    tol = length.get("tolerance_s")
+    if length.get("mode") == LENGTH_SAME and isinstance(tol, (int, float)) and not isinstance(tol, bool):
+        out["length_same_tolerance_s"] = tol
+    return out
+
+
 def build_record(*, gates: Mapping[str, Dict[str, Any]], measurements: Mapping[str, Any],
                  integrated_lufs: Optional[float], true_peak_dbtp: Optional[float], clipped_samples: Optional[int],
                  measured_by: str, measured_at: Optional[str] = None,
@@ -423,7 +443,7 @@ def build_record(*, gates: Mapping[str, Dict[str, Any]], measurements: Mapping[s
         "gates": {name: dict(gates[name]) for name in js.QA_GATES},
         "advisory": advisory,
         "measurements": dict(measurements),
-        "thresholds": dict(THRESHOLDS),
+        "thresholds": thresholds_of(gates),
         "measured_by": measured_by,
         "measured_at": measured_at or _now(),
     }
@@ -525,6 +545,106 @@ def ffmpeg_qa_meter(tools: Optional[MediaTools] = None) -> QaMeter:
     def meter(path: Path, **kwargs: Any) -> Dict[str, Any]:
         return measure_take_qa(path, tools=tools, **kwargs)
     return meter
+
+
+# -- the source comparison --------------------------------------------------------------------
+
+SourceMeter = Callable[[Path], Dict[str, Any]]
+
+
+def measure_source_peaks(path: Path, tools: Optional[MediaTools] = None) -> Dict[str, Any]:
+    """The peaks of the file a take was made from, measured with the same ffmpeg pass as a take:
+    `{measured: True, true_peak_dbtp, sample_peak_dbfs, clipped_samples, integrated_lufs, measured_by}`.
+    Raises `QaError` when ffmpeg cannot run. Blocking: call it through `asyncio.to_thread`."""
+    err = run_ffmpeg_pass(Path(path), tools, with_loudness=True)
+    try:
+        loud = parse_ebur128_summary(err)
+    except LoudnessError:
+        loud = {"lufs_i": None, "true_peak_dbtp": None}
+    astats = parse_astats(err)
+    _clip_gate, clipped = clipping_gate(astats)
+
+    def num(v: Any) -> Optional[float]:
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    return {"measured": True, "true_peak_dbtp": num(loud.get("true_peak_dbtp")),
+            "sample_peak_dbfs": num(astats.get("peak_db")) if astats else None,
+            "clipped_samples": clipped, "integrated_lufs": num(loud.get("lufs_i")), "measured_by": TOOLS_NAME}
+
+
+def ffmpeg_source_meter(tools: Optional[MediaTools] = None) -> SourceMeter:
+    """A source meter for the runner: `meter(path) -> measure_source_peaks(...)`, raising `QaError`."""
+    def meter(path: Path) -> Dict[str, Any]:
+        return measure_source_peaks(path, tools)
+    return meter
+
+
+def _db(v: Optional[float], unit: str) -> str:
+    return f"{v:+.2f} {unit}" if isinstance(v, (int, float)) else "unknown"
+
+
+def _edit_clip_inherited(clip: Mapping[str, Any], s_peak: Any, s_clip: Any) -> bool:
+    """A failed clipping gate of an edit take whose overs are the source's: the take's peak within
+    `SOURCE_PEAK_TOLERANCE_DB` of the source's and no more samples at it. astats counts the samples at the
+    peak (a lower bound), so a take whose peak is lower but still clipped can read as adding overs: flagged,
+    never hidden."""
+    t_peak, t_clip = clip.get("peak_dbfs"), clip.get("clipped_samples")
+    return (isinstance(s_clip, int) and s_clip > 0 and isinstance(s_peak, (int, float))
+            and isinstance(t_peak, (int, float)) and isinstance(t_clip, int)
+            and t_peak <= s_peak + SOURCE_PEAK_TOLERANCE_DB and t_clip <= s_clip)
+
+
+def compare_with_source(record: Mapping[str, Any], source: Optional[Mapping[str, Any]],
+                        relation: str) -> Dict[str, Any]:
+    """`{qa, qa_report}` with the clipping and true-peak gates read against the take's source.
+
+    `edit`: the take is the source outside its zone, bit for bit, so the source's overs come along by
+    design. A gate fails only when the take adds overs (`_edit_clip_inherited`; a true peak more than
+    `SOURCE_PEAK_TOLERANCE_DB` over the source's); an inherited over passes with
+    `inherited_from_source: true` and a detail that says so. `cover`: a new rendering, so the verdict stays
+    the take's own and the source's figures are only written beside it. The source's numbers go in
+    `measurements.source` and in both gates; with no measurement the gates stay as measured. Flags only."""
+    if relation not in (EDIT, COVER):
+        raise ValueError(f"unknown source relation {relation!r}")
+    report = dict(record["qa_report"])
+    out = {"qa": record.get("qa"), "qa_report": report}
+    gates = {k: dict(v) for k, v in (report.get("gates") or {}).items()}
+    src = dict(source) if isinstance(source, Mapping) else {"measured": False, "reason": "no source measurement"}
+    src["relation"] = relation
+    report["measurements"] = {**(report.get("measurements") or {}), "source": src}
+    report["gates"] = gates
+    if not src.get("measured"):
+        return out
+    s_tp, s_peak, s_clip = src.get("true_peak_dbtp"), src.get("sample_peak_dbfs"), src.get("clipped_samples")
+    clip, tp = gates.get("clipping") or {}, gates.get("true_peak") or {}
+    clip_src = (f"the source has {s_clip if s_clip is not None else 'an unknown number of'} clipped sample(s), "
+                f"sample peak {_db(s_peak, 'dBFS')}")
+    tp_src = f"the source's true peak is {_db(s_tp, 'dBTP')}"
+    if clip:
+        clip.update(source_clipped_samples=s_clip, source_peak_dbfs=s_peak)
+    if tp:
+        tp["source_true_peak_dbtp"] = s_tp
+    if relation == COVER:
+        for gate, said in ((clip, clip_src), (tp, tp_src)):
+            if gate:
+                gate["detail"] = f"{gate['detail']} ({said}; a cover is a new rendering, judged on its own)"
+        return out
+    if clip.get("status") == js.GATE_FAIL:
+        if _edit_clip_inherited(clip, s_peak, s_clip):
+            clip.update(status=js.GATE_PASS, inherited_from_source=True,
+                        detail=f"advisory: inherited from the source: {clip['detail']}; {clip_src} (the take adds "
+                               f"none, within {SOURCE_PEAK_TOLERANCE_DB:g} dB)")
+        else:
+            clip.update(inherited_from_source=False, detail=f"{clip['detail']}; {clip_src}, so the take adds clipping")
+    if tp.get("status") == js.GATE_FAIL:
+        t_tp = tp.get("true_peak_dbtp")
+        if isinstance(s_tp, (int, float)) and isinstance(t_tp, (int, float)) and t_tp <= s_tp + SOURCE_PEAK_TOLERANCE_DB:
+            tp.update(status=js.GATE_PASS, inherited_from_source=True,
+                      detail=f"advisory: inherited from the source: {tp['detail']}; {tp_src} (the take raises it by "
+                             f"no more than {SOURCE_PEAK_TOLERANCE_DB:g} dB)")
+        else:
+            tp.update(inherited_from_source=False, detail=f"{tp['detail']}; {tp_src}, so the take raises it")
+    report["verdict"] = js.qa_verdict_of(gates)
+    return out
 
 
 def qa_summary(take: Mapping[str, Any]) -> Dict[str, Any]:

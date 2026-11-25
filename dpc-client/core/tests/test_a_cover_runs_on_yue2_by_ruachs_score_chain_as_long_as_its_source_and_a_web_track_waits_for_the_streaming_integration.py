@@ -282,7 +282,7 @@ async def test_a_yue2_cover_hears_a_loud_source_levelled_sings_the_vocal_line_wi
         assert body["style"] == "russian rock, 120 BPM"                      # tempo agreed, a wrong key dropped
         assert body["lyrics"] == ("[Intro]\n\n[Verse]\nnight drive, city lights\nneon in the rain\n\n"
                                   "[Chorus]\nwe never stop\nwe never stop")
-        assert body["duration"] == 7.0 and body["semantic_sampling"] == {"min_tokens": 125}
+        assert body["duration"] == 7.0 and body["semantic_sampling"] == {"min_tokens": 150}   # the source's 6 s
         song = sidecar_of(rig.store.list_takes(job["id"])[0])["song"]
         assert song["transcribe_level"]["gain_db"] == -7.0 and song["vocal_only"] is True
         assert song["section_match"]["status"] == "applied" and song["section_match"]["pre_tagged"] is True

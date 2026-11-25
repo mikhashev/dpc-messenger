@@ -286,11 +286,14 @@ def pre_tag(lines: Sequence[str], times: Sequence[Optional[float]], abc: str) ->
     return out
 
 
-def match_sections(abc: str, lines: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+def match_sections(abc: str, lines: Sequence[str], rows: Sequence[Mapping[str, Any]], *,
+                   copy_bodies: bool = True) -> Dict[str, Any]:
     """`{lyrics, blocks: [{index, tag, new_tag, section, at, status}], filled: [{section, tag, copied_from}],
     unchanged}` of the lyrics `lines` against the score's named sections; `rows` are the timed sung lines in
     the lyrics' order (`{text, start}`, a `start` of None for a line with no time). `ValueError` when the score
-    has no named sections."""
+    has no named sections. A sung section the lyrics do not reach is filled with the last block of its kind (a
+    whole chorus, as Ruach does); with `copy_bodies` False it gets its tag alone, and `filled` still names the
+    block it would have copied (the run's fallback when the copies do not fit, `similar._fit_without_copies`)."""
     spans = _spans(score_parts(abc)["parts"])
     bar = bar_seconds(abc) or 2.0
     if not any(x["label"] for x in spans):
@@ -345,7 +348,7 @@ def match_sections(abc: str, lines: Sequence[str], rows: Sequence[Mapping[str, A
             src = last_of_kind.get(match_kind(spans[i]["label"])) if spans[i]["sung"] and not state["unsure"] else None
             if spans[i]["sung"] and src is None:
                 continue
-            body = blocks[src]["body"] if src is not None else ""
+            body = blocks[src]["body"] if src is not None and copy_bodies else ""
             out.append(f"[{tag_of(i)}]\n{body}" if body else f"[{tag_of(i)}]")
             emitted.add(i)
             state["placed"] = False

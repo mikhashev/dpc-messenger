@@ -407,8 +407,8 @@ async def test_a_yue2_cover_transcribes_the_source_to_a_score_and_sings_it_with_
         body = json.loads(rig.store.read_payload(job["id"], "synth.v1.request.json"))
         assert body["abc"].startswith("X:1\nT:fake transcription") and body["cot"] == "melody"
         assert body["lyrics"] == "\n".join(LINES) and body["style"] == "russian rock, male vocal" and body["seed"] == 5
-        # as long as the source: the cap one second over it, the floor one second under it (25 frames a second)
-        assert body["duration"] == 7.0 and body["semantic_sampling"] == {"min_tokens": 125}
+        # as long as the source: the cap one second over it, the floor at it (25 frames a second; follow-up 21)
+        assert body["duration"] == 7.0 and body["semantic_sampling"] == {"min_tokens": 150}
         take = rig.store.list_takes(job["id"])[0]
         assert take["title"] == "Cover of Night Drive (v1)" and take["engine"] == "yue2.cpp"
         side = sidecar_of(take)

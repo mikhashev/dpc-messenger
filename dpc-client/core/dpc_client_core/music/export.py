@@ -126,8 +126,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from . import provenance as mp_provenance
-from .audio_tags import (WAV_INFO_PROVENANCE_KEY, _build_vorbis, _parse_vorbis, flac_read_comments,
-                         wav_read_provenance)
+from .audio_tags import (WAV_INFO_PROVENANCE_KEY, WAV_RECORD_READ_MAX, _build_vorbis, _parse_vorbis,
+                         flac_read_comments, wav_read_provenance)
 from .id3 import (ID3_PADDING, ID3_READ_MAX_BYTES, _clean, _frame, _syncsafe, _unsyncsafe,  # noqa: F401 (re-exported)
                   build_id3v24, comm_frame, read_id3_txxx, text_frame, txxx_frame, uslt_frame)
 from .identity import MediaTools, file_sha256, read_flac_streaminfo
@@ -1076,7 +1076,7 @@ class MusicExporter:
             if path.suffix.lower() == ".flac":
                 return flac_read_comments(path, max_block_bytes=cap).get(PROVENANCE_TAG)
             if path.suffix.lower() == ".wav":
-                return wav_read_provenance(path, max_item_bytes=cap)
+                return wav_read_provenance(path, max_item_bytes=WAV_RECORD_READ_MAX)   # the cap every WAV reader uses
         except Exception:
             logger.info("music export: could not read the embedded record of %s", path.name, exc_info=True)
         return None
