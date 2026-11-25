@@ -18,6 +18,7 @@ import {
     type AgentTurnState,
     type AgentTurnStates,
 } from './agentTurnNotice';
+import { cardWaitNote, type CardLeaseSnapshot } from './cardLease';
 import type { FreeCommitReading } from './strataFields';
 
 /** How often the open map reads `list_processes` again; processes have no push event. */
@@ -322,7 +323,8 @@ interface TurnWords {
     nowDetail: string;
 }
 
-function turnWords(state: AgentTurnState | undefined, chatOf: (id: string | null) => string, nowMs: number): TurnWords {
+function turnWords(state: AgentTurnState | undefined, chatOf: (id: string | null) => string, nowMs: number,
+                   cardNote = ''): TurnWords {
     const turn = state?.turn;
     if (!state || !turn) return { dot: 'idle', stateLine: 'Idle', nowLine: 'Idle', nowDetail: '' };
     const chat = turn.conversation_title || chatOf(turn.conversation_id) || 'another chat';
@@ -355,7 +357,7 @@ function turnWords(state: AgentTurnState | undefined, chatOf: (id: string | null
             dot: 'waiting',
             stateLine: `${cap(phrase)} · ${chat} · ${forWait}`,
             nowLine: `${cap(phrase)} in ${chat}`,
-            nowDetail: detail(turn.provider_alias ? `${turn.provider_alias} waits in the queue` : '', round, started, forWait),
+            nowDetail: detail(turn.provider_alias ? `${turn.provider_alias} waits in the queue` : '', cardNote, round, started, forWait),
         };
     }
     if (phrase && turn.wait_reason === 'slot_queue') {
@@ -649,6 +651,8 @@ export function buildAgentMap(input: {
     listing: ProcessListing | null;
     names: ConversationNames;
     nowMs: number;
+    /** The card's queue, when the backend sends it: an agent's turn that waits for the card says its place. */
+    card?: CardLeaseSnapshot | null;
 }): AgentMap {
     const { turns, listing, nowMs } = input;
     const names: ConversationNames = { ...input.names, agents: input.names.agents ?? input.agents };
@@ -672,7 +676,8 @@ export function buildAgentMap(input: {
 
     const agents = rows.map((row): MapAgent => {
         const state = turns[row.agent_id];
-        const words = turnWords(state, chatOf, nowMs);
+        const words = turnWords(state, chatOf, nowMs,
+            state?.turn?.wait_reason === 'card_queue' ? cardWaitNote(input.card, row.agent_id) : '');
         const procs = (agentProcs.get(row.agent_id) ?? [])
             .filter(p => inAgentWindow(p, nowMs))
             .sort(byAliveThenNewest)

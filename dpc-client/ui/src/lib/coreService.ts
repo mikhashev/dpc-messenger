@@ -142,6 +142,7 @@ import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionCompl
 import { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed, modelDownloadProgress } from './services/modelDownload';
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
 import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentStopNotes, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates, agentTurns, onAgentTurnUpdated, onAgentActivity, forgetAgentTurns } from './services/agents';
+import { onCardLeaseUpdated } from './services/cardLease';
 import { addStopNote, clearStopNotes, isStopNote } from './utils/stopNotes';
 import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
 import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionCancelled, extractionFallback, tokenWarning, integrityWarnings, votingConversationId } from './services/knowledge';
@@ -1101,6 +1102,10 @@ export async function connectToCoreService() {
                 else if (message.event === "agent_turn_updated") {
                     // Full snapshot {agent_id, turn, waiting, ts}; turn null = idle.
                     onAgentTurnUpdated(message.payload);
+                }
+                else if (message.event === "card_lease_updated") {
+                    // The GPU card's queue: who holds it, who waits, the last grants (card_lease.queue_snapshot).
+                    onCardLeaseUpdated(message.payload);
                 }
                 else if (message.event === "agent_progress_clear") {
                     // Signal to clear progress display (task completed/failed)

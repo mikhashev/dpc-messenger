@@ -8,6 +8,12 @@
   minimised map reads nothing, and restoring it reads at once. Every line is
   built in utils/agentMap.ts.
 
+  The Card block under the memory bars is the GPU card's queue (ADR-052): who holds it
+  since when, and who waits, in order, with the lease's own estimate. It reads
+  get_card_lease_status with each list_processes read, and the backend pushes
+  card_lease_updated at every change (services/cardLease.ts); its lines are built in
+  utils/cardLease.ts.
+
   A window the viewer can drag by its header, resize by the corner handle and
   minimise to the header bar; its box and the minimised flag are remembered in
   localStorage (utils/windowGeometry.ts), and the map works without it.
@@ -17,6 +23,8 @@
   import { untrack } from 'svelte';
   import { sendCommand, groupChats, nodeStatus } from '$lib/coreService';
   import { agentTurns, agentsList } from '$lib/services/agents';
+  import { cardLease, onCardLeaseUpdated } from '$lib/services/cardLease';
+  import { cardLeaseView } from '$lib/utils/cardLease';
   import {
     PROCESS_POLL_MS,
     SYSTEM_OPEN_BY_DEFAULT,
@@ -138,7 +146,19 @@
   }
   const remember = () => saveWindowState(storage(), { rect, minimised });
 
+  // The card's queue: read with the map's own reads, then kept current by the pushed event. An older
+  // backend has no such command, and the block then stays out.
+  async function refreshCard() {
+    try {
+      const r: any = await sendCommand('get_card_lease_status', {});
+      if (r?.status === 'success') onCardLeaseUpdated(r);
+    } catch {
+      /* the block keeps what it has */
+    }
+  }
+
   async function refresh() {
+    untrack(refreshCard);
     if (inFlight) return;
     inFlight = true;
     try {
@@ -207,7 +227,13 @@
     listing,
     names: { groups: $groupChats, peers: ($nodeStatus as any)?.peer_info ?? [] },
     nowMs: now,
+    card: $cardLease,
   }));
+  let card = $derived(cardLeaseView(
+    $cardLease,
+    now,
+    (id: string) => (($agentsList ?? []) as any[]).find(a => a.agent_id === id)?.name || id,
+  ));
   let selected = $derived(map.agents.find(a => a.agent_id === pickSelected(map, selectedId)) ?? null);
 
   // The memory limit per command: the line, and its inline edit (a number, Save / Cancel).
@@ -418,6 +444,46 @@
             {#if map.memorySource}<span class="memory-source">{map.memorySource}</span>{/if}
           {:else}
             <span class="muted">{freeCommitLine(listing.free_commit)}</span>
+          {/if}
+        </div>
+      {/if}
+
+      {#if card}
+        <div class="card-block" aria-label="GPU card">
+          <div class="card-head">
+            <span class="section-label">CARD</span>
+            <span class="card-headline" class:free={card.free}>{card.headline}</span>
+          </div>
+          {#if card.closed}
+            <span class="muted small">The backend is stopping ({card.closed}): the card is not handed out.</span>
+          {/if}
+          {#each card.holders as h (h.key)}
+            <div class="card-row">
+              <span class="dot {h.busy ? 'working' : 'idle'}"></span>
+              <span class="card-name">{h.name}</span>
+              <span>{h.purpose}</span>
+              <span class="muted small">{h.state}{#if h.since} · {h.since}{/if}</span>
+            </div>
+          {/each}
+          {#if card.waiters.length > 0}
+            <span class="muted small">Waiting for the card, first served first</span>
+            {#each card.waiters as w (w.key)}
+              <div class="card-row">
+                <span class="card-position">{w.position}.</span>
+                <span class="card-name">{w.name}</span>
+                {#if w.purpose}<span>{w.purpose}</span>{/if}
+                <span class="muted small">{w.waited} · wait {w.estimate}{#if w.note} · {w.note}{/if}</span>
+                {#if w.waitsFor}<span class="muted small">{w.waitsFor}</span>{/if}
+              </div>
+            {/each}
+          {/if}
+          {#if card.recent.length > 0}
+            <details class="card-recent">
+              <summary class="muted small">Recent: {card.recent.length}</summary>
+              {#each card.recent as r (r.key)}
+                <div class="muted small"><span class="card-time">{r.at}</span> {r.text}</div>
+              {/each}
+            </details>
           {/if}
         </div>
       {/if}
@@ -746,6 +812,25 @@
   .bar-fill { height: 6px; background: #58a6ff; border-radius: 3px; }
   .bar-fill.physical { background: #d29922; }
   .bar-fill.vram { background: #a371f7; }
+  .card-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 16px;
+    background: var(--bg-secondary, #1d2025);
+    border: 1px solid var(--border-color, #2c3036);
+    border-radius: 10px;
+    font-size: 14px;
+    color: #c9d1d9;
+  }
+  .card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .card-headline { font-weight: 600; }
+  .card-headline.free { color: #7ee2a0; font-weight: 500; }
+  .card-row { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; }
+  .card-name { font-weight: 600; }
+  .card-position { color: #f0c674; min-width: 1.4em; }
+  .card-time { font-variant-numeric: tabular-nums; margin-right: 6px; }
+  .card-recent summary { cursor: pointer; }
   .memory-source { font-size: 13px; color: var(--text-secondary, #a9b0bb); }
   .bar-note { font-size: 12px; color: var(--text-secondary, #a9b0bb); opacity: 0.8; }
 
