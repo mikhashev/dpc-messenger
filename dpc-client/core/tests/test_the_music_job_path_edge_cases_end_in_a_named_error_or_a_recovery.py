@@ -248,10 +248,11 @@ async def test_a_merge_never_loses_a_comment_to_the_cap(tmp_path, no_tools, monk
             await service.add_music_comment(track_id=twin, start_s=i, text=f"t{i}")
         monkeypatch.setattr(comments_module, "MAX_COMMENTS_PER_TRACK", 3)
         service._music_library_instance._delete_entry(twin, replaced_by=keeper)
-        assert len((await service.list_music_comments(track_id=keeper))["comments"]) == 3
-        left = comments_module.load_records(service._music_comments_instance.comments_path(twin),
-                                            comments_module.schemas.validate_comment)
-        assert [c["text"] for c in left] == ["t1"]   # kept in the file it came from
+        # Follow-up 16 (Zcode #188, finding 9): every comment is attached to the survivor, past the cap;
+        # the folded entry's file does not stay behind holding comments nobody can reach.
+        got = (await service.list_music_comments(track_id=keeper))["comments"]
+        assert sorted(c["text"] for c in got) == ["k0", "k1", "t0", "t1"]
+        assert not service._music_comments_instance.comments_path(twin).exists()
     finally:
         await service.stop_music_library()
 
@@ -416,3 +417,22 @@ async def test_the_capabilities_report_is_built_off_the_event_loop(tmp_path, mon
         assert seen and seen[0] != loop_thread
     finally:
         await service.stop_music_library()
+
+
+@pytest.mark.parametrize("name, said, not_said", [
+    ("lm.request.json", "shorten the lyrics or the style", "answer"),
+    ("synth.v2.request.json", "shorten the lyrics or the style", "answer"),
+    ("edit.request.json", "note of the edit or its region", "lyrics"),
+    ("lm.result.json", "the engine's answer", "lyrics"),
+    ("synth.v1.result.json", "the engine's answer", "lyrics"),
+    ("transcribe.result.json", "the engine's answer", "lyrics"),
+])
+def test_the_oversized_payload_message_is_worded_by_the_payload_kind(tmp_path, name, said, not_said):
+    """Follow-up 16 (Zcode #188, finding 10): a binary result is not something to shorten the lyrics for."""
+    from tests._music_jobs_helpers import queued_job, store_at
+    store = store_at(tmp_path)
+    job = queued_job(store)
+    with pytest.raises(MusicJobError) as err:
+        store.write_payload(job["id"], name, b"x" * (jobs_module.MAX_PAYLOAD_BYTES + 1))
+    assert err.value.code == "payload_too_large" and said in err.value.message
+    assert not_said not in err.value.message

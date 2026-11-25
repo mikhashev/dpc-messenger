@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..local_api import slow_command
@@ -44,6 +45,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_QC_RANKING = False
 QC_COMMANDS = ("judge_music_take", "get_music_job_qc", "backfill_music_qa")
 BACKFILL_NOTE = "measured after the take was made (backfill_music_qa)"
+# A take whose backfill still ends `not_measured` is marked `qa_report.unmeasurable` (follow-up 16, Zcode #188
+# finding 6) and is skipped by later runs without `force`: at once when its length cannot be recovered (nothing
+# a later run could add), after `UNMEASURABLE_ATTEMPTS` runs for any other reason. A new file hash measures again.
+UNMEASURABLE_ATTEMPTS = 3
+LENGTH_UNRECOVERABLE = "the requested length of the take cannot be recovered, so the length gate cannot be measured"
 
 
 class MusicQcCommandsMixin:
@@ -173,12 +179,18 @@ class MusicQcCommandsMixin:
     async def _backfill_one(self, store: Any, take: Dict[str, Any], job: Dict[str, Any],
                             force: bool) -> Dict[str, Any]:
         """One take's outcome: `measured`, `skipped` (already measured, no `force`), `no_file` or
-        `failed` with `error`."""
+        `failed` with `error`. A take that is still `not_measured` after a run is marked
+        `qa_report.unmeasurable` and skipped later (see `UNMEASURABLE_ATTEMPTS`)."""
         tid = take["id"]
         entry: Dict[str, Any] = {"take_id": tid, "job_id": job["id"], "variant": take.get("variant")}
         report = take.get("qa_report")
+        file_hash = (take.get("file") or {}).get("content_hash")
         if not force and isinstance(report, dict) and report.get("verdict") != js.QA_NOT_MEASURED:
             return {**entry, "outcome": "skipped", "verdict": report.get("verdict")}
+        mark = report.get("unmeasurable") if isinstance(report, dict) else None
+        if (not force and isinstance(mark, dict) and mark.get("file_hash") == file_hash
+                and (mark.get("reason") == LENGTH_UNRECOVERABLE or mark.get("attempts", 0) >= UNMEASURABLE_ATTEMPTS)):
+            return {**entry, "outcome": "skipped", "verdict": js.QA_NOT_MEASURED, "unmeasurable": mark["reason"]}
         path = path_of_file_uri((take.get("file") or {}).get("uri"))
         if path is None or not await asyncio.to_thread(path.is_file):
             return {**entry, "outcome": "no_file", "error": f"take {tid} has no local file to measure"}
@@ -191,6 +203,16 @@ class MusicQcCommandsMixin:
             new_report = dict(record["qa_report"])
             new_report["note"] = BACKFILL_NOTE + ("; the seam metrics of an edit cannot be measured again"
                                                   if "edit" in terms else "")
+            if new_report["verdict"] == js.QA_NOT_MEASURED:
+                prior = (report or {}).get("unmeasurable") if isinstance(report, dict) else None
+                same_file = isinstance(prior, dict) and prior.get("file_hash") == file_hash
+                gate = (new_report.get("gates") or {}).get("length") or {}
+                new_report["unmeasurable"] = {
+                    "reason": LENGTH_UNRECOVERABLE if terms["requested_s"] is None
+                    else str(gate.get("detail") or new_report.get("note") or "stage-1 QA could not be measured")[:300],
+                    "attempts": (int(prior.get("attempts") or 0) if same_file else 0) + 1,
+                    "last_attempt_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "file_hash": file_hash}
             js.check_qa_report(new_report)
             qc_record = None
             if qc_.FLOW_OF_JOB_TYPE.get(job.get("type")) is not None:

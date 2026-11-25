@@ -254,3 +254,63 @@ async def test_a_corrupt_comments_file_is_moved_aside_not_lost_or_fatal(tmp_path
         assert (await service.add_music_comment(track_id=entry["id"], start_s=1, text="ok"))["status"] == "ok"
     finally:
         await service.stop_music_library()
+
+
+@pytest.mark.asyncio
+async def test_a_merge_past_the_cap_attaches_every_comment_to_the_survivor_and_leaves_no_orphan_file(tmp_path, no_tools, monkeypatch):
+    """Follow-up 16 (Zcode #188, finding 9): the surplus used to go back to the file of the entry the library
+    had just deleted, unreachable (`unknown_track`) and never cleaned. Now it is on the surviving track."""
+    from dpc_client_core.music import comments as comments_mod
+    monkeypatch.setattr(comments_mod, "MAX_COMMENTS_PER_TRACK", 3)
+    service, music, [entry] = await _setup(tmp_path)
+    tid = entry["id"]
+    comments_dir = tmp_path / "dpc" / "music" / "comments"
+    try:
+        library = service._music_library_instance
+        (music / "z.mp3").write_bytes(b"other")
+        await service.rescan_music_folder()
+        await library.wait_hashed()
+        other = next(e["id"] for e in (await service.list_music_library())["entries"] if e["id"] != tid)
+        for i in range(2):
+            await service.add_music_comment(track_id=tid, start_s=i, text=f"keeper {i}")
+        for i in range(3):
+            await service.add_music_comment(track_id=other, start_s=i, text=f"twin {i}")
+        library._delete_entry(other, replaced_by=tid)
+        got = await service.list_music_comments(track_id=tid)
+        assert len(got["comments"]) == 5                       # nothing lost, none left under the deleted id
+        assert {c["text"] for c in got["comments"]} >= {"twin 0", "twin 1", "twin 2"}
+        assert all(c["track_id"] == tid for c in got["comments"])
+        assert not (comments_dir / f"{other}.json").exists()
+        assert [p.name for p in comments_dir.iterdir()] == [f"{tid}.json"]
+        # over the cap: an add is refused until comments are deleted
+        refused = await service.add_music_comment(track_id=tid, start_s=1, text="one more")
+        assert refused["code"] == "too_many_comments"
+    finally:
+        await service.stop_music_library()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_comments_file_of_an_unknown_track_is_swept_and_one_with_comments_is_kept(tmp_path, no_tools):
+    service, _, [entry] = await _setup(tmp_path)
+    tid = entry["id"]
+    comments_dir = tmp_path / "dpc" / "music" / "comments"
+    comments_dir.mkdir(parents=True, exist_ok=True)
+    gone_empty, gone_full, bad = "trk_" + "a" * 16, "trk_" + "b" * 16, "trk_" + "c" * 16
+    (comments_dir / f"{gone_empty}.json").write_text("[]", encoding="utf-8")
+    (comments_dir / f"{bad}.json").write_text("{not json", encoding="utf-8")
+    (comments_dir / f"{tid}.json").write_text("[]", encoding="utf-8")        # a live track keeps its file
+    try:
+        await service.add_music_comment(track_id=tid, start_s=1, text="x")
+        # a removed track that still holds a comment keeps its file (nothing reads it, but it is the person's words)
+        comment = (await service.list_music_comments(track_id=tid))["comments"][0]
+        (comments_dir / f"{gone_full}.json").write_text(json.dumps([{**comment, "track_id": gone_full}]), encoding="utf-8")
+        comments = service._music_comments_instance
+        comments._swept = False
+        await service.list_music_comments(track_id=tid)
+        assert not (comments_dir / f"{gone_empty}.json").exists()
+        assert (comments_dir / f"{gone_full}.json").exists()
+        assert (comments_dir / f"{bad}.json").read_text(encoding="utf-8") == "{not json"
+        assert (comments_dir / f"{tid}.json").exists()
+        assert comments.sweep_orphans() == 0
+    finally:
+        await service.stop_music_library()

@@ -262,7 +262,11 @@ GATE_STATUSES = (GATE_PASS, GATE_FAIL, GATE_NOT_MEASURED)
 QA_PASSED, QA_FAILED, QA_NOT_MEASURED = "passed", "failed", "not_measured"
 QA_VERDICTS = (QA_PASSED, QA_FAILED, QA_NOT_MEASURED)
 _QA_REPORT_KEYS = {"stage", "verdict", "gates", "advisory", "measurements", "thresholds", "measured_by", "measured_at",
-                   "note"}
+                   "note", "unmeasurable"}
+# `qa_report.unmeasurable` (follow-up 16, Zcode #188 finding 6): written by `backfill_music_qa` when a measurement
+# still ends `not_measured`: `{reason, attempts, last_attempt_at, file_hash}`. A later backfill skips such a take
+# unless `force` is set or the file's hash differs from `file_hash`.
+_QA_UNMEASURABLE_KEYS = {"reason", "attempts", "last_attempt_at", "file_hash"}
 _FILE_KEYS = {"uri", "content_hash", "sample_rate", "channels", "duration_s"}
 
 # mp.qc/1 (SPEC §8.1) as DPC writes it; the extensions are in the module docstring.
@@ -1165,7 +1169,7 @@ def check_qa_report(report: Any, schema: str = TAKE) -> None:
     each gate with a status and a detail, the advisory entries never `pass`/`fail`, and the
     verdict the one `qa_verdict_of` gives."""
     _expect(schema, isinstance(report, Mapping), "'qa_report' must be an object, or null")
-    needed = _QA_REPORT_KEYS - {"note"}
+    needed = _QA_REPORT_KEYS - {"note", "unmeasurable"}
     missing = sorted(needed - set(report))
     extra = sorted(set(report) - _QA_REPORT_KEYS)
     _expect(schema, not missing, f"'qa_report' lacks: {', '.join(missing)}")
@@ -1193,6 +1197,16 @@ def check_qa_report(report: Any, schema: str = TAKE) -> None:
         _expect(schema, _is_str(report[k]) and bool(report[k]), f"'qa_report.{k}' must be text")
     if "note" in report:
         _expect(schema, report["note"] is None or _is_str(report["note"]), "'qa_report.note' must be text or null")
+    if "unmeasurable" in report:
+        mark = report["unmeasurable"]
+        _expect(schema, isinstance(mark, Mapping) and set(mark) == _QA_UNMEASURABLE_KEYS,
+                f"'qa_report.unmeasurable' must be an object with exactly {sorted(_QA_UNMEASURABLE_KEYS)}")
+        _expect(schema, _is_str(mark["reason"]) and bool(mark["reason"]) and _is_str(mark["last_attempt_at"]),
+                "'qa_report.unmeasurable' reason and last_attempt_at must be text")
+        _expect(schema, isinstance(mark["attempts"], int) and not isinstance(mark["attempts"], bool) and mark["attempts"] >= 1,
+                "'qa_report.unmeasurable.attempts' must be an integer >= 1")
+        _expect(schema, mark["file_hash"] is None or _is_str(mark["file_hash"]),
+                "'qa_report.unmeasurable.file_hash' must be text or null")
 
 
 def check_qc_issue(issue: Any, schema: str = TAKE, where: str = "qc.issues[]") -> None:

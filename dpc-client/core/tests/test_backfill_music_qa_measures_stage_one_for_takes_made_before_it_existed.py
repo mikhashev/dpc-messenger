@@ -231,3 +231,70 @@ async def test_the_job_qc_says_whether_a_judge_alias_is_configured(tmp_path):
     service.settings.get = lambda section, key, fallback=None: (
         "music_flamingo" if (section, key) == ("music", "qc_judge_alias") else fallback)
     assert (await service.get_music_job_qc(job_id=job["id"]))["judge_alias"] == "music_flamingo"
+
+
+@pytest.mark.asyncio
+async def test_a_take_whose_length_cannot_be_recovered_is_marked_unmeasurable_and_skipped_next_time(tmp_path):
+    """Follow-up 16 (Zcode #188, finding 6): no requested length, so the length gate can never pass;
+    the second library-wide run neither runs ffmpeg, nor writes, nor broadcasts. `force` and a new
+    file hash measure it again."""
+    service = _Service(tmp_path / "dpc")
+    store = service._music_jobs_instance
+    job = running_job(store, variants=1)          # the job has no duration_s either
+    path = _sine(tmp_path / "none.wav")
+    take = store.add_take(job["id"], variant=1, file_uri=path.as_uri(), content_hash=f"sha256:{1:064x}", title="v1",
+                          seed=1, synth_batch_size=1, synth_batch_index=0, payload="lm.request.json",
+                          sample_rate=16000, channels=1, duration_s=0.2)
+    job = store.finish_job(job["id"])
+    # a take of an old job: no length was recorded anywhere (a current job always has `duration_s`)
+    service._backfill_terms = lambda t, j: {"requested_s": None, "length_mode": qa.LENGTH_EXACT}
+    first = await service.backfill_music_qa()
+    assert first["counts"]["measured"] == 1 and len(service.calls) == 1
+    report = store.get_take(take["id"])["qa_report"]
+    js.check_qa_report(report)
+    assert report["verdict"] == "not_measured"
+    mark = report["unmeasurable"]
+    assert mark["attempts"] == 1 and mark["file_hash"] == f"sha256:{1:064x}" and mark["last_attempt_at"]
+    assert "length" in mark["reason"]
+    service.broadcasts.clear()
+    again = await service.backfill_music_qa()
+    assert again["counts"] == {"measured": 0, "skipped": 1, "no_file": 0, "failed": 0}
+    assert len(service.calls) == 1 and service.broadcasts == []
+    assert store.get_take(take["id"])["qa_report"]["unmeasurable"] == mark       # nothing was written
+    forced = await service.backfill_music_qa(take_id=take["id"], force=True)
+    assert forced["takes"][0]["outcome"] == "measured" and len(service.calls) == 2
+    assert store.get_take(take["id"])["qa_report"]["unmeasurable"]["attempts"] == 2
+    # the file's hash changed (inputs changed): measured again, the counter starts over
+    with store._lock:
+        store._take(take["id"])[1]["file"]["content_hash"] = f"sha256:{2:064x}"
+    changed = await service.backfill_music_qa()
+    assert changed["counts"]["measured"] == 1 and len(service.calls) == 3
+    assert store.get_take(take["id"])["qa_report"]["unmeasurable"]["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_take_that_stays_not_measured_for_another_reason_gets_a_bounded_number_of_attempts(tmp_path):
+    from dpc_client_core.music import qc_commands
+
+    def meter(path, **kwargs):
+        service.calls.append((Path(path).name, kwargs))
+        rec = qa.not_measured_record("ffmpeg could not read the file", requested_s=kwargs["requested_s"])
+        return rec
+    service = _Service(tmp_path / "dpc", meter=meter)
+    store = service._music_jobs_instance
+    job, takes = _old_job(store, tmp_path, files=(True,))
+    for _ in range(qc_commands.UNMEASURABLE_ATTEMPTS + 2):
+        await service.backfill_music_qa()
+    assert len(service.calls) == qc_commands.UNMEASURABLE_ATTEMPTS
+    mark = store.get_take(takes[0]["id"])["qa_report"]["unmeasurable"]
+    assert mark["attempts"] == qc_commands.UNMEASURABLE_ATTEMPTS and "ffmpeg could not read" in mark["reason"]
+
+
+def test_the_unmeasurable_mark_has_its_schema_shape():
+    rec = qa.not_measured_record("x")
+    report = {**rec["qa_report"], "unmeasurable": {"reason": "r", "attempts": 1, "last_attempt_at": "t", "file_hash": None}}
+    js.check_qa_report(report)
+    for bad in ({"reason": "r"}, {"reason": "r", "attempts": 0, "last_attempt_at": "t", "file_hash": None},
+                {"reason": "", "attempts": 1, "last_attempt_at": "t", "file_hash": None}):
+        with pytest.raises(js.SchemaError):
+            js.check_qa_report({**rec["qa_report"], "unmeasurable": bad})

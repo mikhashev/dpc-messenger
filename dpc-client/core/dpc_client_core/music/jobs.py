@@ -918,6 +918,18 @@ class MusicJobStore:
             raise MusicJobError("invalid_params", f"payload name {name!r}: lowercase letters, digits, '.', '_', '-'; "
                                                   "at most 64", field="name")
 
+    @staticmethod
+    def _payload_too_large_hint(name: str) -> str:
+        """What the person can change, by what the payload is (follow-up 16, Zcode #188 finding 10):
+        a `*.result.json` is the engine's answer (audio codes, a transcription: bytes the person did not
+        write), the edit request carries the note and the region, every other request carries the lyrics
+        and the style."""
+        if ".result." in name:
+            return "the engine's answer is that large; ask for a shorter length or fewer variants"
+        if name.startswith("edit."):
+            return "shorten the note of the edit or its region"
+        return "shorten the lyrics or the style"
+
     def write_payload(self, job_id: str, name: str, body: bytes, *, endpoint: Optional[str] = None) -> dict:
         """Write the exact bytes the engine will receive, before they are sent, and record
         them on the job. Allowed while the job is queued or running. A name is written once
@@ -930,7 +942,7 @@ class MusicJobStore:
         if len(body) > MAX_PAYLOAD_BYTES:
             raise MusicJobError(
                 "payload_too_large", f"payload {name!r} is {len(body)} bytes and a payload is at most "
-                                     f"{MAX_PAYLOAD_BYTES} bytes: shorten the lyrics or the style", field="body")
+                                     f"{MAX_PAYLOAD_BYTES} bytes: {self._payload_too_large_hint(name)}", field="body")
         if endpoint is not None and not isinstance(endpoint, str):
             raise MusicJobError("invalid_params", "endpoint must be text", field="endpoint")
         with self._lock:

@@ -12,9 +12,16 @@ one step (`store.atomic_write_json`), read with `store.load_records` so a file t
 not parse is moved aside and a record that fails its schema is kept aside, never lost.
 
 **When an entry is removed** (`remove_missing_music_tracks`, a folder removal, deleting a
-generated file) its comments file is **kept** on disk: it is a few KB of the person's own
-words, and nothing reads it once the id is gone. It is not cleaned up; a later change can
-sweep files whose id the library no longer knows.
+generated file) its comments file is **kept** on disk when it holds comments: it is a few KB
+of the person's own words. `sweep_orphans` (run once, on the first comments call after the core starts)
+removes only the files of an id the library no longer knows that hold no comment (`[]`): what a
+merge or the deletion of a track's last comment leaves.
+
+**A merge past the cap** (follow-up 16, Zcode #188 finding 9): the moved comments are attached
+to the surviving track even when that takes it over `MAX_COMMENTS_PER_TRACK`; the cap only
+refuses an add. The earlier way, writing the surplus back to the folded entry's file, left
+comments under an id the library had deleted (`unknown_track` for good, nobody to clean the
+file). An over-cap track lists all its comments and refuses adds until some are deleted.
 
 The core reads and writes the fields SPEC §4 names. `action` is `note` or one of the built
 region edits (`regenerate_region`, `fix_seam`, `remove_region`, `region_edit.py`), which need a
@@ -29,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import secrets
 import threading
@@ -132,6 +140,7 @@ class MusicComments:
         # file also runs under `_file_lock`, a thread lock `merge` takes too.
         self._lock = asyncio.Lock()
         self._file_lock = threading.RLock()
+        self._swept = False
 
     def comments_path(self, track_id: str) -> Path:
         if not isinstance(track_id, str) or not schemas.TRACK_ID_RE.match(track_id):
@@ -149,8 +158,22 @@ class MusicComments:
         d = self.library.get_entry(track_id).get("duration_s")
         return float(d) if isinstance(d, (int, float)) and not isinstance(d, bool) and d > 0 else None
 
+    def _sweep_once(self) -> None:
+        """`sweep_orphans` on the first call only; a failure is logged, never raised."""
+        with self._file_lock:
+            if self._swept:
+                return
+            self._swept = True
+        try:
+            removed = self.sweep_orphans()
+            if removed:
+                logger.info("music: removed %d empty comments file(s) of removed tracks", removed)
+        except Exception:
+            logger.warning("music: the orphan comments sweep failed", exc_info=True)
+
     async def list(self, track_id: str) -> List[dict]:
         self._duration(track_id)
+        await asyncio.to_thread(self._sweep_once)
         comments = await asyncio.to_thread(self._read, track_id)
         return sorted(copy.deepcopy(comments), key=_sort_key)
 
@@ -240,8 +263,9 @@ class MusicComments:
         (re-keyed) and its file goes. Synchronous: the library calls it from `_delete_entry`,
         on the loop or in a worker thread, so it cannot wait on the asyncio lock; it takes the
         thread lock every comment write holds, so an add that is writing `from_id` finishes
-        first and its comment moves with the rest. The moved comments are capped like an add
-        (the surplus stays in `from_id`'s file, which is then kept)."""
+        first and its comment moves with the rest. Every moved comment is attached to `to_id`,
+        also past `MAX_COMMENTS_PER_TRACK` (the cap refuses adds, it never loses a comment); the
+        file of `from_id` then goes."""
         if from_id == to_id:
             return
         src = self.comments_path(from_id)
@@ -253,16 +277,41 @@ class MusicComments:
                 existing = self._read(to_id)
                 have = {c["id"] for c in existing}
                 fresh = [c for c in moved if c["id"] not in have]
-                room = max(0, MAX_COMMENTS_PER_TRACK - len(existing))
-                take, left = fresh[:room], fresh[room:]
-                existing.extend({**c, "track_id": to_id} for c in take)
+                existing.extend({**c, "track_id": to_id} for c in fresh)
                 self._write(to_id, existing)
-                if left:
-                    # Never lose a comment to the cap: the surplus stays in the file it came from.
-                    logger.warning("music: %s is full, %d comment(s) of %s stay in its file", to_id, len(left), from_id)
-                    self._write(from_id, left)
-                    return
+                if len(existing) > MAX_COMMENTS_PER_TRACK:
+                    logger.warning("music: %s has %d comments (over the %d cap) after folding %s into it; "
+                                   "adds are refused until some are deleted", to_id, len(existing),
+                                   MAX_COMMENTS_PER_TRACK, from_id)
             try:
                 src.unlink()
             except OSError:
                 logger.warning("music: could not remove %s after moving its comments to %s", src.name, to_id)
+
+    def sweep_orphans(self) -> int:
+        """Remove the comments files of an id the library no longer knows that hold no comment
+        (an empty JSON array). A file with comments, one that does not parse and a name that is
+        not a track id are never touched. Returns how many files went. Synchronous, thread-safe."""
+        removed = 0
+        with self._file_lock:
+            try:
+                files = sorted(self.root.glob("*.json"))
+            except OSError:
+                return 0
+            for path in files:
+                track_id = path.stem
+                if not schemas.TRACK_ID_RE.match(track_id):
+                    continue
+                try:
+                    self.library.get_entry(track_id)
+                    continue                      # a live track keeps its (empty) file
+                except MusicLibraryError:
+                    pass
+                try:
+                    if json.loads(path.read_text(encoding="utf-8")) != []:
+                        continue
+                    path.unlink()
+                    removed += 1
+                except (OSError, ValueError):
+                    continue
+        return removed
