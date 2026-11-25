@@ -33,7 +33,7 @@ export const MUSIC_TOOL_CATEGORY: PermissionCategory = {
     { key: 'music_check', label: 'Check Job', desc: 'One look at a music job: its state and, when done, its takes' },
     { key: 'music_wait', label: 'Wait for Job', desc: 'Wait for a music job to finish (blocking, up to 15 minutes a turn)' },
     { key: 'music_cancel_job', label: 'Cancel Job', desc: 'Cancel a music job this agent proposed' },
-    { key: 'music_list_takes', label: 'List Takes', desc: "A job's takes: id, length, loudness, file" },
+    { key: 'music_list_takes', label: 'List Takes', desc: "A job's takes: id, length, loudness, QA verdict, file" },
     { key: 'music_list_library', label: 'List Library', desc: "The music library's tracks and your playlists (read-only)" },
     { key: 'music_get_lyrics', label: 'Get Lyrics', desc: "A library track's lyrics from what DPC stores locally (never asks the internet)" },
     { key: 'music_playlist_add', label: 'Add to Playlist', desc: 'Add library tracks to the end of one of your playlists' },

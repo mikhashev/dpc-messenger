@@ -34,6 +34,7 @@
     takeDecisionText,
     takeInfo,
     takeLetter,
+    takeQaBadge,
     type FailureClass,
     type MusicJob,
     type MusicTake,
@@ -351,13 +352,20 @@
 
     <ol class="rows takes">
       {#each takes as t, i (t.id)}
+        {@const qa = takeQaBadge(t)}
         <li class="take" class:current={i === current}>
           <div class="take-head">
             <span class="take-letter">{takeLetter(i)}</span>
             <span class="track-title">{t.title}</span>
             {#if t.decision !== 'pending'}<span class="tag" class:warn={t.decision === 'rejected'}>{takeDecisionText(t)}</span>{/if}
             {#if lm.matched && (lm.db[i] ?? 0) <= -0.05}<span class="tag">{formatDb(lm.db[i])} dB</span>{/if}
+            <span class="tag qa" class:ok={qa.kind === 'passed'} class:warn={qa.kind === 'failed'} title={qa.details.join(' | ')}>{qa.label}</span>
           </div>
+          {#if qa.kind === 'failed'}
+            <ul class="muted tiny qa-details">
+              {#each qa.details.slice(0, 4) as d}<li>{d}</li>{/each}
+            </ul>
+          {/if}
           <p class="muted tiny">{takeInfo(t)}</p>
           {#if !t.library_track_id}<p class="muted tiny">Not in the library: it cannot play here.</p>{/if}
           {#if takeDecidable(job, t)}

@@ -34,6 +34,7 @@ import {
     takeDecidable,
     takeDecisionText,
     takeInfo,
+    takeQaBadge,
     upsertJob,
     validateFromTextForm,
     instrumentalChoiceText,
@@ -539,5 +540,44 @@ describe('an Instrumental job on YuE2 says which engine and adapter it will use'
         expect(jobVoiceName(j)).toBe('voice-a');
         expect(jobVoiceName(job({ params: { adapters: [{ name: INST }] },
             engine_choice: { rule: 'instrumental', engine: 'yue2', adapters: [INST], fallback: 'acestep', reason: 'x' } }))).toBeNull();
+    });
+});
+
+describe('the QA badge beside a take', () => {
+    const gate = (status: string, detail = `${status} detail`) => ({ status, detail });
+    const report = (gates: Record<string, { status: string; detail: string }>, verdict: string, note?: string) => ({
+        stage: 1, verdict, gates, note: note ?? null,
+    });
+    const base: MusicTake = { id: 'tak_1', job_id: 'job_a', variant: 1, title: 't', decision: 'pending', file: { uri: 'file:///x.flac', content_hash: null } };
+    const allPass = { length: gate('pass'), clipping: gate('pass'), true_peak: gate('pass'), silence: gate('pass') };
+
+    it('says passed only when every gate passed', () => {
+        const b = takeQaBadge({ ...base, qa_report: report(allPass, 'passed') });
+        expect(b).toMatchObject({ kind: 'passed', label: 'QA passed' });
+        expect(b.details).toHaveLength(4);
+    });
+
+    it('names the failed gates, in the gates order, with their details', () => {
+        const b = takeQaBadge({ ...base, qa_report: report({ ...allPass, silence: gate('fail', '4.0 s of silence at the start'), clipping: gate('fail', '12 sample(s)') }, 'failed') });
+        expect(b.kind).toBe('failed');
+        expect(b.label).toBe('QA failed: clipping, silence');
+        expect(b.details).toEqual(['clipping: 12 sample(s)', 'silence: 4.0 s of silence at the start']);
+    });
+
+    it('shows a failed gate even when another gate was not measured', () => {
+        const b = takeQaBadge({ ...base, qa_report: report({ ...allPass, length: gate('fail', 'too short'), true_peak: gate('not_measured', 'no peak') }, 'failed') });
+        expect(b.label).toBe('QA failed: length');
+        expect(b.details).toEqual(['length: too short', 'true peak: no peak']);
+    });
+
+    it('never shows a take as passed when a gate was not measured or there is no report', () => {
+        const unmeasured = takeQaBadge({ ...base, qa_report: report({ ...allPass, clipping: gate('not_measured', 'astats printed no peak level') }, 'not_measured') });
+        expect(unmeasured).toMatchObject({ kind: 'unknown', label: 'QA not measured' });
+        expect(unmeasured.details).toEqual(['clipping: astats printed no peak level']);
+        const none = takeQaBadge(base);
+        expect(none).toMatchObject({ kind: 'unknown', label: 'QA not measured' });
+        expect(takeQaBadge({ ...base, qa_report: null }).kind).toBe('unknown');
+        // a report whose verdict is not "passed" is not a pass, whatever its gates say
+        expect(takeQaBadge({ ...base, qa_report: report(allPass, 'not_measured') }).kind).toBe('unknown');
     });
 });

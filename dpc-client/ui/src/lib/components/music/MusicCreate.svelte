@@ -542,6 +542,8 @@
   .mc-root :global(.track-title) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mc-root :global(.tag) { font-size: 11px; padding: 1px 6px; border-radius: 5px; background: #31353d; color: #c9d1d9; white-space: nowrap; }
   .mc-root :global(.tag.warn) { background: #3d3016; color: #f0c674; }
+  .mc-root :global(.tag.ok) { background: #1b3323; color: #9fd8ac; }
+  .mc-root :global(.qa-details) { margin: 2px 0 0; padding-left: 18px; color: #f0c674; }
   .job { align-items: flex-start; }
   .job.failed .job-state { color: #f5a5a5; }
   .job-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }

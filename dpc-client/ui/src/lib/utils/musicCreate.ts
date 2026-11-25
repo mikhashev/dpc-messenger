@@ -66,6 +66,22 @@ export interface TakeLoudness {
     measured_at: string;
 }
 
+/** One stage-1 QA gate of a take's `qa_report` (core `qa.py`). */
+export interface TakeQaGate {
+    status: 'pass' | 'fail' | 'not_measured' | string;
+    detail: string;
+}
+
+/** A take's stage-1 QA report: four gates and a verdict. Seams and lyrics WER are advisory and never gate. */
+export interface TakeQaReport {
+    stage: number;
+    verdict: 'passed' | 'failed' | 'not_measured' | string;
+    gates: Record<string, TakeQaGate>;
+    advisory?: Record<string, { status: string; reason?: string }>;
+    measurements?: Record<string, unknown>;
+    note?: string | null;
+}
+
 export interface MusicTake {
     id: string;
     job_id: string;
@@ -82,6 +98,9 @@ export interface MusicTake {
     reason_class?: string | null;
     decided_at?: string | null;
     loudness?: TakeLoudness | null;
+    /** The stage-1 `mp.qa/1`, or null when it could not be filled (the report says why). */
+    qa?: Record<string, unknown> | null;
+    qa_report?: TakeQaReport | null;
     engine?: string | null;
     lm_seed?: number | null;
 }
@@ -697,6 +716,45 @@ export function takeInfo(take: MusicTake): string {
         parts.push(`${formatDb(l.lufs_i)} LUFS${tp}`);
     } else parts.push('loudness not measured');
     return parts.join(' · ');
+}
+
+/** The gate names in the order the review shows them, with their plain words. */
+const QA_GATE_WORDS: Record<string, string> = {
+    length: 'length',
+    clipping: 'clipping',
+    true_peak: 'true peak',
+    silence: 'silence',
+};
+
+export interface TakeQaBadge {
+    kind: 'passed' | 'failed' | 'unknown';
+    /** "QA passed", "QA failed: clipping, silence" or "QA not measured". */
+    label: string;
+    /** One line per gate that failed or was not measured, for the hover text. */
+    details: string[];
+}
+
+/**
+ * The badge beside a take: passed, the failed gates by name, or not measured. A take with no
+ * report (made before stage-1 QA) and a gate that could not be measured are never shown as a pass.
+ * QA flags a take; it never rejects it, so a failure is amber text, not a block.
+ */
+export function takeQaBadge(take: MusicTake): TakeQaBadge {
+    const report = take.qa_report;
+    if (!report || typeof report !== 'object' || !report.gates) {
+        return { kind: 'unknown', label: 'QA not measured', details: ['No stage-1 QA record on this take.'] };
+    }
+    const names = Object.keys(QA_GATE_WORDS);
+    const failed = names.filter(n => report.gates[n]?.status === 'fail');
+    const unknown = names.filter(n => report.gates[n]?.status !== 'pass' && report.gates[n]?.status !== 'fail');
+    const line = (n: string) => `${QA_GATE_WORDS[n]}: ${report.gates[n]?.detail ?? 'not measured'}`;
+    if (failed.length) {
+        return { kind: 'failed', label: `QA failed: ${failed.map(n => QA_GATE_WORDS[n]).join(', ')}`, details: [...failed, ...unknown].map(line) };
+    }
+    if (unknown.length || report.verdict !== 'passed') {
+        return { kind: 'unknown', label: 'QA not measured', details: unknown.map(line).concat(report.note ? [report.note] : []) };
+    }
+    return { kind: 'passed', label: 'QA passed', details: names.map(line) };
 }
 
 /** "Kept", "Discarded: muddy mix (struct)", or '' while pending. */
