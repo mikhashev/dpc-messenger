@@ -22,6 +22,7 @@
   import { ownerUserIdFromAgent, ownerUserIdToSend } from '$lib/utils/telegramOwner';
   import { agentStatusLine, buttonSummary, chatNamer } from '$lib/utils/agentMap';
   import { musicButtonSummary } from '$lib/services/music';
+  import MarqueeText from './MarqueeText.svelte';
 
   // Account balance rows (one per DeepSeek/NeuralDeep/... account, 2026-09-28
   // — was a single hard-coded DeepSeek pill with no provider name). Level
@@ -1014,7 +1015,7 @@
         <button type="button" class="btn-agent-map btn-music-player" onclick={onOpenMusicPlayer} title="Listen to your music library; minimised, it keeps playing across chats">
           <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
           <span class="agent-map-label">MUSIC PLAYER</span>
-          {#if $musicButtonSummary}<span class="agent-map-summary music-player-summary" title={$musicButtonSummary}>{$musicButtonSummary}</span>{/if}
+          {#if $musicButtonSummary}<span class="agent-map-summary music-player-summary" title={$musicButtonSummary}><MarqueeText text={$musicButtonSummary} /></span>{/if}
         </button>
       {/if}
       <ul>
@@ -2081,11 +2082,15 @@
     color: #4b5563;
   }
 
+  /* The title is a ticker (MarqueeText) that scrolls only when it overflows; the whole button
+     is its hover target, so the line holds still while the pointer is on the button. */
   .music-player-summary {
     min-width: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  }
+  .btn-music-player:hover :global(.marquee.run .marquee-inner),
+  .btn-music-player:focus-visible :global(.marquee.run .marquee-inner) {
+    animation-play-state: paused;
   }
 
   .btn-add-agent {

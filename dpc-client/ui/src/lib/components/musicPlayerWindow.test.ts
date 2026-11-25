@@ -20,7 +20,14 @@ describe('the Music Player button sits next to AGENTS MAP', () => {
 
     it('says what is playing, from the page-level store', () => {
         expect(sidebar).toContain("import { musicButtonSummary } from '$lib/services/music';");
-        expect(sidebar).toContain('{$musicButtonSummary}');
+        expect(sidebar).toContain('<MarqueeText text={$musicButtonSummary} />');
+    });
+
+    it('shows a long title as a ticker on the button and in the mini bar, not cut off', () => {
+        expect(sidebar).toContain("import MarqueeText from './MarqueeText.svelte';");
+        expect(player).toContain("import MarqueeText from '../MarqueeText.svelte';");
+        expect(player).toMatch(/<span id="music-player-title" class="mini-title"[^>]*>\s*<MarqueeText /);
+        expect(sidebar).toContain('.btn-music-player:hover :global(.marquee.run .marquee-inner)');
     });
 });
 

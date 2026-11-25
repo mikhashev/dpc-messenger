@@ -46,6 +46,7 @@
   import MusicCreate from './MusicCreate.svelte';
   import MusicComments from './MusicComments.svelte';
   import MusicWaveform from './MusicWaveform.svelte';
+  import MarqueeText from '../MarqueeText.svelte';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import { revealInFolder } from '$lib/utils/revealInFolder';
   import { isCommentShortcut } from '$lib/utils/musicComments';
@@ -905,8 +906,9 @@
       {#if minimised}
         <div class="mini">
           {@render transport(true)}
+          <!-- A long title runs like a ticker, only when it overflows (MarqueeText). -->
           <span id="music-player-title" class="mini-title" title={cur?.title ?? 'Music Player'}>
-            {$musicReview.active ? 'Reviewing takes' : (cur?.title ?? 'Music Player')}
+            <MarqueeText text={$musicReview.active ? 'Reviewing takes' : (cur?.title ?? 'Music Player')} title={cur?.title ?? 'Music Player'} />
           </span>
           {#if $musicPosition && miniShows.position}<span class="mini-pos" title="Track k of n in Up next">{$musicPosition}</span>{/if}
           {#if miniShows.modes}{@render modeButtons(true)}{/if}
