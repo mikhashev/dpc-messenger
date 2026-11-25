@@ -21,6 +21,10 @@ would delete the top of this model's ladder before the template ever saw the
 word. The translation table here is local, loud (one log line per alias), and
 measured against the template, per Mike's 2026-08-19 direction that the
 dictionary comes from the model's jinja file.
+
+An alias with an `mmproj` and no `mmproj_kind` is read as `vision` on purpose:
+aliases written before audio feed images, and audio is never offered on a guess.
+A live child's `/props` `modalities` decide once it answers; an exited child's do not.
 """
 
 import asyncio
@@ -131,6 +135,9 @@ AUDIO_FORMATS = ("wav", "mp3", "flac")
 MAX_AUDIO_BYTES = 64 * 1024 * 1024
 
 
+_NO_PROC_ATTR = object()
+
+
 def mmproj_kind_of(alias: str, config: Dict[str, Any]) -> Optional[str]:
     """The alias's `mmproj_kind`, None when it names no projector. Absent means `vision`
     (aliases written before audio); a value outside `MMPROJ_KINDS` is refused, since a wrong
@@ -160,7 +167,7 @@ def audio_format_of(data: bytes) -> Optional[str]:
     return None
 
 
-def audio_part(audio: Union[bytes, bytearray, str, Path], alias: str) -> Tuple[Dict[str, Any], int]:
+def audio_part(audio: Union[bytes, bytearray, memoryview, str, Path], alias: str) -> Tuple[Dict[str, Any], int]:
     """`(the input_audio content part, the byte count)` for raw bytes or a local file path.
 
     The part is the OpenAI-compatible shape the pinned llama-server reads (b12110
@@ -169,7 +176,9 @@ def audio_part(audio: Union[bytes, bytearray, str, Path], alias: str) -> Tuple[D
     The server takes `data` (or `url`) as raw base64 or a data URI and decodes the container
     from its header; `format` is ignored there ("redundant") and sent for OpenAI-shaped
     readers. Refused here, before any call: a path that is not a file, an empty or oversized
-    body, a container the server cannot decode."""
+    body, a container the server cannot decode. Each intermediate copy (a path's raw bytes,
+    the base64 bytes) is dropped as soon as the next one exists, and a bytearray is read
+    through a view rather than copied."""
     import base64
 
     if isinstance(audio, (str, Path)):
@@ -182,8 +191,10 @@ def audio_part(audio: Union[bytes, bytearray, str, Path], alias: str) -> Tuple[D
                 f"Provider '{alias}': the audio is {size / (1024 * 1024):.0f} MiB, above the "
                 f"{MAX_AUDIO_BYTES // (1024 * 1024)} MiB a request to llama-server can carry")
         data = path.read_bytes()
-    elif isinstance(audio, (bytes, bytearray)):
-        data = bytes(audio)
+    elif isinstance(audio, bytes):
+        data = audio
+    elif isinstance(audio, (bytearray, memoryview)):
+        data = memoryview(audio).cast("B")
     else:
         raise ValueError(f"Provider '{alias}' was given audio that is neither bytes nor a file path")
     if not data:
@@ -197,9 +208,24 @@ def audio_part(audio: Union[bytes, bytearray, str, Path], alias: str) -> Tuple[D
         raise ValueError(
             f"Provider '{alias}' was given audio that is not WAV, MP3 or FLAC (the containers "
             "llama-server decodes); convert it first")
-    part = {"type": "input_audio",
-            "input_audio": {"data": base64.b64encode(data).decode("ascii"), "format": fmt}}
-    return part, len(data)
+    size = len(data)
+    encoded = base64.b64encode(data)
+    del data
+    text = encoded.decode("ascii")
+    del encoded
+    part = {"type": "input_audio", "input_audio": {"data": text, "format": fmt}}
+    return part, size
+
+
+def audio_record_part(part: Dict[str, Any], size: int) -> Dict[str, Any]:
+    """The stand-in of an `input_audio` part for the call record and the KV prefix digests
+    (`_ensure_for`): a hash and the size instead of the base64, so an attempt does not
+    serialise the whole clip again to fingerprint it. The wire carries the part itself."""
+    import hashlib
+    data = part["input_audio"]["data"]
+    return {"type": "input_audio", "input_audio": {
+        "sha256_of_base64": hashlib.sha256(data.encode("ascii")).hexdigest(), "bytes": size,
+        "format": part["input_audio"]["format"]}}
 
 
 def _flags_of(config: Dict[str, Any]) -> tuple:
@@ -1313,8 +1339,15 @@ class LlamaServerProvider(DeepSeekProvider):
     def _live_modality(self, name: str) -> Optional[bool]:
         """`/props` `modalities.<name>` of a live child (`vision`, `audio`, `video`; b12110
         server-context.cpp writes all three from the loaded projector), None while no child
-        has answered or the key is absent."""
-        props = getattr(self.supervisor, "props", None) if self.supervisor is not None else None
+        has answered or the key is absent. An exited or stopped child is no child, as in
+        `_reported_window`. A supervisor double with no `_proc` attribute is read by its props."""
+        sup = self.supervisor
+        if sup is None:
+            return None
+        proc = getattr(sup, "_proc", _NO_PROC_ATTR)
+        if proc is None or (proc is not _NO_PROC_ATTR and getattr(proc, "returncode", None) is not None):
+            return None
+        props = getattr(sup, "props", None)
         if not props:
             return None
         modal = props.get("modalities")
@@ -2008,12 +2041,16 @@ class LlamaServerProvider(DeepSeekProvider):
                 "modalities.audio")
         self._last_thinking = None
         self._last_usage = None
+        # Built once and sent by every retry; each attempt's record sees only its hash.
         part, size = audio_part(audio, self.alias)
-        content: List[Dict[str, Any]] = [part, {"type": "text", "text": prompt}]
-        messages = [{"role": "user", "content": content}]
+        fmt = part["input_audio"]["format"]
+        messages = [{"role": "user", "content": [part, {"type": "text", "text": prompt}]}]
+        record_messages = [{"role": "user", "content": [audio_record_part(part, size),
+                                                        {"type": "text", "text": prompt}]}]
+        del part
 
         async def _call():
-            client = await self._ensure_for(messages)
+            client = await self._ensure_for(record_messages)
             import time as _time
             _t0 = _time.perf_counter()  # after ensure: cold start stays out of the number
             effort = kwargs.get("reasoning_effort")
@@ -2050,8 +2087,7 @@ class LlamaServerProvider(DeepSeekProvider):
                 max_tokens=kwargs.get("max_tokens", self.max_tokens),
                 engine_timings=(getattr(resp, "model_extra", None) or {}).get("timings"),
             )
-            logger.info("llamacpp audio: alias=%s sent %d bytes (%s)", self.alias, size,
-                        part["input_audio"]["format"])
+            logger.info("llamacpp audio: alias=%s sent %d bytes (%s)", self.alias, size, fmt)
             return msg.content or ""
 
         try:

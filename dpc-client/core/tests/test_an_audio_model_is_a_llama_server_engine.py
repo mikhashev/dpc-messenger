@@ -13,6 +13,7 @@ decides, after it `/props` `modalities` does, a yes and a no alike.
 import base64
 import json
 import struct
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -20,7 +21,7 @@ from openai import AsyncOpenAI
 
 from dpc_client_core.providers import LlamaServerProvider
 from dpc_client_core.providers.llamacpp_server_provider import (
-    _ACTIVE_SUPERVISORS, MAX_AUDIO_BYTES, audio_format_of, audio_part, mmproj_kind_of,
+    _ACTIVE_SUPERVISORS, _WIRE_MESSAGES, MAX_AUDIO_BYTES, audio_format_of, audio_part, mmproj_kind_of,
 )
 
 GGUF = "D:/models/music-flamingo-hf.Q8_0.gguf"
@@ -151,6 +152,19 @@ def test_a_live_childs_props_decide_both_ways():
     assert r.supports_audio() and not r.supports_vision()
 
 
+def test_a_dead_or_stopped_childs_props_no_longer_speak_for_the_alias():
+    """Review #180 2.4: `/props` of an exited child still answered as if it were alive."""
+    p = _provider(mmproj="mm.gguf")                          # undeclared: an image projector
+    sup = _FakeSupervisor({"modalities": {"vision": False, "video": False, "audio": True}})
+    p.supervisor = sup
+    sup._proc = SimpleNamespace(returncode=None)              # alive: /props decide
+    assert p.supports_audio() and not p.supports_vision()
+    sup._proc = SimpleNamespace(returncode=1)                 # exited: the alias decides again
+    assert not p.supports_audio() and p.supports_vision()
+    sup._proc = None                                          # stopped
+    assert not p.supports_audio() and p.supports_vision()
+
+
 # -- the part ---------------------------------------------------------------------------
 
 
@@ -210,6 +224,48 @@ async def test_the_clip_rides_as_an_input_audio_part_on_the_wire(tmp_path):
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
     assert sup.ensure_calls == 1 and sup.slot_enters == 1
     assert p.get_last_usage()["prompt_tokens"] == 750
+
+
+@pytest.mark.asyncio
+async def test_the_clip_is_encoded_once_for_every_retry_and_each_attempts_record_sees_only_its_hash(tmp_path, monkeypatch):
+    """Review #180 2.3: the clip was serialised again on each attempt (bytes + base64 + text + JSON)."""
+    p = _provider(mmproj="mmproj.gguf", mmproj_kind="audio")
+    wav = _wav_bytes()
+    f = tmp_path / "take.wav"
+    f.write_bytes(wav)
+    encodes = []
+    real = base64.b64encode
+    monkeypatch.setattr(base64, "b64encode", lambda data, *a: encodes.append(len(data)) or real(data, *a))
+    bodies, seen = [], []
+
+    def flaky(request):
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return httpx.Response(503, json={"error": {"message": "loading model"}})
+        return httpx.Response(200, json={
+            "id": "c1", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 1, "total_tokens": 8}})
+    client = AsyncOpenAI(api_key="local", base_url="http://127.0.0.1:8123/v1", max_retries=0,
+                         http_client=httpx.AsyncClient(transport=httpx.MockTransport(flaky)))
+    p.supervisor = _FakeSupervisor()
+
+    async def _ensure():
+        seen.append(_WIRE_MESSAGES.get())
+        return client
+
+    async def _retry_now(fn, _err):
+        return await fn()
+    p._ensure = _ensure
+    p._retry_with_backoff = _retry_now
+
+    assert await p.generate_with_audio("caption", f) == "ok"
+    assert encodes == [len(wav)] and len(bodies) == 2
+    assert [b["messages"][0]["content"][0]["input_audio"]["data"] for b in bodies] == [real(wav).decode("ascii")] * 2
+    assert len(seen) == 2
+    for record in seen:
+        clip = record[0]["content"][0]["input_audio"]
+        assert "data" not in clip and clip["bytes"] == len(wav) and len(clip["sha256_of_base64"]) == 64
 
 
 @pytest.mark.asyncio
