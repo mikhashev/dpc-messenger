@@ -76,7 +76,7 @@ _NOT_BUILT_JOB_TYPES: Dict[str, Dict[str, str]] = {
     "generate_from_lyrics": {"status": PLANNED, "reason": "song from a track's lyrics is not built in DPC"},
     "cover": {"status": PLANNED, "reason": "cover is not built in DPC (YuE2-Studio or ACE-Step cover)"},
     "transcribe": {"status": PLANNED, "reason": "transcribe runs as the lyrics command, not as a job yet"},
-    "qc": {"status": PLANNED, "reason": "the QC layer is not built in DPC"},
+    "qc": {"status": PLANNED, "reason": "QC is folded into the take (mp.qc/1, qc.py, judge_music_take); no qc child job"},
     "generate_from_melody": {"status": PLANNED, "reason": "musician mode is not built in DPC"},
     "voice_clone": {"status": UNSUPPORTED, "reason": "no voice clone engine is chosen (research card, flow 26)"},
 }
@@ -113,7 +113,7 @@ QA_FIELD_STATUS: Dict[str, Dict[str, str]] = {
                          "over the local median step); null on a new take and a removed region; advisory, never a gate"},
     "clipped_samples": {"status": MEASURED, "reason": "qa.py, ffmpeg astats: samples at the peak when the peak is "
                         "0.999 of full scale or more (a lower bound)"},
-    "lyrics_wer": {"status": PLANNED, "reason": "needs the judge; not built in DPC"},
+    "lyrics_wer": {"status": MEASURED, "reason": "qc.py, in mp.qc/1 only (deterministic.lyrics_wer and lyrics_wer), from a stored unedited transcription of the take against the job's lyrics; advisory, never a gate or a rank; take.qa keeps null"},
 }
 
 _FEATURES: Dict[str, Dict[str, str]] = {
@@ -124,7 +124,7 @@ _FEATURES: Dict[str, Dict[str, str]] = {
     "lyrics_tags": {"status": SUPPORTED, "reason": "sidecar .lrc and file tags through ffprobe; ID3 SYLT is not read"},
     "lyrics_lrclib": {"status": SUPPORTED, "reason": "lrclib.net from core, on the person's explicit lookup"},
     "word_timings": {"status": PLANNED, "reason": "no forced aligner installed"},
-    "qc": {"status": PLANNED, "reason": "stage 1 (qa.py) is built; the stage-2 judge and QC ranking are not built in DPC"},
+    "qc": {"status": SUPPORTED, "reason": "mp.qc/1 on every take with stage 1 (qc.py, take.qc); the stage-2 audio judge runs only on judge_music_take when [music] qc_judge_alias names an audio llama-server alias; ranking by scores.overall is off by default ([music] qc_ranking, decision 26)"},
 }
 
 
@@ -475,8 +475,9 @@ class MusicCapabilities:
                    "field_status": {k: dict(v) for k, v in QA_FIELD_STATUS.items()}, "advisory": list(QA_ADVISORY),
                    "status": SUPPORTED,
                    "reason": "stage 1 is built for takes the runner makes (qa.py): one ffmpeg pass fills qa (mp.qa/1) and "
-                             "qa_report; the seam fields are measured on region-edit takes (advisory); loudness delta and "
-                             "lyrics WER are planned and null; QA flags a take and never rejects it",
+                             "qa_report; the seam fields are measured on region-edit takes (advisory); loudness delta is planned "
+                             "and null; lyrics WER is not in take.qa (null there) but is measured in mp.qc/1 (qc.py), "
+                             "advisory; QA flags a take and never rejects it",
                    "gates": {"names": ["length", "clipping", "true_peak", "silence"], "thresholds": dict(QA_THRESHOLDS),
                              "advisory_only": ["seams", "lyrics_wer"]}},
             "features": features,

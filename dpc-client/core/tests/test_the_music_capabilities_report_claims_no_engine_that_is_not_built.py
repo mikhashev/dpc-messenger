@@ -46,6 +46,12 @@ def test_every_job_type_and_edit_action_is_listed_with_a_status_and_a_reason():
     for planned in ("generate_similar", "generate_from_lyrics", "cover", "transcribe", "qc", "generate_from_melody"):
         assert report["job_types"][planned]["status"] == "planned"
     assert report["job_types"]["voice_clone"]["status"] == "unsupported"
+    # QC is not a child job: it is folded into the take (mp.qc/1), so the job type stays planned and the
+    # feature is supported, each with its own reason
+    assert "no qc child job" in report["job_types"]["qc"]["reason"]
+    qc = report["features"]["qc"]
+    assert qc["status"] == "supported" and "mp.qc/1" in qc["reason"] and "judge_music_take" in qc["reason"]
+    assert "off by default" in qc["reason"]
 
 
 def test_the_report_says_which_region_edits_are_built_and_extend_ending_is_not():
@@ -97,12 +103,16 @@ def test_the_qa_block_lists_the_spec_fields_and_says_which_ones_stage_1_measures
     # every field says whether anything produces it; stage 1 measures loudness, true peak and clipping
     assert set(qa["field_status"]) == set(qa["fields"])
     measured = {k for k, v in qa["field_status"].items() if v["status"] == "measured"}
+    # lyrics_wer is measured by qc.py inside mp.qc/1 only; take.qa keeps it null, and the qa reason says so
     assert measured == {"integrated_lufs", "true_peak_dbtp", "clipped_samples", "seam_start_jump_db",
-                        "seam_end_jump_db", "seam_click_score"}
+                        "seam_end_jump_db", "seam_click_score", "lyrics_wer"}
+    wer = qa["field_status"]["lyrics_wer"]["reason"]
+    assert "qc.py" in wer and "mp.qc/1" in wer and "never a gate" in wer and "take.qa keeps null" in wer
+    assert "lyrics WER is not in take.qa" in qa["reason"] and "measured in mp.qc/1" in qa["reason"]
     for k in ("seam_start_jump_db", "seam_end_jump_db", "seam_click_score"):
         assert "region-edit" in qa["field_status"][k]["reason"] and "never a gate" in qa["field_status"][k]["reason"]
-    for k in ("loudness_delta_lu", "lyrics_wer"):
-        assert qa["field_status"][k]["status"] == "planned" and qa["field_status"][k]["reason"]
+    assert qa["field_status"]["loudness_delta_lu"]["status"] == "planned"
+    assert qa["field_status"]["loudness_delta_lu"]["reason"]
     # the gates and the number that judges each; seams and WER never gate
     assert qa["gates"]["names"] == ["length", "clipping", "true_peak", "silence"]
     assert qa["gates"]["thresholds"]["tail_silence_max_s"] == 5.0 and qa["gates"]["thresholds"]["true_peak_max_dbtp"] == -1.0
