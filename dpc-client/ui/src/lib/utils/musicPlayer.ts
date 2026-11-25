@@ -210,6 +210,39 @@ export function stepQueue(q: QueueState, dir: 1 | -1, opts: StepOptions): StepRe
     return { kind: 'nothing-playable', message: NOTHING_PLAYABLE_TEXT };
 }
 
+/** Why the player moved (or tried to), for the debug log. */
+export type StepReason = 'ended' | 'ended+repeat-one' | 'next' | 'prev' | 'play' | 'row' | 'list';
+
+/** The state a debug line carries: repeat, shuffle, the queue's length and position, and whether
+ *  the audio element loops by itself (repeat one: it then never fires `ended`). */
+export function playerStateLine(s: { repeat: RepeatMode; shuffle: boolean; queue: QueueState; loop?: boolean | null }): string {
+    const n = s.queue.ids.length;
+    const pos = s.queue.index >= 0 && s.queue.index < n ? `${s.queue.index + 1}/${n}` : `-/${n}`;
+    return `repeat=${s.repeat} shuffle=${s.shuffle ? 'on' : 'off'} queue=${n} pos=${pos} context=${s.queue.context ?? '-'}` +
+        (s.loop == null ? '' : ` loop=${s.loop ? 'on' : 'off'}`);
+}
+
+/** The reason a track ended by itself moved: repeat one plays it again, anything else advances. */
+export function endedReason(repeat: RepeatMode): StepReason {
+    return repeat === 'one' ? 'ended+repeat-one' : 'ended';
+}
+
+/** One debug line for a step: its reason, what it did and the player's state before it. */
+export function stepLogLine(
+    reason: StepReason, r: StepResult, s: { repeat: RepeatMode; shuffle: boolean; queue: QueueState; loop?: boolean | null },
+): string {
+    const from = currentId(s.queue) ?? '-';
+    const to = r.kind === 'play' ? `play ${s.queue.ids[r.index] ?? '-'} (index ${r.index + 1})` +
+        (r.skipped.length ? ` skipped=${r.skipped.length}` : '') : r.kind === 'restart' ? `restart ${from}` : `${r.kind}: ${r.message}`;
+    return `track-change reason=${reason} from=${from} -> ${to} ${playerStateLine(s)}`;
+}
+
+/** Whether the element's time jumped back far enough between two `timeupdate`s to be a loop (the
+ *  element restarting the same track by itself, with no `ended`). */
+export function loopWrapped(previous: number, now: number): boolean {
+    return Number.isFinite(previous) && Number.isFinite(now) && previous - now > 1 && now < 1;
+}
+
 /** The end of the current track: repeat one plays it again, otherwise auto-advance. */
 export function onTrackEnded(q: QueueState, repeat: RepeatMode, playable: (id: string) => boolean): StepResult {
     if (repeat === 'one' && currentId(q) !== null) return { kind: 'restart' };

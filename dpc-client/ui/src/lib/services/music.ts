@@ -47,12 +47,15 @@ import {
     QUEUE_EMPTY_TEXT,
     currentId,
     cycleRepeat,
+    endedReason,
     enqueue,
     formatRanges,
     resolveDuration,
     loadMusicPreferences,
+    loopWrapped,
     onTrackEnded,
     playbackProblem,
+    playerStateLine,
     playableIds,
     positionLabel,
     queueClear,
@@ -62,8 +65,10 @@ import {
     saveMusicPreferences,
     shuffleOff,
     shuffleOn,
+    stepLogLine,
     stepQueue,
     throttle,
+    type StepReason,
     trackPlaybackUrl,
     VOLUME_SAVE_MS,
     callMusic,
@@ -442,7 +447,7 @@ function dlog(message: string): void {
     } catch { /* a log line never breaks playback */ }
 }
 
-const NEVER_FOLDED = new Set(['seek', 'seeking', 'seeked', 'error', 'ended', 'loadedmetadata', 'source']);
+const NEVER_FOLDED = new Set(['seek', 'seeking', 'seeked', 'error', 'ended', 'loadedmetadata', 'source', 'track', 'state', 'loop']);
 const FOLD_MS = 1000;
 const lastLogged = new Map<string, { at: number; folded: number }>();
 
@@ -459,6 +464,12 @@ function dlogEvent(kind: string, message: string): void {
         if (folded) message += ` (+${folded} folded)`;
     }
     dlog(message);
+}
+
+/** The player's state for a log line: repeat, shuffle, the queue's length and position, the element's loop. */
+function playerState(): string {
+    const s = get(musicPlayback);
+    return playerStateLine({ repeat: s.repeat, shuffle: s.shuffle, queue: s.queue, loop: audio ? audio.loop : null });
 }
 
 /** The element's state at this moment, for a log line. */
@@ -486,7 +497,7 @@ function attachDiagnostics(a: HTMLAudioElement): void {
         const delta = seekRequested == null ? 'n/a' : (a.currentTime - seekRequested).toFixed(2);
         dlogEvent('seeked', `seeked ${tag()} requested=${seekRequested?.toFixed(2) ?? 'none'} actual=${a.currentTime.toFixed(2)} delta=${delta} ${snapshot(a)}`);
     });
-    a.addEventListener('ended', () => dlogEvent('ended', `ended ${tag()} ${snapshot(a)}`));
+    a.addEventListener('ended', () => dlogEvent('ended', `ended ${tag()} ${snapshot(a)} ${playerState()}`));
     a.addEventListener('error', () => {
         if (!a.getAttribute('src')) return;
         dlogEvent('error', `error ${tag()} code=${a.error?.code ?? 'none'} message=${JSON.stringify(a.error?.message ?? '')} ${snapshot(a)}`);
@@ -511,8 +522,14 @@ function ensureAudio(): HTMLAudioElement | null {
         if (owner === 'review') musicReview.update(r => ({ ...r, playing: false }));
         else musicPlayback.update(s => ({ ...s, playing: false }));
     });
+    let lastUpdate = 0;
     a.addEventListener('timeupdate', () => {
         if (!current()) return;
+        // Repeat one makes the element loop by itself, with no `ended`: the wrap is the only trace.
+        if (owner === 'queue' && a.loop && loopWrapped(lastUpdate, a.currentTime)) {
+            dlogEvent('loop', `loop-restart #${audioToken} ${get(musicPlayback).loadedId ?? '-'} from=${lastUpdate.toFixed(2)} to=${a.currentTime.toFixed(2)} ${playerState()}`);
+        }
+        lastUpdate = a.currentTime;
         if (owner === 'review') musicReview.update(r => ({ ...r, currentTime: a.currentTime }));
         else musicPlayback.update(s => ({ ...s, currentTime: a.currentTime }));
     });
@@ -673,7 +690,9 @@ async function startAt(queue: QueueState, index: number, autoplay: boolean, resu
 
 /** Act on `r`, a step computed from `q`: its index is an index into `q`, never
  *  into a queue read later. */
-async function applyStep(r: StepResult, q: QueueState, autoplay: boolean): Promise<void> {
+async function applyStep(r: StepResult, q: QueueState, autoplay: boolean, reason: StepReason): Promise<void> {
+    const s = get(musicPlayback);
+    dlogEvent('track', stepLogLine(reason, r, { repeat: s.repeat, shuffle: s.shuffle, queue: q, loop: audio ? audio.loop : null }));
     switch (r.kind) {
         case 'restart':
             if (audio && get(musicPlayback).loadedId === currentId(q)) {
@@ -714,7 +733,7 @@ async function handleEnded(token: number): Promise<void> {
     if (token !== loadToken) return;
     const s = get(musicPlayback);
     const q = freshQueueAt(endedId);
-    await applyStep(onTrackEnded(q, s.repeat, playable), q, true);
+    await applyStep(onTrackEnded(q, s.repeat, playable), q, true, endedReason(s.repeat));
 }
 
 /** Next track (N). A step asked for before another load began (the track ended
@@ -727,7 +746,7 @@ export async function nextTrack(): Promise<void> {
     if (token !== loadToken) return;
     const s = get(musicPlayback);
     const q = freshQueueAt(from);
-    await applyStep(stepQueue(q, 1, { repeat: s.repeat, playable }), q, s.playing);
+    await applyStep(stepQueue(q, 1, { repeat: s.repeat, playable }), q, s.playing, 'next');
 }
 
 /** Previous track (P); past the first PREV_RESTART_S seconds it restarts the track. */
@@ -739,7 +758,7 @@ export async function prevTrack(): Promise<void> {
     const s = get(musicPlayback);
     const q = freshQueueAt(from);
     const currentTime = s.loadedId ? (audio?.currentTime ?? s.currentTime) : 0;
-    await applyStep(stepQueue(q, -1, { repeat: s.repeat, playable, currentTime }), q, s.playing);
+    await applyStep(stepQueue(q, -1, { repeat: s.repeat, playable, currentTime }), q, s.playing, 'prev');
 }
 
 /** Play / pause (Space). With nothing loaded it starts the current track of the queue,
@@ -763,13 +782,14 @@ export async function togglePlay(): Promise<void> {
         return;
     }
     // The current track cannot play: the next one that can, from here.
-    await applyStep(stepQueue(q, 1, { repeat: get(musicPlayback).repeat, playable }), q, true);
+    await applyStep(stepQueue(q, 1, { repeat: get(musicPlayback).repeat, playable }), q, true, 'play');
 }
 
 /** Play a list from `startId`, or from its start (a random track with shuffle on). */
 export async function playList(list: Playlist, startId: string | null = null): Promise<void> {
     const s = get(musicPlayback);
     const q = queueFromList(list.id, playableIds(list.track_ids, get(musicEntriesById)), { startId, shuffle: s.shuffle, playable: await playablePredicate() });
+    dlogEvent('track', `track-change reason=list list=${list.id} ${q ? `-> play ${currentId(q)}` : '-> nothing playable'} ${playerState()}`);
     if (!q) {
         say(list.track_ids.length ? `Nothing in "${list.name}" can play yet.` : `"${list.name}" is empty.`);
         return;
@@ -791,6 +811,7 @@ export function queueTrack(id: string, next = false): void {
 export async function playQueueAt(index: number): Promise<void> {
     const q = get(musicPlayback).queue;
     if (index < 0 || index >= q.ids.length) return;
+    dlogEvent('track', `track-change reason=row from=${currentId(q) ?? '-'} -> play ${q.ids[index]} (index ${index + 1}) ${playerState()}`);
     await startAt(q, index, true);
 }
 
@@ -817,6 +838,7 @@ export function setShuffle(on: boolean): void {
         text = r.restored ? 'Shuffle off: back to the list order.' : 'Shuffle off.';
     }
     musicPlayback.update(x => ({ ...x, shuffle: on, queue }));
+    dlogEvent('state', `shuffle ${on ? 'on' : 'off'} ${playerState()}`);
     remember();
     say(text);
 }
@@ -826,6 +848,7 @@ export function cycleRepeatMode(): void {
     const repeat = cycleRepeat(get(musicPlayback).repeat);
     musicPlayback.update(s => ({ ...s, repeat }));
     if (audio && owner === 'queue') audio.loop = repeat === 'one';
+    dlogEvent('state', `repeat ${repeat} ${playerState()}`);
     remember();
     say(repeat === 'one' ? 'Repeat: one (the track loops; Next and Prev still move).'
         : repeat === 'all' ? 'Repeat: all (the queue wraps around).' : 'Repeat: off.');

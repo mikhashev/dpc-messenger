@@ -16,7 +16,7 @@ describe('the schedule card for a check_back', () => {
     expect(musicJobSentence({
       about: '',
       music: { type: 'generate_from_text', style: 'slow piano', variants: 2, instrumental: true, engine: 'yue2', eta_seconds: 120 },
-    })).toBe('Run a music job on the GPU: generate from text, slow piano, 2 takes, instrumental, yue2 engine, about 2 min');
+    })).toBe('Run a music job on the GPU: generate from text, slow piano, 2 takes, instrumental, yue2 engine, up to 2 min');
     expect(musicJobSentence({ about: '', music: { style: 's', instrumental: false, engine: null } }))
       .toBe('Run a music job on the GPU: s, with lyrics, default engine');
   });

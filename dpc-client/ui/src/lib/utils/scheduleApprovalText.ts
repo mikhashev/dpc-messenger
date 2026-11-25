@@ -7,10 +7,11 @@
  * Approve or Refuse. The backend asks through the same gate
  * (`_await_schedule_approval`), so the same event carries both.
  *
- * Fields the card reads: `task_type`, `when`, `about` (all sent today). A `music_job`
- * `about` is already a sentence ("Generate music on the GPU: 2 variant(s), ...", cut
- * at 200 characters). When the backend also sends a structured `music` block, the
- * card builds the sentence from it, because `about` can be cut mid-style.
+ * Fields the card reads: `task_type`, `when`, `about`, and for a `music_job` the
+ * structured `music` block, which the backend sends beside `about` (`music_propose_job`,
+ * `_approval_parts`). The card builds its sentence from `music`, because `about` can be cut
+ * mid-style; `about` stays as the fallback sentence ("Run a music job on the GPU: ...") for a
+ * request that carries no block.
  */
 
 export const MUSIC_JOB_TASK_TYPE = 'music_job';
@@ -33,6 +34,8 @@ export interface MusicJobRequest {
   lyrics_excerpt?: string;
   /** The expected time on the card, in seconds. */
   eta_seconds?: number;
+  /** True when `eta_seconds` is a cap-based estimate (YuE2): the card reads it as "up to". */
+  eta_is_upper_bound?: boolean;
 }
 
 export const OWNER_APPROVAL_TASK_TYPE = 'owner_approval';
@@ -130,7 +133,7 @@ export function musicJobSentence(request: Pick<ApprovalRequestLike, 'about' | 'm
     parts.push(`${formatEta(m.duration_s)} long`);
   }
   const eta = formatEta(m?.eta_seconds);
-  if (eta) parts.push(`about ${eta}`);
+  if (eta) parts.push(`${m?.eta_is_upper_bound === true || m?.engine === 'yue2' ? 'up to' : 'about'} ${eta}`);
   if (parts.length > 0) return `Run a music job on the GPU: ${parts.join(', ')}`;
   const about = (request.about || '').trim();
   return about || 'Run a music job on the GPU';
