@@ -81,7 +81,6 @@ noticed until it becomes the primary path; folders may not nest.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import copy
 import hashlib
 import json
@@ -91,10 +90,11 @@ import re
 import secrets
 import threading
 import unicodedata
+import weakref
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 from . import schemas
 from .export import read_export_marker
@@ -634,22 +634,32 @@ class MusicLibrary:
                 return False
         return True
 
-    @contextlib.contextmanager
-    def _scanning(self):
-        """Mark a walk as in flight for `wait_hashed` while the block runs, even if it raises or is cancelled."""
+    def _scan_marked(self, make: Callable[[], Awaitable[Any]]) -> Awaitable[Any]:
+        """A walk `make` builds, marked as in flight for `wait_hashed` from this call on, not from the first step of
+        its coroutine: a scan task that is created but not yet run is seen too (the shape of the old `add_folder`
+        bug; follow-up 23, Zcode #214). The marker is let go when the walk ends, raises or is cancelled, and when
+        the returned coroutine is dropped without ever running."""
         marker = asyncio.get_running_loop().create_future()
         self._scans_running.add(marker)
-        try:
-            yield
-        finally:
+
+        def release() -> None:
             self._scans_running.discard(marker)
             if not marker.done():
                 marker.set_result(None)
 
-    async def _poll_pass(self) -> None:
+        async def run() -> Any:
+            try:
+                return await make()
+            finally:
+                release()
+
+        coro = run()
+        weakref.finalize(coro, release)
+        return coro
+
+    def _poll_pass(self) -> Awaitable[None]:
         """One poll pass: every watched folder of the snapshot taken at its start, then the flag."""
-        with self._scanning():
-            await self._poll_pass_body()
+        return self._scan_marked(self._poll_pass_body)
 
     async def _poll_pass_body(self) -> None:
         failed = False
@@ -1196,12 +1206,12 @@ class MusicLibrary:
         await self.flush()
         return removed
 
-    async def rescan_folder(self, folder_id: str) -> dict:
+    def rescan_folder(self, folder_id: str) -> Awaitable[dict]:
         """Walk one folder and reconcile it (layer 2); new and changed files are queued
-        for hashing (layer 3). Returns the folder record."""
+        for hashing (layer 3). Returns the folder record (awaited). The walk counts for `wait_hashed` from
+        this call, before the coroutine is first stepped."""
         self._ensure_primitives()
-        with self._scanning():
-            return await self._rescan_folder_locked(folder_id)
+        return self._scan_marked(lambda: self._rescan_folder_locked(folder_id))
 
     async def _rescan_folder_locked(self, folder_id: str) -> dict:
         async with self._scan_lock:
@@ -1266,13 +1276,16 @@ class MusicLibrary:
                 self.notify_changed("scan")
             return copy.deepcopy(folder)
 
-    async def rescan_all(self) -> List[dict]:
-        with self._scanning():
-            snapshot = list(self._folders)
-            out = [await self.rescan_folder(fid) for fid in snapshot]
-            if self._watched_folders_scanned_clean(snapshot):
-                self.initial_scan_done = True
-            return out
+    def rescan_all(self) -> Awaitable[List[dict]]:
+        """Rescan every folder (awaited), marked for `wait_hashed` from this call."""
+        return self._scan_marked(self._rescan_all_body)
+
+    async def _rescan_all_body(self) -> List[dict]:
+        snapshot = list(self._folders)
+        out = [await self.rescan_folder(fid) for fid in snapshot]
+        if self._watched_folders_scanned_clean(snapshot):
+            self.initial_scan_done = True
+        return out
 
     def _wants_reprobe(self, e: dict) -> bool:
         """A present, hashed entry with no duration that was not re-probed in this process."""

@@ -119,7 +119,7 @@ DEFAULT_ADAPTERS_SUBDIR = LORAS_SUBDIR / "ruach-voices" / "voices"
 PURPOSE_INSTRUMENTAL = "instrumental"
 DEFAULT_INSTRUMENTAL_ADAPTER = "YuE2-instrumental-cot-full-loras"
 INSTRUMENTAL_ADAPTER_SCALE = 1.0          # its README: apply at scale 1.0
-INSTRUMENTAL_LYRICS = "[instrumental]"    # its README's bare form: the model picks the structure
+INSTRUMENTAL_LYRICS = js.YUE2_INSTRUMENTAL_LYRICS   # its README's bare form; the door counts the same text
 
 # Relative to the models folder, by role; the first present file is used.
 BACKBONE_FILES: Dict[str, Sequence[str]] = {

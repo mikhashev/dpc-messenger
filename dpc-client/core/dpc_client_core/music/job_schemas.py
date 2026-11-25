@@ -564,7 +564,9 @@ def normalize_params_from_text(params: Any, *, missing_engine: str = DEFAULT_FRO
     out["adapters"] = _normalize_adapters(params.get("adapters", []))
     # The context is shared with the frames the cap lets run: the same budget a song job gets
     # (`normalize_params_song`), on the text as the body will carry it. The run checks it again.
-    why = yue2_text_overflow(style, lyrics, duration)
+    # An instrumental (lyrics null) runs with the adapter's tag as its lyrics (`runner.build_yue2_body`): the door
+    # counts the same tag, so a job at the ceiling is not refused only at the run (follow-up 23, Zcode #214).
+    why = yue2_text_overflow(style, lyrics if lyrics is not None else YUE2_INSTRUMENTAL_LYRICS, duration)
     if why is not None:
         raise SongParamsError("context_exceeded", "lyrics", why)
     return out
@@ -667,6 +669,12 @@ def song_caption_sent(caption: Any, theme: Optional[str]) -> str:
     (`similar.caption_sent`) both count (follow-up 20, Zcode #201)."""
     text = " ".join(str(caption).split())
     return f"{text}, lyrics about {theme}" if theme else text
+
+
+# What a yue2.cpp request sends as its lyrics for an Instrumental job that runs the instrumental adapter (its README's
+# bare form: the model picks the structure). One source: `yue2.INSTRUMENTAL_LYRICS` (the request body) and the door's
+# count (`yue2_instrumental_text_overflow`) both read it, so they cannot drift (follow-up 23, Zcode #214).
+YUE2_INSTRUMENTAL_LYRICS = "[instrumental]"
 
 
 def song_text_sent(style: str, lyrics: Optional[str]) -> str:

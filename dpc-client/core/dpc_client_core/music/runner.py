@@ -907,6 +907,18 @@ class MusicJobRunner:
         engine = self.engines.get(js.ENGINE_YUE2)
         request_adapters = engine.request_adapters(params.get("adapters") or [])
         instrumental_lyrics = engine.instrumental_lyrics_for(params.get("adapters") or [])
+        # Bodies written before the ceiling existed (or changed on disk) are read back and counted the way the
+        # check below counts a new one: the style and lyrics the stored body carries, its own duration. The
+        # stored payloads are write-once and stay as they are; the job is refused before anything is sent
+        # (follow-up 23, Zcode #214).
+        for name in names:
+            if name not in have:
+                continue
+            stored = json.loads((await self._call(self.store.read_payload, job_id, name)).decode("utf-8"))
+            why = js.yue2_text_overflow(str(stored.get("style") or ""), stored.get("lyrics"),
+                                        float(stored.get("duration") or params["duration_s"]))
+            if why is not None:
+                raise MusicJobError("context_exceeded", f"context_exceeded: {why}")
         if any(name not in have for name in names):
             # The door's context ceiling again, on the lyrics the body will carry (an instrumental's is the
             # adapter's tag), before any body is written (follow-up 22).
