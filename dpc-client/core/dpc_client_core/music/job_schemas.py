@@ -656,6 +656,19 @@ def yue2_prompt_tokens(text_bytes: int, abc_bytes: int) -> int:
             + math.ceil(abc_bytes * YUE2_ABC_TOKENS_PER_BYTE))
 
 
+def song_caption_sent(caption: Any, theme: Optional[str]) -> str:
+    """The caption a song engine gets: the person's with its white space made single, plus the theme of
+    agent-free new lyrics. The one composition the door (`normalize_params_song`) and the run
+    (`similar.caption_sent`) both count (follow-up 20, Zcode #201)."""
+    text = " ".join(str(caption).split())
+    return f"{text}, lyrics about {theme}" if theme else text
+
+
+def song_text_sent(style: str, lyrics: Optional[str]) -> str:
+    """The text part of a yue2.cpp prompt as the run counts it: the style, a newline, the lyrics."""
+    return style + "\n" + (lyrics or "")
+
+
 def yue2_context_left(budget: int, prompt_tokens: int) -> int:
     """What is left of the context after the prompt, the budget and the end token; negative when it is not enough."""
     return YUE2_CONTEXT - (prompt_tokens + budget + 1)
@@ -807,6 +820,12 @@ def _song_lyrics(job_type: str, engine: str, params: Mapping[str, Any]) -> Dict[
             "lyrics_theme": (theme.strip() or None) if theme else None}
 
 
+# What the run may add to the style once the score is known: `cover_score.agree_style` appends `, <n> BPM` when the
+# style names no tempo (a four-digit tempo at most). The door counts it, so a request it takes does not fail on
+# its text after the transcription (follow-up 20).
+YUE2_COVER_TEMPO_RESERVE_BYTES = len(", 9999 BPM")
+
+
 def _song_duration(job_type: str, engine: str, params: Mapping[str, Any], src_s: Optional[float],
                    text_bytes: int = 0) -> float:
     dmin, dmax, ddefault = DURATION_LIMITS[engine]
@@ -929,6 +948,9 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
         text_bytes = sum(len(x.encode("utf-8")) for x in [caption, out["lyrics_theme"] or "", *(out["lyrics"] or [])])
     except UnicodeEncodeError:
         raise ParamsError("lyrics", "the caption or the lyrics hold a character that is not valid text (a lone surrogate)")
+    # The context counts the text the synth request will carry (`song_text_sent`), not the three parts raw.
+    sent_bytes = len(song_text_sent(song_caption_sent(caption, out["lyrics_theme"]),
+                                    "\n".join(out["lyrics"]) if out["lyrics"] else None).encode("utf-8"))
     if text_bytes > MAX_SONG_TEXT_BYTES:
         raise ParamsError("lyrics", f"the caption, theme and lyrics are {text_bytes} bytes together; the limit is "
                                     f"{MAX_SONG_TEXT_BYTES} bytes (about a megabyte of text): shorten them")
@@ -960,7 +982,8 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
         raise ParamsError("variants", f"variants must be a whole number from {VARIANTS_MIN} to {VARIANTS_MAX}, "
                                       f"got {variants!r}")
     out["variants"] = variants
-    out["duration_s"] = _song_duration(job_type, engine, params, out["source_duration_s"], text_bytes)
+    out["duration_s"] = _song_duration(job_type, engine, params, out["source_duration_s"],
+                                       sent_bytes + YUE2_COVER_TEMPO_RESERVE_BYTES)
     seed = params.get("seed")
     if seed is not None and (not _is_int(seed) or not SEED_MIN <= seed <= SEED_MAX):
         raise ParamsError("seed", f"seed must be a whole number from {SEED_MIN} to {SEED_MAX}, or null to draw one")

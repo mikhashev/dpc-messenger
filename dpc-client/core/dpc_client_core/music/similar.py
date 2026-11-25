@@ -131,9 +131,7 @@ def lyrics_text(params: Mapping[str, Any]) -> Optional[str]:
 
 def caption_sent(params: Mapping[str, Any]) -> str:
     """The caption the engine gets: the person's, plus the theme of agent-free new lyrics."""
-    caption = " ".join(str(params["caption"]).split())
-    theme = params.get("lyrics_theme")
-    return f"{caption}, lyrics about {theme}" if theme else caption
+    return js.song_caption_sent(params["caption"], params.get("lyrics_theme"))
 
 
 def engine_lyrics(params: Mapping[str, Any]) -> str:
@@ -566,30 +564,38 @@ async def _cover_on_acestep(runner: Any, job: dict, prepared: _Prepared, engine:
 async def _transcribe(runner: Any, job_id: str, engine: Any, wav: Path, melody_only: bool,
                       engine_job: List[Optional[str]], source_s: float = 0.0) -> bytes:
     """yue2.cpp `POST /transcribe` (the source as the `audio` part, `melody_only` as a field), polled to
-    its end like any engine job, within a time that grows with the source (`transcribe_timeout_s`); the
-    answer's bytes (`{"abc": ...}`)."""
+    its end like any engine job; the answer's bytes (`{"abc": ...}`). The whole call (the upload, the polling and
+    the fetch of the answer) is under one deadline that grows with the source (`transcribe_timeout_s`; follow-up
+    20, Zcode #201: the deadline had bounded the polling alone). On expiry the engine job is cancelled
+    (`POST /job?id=N&cancel=1`, yue-server.cpp) and the job fails with "did not finish"."""
     from .runner import _JobFailure
     await runner._check(job_id)
-    fields = {"melody_only": "1"} if melody_only else None
-    eid = await engine.submit_form("/transcribe", b"{}", [("audio", wav, "audio/wav")], fields=fields)
-    engine_job[0] = eid
-    loop = asyncio.get_running_loop()
     timeout_s = transcribe_timeout_s(runner.engine_job_timeout_s, source_s)
-    deadline = loop.time() + timeout_s
-    while True:
-        await runner._check(job_id)
-        status = await engine.job_status(eid)
-        if status == "done":
-            break
-        if status in ("failed", "cancelled"):
-            raise _JobFailure(engine.with_log_tail(f"{engine.DISPLAY} /transcribe job {eid} {status}"))
-        if loop.time() > deadline:
+    fields = {"melody_only": "1"} if melody_only else None
+
+    async def call() -> bytes:
+        eid = await engine.submit_form("/transcribe", b"{}", [("audio", wav, "audio/wav")], fields=fields)
+        engine_job[0] = eid
+        while True:
+            await runner._check(job_id)
+            status = await engine.job_status(eid)
+            if status == "done":
+                break
+            if status in ("failed", "cancelled"):
+                raise _JobFailure(engine.with_log_tail(f"{engine.DISPLAY} /transcribe job {eid} {status}"))
+            await asyncio.sleep(runner.engine_poll_s)
+        _ctype, raw = await engine.fetch_result(eid, None)
+        engine_job[0] = None
+        return raw or b""
+
+    try:
+        return await asyncio.wait_for(call(), timeout_s)
+    except asyncio.TimeoutError:
+        eid = engine_job[0]
+        if eid:
             await engine.cancel(eid)
-            raise _JobFailure(f"{engine.DISPLAY} /transcribe job {eid} did not finish within {timeout_s:g} s")
-        await asyncio.sleep(runner.engine_poll_s)
-    _ctype, raw = await engine.fetch_result(eid, None)
-    engine_job[0] = None
-    return raw or b""
+        raise _JobFailure(f"{engine.DISPLAY} /transcribe job {eid or '(not yet accepted)'} did not finish within "
+                          f"{timeout_s:g} s")
 
 
 async def _level_for_transcriber(runner: Any, source_wav: Path, out_dir: Path) -> Tuple[Path, Dict[str, Any]]:
@@ -600,7 +606,8 @@ async def _level_for_transcriber(runner: Any, source_wav: Path, out_dir: Path) -
     source as it is. A reading with no LUFS is leveled on its peak alone; one with nothing in it (or a failed
     measurement) on the mix's own sample peak, which this counts. `said["path"]` names which ran:
     `measured`, `peak_only` (no LUFS), `lufs_sample_peak` (no peak, the sample peak stands in) or
-    `sample_peak_only` (nothing was measured); `unreadable` leaves the source as it is."""
+    `sample_peak_only` (nothing was measured), `silent_no_gain` (a loudness but no peak of any kind: the mix is
+    digital silence, so it gets no gain); `unreadable` leaves the source as it is."""
     from . import region_edit as re_
     dest = out_dir / LEVELLED_PART
 
@@ -628,12 +635,13 @@ async def _level_for_transcriber(runner: Any, source_wav: Path, out_dir: Path) -
 
     lufs, peak = number(loud.get("lufs_i")), number(loud.get("true_peak_dbtp"))
     peak_from = "true_peak" if peak is not None else None
-    if peak is None and math.isfinite(sample_peak):
+    if peak is None and math.isfinite(sample_peak):          # -inf (digital silence) is no peak: unknown
         peak, peak_from = round(sample_peak, 2), "sample_peak"
     path = ("measured" if lufs is not None and peak_from == "true_peak" else
             "peak_only" if lufs is None and peak_from == "true_peak" else
-            "lufs_sample_peak" if lufs is not None else "sample_peak_only")
-    gain = cs.transcriber_gain_db(lufs, peak)
+            "lufs_sample_peak" if lufs is not None and peak is not None else
+            "silent_no_gain" if lufs is not None else "sample_peak_only")
+    gain = cs.transcriber_gain_db(lufs, peak, mix_peak_db=sample_peak)
     said: Dict[str, Any] = {"measured": lufs is not None or loud.get("true_peak_dbtp") is not None, "path": path,
                             "lufs_i": lufs, "true_peak_dbtp": peak, "peak_from": peak_from, "gain_db": gain,
                             "measured_on": "the mono mix that is sent",
@@ -692,8 +700,8 @@ def check_cover_context(params: Mapping[str, Any], source_s: float, style: Optio
     `/synth` is sent. The counts are conservative estimates (`job_schemas.yue2_prompt_tokens`); the answer is the
     numbers for the take's `song.length.context`."""
     from .runner import _JobFailure
-    text = (style if style is not None else caption_sent(params)) + chr(10) + (
-        lyrics if lyrics is not None else (lyrics_text(params) or ""))
+    text = js.song_text_sent(style if style is not None else caption_sent(params),
+                             lyrics if lyrics is not None else lyrics_text(params))
     text_bytes, abc_bytes = len(text.encode("utf-8")), len(score.encode("utf-8"))
     budget = js.yue2_semantic_budget(yue2_cover_length(source_s))
     prompt = js.yue2_prompt_tokens(text_bytes, abc_bytes)

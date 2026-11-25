@@ -50,11 +50,16 @@ LEVEL_TARGET_LUFS = -16.0
 LEVEL_PEAK_CEILING_DB = -1.5
 
 
-def transcriber_gain_db(lufs: Optional[float], peak_db: Optional[float]) -> Optional[float]:
+def transcriber_gain_db(lufs: Optional[float], peak_db: Optional[float],
+                        mix_peak_db: Optional[float] = None) -> Optional[float]:
     """The one gain (dB) that brings a recording too loud for the transcriber to -16 LUFS with its peak
     at -1.5 dBFS at most, or None when it goes as it is (within bounds, or nothing known). A reading with
     no loudness is judged on its peak alone: over -1 dBFS, the gain that brings the peak to -1.5 dBFS (the
-    rule's peak half is not lost on a partial reading; follow-up 18, Zcode #195)."""
+    rule's peak half is not lost on a partial reading; follow-up 18, Zcode #195). A non-finite peak is no peak.
+    With a loudness and no peak, `mix_peak_db` (the measured sample peak of the very mix the gain is applied to)
+    stands in as the ceiling's reference: the gain never lifts it over -1.5 dBFS, and a mix with no peak at all
+    (`-inf`, digital silence) gets no gain (follow-up 20, Zcode #201). Without `mix_peak_db` the gain follows
+    the loudness alone."""
     lufs_ok = isinstance(lufs, (int, float)) and not isinstance(lufs, bool) and math.isfinite(lufs)
     peak_ok = isinstance(peak_db, (int, float)) and not isinstance(peak_db, bool) and math.isfinite(peak_db)
     if not (lufs_ok and lufs > LEVEL_LUFS_MAX or peak_ok and peak_db > LEVEL_PEAK_MAX_DB):
@@ -62,6 +67,10 @@ def transcriber_gain_db(lufs: Optional[float], peak_db: Optional[float]) -> Opti
     if not lufs_ok:
         return round(LEVEL_PEAK_CEILING_DB - peak_db, 2)
     gain = LEVEL_TARGET_LUFS - lufs
+    if not peak_ok and isinstance(mix_peak_db, (int, float)) and not isinstance(mix_peak_db, bool):
+        if not math.isfinite(mix_peak_db):
+            return None
+        peak_db, peak_ok = float(mix_peak_db), True
     if peak_ok and peak_db + gain > LEVEL_PEAK_CEILING_DB:
         gain = LEVEL_PEAK_CEILING_DB - peak_db
     return round(gain, 2)
