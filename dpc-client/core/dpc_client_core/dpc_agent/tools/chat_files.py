@@ -23,7 +23,8 @@ Limits (D41):
   executables): audio (flac, wav, mp3, ogg, m4a), image (png, jpg, webp, gif), pdf, and plain
   text (txt, md, json, csv), each by its extension AND by its first bytes, so a program renamed
   `song.flac` or `notes.txt` is refused (`content_refusal`; the copy is read again after it is made);
-- at most MAX_FILES_PER_TURN files per turn;
+- at most MAX_FILES_PER_TURN files per turn, and at most MAX_BYTES_PER_TURN bytes in all
+  (follow-up 14, Zcode #176: the count alone let four files of the cap each go out in one turn);
 - a file whose bytes are already in the chat's `files/` is not copied again.
 
 In a group (D50 G) the file does not ride on the answer: it goes through the person's group
@@ -32,8 +33,13 @@ file path (`service.send_group_agent_file` over `_send_group_file`: the copy in 
 connected member), authored by the agent, as a group message of its own sent when the tool
 runs. The same limits hold, the size cap being the group's file-transfer cap. The source is
 first copied to a temporary file whose content is checked again, so a file changed after the
-check is not offered. The room axis is `_resolve_file_path`'s audience gate (ADR-048): a store
-closed to the group's audience is refused, and on a foreign request before any card.
+check is not offered. That copy is read once, whole (follow-up 14, Zcode #176): its type from
+its first bytes and its SHA-256 from all of them, and the send refuses a file whose hash is not
+that one. On a foreign request the owner's card names the file's name, size and hash, and the
+call the owner approved posts only that file: a source changed between the card and the send
+is refused. A second post of the same content in one turn is judged by that hash, not by the
+path. The room axis is `_resolve_file_path`'s audience gate (ADR-048): a store closed to the
+group's audience is refused, and on a foreign request before any card.
 
 A music take is posted by its `take_id` instead of a path (D41, D44): core resolves the id
 through `get_music_take` into the take's own file, so the agent needs no access to
@@ -49,6 +55,8 @@ in the library). `path` and `take_id` are given one at a time.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import hashlib
 import logging
 import mimetypes
 import shutil
@@ -65,6 +73,9 @@ log = logging.getLogger(__name__)
 
 # D41: at most this many files per turn; the next one is refused.
 MAX_FILES_PER_TURN = 4
+# And at most this many bytes in all per turn (follow-up 14, Zcode #176): the per-file cap
+# times MAX_FILES_PER_TURN would let one turn send 400 MB to every member of a group.
+MAX_BYTES_PER_TURN = 200 * 1024 * 1024
 # D42 records the value set at build: one copy and two hashes of at most the size cap.
 CHAT_POST_FILE_TIMEOUT_SEC = 120
 # A caption longer than this is cut: it is a line under a file, not a message.
@@ -101,6 +112,13 @@ ALLOWED_TYPES_TEXT = ("audio (flac, wav, mp3, ogg, m4a), image (png, jpg, webp, 
                       "plain text (txt, md, json, csv)")
 # How much of the file is read to tell what it is.
 _SNIFF_BYTES = 64 * 1024
+# How much of a file is read at a time when it is hashed.
+_HASH_CHUNK = 1024 * 1024
+# What the owner's card for a foreign request to post into a group showed (Zcode #176): the
+# file's name, size and SHA-256. Set by the approval check and read by the call it approved,
+# in the same context (ToolRegistry.execute runs both); the call posts only that file.
+_CARD_BINDING: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "chat_post_file_card_binding", default=None)
 # First bytes of programs, for the message and the text check (the allow-list is what refuses).
 _PROGRAM_MAGIC = (b"MZ", b"\x7fELF", b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe",
                   b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"#!")
@@ -159,23 +177,58 @@ def content_refusal(path: Path) -> Optional[str]:
     """Why file `path` is not one of the allowed types, in a sentence, or None when it is.
     The suffix must be on the list and the first bytes must be that type (and the same group:
     a `.txt` that is a PNG is refused too)."""
-    suffix = _suffix_of(path.name)
-    expected = ALLOWED_SUFFIXES.get(suffix)
-    if expected is None:
-        what = f"the extension {suffix}" if suffix else "no extension"
-        return f"a file with {what} is not a type that may be posted; only {ALLOWED_TYPES_TEXT} are."
+    suffix_refusal = _suffix_refusal(path.name)
+    if suffix_refusal:
+        return suffix_refusal
     try:
         with open(path, "rb") as f:
             head = f.read(_SNIFF_BYTES)
     except OSError as e:
         return f"the file could not be read to check its type ({e.__class__.__name__})."
+    return head_refusal(path.name, head)
+
+
+def _suffix_refusal(name: str) -> Optional[str]:
+    suffix = _suffix_of(name)
+    if suffix in ALLOWED_SUFFIXES:
+        return None
+    what = f"the extension {suffix}" if suffix else "no extension"
+    return f"a file with {what} is not a type that may be posted; only {ALLOWED_TYPES_TEXT} are."
+
+
+def head_refusal(name: str, head: bytes) -> Optional[str]:
+    """`content_refusal` for a file named `name` whose first bytes (up to _SNIFF_BYTES) are
+    `head`, already read."""
+    suffix_refusal = _suffix_refusal(name)
+    if suffix_refusal:
+        return suffix_refusal
+    suffix = _suffix_of(name)
+    expected = ALLOWED_SUFFIXES[suffix]
     found = sniff_kind(head, suffix)
     if found == expected:
         return None
     looks = ("a program" if head.startswith(_PROGRAM_MAGIC) else
              f"{found} data" if found else f"not {expected}")
-    return (f"the file is named {path.name} but its content is {looks}, not {expected}; only "
+    return (f"the file is named {name} but its content is {looks}, not {expected}; only "
             f"{ALLOWED_TYPES_TEXT} are posted, and the content must match the name.")
+
+
+def file_digest(path: Path) -> Tuple[str, int, bytes]:
+    """(SHA-256 hex, size in bytes, first _SNIFF_BYTES bytes) of `path`, from one read of the
+    whole file, so the type checked and the hash are of the same bytes. Raises OSError."""
+    digest = hashlib.sha256()
+    head = b""
+    size = 0
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(_HASH_CHUNK)
+            if not chunk:
+                break
+            if len(head) < _SNIFF_BYTES:
+                head += chunk[:_SNIFF_BYTES - len(head)]
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size, head
 
 
 def discard_partial_copy(files_dir: Path, before: set, source_name: str) -> int:
@@ -341,6 +394,10 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None,
         if len(posted) >= MAX_FILES_PER_TURN:
             return _refusal(f"this answer already carries {MAX_FILES_PER_TURN} files, the most "
                             f"one turn may post.")
+        over = _turn_bytes_refusal(sum(int(a.get("size_bytes") or 0) for a in posted),
+                                   source.stat().st_size)
+        if over:
+            return _refusal(over)
         try:
             before = {p.name for p in files_dir.iterdir()} if files_dir.is_dir() else set()
         except OSError:
@@ -397,6 +454,16 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None,
             f"answer in this chat. {count} of {MAX_FILES_PER_TURN} files this turn.")
 
 
+def _turn_bytes_refusal(already: int, size: int) -> Optional[str]:
+    """Why a file of `size` bytes would take this turn past MAX_BYTES_PER_TURN, or None."""
+    if already + size <= MAX_BYTES_PER_TURN:
+        return None
+    mb = 1024 * 1024
+    return (f"this turn already posted {round(already / mb, 2)} MB, and this file "
+            f"({round(size / mb, 2)} MB) would take it past {MAX_BYTES_PER_TURN // mb} MB, the "
+            f"most one turn may post in all.")
+
+
 def _group_cap_mb(ctx: ToolContext) -> float:
     """The cap on a file posted into a group: the group file-transfer cap
     (`file_transfer_cap_mb` with the group sender's default) and D41's cap on any posted file
@@ -436,28 +503,32 @@ def _caption_text(caption: Optional[str]) -> str:
     return " ".join(caption.split())[:MAX_CAPTION_CHARS] if caption and caption.strip() else ""
 
 
-def _checked_temp_copy(source: Path) -> Tuple[Optional[Path], Optional[str]]:
-    """(a copy of `source` under its own name in a fresh folder of the DPC temp dir, None),
-    or (None, refusal). The copy is what the group is sent, and its content is checked again:
-    the source may change after the first check, and the group send offers what it copied at
-    once, with no second look."""
+def _checked_temp_copy(
+        source: Path) -> Tuple[Optional[Path], Optional[Tuple[str, int]], Optional[str]]:
+    """(a copy of `source` under its own name in a fresh folder of the DPC temp dir, (its
+    SHA-256, its size), None), or (None, None, refusal). The copy is what the group is sent,
+    and its content is checked again: the source may change after the first check. Its type
+    and its hash come from one read of the whole copy (Zcode #176), and the send checks the
+    file it offers against that hash."""
     from dpc_client_core import service as service_mod
     folder = Path(service_mod.DPC_HOME_DIR) / "temp" / f"chat_post_file_{uuid.uuid4().hex[:12]}"
     try:
         folder.mkdir(parents=True, exist_ok=False)
         copy = folder / source.name
         shutil.copyfile(source, copy)
+        sha256, size, head = file_digest(copy)
     except OSError as e:
         shutil.rmtree(folder, ignore_errors=True)
-        return None, _refusal(f"the file could not be copied to be checked ({e.__class__.__name__}).")
+        return None, None, _refusal(
+            f"the file could not be copied to be checked ({e.__class__.__name__}).")
     except BaseException:
         shutil.rmtree(folder, ignore_errors=True)
         raise
-    changed = content_refusal(copy)
+    changed = head_refusal(copy.name, head)
     if changed:
         shutil.rmtree(folder, ignore_errors=True)
-        return None, _refusal(changed)
-    return copy, None
+        return None, None, _refusal(changed)
+    return copy, (sha256, size), None
 
 
 class _GroupSendUnavailable(Exception):
@@ -465,9 +536,9 @@ class _GroupSendUnavailable(Exception):
 
 
 def _send_into_group(ctx: ToolContext, file_path: Path, text: str,
-                     music: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """`send_group_agent_file` on the service loop; raises _GroupSendUnavailable or
-    TimeoutError."""
+                     music: Optional[Dict[str, Any]], sha256: str, size: int) -> Dict[str, Any]:
+    """`send_group_agent_file` on the service loop, held to the checked copy's hash and size;
+    raises _GroupSendUnavailable or TimeoutError."""
     service = getattr(ctx, "dpc_service", None)
     loop = getattr(ctx, "agent_event_loop", None)
     send = getattr(service, "send_group_agent_file", None) if service is not None else None
@@ -475,7 +546,8 @@ def _send_into_group(ctx: ToolContext, file_path: Path, text: str,
         raise _GroupSendUnavailable("the group file send is not available in this context")
     future = asyncio.run_coroutine_threadsafe(send(
         group_id=ctx.conversation_id, agent_name=ctx.agent_root.name, file_path=str(file_path),
-        text=text, music=dict(music) if music else None), loop)
+        text=text, music=dict(music) if music else None, expected_sha256=sha256,
+        expected_size=size), loop)
     try:
         return future.result(timeout=GROUP_SEND_TIMEOUT_SEC)
     except BaseException:
@@ -496,34 +568,57 @@ def _post_into_group(ctx: ToolContext, source: Path, caption: Optional[str],
     too_large = _group_size_refusal(ctx, source.stat().st_size)
     if too_large:
         return _refusal(too_large)
-    key = str(source)
+    # The card this call was approved on, read once (a later call of the turn has its own).
+    card = _CARD_BINDING.get()
+    _CARD_BINDING.set(None)
+    # The slot is held from here while the file is checked and sent; it is named by the
+    # content's hash once that is known (Zcode #176: not by the path).
+    slot = [f"pending:{uuid.uuid4().hex}"]
     with _post_lock:
         posted = ctx.posted_group_files
-        if key in posted:
-            return (f"{source.name} was already posted into this group in this turn; it is "
-                    f"posted once. {len(posted)} of {MAX_FILES_PER_TURN} files this turn.")
         if len(posted) >= MAX_FILES_PER_TURN:
             return _refusal(f"this turn already posted {MAX_FILES_PER_TURN} files, the most one "
                             f"turn may post.")
-        posted.append(key)  # the slot is held while the file is sent
+        posted.append(slot[0])
 
     def release() -> None:
         with _post_lock:
-            if key in ctx.posted_group_files:
-                ctx.posted_group_files.remove(key)
+            if slot[0] in ctx.posted_group_files:
+                ctx.posted_group_files.remove(slot[0])
+            ctx.posted_group_bytes.pop(slot[0], None)
 
     copy = None
     try:
-        copy, refusal = _checked_temp_copy(source)
+        copy, digest, refusal = _checked_temp_copy(source)
         if refusal:
             release()
             return refusal
-        too_large = _group_size_refusal(ctx, copy.stat().st_size)
+        sha256, size = digest
+        too_large = _group_size_refusal(ctx, size)
         if too_large:
             release()
             return _refusal(too_large)
+        unbound = _card_mismatch(ctx, card, source.name, size, sha256)
+        if unbound:
+            release()
+            return _refusal(unbound)
+        key = f"sha256:{sha256}"
+        with _post_lock:
+            posted = ctx.posted_group_files
+            if key in posted:
+                posted.remove(slot[0])
+                return (f"{source.name} was already posted into this group in this turn (the "
+                        f"same content); it is posted once. {len(posted)} of "
+                        f"{MAX_FILES_PER_TURN} files this turn.")
+            over = _turn_bytes_refusal(sum(ctx.posted_group_bytes.values()), size)
+            if over:
+                posted.remove(slot[0])
+                return _refusal(over)
+            posted[posted.index(slot[0])] = key
+            slot[0] = key
+            ctx.posted_group_bytes[key] = size
         try:
-            answer = _send_into_group(ctx, copy, _caption_text(caption), music)
+            answer = _send_into_group(ctx, copy, _caption_text(caption), music, sha256, size)
         except _GroupSendUnavailable as e:
             release()
             return _refusal(f"{e}.")
@@ -559,6 +654,23 @@ def _post_into_group(ctx: ToolContext, source: Path, caption: Optional[str],
             f"{_group_name(ctx)} as {who}: kept in the group's files and {reach}. It is a group "
             f"message of its own, already shown; it is not attached to your answer. "
             f"{count} of {MAX_FILES_PER_TURN} files this turn.")
+
+
+def _card_mismatch(ctx: ToolContext, card: Optional[Dict[str, Any]], name: str, size: int,
+                   sha256: str) -> Optional[str]:
+    """Why this call may not post the file it checked, or None (Zcode #176): a call the owner
+    approved for someone else posts only the file the card showed, by name, size and hash. The
+    owner's own call carries no card. A foreign call with no card behind it is refused."""
+    from ..owner_approval import asker_is_owner
+    if asker_is_owner(ctx):
+        return None
+    if not card:
+        return "the owner's card for this call named no file, so nothing it did not show is sent."
+    if card.get("name") == name and card.get("size") == size and card.get("sha256") == sha256:
+        return None
+    return (f"the file is not the one the owner's card showed ({card.get('name')}, "
+            f"{card.get('size')} bytes, sha256 {str(card.get('sha256'))[:16]}...): it changed "
+            f"after the card, so the approval does not cover it.")
 
 
 def _take_source(ctx: ToolContext, take_id: str) -> Union[str, Tuple[Path, Dict[str, Any]]]:
@@ -639,7 +751,8 @@ def get_tools() -> List[ToolEntry]:
                     "is sent to every member as a group file message of its own, under your name, "
                     "right away. Use it only when the person asks for the file. The file is "
                     "copied, never moved. Limits: at most "
-                    f"{MAX_FILES_PER_TURN} files per turn; the file-transfer size cap "
+                    f"{MAX_FILES_PER_TURN} files and {MAX_BYTES_PER_TURN // (1024 * 1024)} MB in all "
+                    "per turn; the file-transfer size cap "
                     "(file_transfer.max_size_mb, 100 MB by default); only in DPC (a Telegram or "
                     "Discord turn is refused); in a group, a file from a store the group may not "
                     "see (your private memory, for one) is refused; the path is resolved as "
@@ -685,6 +798,7 @@ def _chat_post_file_approval(ctx: ToolContext, args: Dict[str, Any]):
     if place_refusal(ctx):
         return Exempt("a chat the tool never posts into; it refuses with its reason")
     caption = str(args.get("caption") or "")
+    _CARD_BINDING.set(None)
     if in_group(ctx):
         # D50 G: the card says what reaches every member: the file, its size and type, the group.
         described = _group_post_card(ctx, args)
@@ -726,13 +840,24 @@ def _group_post_card(ctx: ToolContext, args: Dict[str, Any]) -> str:
     bad = content_refusal(source)
     if bad:
         return _refusal(bad)
-    size = source.stat().st_size
+    too_large = _group_size_refusal(ctx, source.stat().st_size)
+    if too_large:
+        return _refusal(too_large)
+    try:
+        sha256, size, head = file_digest(source)
+    except OSError as e:
+        return _refusal(f"the file could not be read to describe it ({e.__class__.__name__}).")
+    bad = head_refusal(source.name, head)
+    if bad:
+        return _refusal(bad)
     too_large = _group_size_refusal(ctx, size)
     if too_large:
         return _refusal(too_large)
+    # What the card shows is what the approved call may post (Zcode #176).
+    _CARD_BINDING.set({"name": source.name, "size": size, "sha256": sha256})
     mime = mimetypes.guess_type(str(source))[0] or "application/octet-stream"
-    return (f"post {what}, {round(size / (1024 * 1024), 2)} MB ({size} bytes), {mime}, into the group "
-            f"{_group_name(ctx)}, where every member receives it")
+    return (f"post {what}, {round(size / (1024 * 1024), 2)} MB ({size} bytes), {mime}, sha256 "
+            f"{sha256[:16]}, into the group {_group_name(ctx)}, where every member receives it")
 
 
 _get_chat_file_tools_unflagged = get_tools

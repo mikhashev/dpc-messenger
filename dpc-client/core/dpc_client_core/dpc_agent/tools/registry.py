@@ -379,6 +379,9 @@ class ToolContext:
     # group message of its own the moment it is sent, so it never rides on the answer and
     # is never removed; the list only counts the turn's files against MAX_FILES_PER_TURN.
     posted_group_files: List[str] = field(default_factory=list)
+    # The bytes of each of those files, by its slot (`sha256:<hex>`), held to
+    # chat_files.MAX_BYTES_PER_TURN (follow-up 14, Zcode #176).
+    posted_group_bytes: Dict[str, int] = field(default_factory=dict)
 
     # -----------------------------------------------------------------------
     # Path helpers (all sandboxed to agent_root)

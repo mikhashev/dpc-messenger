@@ -48,6 +48,18 @@ def _is_blocked(service, *node_ids) -> Optional[str]:
     return None
 
 
+def agent_file_record(record: Dict[str, Any]) -> bool:
+    """Is this group record an agent's file post (a file attachment, written by an agent)?
+    Its words wake nobody, on the sending node and on every node that syncs it (ADR-051
+    D50 G, Zcode #176)."""
+    is_agent = (record.get("sender_type") == "agent"
+                or record.get("is_agent", record.get("isAgent")) is True)
+    if not is_agent:
+        return False
+    attachments = record.get("attachments") or []
+    return any(isinstance(a, dict) and a.get("type") == "file" for a in attachments)
+
+
 def _peer_display_name(service, node_id: str) -> str:
     """A node's name as the settings panel shows it (`CoreService._peer_name`:
     live metadata, then the peer cache, then a 16-character stub).
@@ -1250,6 +1262,13 @@ class GroupHistoryResponseHandler(MessageHandler):
             if not record.get("sender_node_id"):
                 self.logger.info("Synced mention %s in group %s wakes nobody: the record names no author",
                                  str(message_id)[:8], group_id)
+                continue
+            # An agent's file post wakes nobody on its sending node (send_group_agent_file:
+            # its caption is a line under a file); the synced copy carries the caption, and
+            # it wakes nobody here either (Zcode #176).
+            if agent_file_record(record):
+                self.logger.info("Synced mention %s in group %s wakes nobody: the caption of "
+                                 "an agent's file post", str(message_id)[:8], group_id)
                 continue
             blocked = _is_blocked(self.service, record.get("sender_node_id"), record.get("agent_owner"))
             if blocked:

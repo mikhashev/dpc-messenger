@@ -103,3 +103,34 @@ async def test_an_author_still_on_the_roster_at_the_wake_does_wake(keys, second_
 
     assert service.run.await_count == 1
     assert service.run.await_args.kwargs["trigger_message_id"] == record["id"]
+
+
+# -- follow-up 14 (Zcode #176): an agent's file post wakes nobody, here as on its node ----------
+
+@pytest.mark.asyncio
+async def test_a_synced_agent_file_post_wakes_nobody_and_says_so(keys, caplog):
+    caplog.set_level(logging.INFO, logger=HANDLER_LOGGER)
+    peer = keys.peer[0]
+    service = _Service([peer])
+    record = _record(keys.peer, "@Ark here is the take")
+    record["attachments"] = [{"type": "file", "filename": "take.flac", "size_bytes": 10,
+                              "mime_type": "audio/flac"}]
+
+    await _sync(service, peer, [record])
+
+    assert record["id"] in service.monitor.message_ids, "merged: the rule is for waking only"
+    assert service.run.await_count == 0
+    assert any("an agent's file post" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_persons_synced_file_caption_still_wakes(keys):
+    peer = keys.peer[0]
+    service = _Service([peer])
+    record = _record(keys.peer, "@Ark listen to this", sender_type="human", name="Miron")
+    record["attachments"] = [{"type": "file", "filename": "take.flac", "size_bytes": 10,
+                              "mime_type": "audio/flac"}]
+
+    await _sync(service, peer, [record])
+
+    assert service.run.await_count == 1

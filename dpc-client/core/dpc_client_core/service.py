@@ -902,6 +902,22 @@ async def hash_and_note_group_file(service, group_id: str, message_id: str, path
         logger.warning("Could not hash the kept group file %s: %s", path.name, e)
 
 
+def kept_copy_mismatch(path: Path, sha256: Optional[str], size: Optional[int]) -> Optional[str]:
+    """Why the file at `path` is not the bytes a caller checked (`sha256`, `size`), or None
+    (Zcode #176: chat_post_file checks a temporary copy, and the group send copies it again)."""
+    actual_size = path.stat().st_size
+    if size is not None and actual_size != size:
+        return f"{actual_size} bytes, not the {size} checked"
+    if sha256 is not None:
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != sha256:
+            return "its SHA-256 is not the one checked"
+    return None
+
+
 def local_wake_sender(sender_name: str, is_agent_sender: bool, asker: Any,
                       this_node_id: str) -> str:
     """The sender words of a local-path wake line: name, node, human or agent, verdict.
@@ -8818,19 +8834,26 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
 
     async def send_group_agent_file(
         self, group_id: str, agent_name: str, file_path: str, text: str = "",
-        music: Optional[Dict[str, Any]] = None,
+        music: Optional[Dict[str, Any]] = None, expected_sha256: Optional[str] = None,
+        expected_size: Optional[int] = None,
     ) -> Dict[str, Any]:
         """An agent of this node posts a file into a group (ADR-051 D50 G, `chat_post_file`).
 
         The person's path, with the agent as the record's signed author: `sender_type`
         "agent", the name checked as `send_group_agent_message` checks it, `agent_owner`
-        this node. Not a local API command (ALLOWED_COMMANDS): the tool calls it."""
+        this node. Not a local API command (ALLOWED_COMMANDS): the tool calls it.
+        `expected_sha256` / `expected_size`: the tool's checked copy's (Zcode #176); the
+        copy kept in the group's files must be those bytes, or nothing is recorded or
+        offered."""
         return await CoreService._send_group_file(self, group_id, file_path, text,
-                                                  agent_name=agent_name, music=music)
+                                                  agent_name=agent_name, music=music,
+                                                  expected_sha256=expected_sha256,
+                                                  expected_size=expected_size)
 
     async def _send_group_file(
         self, group_id: str, file_path: str, text: str = "",
         agent_name: Optional[str] = None, music: Optional[Dict[str, Any]] = None,
+        expected_sha256: Optional[str] = None, expected_size: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Send a file to a group: keep it here first, then offer it to the connected members.
 
@@ -8858,6 +8881,10 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 (`send_group_agent_file`): the record is the agent's, and the words
                 wake nobody.
             music: The take's `{track_id, take_id, job_id}`, on this node's record only.
+            expected_sha256, expected_size: when given, the copy kept in the group's
+                folder is hashed and must match them (the agent's checked copy, Zcode
+                #176); a mismatch removes the copy and answers an error, before any
+                record or offer.
 
         Returns:
             On success: `saved_locally` (the copy and the record exist), `file_path`
@@ -8908,6 +8935,15 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             group_files_dir.mkdir(parents=True, exist_ok=True)
             local_path = await asyncio.to_thread(
                 keep_copy_under_a_free_name, path, group_files_dir, path.name)
+            if expected_sha256 is not None or expected_size is not None:
+                mismatch = await asyncio.to_thread(
+                    kept_copy_mismatch, local_path, expected_sha256, expected_size)
+                if mismatch:
+                    local_path.unlink(missing_ok=True)
+                    logger.warning("Group file %s for %s refused: %s", path.name, group_id,
+                                   mismatch)
+                    return {"status": "error",
+                            "message": f"the file changed after it was checked: {mismatch}"}
 
             caption = (text or "").strip()
             try:

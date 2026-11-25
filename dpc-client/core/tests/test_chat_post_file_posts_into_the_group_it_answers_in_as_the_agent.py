@@ -220,10 +220,12 @@ class _GroupService:
         self.group_manager = SimpleNamespace(
             get_group=lambda gid: SimpleNamespace(group_id=gid, name="Studio"))
 
-    async def send_group_agent_file(self, group_id, agent_name, file_path, text="", music=None):
+    async def send_group_agent_file(self, group_id, agent_name, file_path, text="", music=None,
+                                    expected_sha256=None, expected_size=None):
         copy = Path(file_path)
         self.sent.append({"group_id": group_id, "agent_name": agent_name, "file_path": file_path,
-                          "name": copy.name, "bytes": copy.read_bytes(), "text": text, "music": music})
+                          "name": copy.name, "bytes": copy.read_bytes(), "text": text, "music": music,
+                          "expected_sha256": expected_sha256, "expected_size": expected_size})
         return {"status": "success", "saved_locally": True, "file_path": f"/group/files/{copy.name}",
                 "message_id": "m1", "msg_index": 3, "size_bytes": copy.stat().st_size,
                 "mime_type": "audio/flac", "sender_name": AGENT_NAME,
@@ -461,7 +463,7 @@ async def test_an_owner_turn_in_a_group_posts_the_file_through_the_agents_servic
     w = _World(tmp_path, home, monkeypatch)
     sent = []
 
-    async def send_group_agent_file(group_id, agent_name, file_path, text="", music=None):
+    async def send_group_agent_file(group_id, agent_name, file_path, text="", music=None, **kw):
         sent.append((group_id, agent_name, Path(file_path).name, Path(file_path).read_bytes(), text))
         return {"status": "success", "file_path": file_path, "size_bytes": 10, "mime_type": "audio/flac",
                 "sender_name": "Poster", "transfer_ids": [], "offline_members": []}
@@ -476,3 +478,142 @@ async def test_an_owner_turn_in_a_group_posts_the_file_through_the_agents_servic
     assert sent == [("group-own", CID, "take.flac", take.read_bytes(), "here")]
     assert "Posted take.flac" in _tool_results(w) and "into the group" in _tool_results(w)
     assert w.all_chat_files() == [], "nothing is copied into a chat's files by the tool itself"
+
+
+# --- follow-up 14 (Zcode #176): the checked copy's hash, the card's file, content not path --------
+
+@pytest.mark.asyncio
+async def test_the_group_send_refuses_a_kept_copy_that_is_not_the_checked_bytes(home):
+    net = _Network()
+    me = _ids(1)[0]
+    node = _make_node(net, home, me, [], [me])
+    svc = _agent_author(node)
+    take = _take_file(home)
+
+    result = await CoreService.send_group_agent_file(
+        svc, GROUP, AGENT_ID, str(take), expected_sha256="0" * 64, expected_size=len(FLAC))
+
+    assert result["status"] == "error" and "changed after it was checked" in result["message"]
+    assert records(node) == []
+    files = node.root / GROUP / "files"
+    assert not files.exists() or list(files.iterdir()) == [], "the kept copy is removed"
+
+
+@pytest.mark.asyncio
+async def test_the_group_send_keeps_a_copy_whose_hash_is_the_checked_one(home):
+    import hashlib
+    net = _Network()
+    me = _ids(1)[0]
+    node = _make_node(net, home, me, [], [me])
+    svc = _agent_author(node)
+
+    result = await CoreService.send_group_agent_file(
+        svc, GROUP, AGENT_ID, str(_take_file(home)),
+        expected_sha256=hashlib.sha256(FLAC).hexdigest(), expected_size=len(FLAC))
+
+    assert result["status"] == "success", result
+    assert len(records(node)) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_tool_holds_the_send_to_the_checked_copys_hash_and_size(registry, home):
+    import hashlib
+    service = _GroupService()
+    ctx = _ctx(home, service, MIKE)
+    _in_root(ctx, "outputs/take.flac")
+
+    await _run(registry, {"path": "outputs/take.flac"}, ctx)
+
+    (sent,) = service.sent
+    assert sent["expected_sha256"] == hashlib.sha256(FLAC).hexdigest()
+    assert sent["expected_size"] == len(FLAC)
+
+
+@pytest.mark.asyncio
+async def test_a_file_changed_after_the_owners_card_is_not_posted(registry, home):
+    service = _GroupService("approve")
+    ctx = _ctx(home, service, FRIEND)
+    source = _in_root(ctx, "outputs/take.flac")
+    shown = service.announce_schedule_approval_request
+
+    async def change_then_approve(**kwargs):
+        source.write_bytes(FLAC + b"a different take, same name")
+        await shown(**kwargs)
+
+    service.announce_schedule_approval_request = change_then_approve
+
+    out = await _run(registry, {"path": "outputs/take.flac"}, ctx)
+
+    (card,) = service.cards
+    assert "sha256" in card["details"]
+    assert service.sent == [], out
+    assert "changed after the card" in out
+    assert ctx.posted_group_files == [] and ctx.posted_group_bytes == {}
+
+
+@pytest.mark.asyncio
+async def test_the_file_the_owners_card_showed_is_posted(registry, home):
+    import hashlib
+    service = _GroupService("approve")
+    ctx = _ctx(home, service, FRIEND)
+    _in_root(ctx, "outputs/take.flac")
+
+    out = await _run(registry, {"path": "outputs/take.flac"}, ctx)
+
+    (card,) = service.cards
+    assert hashlib.sha256(FLAC).hexdigest()[:16] in card["details"]
+    assert "Posted take.flac" in out and len(service.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_call_with_no_card_behind_it_posts_nothing(home):
+    ctx = _ctx(home, _GroupService(), FRIEND)
+    source = _in_root(ctx, "outputs/take.flac")
+
+    def _approved_call():
+        token = owner_approval._CALL_MARK.set(owner_approval.MARK_APPROVED)
+        try:
+            return chat_files._post_into_group(ctx, source, None, None)
+        finally:
+            owner_approval._CALL_MARK.reset(token)
+
+    out = await asyncio.get_running_loop().run_in_executor(None, _approved_call)
+    assert "named no file" in out and ctx.dpc_service.sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_same_content_under_another_path_is_posted_once_per_turn(registry, home):
+    service = _GroupService()
+    ctx = _ctx(home, service, MIKE)
+    _in_root(ctx, "outputs/take.flac")
+    _in_root(ctx, "outputs/copy/take.flac")
+
+    first = await _run(registry, {"path": "outputs/take.flac"}, ctx)
+    second = await _run(registry, {"path": "outputs/copy/take.flac"}, ctx)
+
+    assert "Posted take.flac" in first
+    assert "already posted into this group in this turn (the same content)" in second
+    assert len(service.sent) == 1 and len(ctx.posted_group_files) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_turn_is_held_to_its_total_bytes_across_files(registry, home, monkeypatch):
+    monkeypatch.setattr(chat_files, "MAX_BYTES_PER_TURN", len(FLAC) + 10)
+    service = _GroupService()
+    ctx = _ctx(home, service, MIKE)
+    _in_root(ctx, "outputs/take0.flac", FLAC + b"0")
+    _in_root(ctx, "outputs/take1.flac", FLAC + b"1")
+
+    first = await _run(registry, {"path": "outputs/take0.flac"}, ctx)
+    second = await _run(registry, {"path": "outputs/take1.flac"}, ctx)
+
+    assert "Posted take0.flac" in first
+    assert "the most one turn may post in all" in second
+    assert [s["name"] for s in service.sent] == ["take0.flac"]
+    assert len(ctx.posted_group_files) == 1
+
+
+def test_the_per_turn_total_is_200_mb_and_the_tool_says_so():
+    assert chat_files.MAX_BYTES_PER_TURN == 200 * 1024 * 1024
+    (entry,) = chat_files.get_tools()
+    assert "200 MB in all per turn" in entry.schema["description"]
