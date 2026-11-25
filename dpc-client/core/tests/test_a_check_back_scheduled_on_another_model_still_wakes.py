@@ -8,8 +8,9 @@ by either agent wrote its own list over the other's (a task erased, a finished o
 brought back); the one-check_back-per-chat rule and the Task Board's cancel each saw one
 list. Now there is one queue object and one processor per agent root; a task records
 the alias it was scheduled on and wakes on that alias's agent; a queue nothing runs is
-refused; and a task more than OVERDUE_SKIP_AFTER_SEC late is skipped with a line in its
-chat (Mike, 2026-11-25).
+refused; and a task that was already more than OVERDUE_SKIP_AFTER_SEC late when the queue
+loaded it from disk (its time passed while the backend was down) is skipped with a line in
+its chat (Mike, 2026-11-25). One that fell late in a running process still runs.
 
 Real code under test: DpcAgentManager (start, stop, the per-alias agent, the task
 routing, the notice), TaskQueue (file, processor, overdue skip), DpcAgent.schedule_task
@@ -469,17 +470,66 @@ async def test_a_task_nine_minutes_late_still_runs(managers, home):
     assert not (home / ".dpc" / "conversations" / CONV / "history.json").exists()
 
 
-def test_the_skip_is_a_failure_with_its_reason_and_no_retry(tmp_path):
-    queue = TaskQueue(tmp_path)
+def _queue_loaded_with(root, *tasks):
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    (root / "state" / "task_queue.json").write_text(json.dumps({"tasks": list(tasks)}),
+                                                    encoding="utf-8")
+    return TaskQueue(root)
+
+
+def test_the_skip_at_load_is_a_failure_with_its_reason_and_no_retry(tmp_path):
+    queue = _queue_loaded_with(tmp_path, _due(11, "task-load0001"), _due(9, "task-load0002"))
     failed = []
     queue.set_callbacks(on_task_failed=failed.append)
+    late, near = queue.get_task("task-load0001"), queue.get_task("task-load0002")
+    assert queue._skip_if_overdue(late) is True
+    assert late.status == "failed" and late.error.startswith("overdue: 11 min late")
+    assert late.retry_count == 0 and failed == [late]
+    assert [t.id for t in queue._queue] == ["task-load0002"]
+    assert queue._skip_if_overdue(near) is False, "9 min late at load is within the limit"
+
+
+def test_a_task_that_fell_late_in_a_running_process_is_not_skipped(tmp_path):
+    """The processor was busy past its time: no restart came between, so it runs."""
+    queue = TaskQueue(tmp_path)
     task = queue.schedule("check_back", {"text": "x"},
-                          scheduled_at=datetime.now(timezone.utc) - timedelta(minutes=11))
-    assert queue._skip_if_overdue(task) is True
-    assert task.status == "failed" and task.error.startswith("overdue: 11 min late")
-    assert task.retry_count == 0 and queue._queue == [] and failed == [task]
-    on_time = queue.schedule("check_back", {"text": "y"}, scheduled_at=None)
-    assert queue._skip_if_overdue(on_time) is False
+                          scheduled_at=datetime.now(timezone.utc) - timedelta(minutes=40))
+    assert queue._skip_if_overdue(task) is False
+
+
+@pytest.mark.asyncio
+async def test_a_task_late_because_the_processor_was_busy_still_runs(manager, approval):
+    await manager.start()
+    queue = manager.agent.queue
+    queue.stop_processor()  # the processor is held elsewhere while the task's time passes
+    task_id = queue.schedule("check_back", {"text": "late", "_reply_conversation_id": CONV},
+                             scheduled_at=datetime.now(timezone.utc) - timedelta(minutes=30)).id
+    await manager.agent.start_task_processor()  # the same process: nothing was reloaded
+    await _until(lambda: RAN, "the late task to run")
+    assert RAN == [("default", task_id, "check_back")]
+
+
+@pytest.mark.asyncio
+async def test_a_retry_rescheduled_into_the_past_still_runs(managers, home):
+    """A retry is the queue's own reschedule (mark_failed), not a time the process slept through."""
+    attempts = []
+
+    async def _fail_then_succeed(self, task):
+        attempts.append(task.id)
+        if len(attempts) == 1:
+            raise RuntimeError("provider flapped")
+        RAN.append(("default", task.id, task.task_type))
+        return "done"
+
+    manager = managers(type("_FlakyAgent", (_Agent,), {"_execute_task": _fail_then_succeed}))
+    await manager.start()
+    task = manager.agent.queue.schedule("check_back", {"text": "x", "_reply_conversation_id": CONV})
+    await _until(lambda: attempts, "the first attempt")
+    await _until(lambda: task.status == "pending" and task.retry_count == 1, "the retry")
+    # The backoff put it 30 s ahead; push it far behind, as a long stall would.
+    task.scheduled_at = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    await _until(lambda: RAN, "the retry to run")
+    assert RAN == [("default", task.id, "check_back")]
 
 
 # -- the run on the alias shows itself, stops and reaches Telegram ------------------

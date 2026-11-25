@@ -57,10 +57,12 @@ def _task_timeout(task_type: str) -> int:
 # Ceiling for a task whose type declares none.
 DEFAULT_TASK_TIMEOUT_SEC = 900
 
-# A task with a time (`scheduled_at`) that is later than this when its turn to
-# start comes is not run but skipped as overdue (Mike's decision, 2026-11-25).
-# Typically the process was down at the time: a check_back that wakes an hour
-# after the moment it was for answers a situation that has moved on.
+# A task with a time (`scheduled_at`) that was already later than this when the
+# queue loaded it from disk is not run but skipped as overdue (Mike's decision,
+# 2026-11-25: "an overdue reminder at startup"). Its time passed while the
+# process was down: a check_back that wakes an hour after the moment it was for
+# answers a situation that has moved on. A task that falls late in a running
+# process (the processor was busy, a retry's backoff) still runs.
 OVERDUE_SKIP_AFTER_SEC = 10 * 60
 
 
@@ -164,6 +166,9 @@ class TaskQueue:
         self._on_task_complete: Optional[Callable[[Task], Any]] = None
         self._on_task_failed: Optional[Callable[[Task], Any]] = None
         self._on_task_skipped: Optional[Callable[[Task], Any]] = None
+        # Ids of the tasks that were more than OVERDUE_SKIP_AFTER_SEC late when
+        # loaded from disk; only these are skipped as overdue at dispatch.
+        self._overdue_at_load: set = set()
 
         self._load_queue()
         log.info(f"TaskQueue initialized with {len(self._queue)} pending tasks")
@@ -209,6 +214,8 @@ class TaskQueue:
                             abandoned += 1
                     if task.status == "pending":
                         self._queue.append(task)
+                        if self.overdue_seconds(task) > OVERDUE_SKIP_AFTER_SEC:
+                            self._overdue_at_load.add(task.id)
                 except Exception as e:
                     log.warning(f"Failed to load task: {e}")
 
@@ -475,10 +482,13 @@ class TaskQueue:
                 log.error(f"on_task_skipped callback error: {e}")
 
     def _skip_if_overdue(self, task: Task) -> bool:
-        """Skip `task` when it is more than OVERDUE_SKIP_AFTER_SEC late; whether it was."""
-        late = self.overdue_seconds(task)
-        if late <= OVERDUE_SKIP_AFTER_SEC:
+        """Skip `task` when it was already more than OVERDUE_SKIP_AFTER_SEC late when
+        the queue loaded it from disk; whether it was. One that fell late since, in
+        this process, is not skipped."""
+        if task.id not in self._overdue_at_load:
             return False
+        self._overdue_at_load.discard(task.id)
+        late = self.overdue_seconds(task)
         self.mark_skipped(task, f"overdue: {int(late // 60)} min late, not run")
         return True
 
