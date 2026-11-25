@@ -50,6 +50,24 @@ def _name_refusal(name):
     return ""
 
 
+
+def local_voice_alias_refusal(service: Any, voice_alias: Optional[str]) -> Optional[str]:
+    """Why a per-agent Voice alias cannot be saved; None when it can.
+
+    The voice is transcribed on this node, so it must be a local provider that
+    transcribes. '' and None pass. A module function, not a method: test services
+    borrow save_agent_model_config onto plain namespaces that carry no helpers.
+    """
+    providers = getattr(getattr(service, "llm_manager", None), "providers", None) or {}
+    if voice_alias:
+        provider = providers.get(voice_alias)
+        if provider is None:
+            return f"Voice model '{voice_alias}' is not a provider on this node."
+        kind = (getattr(provider, "config", None) or {}).get("type", "")
+        if kind not in VOICE_PROVIDER_TYPES:
+            return f"Voice model '{voice_alias}' does not transcribe (type '{kind}')."
+    return None
+
 class AgentService:
     """DPC Agent lifecycle management."""
 
@@ -966,20 +984,8 @@ class AgentService:
             return {"status": "error", "message": str(e)}
 
     def _local_media_alias_refusal(self, voice_alias: Optional[str]) -> Optional[str]:
-        """Why a per-agent Voice alias cannot be saved; None when it can.
-
-        The voice is transcribed on this node, so it must be a local provider that
-        transcribes. '' and None pass.
-        """
-        providers = getattr(getattr(self, "llm_manager", None), "providers", None) or {}
-        if voice_alias:
-            provider = providers.get(voice_alias)
-            if provider is None:
-                return f"Voice model '{voice_alias}' is not a provider on this node."
-            kind = (getattr(provider, "config", None) or {}).get("type", "")
-            if kind not in VOICE_PROVIDER_TYPES:
-                return f"Voice model '{voice_alias}' does not transcribe (type '{kind}')."
-        return None
+        """Why a per-agent Voice alias cannot be saved; None when it can (see local_voice_alias_refusal)."""
+        return local_voice_alias_refusal(self, voice_alias)
 
     async def _refresh_live_agent_manager(self, agent_id: str, config: Dict[str, Any]) -> Optional[int]:
         """Push an updated config into the running agent manager (if any) so a model switch takes effect (1:1 + group counters) without a backend restart; returns the resolved context window."""
@@ -1019,7 +1025,7 @@ class AgentService:
             config = load_agent_config(agent_id)
             # Voice runs on this node: a name this node does not hold, or one that
             # cannot transcribe, is refused before anything is written.
-            refused = self._local_media_alias_refusal(voice_provider_alias)
+            refused = local_voice_alias_refusal(self, voice_provider_alias)
             if refused:
                 return {"status": "error", "message": refused}
             if provider_alias is not None:
