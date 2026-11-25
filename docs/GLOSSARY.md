@@ -51,7 +51,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **K** — [knowledge](#knowledge) · [knowledge base](#knowledge-base) · [knowledge commit](#knowledge-commit) · [knowledge_extraction_cancelled](#knowledge_extraction_cancelled) · [KV snapshot](#kv-snapshot)
 
-**L** — [launcher / launcher_kind](#launcher--launcher_kind) · [`layer_audience`](#layer_audience) · [lease line](#lease-line) · [`limit` (local API)](#limit-local-api) · [`link_ping`](#link_ping) · [`LINK_PING`, `LINK_PONG`](#link_ping-link_pong) · [`link_silence_timeout`](#link_silence_timeout) · [`list_cached_peers`](#list_cached_peers) · [live-history boundary](#live-history-boundary) · [local engine swap](#local-engine-swap) · [`local_addresses`](#local_addresses)
+**L** — [launcher / launcher_kind](#launcher--launcher_kind) · [`layer_audience`](#layer_audience) · [lease line](#lease-line) · [`limit` (local API)](#limit-local-api) · [`link_ping`](#link_ping) · [`LINK_PING`, `LINK_PONG`](#link_ping-link_pong) · [`link_silence_timeout`](#link_silence_timeout) · [`list_cached_peers`](#list_cached_peers) · [live-history boundary](#live-history-boundary) · [local engine swap](#local-engine-swap) · [`local_addresses`](#local_addresses) · [`lyrics_prep`](#lyrics_prep)
 
 **M** — [`MAX_HELLO_FRAME_BYTES`](#max_hello_frame_bytes) · [max_output_tokens](#max_output_tokens) · [`max_proved_connections_per_ip`](#max_proved_connections_per_ip) · [memory layers (L1–L7)](#memory-layers-l1l7) · [memory limit per command](#memory-limit-per-command) · [memory system](#memory-system) · [mention](#mention) · [mention_depth](#mention_depth) · [menu row / menu](#menu-row--menu) · [message signing / preimage](#message-signing--preimage) · [message source](#message-source) · [model download consent](#model-download-consent) · [model files folder](#model-files-folder) · [month summary](#month-summary) · [morning brief](#morning-brief) · [mp.qa/1](#mpqa1) · [music job `variants`](#music-job-variants) · [music QA gate](#music-qa-gate) · [music_* tools](#music_-tools)
 
@@ -59,7 +59,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **O** — [observation debt](#observation-debt) · [observation shelf](#observation-shelf) · [Observed / Inferred](#observed--inferred) · [on_reasoning](#on_reasoning) · [origin](#origin) · [output limit](#output-limit) · [output_includes_thinking](#output_includes_thinking) · [own / burn](#own--burn) · [owner_approval_for_others](#owner_approval_for_others) · [owner_only](#owner_only) · [`own_node_group`](#own_node_group)
 
-**P** — [peer](#peer) · [peer cache](#peer-cache) · [peer_proved](#peer_proved) · [per-reader role derivation](#per-reader-role-derivation) · [pin](#pin) · [prefix_hashes, prefix_chars, call_chars](#prefix_hashes-prefix_chars-call_chars) · [process registry](#process-registry) · [processed message ids](#processed-message-ids) · [Protocol 13](#protocol-13) · [proved connection](#proved-connection) · [proven_on_this_machine](#proven_on_this_machine) · [provider alias](#provider-alias) · [provider_kind](#provider_kind) · [provider_row_facts](#provider_row_facts)
+**P** — [peer](#peer) · [peer cache](#peer-cache) · [peer_proved](#peer_proved) · [per-reader role derivation](#per-reader-role-derivation) · [pin](#pin) · [prefix_hashes, prefix_chars, call_chars](#prefix_hashes-prefix_chars-call_chars) · [process registry](#process-registry) · [processed message ids](#processed-message-ids) · [pronunciation status](#pronunciation-status) · [Protocol 13](#protocol-13) · [proved connection](#proved-connection) · [proven_on_this_machine](#proven_on_this_machine) · [provider alias](#provider-alias) · [provider_kind](#provider_kind) · [provider_row_facts](#provider_row_facts)
 
 **Q** — [qa_report](#qa_report) · [quota block](#quota-block)
 
@@ -387,6 +387,18 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 - **Met in:** code, screen
 - **Meaning:** One of the four deterministic stage-1 checks of a music take: `length`, `clipping`, `true_peak`, `silence`. Each is `pass`, `fail` or `not_measured` in the take's `qa_report.gates`; the verdict is `failed` if any failed, `passed` only if all four passed, and `not_measured` otherwise, so an unmeasured gate is never a pass. A gate flags the take (the review's "QA failed: clipping" badge) and never rejects it. A quiet tail of 1-5 s is not a silence failure; the seam metrics and lyrics WER are advisory and are not gates.
 - **Defined in:** [music/qa.py — the gates and why these numbers](../dpc-client/core/dpc_client_core/music/qa.py)
+
+### `lyrics_prep`
+
+- **Met in:** code, screen
+- **Meaning:** The record `params.lyrics_prep` of a vocal music job (`dpc.lyrics_prep/1`) and the read-only core command `prepare_music_lyrics` that produces it. The command reads the author's lyrics and answers a report: syllables per line (Cyrillic vowel letters; a heuristic for Latin words), a meter check per section (a line is flagged when it is more than `max(2, ceil(0.25 * typical))` syllables from the median of its section's sung lines; a section of fewer than 3 sung lines is not checked), an audit of the author's U+0301 marks, the **pronunciation status** of each word, and the text with stress marks added where the dictionary has one stress. The record says what was applied to the text the engine gets: the language, the engine, `engine_text` `plain` or `marked`, the sha256 of the author's text and of the text sent, the counts per status, the meter and audit results, and the stress dictionary's source, licence and sha256 (`dictionary_state` `missing` when it is not installed, and then the meter and the audit still run). The Create form puts a record in the job only while its check describes exactly the lyrics and the engine being sent; before 2026-11-25 the param was `{}`. Only YuE2 is offered the marked text (U+0301 is documented to set the stress for it, SPEC decision 39; the effect on the sung result is not established), and only when the person presses "Use marked lyrics". Built 2026-11-25, not observed on an engine run.
+- **Defined in:** [music/lyrics_prep.py — the rules, the report and the record](../dpc-client/core/dpc_client_core/music/lyrics_prep.py)
+
+### pronunciation status
+
+- **Met in:** code, screen
+- **Meaning:** The state of one word after "Prepare lyrics" (`music/lyrics_prep.py`): `resolved` (the dictionary has one stress for the word, or the person picked a reading), `ambiguous` (a homograph such as замок: the readings are listed and none is guessed), `unknown` (the dictionary does not have the word, or is not installed), `author_marked` (the author wrote a U+0301 mark on a vowel, or ё; kept as written), `invalid_mark` (the author's mark is on a consonant, doubled, a spacing accent or beside ё; nothing is added to that word), `not_needed` (one vowel or none) and `not_checked` (a Latin word or a number: no dictionary for them). Not the `pronunciation` field of the provenance record (`stress_marks: none_sent`, `present`), which counts what was sent, and not the QC issue kind `pronunciation`, which is a stage-2 check that is not built.
+- **Defined in:** [music/lyrics_prep.py — the resolver and its statuses](../dpc-client/core/dpc_client_core/music/lyrics_prep.py)
 
 ### qa_report
 
