@@ -10,8 +10,10 @@ the hidden genes `synth_batch_size` and `synth_batch_index`), and the **phenotyp
 loudness, the decoded-PCM MD5), plus the lineage ids and the output chain. It is one flat JSON
 object; the bucket of each field is in `GENOTYPE_KEYS` / `SUBSTRATE_KEYS`.
 
-Where it goes: `audio_tags.py` writes it into the file (FLAC Vorbis comment `DPC_PROVENANCE`,
-WAV `LIST/INFO` item `DPCP`); the sidecar `<name>.json` carries the same record (plus the
+Where it goes: `audio_tags.py` writes it into the file under one key, `DPC_PROVENANCE`, in each
+format's own standard text-tag mechanism (FLAC Vorbis comment; WAV ID3v2.4 `TXXX:DPC_PROVENANCE` in a
+RIFF `id3 ` chunk, as the MP3; a WAV written before 2026-11-26 holds it in `LIST/INFO` item `DPCP`
+and is still read); the sidecar `<name>.json` carries the same record (plus the
 local ids the store assigns after the file exists); `export.py` carries it into MP3's
 `TXXX:DPC_PROVENANCE` as `source_record`; `library.py` reads it back on a scan.
 

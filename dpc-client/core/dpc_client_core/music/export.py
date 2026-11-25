@@ -84,8 +84,10 @@ forbids local paths inside a file that may be shared, so exactly three elements 
 are reduced to file names: the ffmpeg binary, the source and the output; the record says so.
 
 **The source's own record** (PROVENANCE §3, Mike 2026-11-21): a track made since then carries a
-full `mp.provenance/1` inside its FLAC (or WAV `DPCP` item), read straight from the file when
-ffprobe is absent. It is strictly validated (`provenance.parse_embedded`) and carried over whole
+full `mp.provenance/1` inside its FLAC or WAV (a Vorbis comment `DPC_PROVENANCE`, or the same
+`TXXX:DPC_PROVENANCE` frame in the WAV's `id3 ` chunk; a WAV written before 2026-11-26 holds it in a
+`LIST/INFO` item `DPCP`, which is still read), read straight from the file when ffprobe is absent.
+It is strictly validated (`provenance.parse_embedded`) and carried over whole
 as `source_record`; the sidecar, which is the same record, then adds only its ids to `take`. The
 record's `node_id` (the node's public id) is replaced by `withheld_on_export` in both: the node id is a
 tracking identifier, so it stays in the library's copy and does not travel in an export. When
@@ -124,7 +126,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from . import provenance as mp_provenance
-from .audio_tags import WAV_INFO_PROVENANCE_KEY, _build_vorbis, _parse_vorbis, flac_read_comments, wav_read_info
+from .audio_tags import (WAV_INFO_PROVENANCE_KEY, _build_vorbis, _parse_vorbis, flac_read_comments,
+                         wav_read_provenance)
+from .id3 import (ID3_PADDING, ID3_READ_MAX_BYTES, _clean, _frame, _syncsafe, _unsyncsafe,  # noqa: F401 (re-exported)
+                  build_id3v24, comm_frame, read_id3_txxx, text_frame, txxx_frame, uslt_frame)
 from .identity import MediaTools, file_sha256, read_flac_streaminfo
 from .loudness import LoudnessError, measure_loudness
 from .store import atomic_write_text
@@ -190,8 +195,6 @@ FOLDER_MAX_BYTES = 60
 HASH_SUFFIX_RESERVE = 9              # " (abcdef)"
 PROVENANCE_MAX_BYTES = 64 * 1024
 SIDECAR_MAX_BYTES = 256 * 1024
-ID3_READ_MAX_BYTES = 1024 * 1024
-ID3_PADDING = 1024
 _COPY_CHUNK = 1024 * 1024
 
 _FORBIDDEN = frozenset('<>:"/\\|?*')
@@ -303,112 +306,6 @@ def pick_name(stem: str, ext: str, taken: Set[str], content_hash: str) -> str:
 
 def number_width(count: int) -> int:
     return max(2, len(str(count)))
-
-
-# -- ID3v2.4, written and read by hand ------------------------------------------------------
-
-
-def _syncsafe(n: int) -> bytes:
-    return bytes([(n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F])
-
-
-def _unsyncsafe(b: bytes) -> Optional[int]:
-    if len(b) != 4 or any(x & 0x80 for x in b):
-        return None
-    return (b[0] << 21) | (b[1] << 14) | (b[2] << 7) | b[3]
-
-
-def _clean(text: Any) -> str:
-    return str(text).replace("\x00", "")
-
-
-def _frame(fid: str, payload: bytes) -> bytes:
-    return fid.encode("ascii") + _syncsafe(len(payload)) + b"\x00\x00" + payload
-
-
-def text_frame(fid: str, text: str) -> bytes:
-    return _frame(fid, b"\x03" + _clean(text).encode("utf-8"))
-
-
-def txxx_frame(desc: str, value: str) -> bytes:
-    return _frame("TXXX", b"\x03" + _clean(desc).encode("utf-8") + b"\x00" + _clean(value).encode("utf-8"))
-
-
-def _lang3(language: Optional[str]) -> bytes:
-    lang = (language or "").strip().lower()
-    return lang.encode("ascii") if len(lang) == 3 and lang.isascii() and lang.isalpha() else b"xxx"
-
-
-def comm_frame(text: str, language: Optional[str] = None) -> bytes:
-    return _frame("COMM", b"\x03" + _lang3(language) + b"\x00" + _clean(text).encode("utf-8"))
-
-
-def uslt_frame(text: str, language: Optional[str] = None) -> bytes:
-    return _frame("USLT", b"\x03" + _lang3(language) + b"\x00" + _clean(text).encode("utf-8"))
-
-
-def build_id3v24(frames: Sequence[bytes], padding: int = ID3_PADDING) -> bytes:
-    """An ID3v2.4 tag: no unsynchronisation, no extended header, `padding` zero bytes so an
-    editor can change it in place."""
-    body = b"".join(frames) + b"\x00" * padding
-    return b"ID3\x04\x00\x00" + _syncsafe(len(body)) + body
-
-
-def _split_encoded(enc: int, data: bytes) -> Tuple[str, str]:
-    if enc in (1, 2):
-        cut = next((i for i in range(0, len(data) - 1, 2) if data[i:i + 2] == b"\x00\x00"), len(data))
-        codec = "utf-16" if enc == 1 else "utf-16-be"
-        head, tail = data[:cut], data[cut + 2:]
-        return (head.decode(codec, errors="replace").strip("\x00"),
-                tail.decode(codec, errors="replace").strip("\x00"))
-    cut = data.find(b"\x00")
-    head, tail = (data, b"") if cut < 0 else (data[:cut], data[cut + 1:])
-    codec = "utf-8" if enc == 3 else "latin-1"
-    return head.decode(codec, errors="replace"), tail.decode(codec, errors="replace").strip("\x00")
-
-
-def read_id3_txxx(path: Path, max_bytes: int = ID3_READ_MAX_BYTES) -> Dict[str, str]:
-    """The `TXXX` frames (description -> value) of a leading ID3v2.3 or 2.4 tag; {} when
-    there is none or it cannot be read safely. Reads at most `max_bytes` of the tag."""
-    try:
-        with open(path, "rb") as f:
-            head = f.read(10)
-            if len(head) < 10 or head[:3] != b"ID3" or head[3] not in (3, 4):
-                return {}
-            flags = head[5]
-            size = _unsyncsafe(head[6:10])
-            if size is None or flags & 0x80:  # tag-wide unsynchronisation: not ours, not parsed
-                return {}
-            data = f.read(min(size, max_bytes))
-    except OSError:
-        return {}
-    major = head[3]
-    pos = 0
-    if flags & 0x40 and len(data) >= 4:  # an extended header
-        if major == 4:
-            ext = _unsyncsafe(data[:4])
-            pos = ext if ext is not None else len(data)
-        else:
-            pos = int.from_bytes(data[:4], "big") + 4
-    out: Dict[str, str] = {}
-    while pos + 10 <= len(data):
-        fid = data[pos:pos + 4]
-        if fid[0] == 0 or not all(48 <= c <= 57 or 65 <= c <= 90 for c in fid):
-            break
-        raw_size = data[pos + 4:pos + 8]
-        fsize = _unsyncsafe(raw_size) if major == 4 else int.from_bytes(raw_size, "big")
-        if fsize is None:
-            break
-        fflags = data[pos + 9]
-        payload = data[pos + 10:pos + 10 + fsize]
-        pos += 10 + fsize
-        if fid != b"TXXX" or len(payload) < 2:
-            continue
-        if (major == 4 and fflags & 0x0F) or (major == 3 and fflags & 0xC0):
-            continue  # compressed, encrypted or unsynchronised frame
-        desc, value = _split_encoded(payload[0], payload[1:])
-        out[desc] = value
-    return out
 
 
 # -- Ogg Opus, written and read by hand ---------------------------------------------------------
@@ -1146,6 +1043,7 @@ class MusicExporter:
                 "exported_at": _now(),
             },
         }
+        # ffprobe returns the `id3 ` chunk's TXXX as `DPC_PROVENANCE` and a legacy WAV INFO item as `DPCP`
         carried = (_tag_value(tags, PROVENANCE_TAG) or _tag_value(tags, WAV_INFO_PROVENANCE_KEY)
                    or self._embedded_record_text(source.path))
         parsed: Optional[Dict[str, Any]] = None
@@ -1178,7 +1076,7 @@ class MusicExporter:
             if path.suffix.lower() == ".flac":
                 return flac_read_comments(path, max_block_bytes=cap).get(PROVENANCE_TAG)
             if path.suffix.lower() == ".wav":
-                return wav_read_info(path, max_item_bytes=cap).get(WAV_INFO_PROVENANCE_KEY)
+                return wav_read_provenance(path, max_item_bytes=cap)
         except Exception:
             logger.info("music export: could not read the embedded record of %s", path.name, exc_info=True)
         return None

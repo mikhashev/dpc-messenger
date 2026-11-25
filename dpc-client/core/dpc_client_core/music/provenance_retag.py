@@ -5,10 +5,13 @@ Today's trial files carry older tags (WAV `ICMT` JSON) and a sidecar `<name>.jso
 `request_body` + `info`, or a `dpc.take-sidecar/1`). This builds the best `mp.provenance/1`
 record each file's own evidence allows and writes it into the file:
 
-- **WAV** (the trial files): `LIST/INFO` item `DPCP`. The choice is recorded in PROVENANCE §3: a
-  custom top-level RIFF chunk is invisible to ffprobe and the library, while an INFO item is
-  returned by ffprobe as the tag `DPCP` and read directly by `audio_tags.wav_read_info`; players
-  ignore it. The WAV's other chunks, the PCM included, are copied byte for byte.
+- **WAV** (the trial files): ID3v2.4 `TXXX:DPC_PROVENANCE` in a RIFF `id3 ` chunk, the same frame and
+  key as the MP3 and the Vorbis comment of a FLAC (PROVENANCE §3, Mike 2026-11-26); ffprobe returns it
+  as the tag `DPC_PROVENANCE` and `audio_tags.wav_read_provenance` reads it directly. A WAV re-tagged
+  before that day holds its record in a `LIST/INFO` item `DPCP`: that file is still read, and a
+  re-tag run moves the record verbatim into the `id3 ` chunk and drops the old item (status
+  `migrated`, never a rebuilt record). The WAV's other chunks, the PCM included, are copied byte
+  for byte.
 - **FLAC** (`slice1-smoke*`): Vorbis comment `DPC_PROVENANCE` plus `LYRICS` / `UNSYNCEDLYRICS`.
 
 **Never guessed** (rule 7). A field the evidence does not hold is `not_stored`: the text sent to
@@ -45,7 +48,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import provenance as prov
 from .audio_tags import (WAV_INFO_PROVENANCE_KEY, AlreadyTagged, TagError, flac_add_comments, flac_read_comments,
-                         wav_add_info, wav_read_info)
+                         wav_add_provenance, wav_migrate_provenance, wav_read_id3, wav_read_info,
+                         wav_read_provenance)
 from .identity import MediaTools, file_sha256, read_flac_streaminfo
 from .runner import pcm_md5_and_sha256, read_wav_info
 from .store import atomic_write_text
@@ -70,7 +74,7 @@ class Format:
 class FileResult:
     file: str
     container: str
-    status: str            # tagged | would_tag | already | derived | error
+    status: str            # tagged | would_tag | migrated | would_migrate | already | derived | error
     reason: str = ""
     record_bytes: int = 0
     by_hash_only: List[str] = field(default_factory=list)
@@ -406,7 +410,19 @@ def retag_file(path: Path, *, dry_run: bool, dpc_home: Optional[Path] = None, no
     now = now or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     try:
         if container == "wav":
-            has = bool(wav_read_info(path).get(WAV_INFO_PROVENANCE_KEY))
+            has = bool(wav_read_provenance(path))
+            if has and not wav_read_id3(path).get(prov.TAG) and wav_read_info(path).get(WAV_INFO_PROVENANCE_KEY):
+                # an old-form record (LIST/INFO DPCP): move it to the id3 chunk as it is, never rebuild it
+                if dry_run:
+                    res.status, res.reason = "would_migrate", "the record moves from LIST/INFO DPCP to the id3 chunk"
+                    return res
+                md5_before = _wav_facts(path)[0]
+                wav_migrate_provenance(path)
+                if _wav_facts(path)[0] != md5_before:
+                    res.reason = "the PCM md5 changed while migrating"  # unreachable: the writer verifies the audio
+                    return res
+                res.status, res.reason = "migrated", "the record moved from LIST/INFO DPCP to the id3 chunk"
+                return res
         elif container == "flac":
             has = bool(flac_read_comments(path, max_block_bytes=8 * 1024 * 1024).get(prov.TAG))
         else:
@@ -469,7 +485,7 @@ def retag_file(path: Path, *, dry_run: bool, dpc_home: Optional[Path] = None, no
             return res
 
         if container == "wav":
-            wav_add_info(path, WAV_INFO_PROVENANCE_KEY, text)
+            wav_add_provenance(path, text)
             after = _wav_facts(path)[0]
         else:
             comments = {prov.TAG: text}

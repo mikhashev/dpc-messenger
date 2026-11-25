@@ -174,7 +174,10 @@ def test_a_trial_wav_gets_the_record_with_not_stored_where_the_trial_kept_nothin
     assert result.status == "tagged" and result.pcm_md5 == pcm and _data_md5(wav) == pcm
     items = at.wav_read_info(wav)
     assert items["INAM"] == "Song" and items["ICMT"] == '{"old":1}'          # the old tags stay
-    rec = json.loads(items["DPCP"])
+    assert "DPCP" not in items                                               # the old INFO form is not written any more
+    record_text = at.wav_read_provenance(wav)
+    assert at.wav_read_id3(wav)["DPC_PROVENANCE"] == record_text
+    rec = json.loads(record_text)
     assert rec["schema"] == "mp.provenance/1" and rec["engine"] == "acestep.cpp" and rec["engine_commit"] == "973517b"
     # what the trial stored, exactly
     assert rec["audio_codes"] == ACE_BODY["audio_codes"] and rec["codes_count"] == 300 and rec["solver"] == "euler"
@@ -197,7 +200,7 @@ def test_a_trial_wav_gets_the_record_with_not_stored_where_the_trial_kept_nothin
     # the sidecar keeps its own keys and gains the record
     side = json.loads(wav.with_suffix(".json").read_text(encoding="utf-8"))
     assert side["mp_provenance"] == rec and side["request_body"] == ACE_BODY
-    assert str(tmp_path) not in items["DPCP"]
+    assert str(tmp_path) not in record_text
 
 
 def test_a_yue2_trial_gets_its_weights_hashes_adapters_and_the_tokens_from_its_replay_file(tmp_path):
@@ -219,14 +222,14 @@ def test_a_yue2_trial_gets_its_weights_hashes_adapters_and_the_tokens_from_its_r
     wav = _trial_wav(tmp_path / "y", "song_v0", body=body, info=info)
     (result,) = rt.retag_tree([wav.parent], dry_run=False)
     assert result.status == "tagged", result.reason
-    rec = json.loads(at.wav_read_info(wav)["DPCP"])
+    rec = json.loads(at.wav_read_provenance(wav))
     assert rec["engine"] == "yue2.cpp" and rec["semantic_tokens_count"] == 500 and rec["score_abc"] == "X:1\n"
     assert next(m for m in rec["models"] if m["role"] == "backbone")["sha256"] == "sha256:" + "b" * 64
     assert rec["adapters"][0]["source"] == {"file": "voice-x-e029.safetensors", "bytes": pv.NOT_STORED, "sha256": "d" * 64} \
         and rec["adapters"][0]["sound"]["sha256"] == "f" * 64 and rec["adapters"][0]["music"]["scale"] == 0.45
     assert rec["loudness"]["lufs_i"] == -12.9 and rec["pronunciation"]["stress_marks"] == "present"
     assert rec["genome_sha256"].startswith("sha256:")                 # everything the genotype needs was stored
-    assert "C:/Users" not in at.wav_read_info(wav)["DPCP"]            # the trial's raw_dir is never copied (rule 3)
+    assert "C:/Users" not in at.wav_read_provenance(wav)            # the trial's raw_dir is never copied (rule 3)
 
 
 def test_a_yue2_trial_whose_replay_file_does_not_match_is_tagged_without_tokens_not_with_the_wrong_ones(tmp_path):
@@ -239,7 +242,7 @@ def test_a_yue2_trial_whose_replay_file_does_not_match_is_tagged_without_tokens_
             str(tmp_path / "raw" / "replay.json")}
     wav = _trial_wav(tmp_path / "y", "song_v0", body=body, info=info)
     (result,) = rt.retag_tree([wav.parent], dry_run=False)
-    rec = json.loads(at.wav_read_info(wav)["DPCP"])
+    rec = json.loads(at.wav_read_provenance(wav))
     assert result.status == "tagged" and rec["semantic_tokens"] == "" and "cannot be replayed" in rec["record_notes"][0]
     assert rec["genome_sha256"] == pv.NOT_STORED
 
@@ -265,7 +268,26 @@ def test_a_file_that_has_a_record_is_not_tagged_again_and_derived_copies_and_unr
     results = {r.file: r for r in rt.retag_tree([tmp_path], dry_run=False)}
     assert results["x_m18lufs.wav"].status == "derived" and derived.read_bytes()[:4] == b"RIFF"
     assert results["orphan.wav"].status == "error" and "no readable sidecar" in results["orphan.wav"].reason
-    assert at.wav_read_info(orphan) == {}
+    assert at.wav_read_info(orphan) == {} and at.wav_read_provenance(orphan) is None
+
+
+def test_a_wav_re_tagged_in_the_old_info_form_is_migrated_verbatim_to_the_id3_chunk(tmp_path):
+    wav = _trial_wav(tmp_path / "trial")
+    old_record = json.dumps({"schema": "mp.provenance/1", "engine": "acestep.cpp", "seed": 7, "ids": "wide"})
+    at.wav_add_info(wav, "DPCP", old_record)                    # how the 55 files of 2026-11-21 were tagged
+    pcm, before = _data_md5(wav), wav.read_bytes()
+    assert at.wav_read_provenance(wav) == old_record and at.wav_read_id3(wav) == {}
+    (dry,) = rt.retag_tree([wav.parent], dry_run=True)
+    assert dry.status == "would_migrate" and wav.read_bytes() == before
+    (res,) = rt.retag_tree([wav.parent], dry_run=False)
+    assert res.status == "migrated"
+    assert at.wav_read_id3(wav)["DPC_PROVENANCE"] == old_record          # moved as it was, not rebuilt from the sidecar
+    info = at.wav_read_info(wav)
+    assert "DPCP" not in info and info["INAM"] == "Song" and _data_md5(wav) == pcm
+    once = wav.read_bytes()
+    (again,) = rt.retag_tree([wav.parent], dry_run=False)
+    assert again.status == "already" and wav.read_bytes() == once
+    assert rt.summarize([res])["by_status"] == {"migrated": 1}
 
 
 def test_a_job_made_flac_gets_its_record_from_its_sidecar_and_the_codes_back_from_a_matching_payload(tmp_path):
@@ -340,7 +362,7 @@ def test_the_command_line_tool_reports_and_honours_dry_run(tmp_path):
     dry = run("--dry-run", str(tmp_path / "trial"))
     assert dry.returncode == 0, dry.stderr
     assert json.loads(dry.stdout)["summary"]["by_status"] == {"would_tag": 1}
-    assert at.wav_read_info(tmp_path / "trial" / "turbo_v1.wav").get("DPCP") is None
+    assert at.wav_read_provenance(tmp_path / "trial" / "turbo_v1.wav") is None
     real = run(str(tmp_path / "trial"))
     assert json.loads(real.stdout)["summary"]["by_status"] == {"tagged": 1}
-    assert at.wav_read_info(tmp_path / "trial" / "turbo_v1.wav").get("DPCP")
+    assert at.wav_read_provenance(tmp_path / "trial" / "turbo_v1.wav")

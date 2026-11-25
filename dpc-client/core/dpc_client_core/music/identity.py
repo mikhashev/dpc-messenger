@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from . import provenance as _provenance
-from .audio_tags import WAV_INFO_PROVENANCE_KEY, flac_read_comments, wav_read_info
+from .audio_tags import WAV_INFO_PROVENANCE_KEY, flac_read_comments, wav_read_provenance
 from .schemas import HASH_KIND_AUDIO, HASH_KIND_FILE, HASH_KIND_FLAC
 
 logger = logging.getLogger(__name__)
@@ -270,6 +270,7 @@ def probe_metadata(path: Path, tools: MediaTools) -> Dict[str, Any]:
         "channels": _as_int(stream.get("channels")),
         "export_of": _tag(tags, "dpc_export_of"),
     }
+    # a FLAC / WAV `id3 ` chunk / MP3 all give `DPC_PROVENANCE`; a WAV written before 2026-11-26 gives `DPCP`
     raw = _tag(tags, _provenance.TAG.casefold()) or _tag(tags, WAV_INFO_PROVENANCE_KEY.casefold())
     if raw:
         result["provenance"] = _provenance.read_summary(raw, where=Path(path).name)
@@ -285,7 +286,7 @@ def embedded_provenance(path: Path) -> Optional[Dict[str, Any]]:
         if suffix == ".flac":
             raw = flac_read_comments(path, max_block_bytes=2 * 1024 * 1024).get(_provenance.TAG)
         elif suffix == ".wav":
-            raw = wav_read_info(path, max_item_bytes=2 * 1024 * 1024).get(WAV_INFO_PROVENANCE_KEY)
+            raw = wav_read_provenance(path, max_item_bytes=2 * 1024 * 1024)
         else:
             return None
         return _provenance.read_summary(raw, where=Path(path).name) if raw else None

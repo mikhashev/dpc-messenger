@@ -11,10 +11,16 @@ unless they are equal.
   every other metadata block, keeps the comments already there and adds new ones. The
   audio frames are copied byte for byte, so the STREAMINFO MD5 (the decoded-PCM hash the
   library keys a FLAC on) is the same.
-- **WAV.** The full record goes in a sub-chunk of `LIST/INFO` with the four-character key
-  `DPCP` (see PROVENANCE §3: ffprobe returns it as the tag `DPCP`; a custom top-level RIFF
-  chunk is not read by ffprobe). Every other chunk is copied byte for byte, `data` included,
-  so the library's audio-stream hash (an ffmpeg stream copy of the PCM packets) is the same.
+- **WAV.** The full record goes in an ID3v2.4 tag in a top-level RIFF `id3 ` chunk, as the text
+  frame `TXXX:DPC_PROVENANCE`, the same frame the MP3 export carries (`id3.py`; Mike 2026-11-26:
+  one key, in each format's own standard text-tag mechanism). ffmpeg's WAV demuxer reads the chunk
+  (`case MKTAG('I','D','3',' '): case MKTAG('i','d','3',' ')`, so both case forms), and so do
+  mutagen, foobar2000 and Mp3tag; ffprobe returns it as the tag `DPC_PROVENANCE`. The writer uses
+  the lowercase form and keeps the case of a chunk already there; the reader takes both. A WAV
+  written before that day holds the record in a `LIST/INFO` item `DPCP` (ffprobe: `DPCP`); the
+  reader falls back to it, and writing the new form drops the old item. Every other chunk is
+  copied byte for byte, `data` included, so the library's audio-stream hash (an ffmpeg stream copy
+  of the PCM packets) is the same. The `LIST/INFO` text items (title and so on) stay as they are.
 
 **Write once** (PROVENANCE rule 7): a file that already holds the key is never changed;
 `AlreadyTagged` is raised and the file is left as it was. The new file is written next to the
@@ -31,11 +37,18 @@ import hashlib
 import os
 import struct
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
+
+from .id3 import ID3_PADDING, build_id3v24, id3v24_frames, parse_id3_txxx, txxx_frame
 
 _COPY_CHUNK = 4 * 1024 * 1024
 FLAC_VORBIS_COMMENT = 4
-WAV_INFO_PROVENANCE_KEY = "DPCP"
+PROVENANCE_TAG = "DPC_PROVENANCE"       # the one key, in every format's own text-tag mechanism
+WAV_INFO_PROVENANCE_KEY = "DPCP"        # the old WAV form: a LIST/INFO item; still read, never written
+WAV_ID3_CHUNK_IDS = (b"id3 ", b"ID3 ")  # the RIFF chunk that holds an ID3v2 tag; ffmpeg reads both cases
+WAV_ID3_WRITE_ID = b"id3 "
+_WAV_CHUNK_READ_MAX = 16 * 1024 * 1024
+_ID3_SLACK = 64 * 1024                  # a tag may be this much bigger than the record it carries
 
 
 class AlreadyTagged(Exception):
@@ -294,36 +307,33 @@ def _wav_data_digest(path: Path) -> str:
     raise TagError("the WAV has no data chunk")
 
 
-def wav_add_info(path: Path, key: str, text: str) -> None:
-    """Add one `LIST/INFO` item (`key`: four ASCII characters) to a WAV file, keeping every
-    other chunk byte for byte. Raises `AlreadyTagged` when the item is there. The PCM is
-    verified equal before the result replaces the file."""
+def _wav_rewrite(path: Path, plan: Callable[[object, List[Tuple[bytes, int, int]]],
+                                              Tuple[Dict[int, Optional[bytes]], Optional[bytes]]]) -> None:
+    """Rebuild a WAV next to itself with some chunks replaced or dropped and one chunk added before
+    `data`, copying every other chunk byte for byte, then verify the PCM and replace the file.
+
+    `plan(src, chunks)` returns `({chunk index: whole replacement chunk bytes, or None to drop it},
+    whole chunk bytes to insert before `data` or None)`. It may raise `AlreadyTagged` or `TagError`;
+    the file is then left as it was. A chunk is written with its pad byte when its size is odd and
+    the RIFF size is rewritten at the end."""
     path = Path(path)
-    cid = key.encode("ascii")
-    if len(cid) != 4:
-        raise TagError("an INFO key is four characters")
-    value = text.encode("utf-8") + b"\0"
     size = path.stat().st_size
     before = _wav_data_digest(path)
     tmp = path.with_name(path.name + ".tagging")
     try:
         with open(path, "rb") as src, open(tmp, "wb") as dst:
             chunks = _riff_chunks(src, size)
-            info_at = next((i for i, (c, off, n) in enumerate(chunks) if c == b"LIST" and _peek(src, off, 4) == b"INFO"), None)
+            replace, insert = plan(src, chunks)
             dst.write(b"RIFF\0\0\0\0WAVE")
-            written_info = False
+            inserted = insert is None
             for i, (c, off, n) in enumerate(chunks):
-                if i == info_at:
-                    src.seek(off)
-                    items = _info_items(src.read(n))
-                    if any(k == cid for k, _ in items):
-                        raise AlreadyTagged(f"{path.name} already holds INFO {key}")
-                    dst.write(_info_chunk(items + [(cid, value)]))
-                    written_info = True
+                if i in replace:
+                    if replace[i] is not None:
+                        dst.write(replace[i])
                     continue
-                if c == b"data" and info_at is None and not written_info:
-                    dst.write(_info_chunk([(cid, value)]))
-                    written_info = True
+                if c == b"data" and not inserted:
+                    dst.write(insert)
+                    inserted = True
                 dst.write(c + struct.pack("<I", n))
                 src.seek(off)
                 left = n
@@ -335,8 +345,8 @@ def wav_add_info(path: Path, key: str, text: str) -> None:
                     left -= len(chunk)
                 if n & 1:
                     dst.write(b"\0")
-            if not written_info:
-                dst.write(_info_chunk([(cid, value)]))
+            if not inserted:
+                dst.write(insert)
             total = dst.tell()
             dst.seek(4)
             dst.write(struct.pack("<I", total - 8))
@@ -350,6 +360,137 @@ def wav_add_info(path: Path, key: str, text: str) -> None:
             tmp.unlink()
         except FileNotFoundError:
             pass
+
+
+def _riff_chunk(cid: bytes, body: bytes) -> bytes:
+    """A whole RIFF chunk: id, size (without the pad), body, and the pad byte when the size is odd."""
+    return cid + struct.pack("<I", len(body)) + body + (b"\0" if len(body) & 1 else b"")
+
+
+def wav_add_info(path: Path, key: str, text: str) -> None:
+    """Add one `LIST/INFO` item (`key`: four ASCII characters) to a WAV file, keeping every
+    other chunk byte for byte. Raises `AlreadyTagged` when the item is there. The PCM is
+    verified equal before the result replaces the file. (The provenance record is not written
+    this way any more: see `wav_add_provenance`.)"""
+    cid = key.encode("ascii")
+    if len(cid) != 4:
+        raise TagError("an INFO key is four characters")
+    value = text.encode("utf-8") + b"\0"
+
+    def plan(src, chunks):
+        info_at = next((i for i, (c, off, n) in enumerate(chunks) if c == b"LIST" and _peek(src, off, 4) == b"INFO"), None)
+        if info_at is None:
+            return {}, _info_chunk([(cid, value)])
+        src.seek(chunks[info_at][1])
+        items = _info_items(src.read(chunks[info_at][2]))
+        if any(k == cid for k, _ in items):
+            raise AlreadyTagged(f"{Path(path).name} already holds INFO {key}")
+        return {info_at: _info_chunk(items + [(cid, value)])}, None
+
+    _wav_rewrite(path, plan)
+
+
+# -- WAV provenance: ID3v2.4 `TXXX:DPC_PROVENANCE` in an `id3 ` chunk, the old INFO `DPCP` as a fallback ---
+
+
+def _wav_id3_chunks(chunks: List[Tuple[bytes, int, int]]) -> List[int]:
+    return [i for i, (c, _o, _n) in enumerate(chunks) if c in WAV_ID3_CHUNK_IDS]
+
+
+def wav_read_id3(path: Path, max_item_bytes: int = 256 * 1024) -> Dict[str, str]:
+    """The `TXXX` frames (description -> value) of a WAV's `id3 ` (or `ID3 `) chunk; a value over
+    `max_item_bytes` is skipped, and so is a tag more than 64 KB bigger than that. {} for a file that
+    is not a readable WAV or has no such chunk."""
+    try:
+        size = Path(path).stat().st_size
+        with open(path, "rb") as f:
+            chunks = _riff_chunks(f, size)
+            for i in _wav_id3_chunks(chunks):
+                _cid, off, csize = chunks[i]
+                if csize < 10 or csize > max_item_bytes + _ID3_SLACK or csize > _WAV_CHUNK_READ_MAX:
+                    continue
+                f.seek(off)
+                tag = f.read(csize)
+                found = {k: v for k, v in parse_id3_txxx(tag[:10], tag[10:]).items()
+                         if len(v.encode("utf-8")) <= max_item_bytes}
+                if found:
+                    return found
+        return {}
+    except (OSError, TagError, struct.error):
+        return {}
+
+
+def wav_read_provenance(path: Path, max_item_bytes: int = 256 * 1024) -> Optional[str]:
+    """The provenance record text of a WAV: the `TXXX:DPC_PROVENANCE` frame of its `id3 ` chunk, else
+    the old `LIST/INFO` item `DPCP`, else None. Defensive (rule 6): never raises."""
+    text = wav_read_id3(path, max_item_bytes).get(PROVENANCE_TAG)
+    if text and text.strip():
+        return text
+    legacy = wav_read_info(path, max_item_bytes=max_item_bytes).get(WAV_INFO_PROVENANCE_KEY)
+    return legacy if legacy and legacy.strip() else None
+
+
+def _info_without_legacy(src, chunks: List[Tuple[bytes, int, int]]) -> Dict[int, Optional[bytes]]:
+    """Replacements that remove the `DPCP` item from the `LIST/INFO` chunk (the chunk goes when it
+    held nothing else)."""
+    out: Dict[int, Optional[bytes]] = {}
+    legacy = WAV_INFO_PROVENANCE_KEY.encode("ascii")
+    for i, (c, off, n) in enumerate(chunks):
+        if c != b"LIST" or _peek(src, off, 4) != b"INFO":
+            continue
+        src.seek(off)
+        items = _info_items(src.read(n))
+        kept = [(k, v) for k, v in items if k != legacy]
+        if len(kept) != len(items):
+            out[i] = _info_chunk(kept) if kept else None
+    return out
+
+
+def wav_add_provenance(path: Path, text: str) -> None:
+    """Write the provenance record into a WAV as `TXXX:DPC_PROVENANCE` in an ID3v2.4 tag in a RIFF
+    `id3 ` chunk, before `data` (an `id3 ` / `ID3 ` chunk already there keeps its place, its case and
+    its other frames). The old `LIST/INFO` item `DPCP` is dropped; the other INFO items stay. Every
+    other chunk is copied byte for byte and the PCM is verified equal before the file is replaced
+    (atomic, temp then `os.replace`). Raises `AlreadyTagged` when an `id3 ` chunk already holds the
+    record (rule 7), `TagError` for a WAV it cannot rebuild safely, including an `id3 ` chunk that
+    is not a plain ID3v2.4 tag. The file is left as it was in both cases."""
+    path = Path(path)
+    new_frame = txxx_frame(PROVENANCE_TAG, text)
+
+    def plan(src, chunks):
+        replace = _info_without_legacy(src, chunks)
+        at = _wav_id3_chunks(chunks)
+        if not at:
+            return replace, _riff_chunk(WAV_ID3_WRITE_ID, build_id3v24([new_frame], ID3_PADDING))
+        cid, off, n = chunks[at[0]]
+        if n > _WAV_CHUNK_READ_MAX:
+            raise TagError("the WAV's ID3 chunk is too big to rebuild")
+        src.seek(off)
+        old = src.read(n)
+        if parse_id3_txxx(old[:10], old[10:]).get(PROVENANCE_TAG):
+            raise AlreadyTagged(f"{path.name} already holds {PROVENANCE_TAG}")
+        frames = id3v24_frames(old)
+        if frames is None:
+            raise TagError("the WAV's ID3 chunk is not a plain ID3v2.4 tag; it is left as it is")
+        replace[at[0]] = _riff_chunk(cid, build_id3v24(frames + [new_frame], ID3_PADDING))
+        return replace, None
+
+    _wav_rewrite(path, plan)
+
+
+def wav_migrate_provenance(path: Path, max_item_bytes: int = 2 * 1024 * 1024) -> bool:
+    """Move a record held in the old `LIST/INFO` item `DPCP` into the `id3 ` chunk, verbatim, and drop
+    the old item. True when the file changed; False when there was no old item. When the `id3 ` chunk
+    already holds a record the old item is only dropped (the new form wins). Never rewrites a record."""
+    path = Path(path)
+    legacy = wav_read_info(path, max_item_bytes=max_item_bytes).get(WAV_INFO_PROVENANCE_KEY)
+    if legacy is None:
+        return False
+    if wav_read_id3(path, max_item_bytes).get(PROVENANCE_TAG):
+        _wav_rewrite(path, lambda src, chunks: (_info_without_legacy(src, chunks), None))
+        return True
+    wav_add_provenance(path, legacy)
+    return True
 
 
 def _peek(f, off: int, n: int) -> bytes:
