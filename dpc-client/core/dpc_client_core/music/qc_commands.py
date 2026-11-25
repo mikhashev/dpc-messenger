@@ -16,7 +16,13 @@ with the person; QC is advice for that decision).
   order (`qc.ranking_state`, `qc.rank_takes`). Ranking is `on` only with a judge alias and
   `[music] qc_ranking` true (default false, SPEC §12 decision 26). `refresh` assembles stage 1
   again for every take (it reads a stored transcription for the WER, never starts Whisper) and
-  keeps each take's judge result.
+  keeps each take's judge result. `judge_alias` is the configured alias or null: the UI shows a
+  Judge button only when it is set.
+- `backfill_music_qa {job_id?, take_id?, force?}`: measures stage-1 QA (`qa.py`) for takes made
+  before it existed or whose measurement could not run (no `qa_report`, or a `not_measured`
+  verdict; with `force`, every take of the scope), one take at a time off the event loop, stores
+  `qa` / `qa_report` through the job store and assembles `mp.qc/1` again beside them, keeping a
+  stored judge result. A take whose file is gone is `no_file`; the rest go on.
 """
 
 from __future__ import annotations
@@ -26,14 +32,18 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from ..local_api import slow_command
+from . import job_schemas as js
 from . import qc as qc_
+from . import region_edit as re_
+from .qa import LENGTH_CAP, LENGTH_EXACT, LENGTH_SAME, ffmpeg_qa_meter
 from .commands import _FALSE, _TRUE, _error, _need_str, path_of_file_uri
 from .jobs import MusicJobError
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_QC_RANKING = False
-QC_COMMANDS = ("judge_music_take", "get_music_job_qc")
+QC_COMMANDS = ("judge_music_take", "get_music_job_qc", "backfill_music_qa")
+BACKFILL_NOTE = "measured after the take was made (backfill_music_qa)"
 
 
 class MusicQcCommandsMixin:
@@ -113,8 +123,9 @@ class MusicQcCommandsMixin:
 
     @slow_command
     async def get_music_job_qc(self, job_id: Any = None, refresh: Any = False) -> Dict[str, Any]:
-        """`{job_id, takes: [{take_id, variant, qc}], ranking, order, caveat}`: each take's `qc`
-        (null on a take made before QC), the ranking state and the take ids in display order.
+        """`{job_id, takes: [{take_id, variant, qc}], ranking, judge_alias, order, caveat}`: each
+        take's `qc` (null on a take made before QC), the ranking state, the configured judge alias
+        (null: no judge, so no Judge button) and the take ids in display order.
         `refresh: true` assembles stage 1 again for each take whose job type has a rubric,
         keeping its judge result. Errors: `invalid_job_id`, `not_found`, `invalid_params`."""
         try:
@@ -129,6 +140,104 @@ class MusicQcCommandsMixin:
             ranking = self._music_qc_ranking()
             return {"status": "ok", "job_id": jid,
                     "takes": [{"take_id": t["id"], "variant": t.get("variant"), "qc": t.get("qc")} for t in takes],
-                    "ranking": ranking, "order": qc_.rank_takes(takes, ranking), "caveat": qc_.CAVEAT}
+                    "ranking": ranking, "judge_alias": self._music_qc_judge_alias(),
+                    "order": qc_.rank_takes(takes, ranking), "caveat": qc_.CAVEAT}
+        except Exception as exc:
+            return _error(exc)
+
+    # -- backfill of stage-1 QA ------------------------------------------------------------
+
+    @staticmethod
+    def _backfill_terms(take: Dict[str, Any], job: Dict[str, Any]) -> Dict[str, Any]:
+        """The length terms and the edit zone `measure_take_qa` needs, from what the take and its
+        job hold; what is missing stays None and the gate that needs it is `not_measured`. An edit
+        take keeps the control's length (`same`) and has its zone judged apart; its seam metrics
+        were measured from the engine's audio at the time and cannot be had again."""
+        params = job.get("params") or {}
+        if take.get("kind") == "edit" and job.get("type") == "edit":
+            zones = re_.zones_of(job["region"], params)
+            action = job.get("action")
+            cut = bool(params.get("cut_with_shift"))
+            zone = None if cut else (zones["intent"] if action == re_.REMOVE_REGION else zones["splice"])
+            return {"requested_s": take.get("duration_requested_s"), "length_mode": LENGTH_SAME,
+                    "edit": {"action": action, "zone": zone, "expects_silence": action == re_.REMOVE_REGION,
+                             "seams": {}}}
+        requested = take.get("duration_requested_s")
+        if not isinstance(requested, (int, float)) or isinstance(requested, bool):
+            requested = params.get("duration_s")
+        if not isinstance(requested, (int, float)) or isinstance(requested, bool):
+            requested = None
+        mode = LENGTH_CAP if str(take.get("engine") or "").startswith("yue2") else LENGTH_EXACT
+        return {"requested_s": float(requested) if requested is not None else None, "length_mode": mode}
+
+    async def _backfill_one(self, store: Any, take: Dict[str, Any], job: Dict[str, Any],
+                            force: bool) -> Dict[str, Any]:
+        """One take's outcome: `measured`, `skipped` (already measured, no `force`), `no_file` or
+        `failed` with `error`."""
+        tid = take["id"]
+        entry: Dict[str, Any] = {"take_id": tid, "job_id": job["id"], "variant": take.get("variant")}
+        report = take.get("qa_report")
+        if not force and isinstance(report, dict) and report.get("verdict") != js.QA_NOT_MEASURED:
+            return {**entry, "outcome": "skipped", "verdict": report.get("verdict")}
+        path = path_of_file_uri((take.get("file") or {}).get("uri"))
+        if path is None or not await asyncio.to_thread(path.is_file):
+            return {**entry, "outcome": "no_file", "error": f"take {tid} has no local file to measure"}
+        try:
+            terms = self._backfill_terms(take, job)
+            meter = getattr(self, "_music_qa_meter", None) or ffmpeg_qa_meter()
+            record = await asyncio.to_thread(
+                meter, path, duration_s=(take.get("file") or {}).get("duration_s"),
+                loudness=take.get("loudness"), **terms)
+            new_report = dict(record["qa_report"])
+            new_report["note"] = BACKFILL_NOTE + ("; the seam metrics of an edit cannot be measured again"
+                                                  if "edit" in terms else "")
+            js.check_qa_report(new_report)
+            qc_record = None
+            if qc_.FLOW_OF_JOB_TYPE.get(job.get("type")) is not None:
+                qc_record = qc_.assemble({**take, "qa": record["qa"], "qa_report": new_report}, job,
+                                         lyrics_wer=await self._music_qc_wer(take, job))
+            stored = await asyncio.to_thread(store.set_take_qa, tid, record["qa"], new_report, qc_record)
+        except Exception as exc:
+            logger.warning("music: QA backfill of take %s failed", tid, exc_info=True)
+            return {**entry, "outcome": "failed", "error": f"{type(exc).__name__}: {exc}"[:300]}
+        return {**entry, "outcome": "measured", "verdict": stored["qa_report"]["verdict"]}
+
+    @slow_command
+    async def backfill_music_qa(self, job_id: Any = None, take_id: Any = None, force: Any = False) -> Dict[str, Any]:
+        """Measure stage-1 QA for takes that have none: `{counts, takes: [{take_id, job_id, variant,
+        outcome, verdict?, error?}]}`; outcomes `measured`, `skipped`, `no_file`, `failed`. Scope:
+        `take_id`, else `job_id`, else every take of every job. A take counts as unmeasured when
+        it has no `qa_report` or its verdict is `not_measured`; `force: true` measures every take
+        of the scope again. One take at a time, off the event loop; a job whose takes changed is
+        broadcast once. Errors: `invalid_job_id`, `invalid_take_id`, `not_found`, `invalid_params`."""
+        try:
+            if not isinstance(force, bool):
+                raise MusicJobError("invalid_params", "force must be true or false", field="force")
+            tid = _need_str(take_id, "take_id", "invalid_take_id") if take_id is not None else None
+            jid = _need_str(job_id, "job_id", "invalid_job_id") if job_id is not None else None
+            store = await self._music_jobs()
+
+            def scope() -> List[tuple]:
+                if tid is not None:
+                    t = store.get_take(tid)
+                    return [(store.get_job(t["job_id"]), [t])]
+                if jid is not None:
+                    return [(store.get_job(jid), store.list_takes(jid))]
+                return [(j, store.list_takes(j["id"])) for j in store.list_jobs()]
+            groups = await asyncio.to_thread(scope)
+            lock = self.__dict__.setdefault("_music_qa_backfill_lock", asyncio.Lock())
+            results: List[Dict[str, Any]] = []
+            async with lock:
+                for job, takes in groups:
+                    changed = False
+                    for take in takes:
+                        outcome = await self._backfill_one(store, take, job, force)
+                        results.append(outcome)
+                        changed = changed or outcome["outcome"] == "measured"
+                    if changed:
+                        self._music_job_changed(await asyncio.to_thread(store.get_job, job["id"]))
+            counts = {k: sum(1 for r in results if r["outcome"] == k)
+                      for k in ("measured", "skipped", "no_file", "failed")}
+            return {"status": "ok", "counts": counts, "takes": results}
         except Exception as exc:
             return _error(exc)

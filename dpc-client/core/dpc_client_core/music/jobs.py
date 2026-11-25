@@ -1129,6 +1129,36 @@ class MusicJobStore:
             self._change(job_id, change)
             return copy.deepcopy(self._take(take_id)[1])
 
+    def set_take_qa(self, take_id: str, qa: Optional[Mapping[str, Any]], qa_report: Mapping[str, Any],
+                    qc: Optional[Mapping[str, Any]] = None) -> dict:
+        """Record a take's stage-1 QA after the fact (`backfill_music_qa`: a take made before QA
+        existed, or whose measurement could not run): the `mp.qa/1` (or null), its `qa_report`
+        and, when given, the `mp.qc/1` assembled from them, in one change. It is a measurement
+        of the file, never a decision, so any job state and any decision. A later measurement
+        replaces an earlier one. Raises `MusicJobError` (`not_found`, `invalid_params`)."""
+        try:
+            js.check_qa_report(qa_report)
+            if qa is not None:
+                js.check_qa(qa)
+            if qc is not None:
+                js.check_qc(qc)
+        except SchemaError as exc:
+            raise MusicJobError("invalid_params", str(exc), field="qa")
+        if qc is not None and qc.get("take_id") != take_id:
+            raise MusicJobError("invalid_params", "the QC record is of another take", field="qc")
+        with self._lock:
+            self._ready()
+            job_id, _ = self._take(take_id)
+
+            def change(job: dict) -> None:
+                take = next(t for t in self._takes[job_id] if t["id"] == take_id)
+                take["qa"] = dict(qa) if qa is not None else None
+                take["qa_report"] = copy.deepcopy(dict(qa_report))
+                if qc is not None:
+                    take["qc"] = copy.deepcopy(dict(qc))
+            self._change(job_id, change)
+            return copy.deepcopy(self._take(take_id)[1])
+
     def list_takes(self, job_id: str) -> List[dict]:
         with self._lock:
             self._ready()

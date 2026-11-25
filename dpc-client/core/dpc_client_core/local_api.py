@@ -150,7 +150,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "list_music_takes", "keep_music_take", "discard_music_take", "reject_all_music_takes",
     "measure_music_take_loudness",
     # QC of a take (music/qc_commands.py): the on-demand audio judge, the QC records and the ranking state
-    "judge_music_take", "get_music_job_qc",
+    "judge_music_take", "get_music_job_qc", "backfill_music_qa",
     "list_music_discard_reasons", "set_music_discard_reason_class",
     "list_music_playlists", "create_music_playlist", "update_music_playlist", "delete_music_playlist",
     # The lyrics chain (ADR-051 D6): .lrc sidecar, tags, LRCLIB; transcribe; manual edits
