@@ -90,7 +90,9 @@ def _dpc_home() -> Path:
 _L5_DIRS = frozenset({"memory", "knowledge"})
 # Stores that mix every layer (the word index holds EXT and L6 text, the logs and
 # task results quote whatever a turn read): closed on every turn that is not the owner's.
-_MIXED_DIRS = frozenset({"state", "logs", "task_results"})
+# transcripts/ (transcribe_audio_file writes there) and output/ hold what a turn produced
+# from whatever it read: closed the same way (Zcode's review of ADR-053).
+_MIXED_DIRS = frozenset({"state", "logs", "task_results", "transcripts", "output"})
 _MIXED_PREFIXES = ("knowledge_graph", "config.json")
 
 
@@ -1495,6 +1497,11 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
         if context_type == "personal" and _not_owner(ctx) is not None:
             return ("⚠️ Personal context is not read on this turn: it is not the owner's "
                     "(a group with another node, Telegram, Discord or an unnamed source).")
+        # The device context (hardware, paths, software) is the owner's too (ADR-048; Zcode's
+        # review of ADR-053).
+        if context_type == "device" and _not_owner(ctx) is not None:
+            return ("⚠️ Device context is not read on this turn: it is not the owner's "
+                    "(a group with another node, Telegram, Discord or an unnamed source).")
 
         # Check firewall if available via DPC service (per-agent profile if set)
         if ctx.dpc_service and hasattr(ctx.dpc_service, 'firewall'):
@@ -1658,6 +1665,28 @@ _SCHEDULE_APPROVAL_WORDS = {
         "killed_outcome": "⛔ The turn was killed; no music job was made.",
         "stopped_outcome": "⛔ The turn was stopped; no music job was made.",
     },
+    # ADR-053 point 3: a peer's APPLY_KNOWLEDGE_COMMIT for a proposal this node did not vote on.
+    "knowledge_commit": {
+        "heading": "asks to apply a knowledge commit this node did not vote on",
+        "approve_label": "Apply",
+        "refuse_label": "Refuse",
+        "approved_outcome": "✅ Applied.",
+        "refused_outcome": "❌ Not applied.",
+        "expiry_note": "after that it is not applied",
+        "killed_outcome": "⛔ Not applied.",
+        "stopped_outcome": "⛔ Not applied.",
+    },
+    # ADR-053: a flagged tool asked for by someone who is not the owner (owner_approval.py).
+    "owner_approval": {
+        "heading": "asks to run a tool for someone who is not the owner",
+        "approve_label": "Approve",
+        "refuse_label": "Refuse",
+        "approved_outcome": "✅ Approved: the tool runs once.",
+        "refused_outcome": "❌ Refused: nothing was run.",
+        "expiry_note": "after that nothing is run",
+        "killed_outcome": "⛔ The turn was killed; nothing was run.",
+        "stopped_outcome": "⛔ The turn was stopped; nothing was run.",
+    },
 }
 
 
@@ -1678,7 +1707,13 @@ def _schedule_needs_approval(ctx) -> bool:
     Default is to ask. A fully trusted agent can be exempted by setting
     `schedule_approval: false` in its firewall profile — the same shape as the
     shell gate, so there is one idea to learn rather than two.
+
+    A turn someone other than the owner asked for always asks (ADR-053 D-b): the
+    exemption is the owner's for his own requests, and this card is the call's one card.
     """
+    from ..owner_approval import asker_is_owner
+    if not asker_is_owner(ctx):
+        return True
     firewall = getattr(ctx, "firewall", None)
     if firewall is None:
         return True
@@ -1719,7 +1754,8 @@ _SCHEDULE_TURN_STOPPED = "the turn was stopped before the person answered"
 
 def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str,
                              music: Optional[Dict[str, Any]] = None,
-                             void_on_stop: bool = False) -> tuple:
+                             void_on_stop: bool = False,
+                             card: Optional[Dict[str, Any]] = None) -> tuple:
     """Ask the person before anything enters the queue.
 
     The point is not to guard execution — check_back runs the agent's own
@@ -1730,6 +1766,8 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str,
     carried to the interface beside `about`; given only for a music job.
     `void_on_stop`: a Stop while the card is up withdraws it, so a later "yes"
     approves nothing.
+    `card`: more fields for the card (ADR-053: `tool`, `details`, `cost`). When someone
+    other than the owner asked for the turn, the card also names them (`asker`, D-b).
     """
     import threading
     import uuid
@@ -1739,7 +1777,9 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str,
 
     dpc_service = getattr(ctx, "dpc_service", None)
     local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
-    telegram_chat_id = getattr(ctx, "reply_telegram_chat_id", "") or ""
+    # The run's Telegram chat, unless a stranger there could press for the owner (ADR-053).
+    from ..owner_approval import telegram_chat_for_card
+    telegram_chat_id = telegram_chat_for_card(ctx)
     if dpc_service is None:
         return False, "no service is available to ask for approval"
     # Learned from the headless web-auth gate: broadcast_event drops the
@@ -1804,6 +1844,13 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str,
         return True
 
     extra = {"music": dict(music)} if music else {}
+    for key, value in (card or {}).items():
+        if value:
+            extra[key] = value
+    from ..owner_approval import asker_card_fields
+    asker_fields = asker_card_fields(ctx)
+    if asker_fields:
+        extra["asker"] = asker_fields
     try:
         offered = _on_main_loop(dpc_service.announce_schedule_approval_request(
             request_id=request_id,
@@ -1897,6 +1944,12 @@ def _await_schedule_approval(ctx, *, task_type: str, when: str, about: str,
         return False, _SCHEDULE_TURN_KILLED
     if not entry.get("approved"):
         return False, "the user declined"
+    # A "yes" after the loop gave up on this call starts nothing (ADR-053 D-c): the model
+    # was already told it timed out and nobody would read what it did.
+    from ..owner_approval import LATE_APPROVAL_REASON, call_deadline_passed
+    if call_deadline_passed():
+        log.info("%s approval %s came after the call's deadline; not used", task_type, request_id)
+        return False, LATE_APPROVAL_REASON
     return True, ""
 
 
@@ -1944,6 +1997,13 @@ def release_schedule_approvals_of_turn(turn_id: str) -> int:
         entry["event"].set()
         released += 1
     return released
+
+
+def _asker_record(ctx: ToolContext) -> Optional[Dict[str, Any]]:
+    """The turn's asker as a scheduled task stores it, or None for a context no turn made."""
+    from ..agent import Asker
+    asker = Asker.from_record(getattr(ctx, "asker", None))
+    return asker.to_record() if asker is not None else None
 
 
 # What schedule_task answers when the queue it would write to has no running
@@ -2110,6 +2170,10 @@ def schedule_task(
         # _message_source: the task runs as the turn that scheduled it. Always the
         #   context's, never the payload's: the model must not name its own source.
         data["_message_source"] = getattr(ctx, "message_source", None)
+        # _asker: who asked for the turn that scheduled it (ADR-053 Decision 2.9), so a wake
+        #   keeps its asker and a flagged call in it asks the owner again. The context's,
+        #   never the payload's, like the source; a row without one fails closed (D-g).
+        data["_asker"] = _asker_record(ctx)
 
         # Schedule task
         task = ctx._agent.schedule_task(
@@ -2144,6 +2208,19 @@ def get_task_status(ctx: ToolContext, task_id: str) -> str:
         task = ctx._agent.queue.get_task(task_id)
         if not task:
             return f"⚠️ Task not found: {task_id}"
+
+        # A task's result and error quote whatever its run read: not shown on a turn that is
+        # not the owner's (ADR-048; Zcode's review of ADR-053).
+        if _not_owner(ctx) is not None:
+            withheld = "(withheld: this turn is not the owner's)"
+            return json.dumps({
+                "id": task.id, "type": task.task_type, "status": task.status,
+                "created_at": task.created_at, "scheduled_at": task.scheduled_at,
+                "started_at": task.started_at, "completed_at": task.completed_at,
+                "result": withheld if task.result else None,
+                "error": withheld if task.error else None,
+                "retry_count": task.retry_count,
+            }, indent=2)
 
         return json.dumps({
             "id": task.id,
@@ -3274,3 +3351,82 @@ def get_tools() -> List[ToolEntry]:
         ),
 
     ]
+
+
+# ---------------------------------------------------------------------------
+# ADR-053: the tools here that ask the owner when someone else asked for the turn
+# ---------------------------------------------------------------------------
+
+def _write_file_approval(ctx: ToolContext, args: Dict[str, Any]):
+    """write_file: a path the tool would refuse (closed to the turn, outside the sandbox
+    and its grants) is refused before any card; otherwise the card names the resolved
+    path and the size."""
+    import os
+    from ..owner_approval import Ask, Refuse
+    path = str(args.get("path") or "")
+    try:
+        resolved = _resolve_file_path(ctx, path, require_write=os.path.isabs(path))
+    except PermissionError as e:
+        return Refuse(f"⚠️ Not written: {e}")
+    except (OSError, ValueError):
+        return Ask(f"write to {path}")
+    content = args.get("content")
+    size = len(content) if isinstance(content, str) else 0
+    return Ask(f"write {size} characters to {resolved}")
+
+
+def _repo_delete_approval(ctx: ToolContext, args: Dict[str, Any]):
+    """repo_delete: refused before any card where the tool refuses; else the resolved path."""
+    from ..owner_approval import Ask, Refuse
+    path = str(args.get("path") or "")
+    try:
+        target = gate_path(ctx, ctx.repo_path(path), "deleted")
+    except PermissionError as e:
+        return Refuse(f"⚠️ Not deleted: {e}")
+    except (OSError, ValueError):
+        return Ask(f"delete {path}")
+    how = "the folder and everything in it" if args.get("recursive") else "the file"
+    return Ask(f"delete {how}: {target}")
+
+
+def _schedule_task_approval(ctx: ToolContext, args: Dict[str, Any]):
+    """schedule_task: a check_back asks on its own card (D-b), the return to the agent's own
+    unfinished music job asks nothing (D-e), and a music-return-only schedule_task takes
+    nothing but that return. Any other task type gets the gate's card."""
+    from ..owner_approval import Ask, Exempt, ToolAsks, clip
+    if getattr(ctx, "schedule_task_music_return_only", False):
+        return Exempt("music-return-only: the tool takes nothing but a return to an own music job")
+    task_type = str(args.get("task_type") or "")
+    try:
+        data = json.loads(args.get("task_data") or "")
+    except (TypeError, ValueError):
+        return Exempt("task_data is not JSON, which the tool refuses with nothing queued")
+    if task_type == "check_back":
+        from .music import own_music_job_to_return_to
+        try:
+            if own_music_job_to_return_to(ctx, data) is not None:
+                return Exempt("a return to the agent's own unfinished music job (ADR-051 D49)")
+        except Exception:
+            log.debug("own music job lookup failed; check_back asks", exc_info=True)
+        return ToolAsks()
+    delay = args.get("delay_seconds") or 0
+    text = ""
+    if isinstance(data, dict):
+        text = str(data.get("text") or data.get("message") or "")
+    when = f"in {delay}s" if delay else "immediately"
+    return Ask(clip(f"schedule a {task_type or 'task'} {when}" + (f": {text}" if text else "")))
+
+
+_get_core_tools_unflagged = get_tools
+
+
+def get_tools() -> List[ToolEntry]:  # noqa: F811 (the flags of ADR-053 on the list above)
+    """Export core tools for registry, the writes flagged (ADR-053 2.5)."""
+    from .registry import mark_owner_approval
+    return mark_owner_approval(_get_core_tools_unflagged(), {
+        "write_file": _write_file_approval,
+        "repo_delete": _repo_delete_approval,
+        "schedule_task": _schedule_task_approval,
+        "register_task_type": None,
+        "unregister_task_type": None,
+    }, budget_holds_approval=("schedule_task",))

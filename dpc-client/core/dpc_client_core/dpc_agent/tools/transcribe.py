@@ -333,3 +333,20 @@ def get_tools() -> List[ToolEntry]:
             default_enabled=False,
         ),
     ]
+
+
+# ADR-053 (Mike's answer to Q3, #138): transcribe_audio_file spends the GPU card, so it asks
+# the owner when someone else asked for the turn, and the card states the cost.
+def _transcribe_approval(ctx: ToolContext, args: dict):
+    from ..owner_approval import Ask, GPU_CARD_COST_LINE, clip
+    return Ask(clip(f"transcribe the audio file {args.get('audio_path') or '(none named)'}"),
+               cost=GPU_CARD_COST_LINE)
+
+
+_get_transcribe_tools_unflagged = get_tools
+
+
+def get_tools() -> List[ToolEntry]:  # noqa: F811
+    from .registry import mark_owner_approval
+    return mark_owner_approval(_get_transcribe_tools_unflagged(),
+                               {"transcribe_audio_file": _transcribe_approval})

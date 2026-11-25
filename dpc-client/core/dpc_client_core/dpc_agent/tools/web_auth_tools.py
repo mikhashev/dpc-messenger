@@ -118,3 +118,13 @@ def get_tools() -> List[ToolEntry]:
             default_enabled=True,
         ),
     ]
+
+
+# ADR-053 (Zcode's review, P1): which sites this agent can open as the owner is the owner's
+# to tell a stranger, so the list asks when someone else asked for the turn.
+_get_web_auth_tools_unflagged = get_tools
+
+
+def get_tools() -> List[ToolEntry]:  # noqa: F811
+    from .registry import mark_owner_approval
+    return mark_owner_approval(_get_web_auth_tools_unflagged(), {"list_auth_domains": None})

@@ -119,7 +119,8 @@ class _Service:
     _names_this_node_may_post_as = CoreService._names_this_node_may_post_as
 
     async def _invoke_agent_in_group_serialized(self, group_id, text, sender_name, agent_id,
-                                                trigger_message_id=None, mention_depth=0):
+                                                trigger_message_id=None, mention_depth=0,
+                                                asker=None):
         self.woken.append(agent_id)
 
     def _get_or_create_conversation_monitor(self, _):

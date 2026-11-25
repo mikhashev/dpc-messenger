@@ -27,6 +27,7 @@ import time
 import unicodedata
 import warnings
 from typing import List, NamedTuple, Optional, Tuple
+from pathlib import Path
 
 from .registry import ToolEntry, ToolContext, agent_display_name, conversation_origin
 from ..run_gate import turn_waits_for
@@ -2387,6 +2388,27 @@ def _cleanup_expired_approvals() -> None:
                      APPROVAL_TTL_SECONDS, k, entry.get("command"))
 
 
+def _asker_card_kwargs(ctx: ToolContext, cwd: str) -> dict:
+    """The asker and the resolved working directory for a Tier 1 card, when someone other
+    than the owner asked for the turn (ADR-053 D-b); nothing for the owner's own card."""
+    from ..owner_approval import asker_card_fields
+    asker = asker_card_fields(ctx)
+    if not asker:
+        return {}
+    return {"asker": asker, "cwd": _resolved_cwd(ctx, cwd)}
+
+
+def _resolved_cwd(ctx: ToolContext, cwd: str) -> str:
+    """Where a command runs, as a card shows it: the given directory resolved, or the
+    agent sandbox."""
+    if not cwd:
+        return str(getattr(ctx, "agent_root", "") or "")
+    try:
+        return str(Path(os.path.expanduser(cwd)).resolve())
+    except (OSError, ValueError):
+        return cwd
+
+
 def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, timeout: int) -> str:
     """Request user approval for a Tier 1 command (blocking).
 
@@ -2417,7 +2439,9 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
     # not after: an unanswerable request should not be sitting anywhere.
     dpc_service = getattr(ctx, "dpc_service", None)
     local_api = getattr(dpc_service, "local_api", None) if dpc_service else None
-    telegram_chat_id = getattr(ctx, "reply_telegram_chat_id", "") or ""
+    # The run's Telegram chat, unless a stranger there could press for the owner (ADR-053).
+    from ..owner_approval import telegram_chat_for_card
+    telegram_chat_id = telegram_chat_for_card(ctx)
     ui_attached = bool(getattr(local_api, "has_clients", False)) if local_api else False
     if not ui_attached and not telegram_chat_id and not _approval_watchers:
         log.warning("run_shell TIER1 not asked, no surface could answer: %r", command)
@@ -2490,12 +2514,15 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
                 # decides where the agent's answer goes decides where the
                 # approval is offered — otherwise the button appears in chats
                 # nobody is talking in, and anyone there can press it.
-                telegram_chat_id=getattr(ctx, "reply_telegram_chat_id", "") or "",
+                telegram_chat_id=telegram_chat_id,
                 # Which chat the agent was working in. The tool knows the id and
                 # sometimes the name; naming the conversation is the service's
                 # job, because it is the one holding groups and peers.
                 conversation_id=_origin_id,
                 conversation_title=_origin_title,
+                # ADR-053 D-b: a command someone other than the owner asked for has this one
+                # card, and it names them and where the command runs.
+                **_asker_card_kwargs(ctx, cwd),
             ))
             if not offered:
                 log.warning("No main event loop available to announce shell_approval_request")
@@ -2555,6 +2582,12 @@ def _request_approval(ctx: ToolContext, command: str, reason: str, cwd: str, tim
                 log.warning("Failed to announce shell_approval_closed: %s", e)
         return entry.get("result") or f"Command manually rejected by User. Not run: `{command}`"
 
+    # A "yes" after the loop gave up on this call starts nothing (ADR-053 D-c).
+    from ..owner_approval import call_deadline_passed
+    if call_deadline_passed():
+        log.info("Shell approval %s came after the call's deadline; %r not run", request_id, command)
+        return (f"⚠️ Not run: the approval came after this call had already timed out, so it "
+                f"was not used. `{command}`")
     log.info("Shell approval granted: %s — executing %r", request_id, command)
     output = _execute_shell_command(
         command, entry.get("cwd"), entry.get("timeout", 120), store_at=_call_store(ctx),
@@ -2751,7 +2784,127 @@ def _execute_shell_command(
         return f"Error: {e}"
 
 
+# Words that name no file, whatever directory they are read in.
+_NULL_DEVICES = frozenset({"nul", "/dev/null", "con", "nul:", "$null"})
+
+
+def _closed_path_candidates(word: str, here: str, windows: bool) -> list:
+    """The paths one expanded word may name, resolved against the directory it runs in.
+
+    A word with a separator is a path; a bare name is one only when it exists there
+    (`type notes` reads a file called notes, `echo hello` does not). Switches, null
+    devices, URLs and `name=value` are not paths. Literal only, as the rest of the gate."""
+    body = _REDIRECT_PREFIX_RE.sub("", word, count=1).strip()
+    if _ASSIGNMENT_RE.match(body):
+        body = body.split("=", 1)[1]
+    if not body or body.startswith("-") or body.lower() in _NULL_DEVICES:
+        return []
+    if "://" in body:
+        return []
+    if windows and _SWITCH_TOKEN_RE.match(body) and not os.path.exists(os.path.join(here or "", body)):
+        return []
+    separators = r"[\\/]" if windows else "/"
+    has_separator = bool(re.search(separators, body))
+    spelled = body.replace("\\", "/") if (windows and os.sep == "/") else body
+    if _looks_absolute(spelled, windows) or spelled.startswith("~"):
+        target = os.path.expanduser(spelled)
+    elif here:
+        target = os.path.join(here, spelled)
+    else:
+        return []
+    if not has_separator and not os.path.exists(target):
+        return []
+    try:
+        return [Path(os.path.normpath(target)).resolve()]
+    except (OSError, ValueError):
+        return []
+
+
+def _closed_shell_path(ctx: ToolContext, command: str, cwd: str = "") -> str:
+    """Why this command may not run on this turn because it names a path the turn may not
+    open (ADR-053 2.7, ADR-048), or "".
+
+    The same rule the file tools apply (`tools.core.closed_to_this_turn`), read from the
+    command's literal paths and its working directory, before any approval card. A path
+    outside the agent directory counts only when it is shared knowledge or a granted
+    extended path: an ungranted one is the sandbox gate's (Tier 1) to answer. Not inside
+    `validate_extended_path`: Active Recall reaches that with a context that has no source
+    (`DpcAgent._extended_path_allowed`), and a turn check there would drop its hits."""
+    from .core import _not_owner, closed_to_this_turn, _dpc_home
+    if ctx is None or _not_owner(ctx) is None:
+        return ""
+    windows = _on_windows()
+    root = Path(ctx.agent_root).resolve()
+    try:
+        knowledge = (_dpc_home() / "knowledge").resolve()
+    except Exception:
+        knowledge = None
+
+    def reason_for(target: Path) -> str:
+        inside = target == root or root in target.parents
+        if not inside:
+            shared = knowledge is not None and (target == knowledge or knowledge in target.parents)
+            granted = False
+            if not shared:
+                try:
+                    granted = bool(ctx.is_extended_path_allowed(str(target)))
+                except Exception:
+                    granted = False
+            if not shared and not granted:
+                return ""
+        return closed_to_this_turn(ctx, target) or ""
+
+    base = os.path.expanduser(cwd) if cwd else str(root)
+    if cwd:
+        try:
+            why = reason_for(Path(base).resolve())
+        except (OSError, ValueError):
+            why = ""
+        if why:
+            return why
+    env = _child_environment()
+    walk = _Cwd(base)
+    for segment in (seg.strip() for seg in _split_segments(_normalize_command(command))):
+        here = walk.here
+        view = _expand_for_path_check(segment, env, windows, here)
+        for word in view.words:
+            for target in _closed_path_candidates(word.text, here, windows):
+                why = reason_for(target)
+                if why:
+                    return why
+        move = _cd_move(view.text)
+        if move is not None and not (windows and _is_bare_cd(view.text)):
+            walk.apply(move)
+    return ""
+
+
+def _run_shell_approval(ctx: ToolContext, args: dict):
+    """run_shell's approval_check (ADR-053 2.5, 2.7, D-b): a path closed to the turn is
+    refused with no card; a Tier 2 command is refused by the tool with no card; a Tier 1
+    command asks on its own card, which names the asker; every other command, Tier 0
+    included (`git push`, `copy`, `del`, redirects), gets the owner's card with the command
+    and the directory it runs in, resolved."""
+    from ..owner_approval import Ask, Exempt, Refuse, ToolAsks, clip
+    command = str(args.get("command") or "")
+    cwd = str(args.get("cwd") or "")
+    closed = _closed_shell_path(ctx, command, cwd)
+    if closed:
+        return Refuse(f"⚠️ Not run: {closed}. `{command}`")
+    violation = _validate_command(command, ctx, cwd)
+    if violation and violation[0] == "tier2":
+        return Exempt("Tier 2: the tool refuses it by a fixed rule")
+    if violation and violation[0] == "tier1":
+        return ToolAsks()
+    return Ask(clip(f"command: {command}\ncwd: {_resolved_cwd(ctx, cwd)}"))
+
+
 def run_shell(ctx: ToolContext, command: str, timeout: int = 120, cwd: str = "") -> str:
+    # ADR-053 2.7: a path closed to this turn is refused before anything else, no card.
+    closed = _closed_shell_path(ctx, command, cwd)
+    if closed:
+        log.warning("run_shell refused, a path closed to this turn: %r — %s", command, closed)
+        return f"⚠️ Not run: {closed}. `{command}`"
+
     # ADR-030: validate command before execution
     violation = _validate_command(command, ctx, cwd)
     if violation:
@@ -2829,5 +2982,9 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=RUN_SHELL_TOOL_TIMEOUT_SECONDS,
             is_core=False,
             default_enabled=False,
+            # ADR-053: every tier asks the owner when someone else asked for the turn.
+            owner_approval_for_others=True,
+            approval_check=_run_shell_approval,
+            budget_holds_approval=True,
         ),
     ]

@@ -202,8 +202,11 @@ async def test_a_free_return_takes_cores_delay_and_text_not_the_agents(tmp_path,
         [task] = _pending(agent)
         delay = music_tools.check_back_delay_s(job)
         assert task.task_type == "check_back"
-        assert task.data == {"music_job_id": job["id"], "text": music_tools.music_return_text(job),
-                             "_check_back_depth": 1, "_reply_conversation_id": CHAT, "_message_source": "ui"}
+        stored = dict(task.data)
+        asker = stored.pop("_asker")  # who asked for the turn (ADR-053 2.9), from the context
+        assert asker["is_owner"] is True
+        assert stored == {"music_job_id": job["id"], "text": music_tools.music_return_text(job),
+                          "_check_back_depth": 1, "_reply_conversation_id": CHAT, "_message_source": "ui"}
         assert "ignore the person" not in json.dumps(task.data)
         due = datetime.fromisoformat(task.scheduled_at)
         assert abs((due - before).total_seconds() - delay) < 10, (task.scheduled_at, delay)

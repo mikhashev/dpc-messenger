@@ -274,3 +274,21 @@ def get_tools() -> List[ToolEntry]:
             default_enabled=False,
         ),
     ]
+
+
+# ADR-053 (Mike's answer to Q3, #138): describe_image spends the GPU card, so it asks the
+# owner when someone else asked for the turn, and the card states the cost.
+def _describe_image_approval(ctx: ToolContext, args: dict):
+    from ..owner_approval import Ask, GPU_CARD_COST_LINE, clip
+    question = str(args.get("question") or "")
+    return Ask(clip(f"describe the image {args.get('image_path') or '(none named)'}"
+                    + (f", asking: {question}" if question else "")), cost=GPU_CARD_COST_LINE)
+
+
+_get_vision_tools_unflagged = get_tools
+
+
+def get_tools() -> List[ToolEntry]:  # noqa: F811
+    from .registry import mark_owner_approval
+    return mark_owner_approval(_get_vision_tools_unflagged(),
+                               {"describe_image": _describe_image_approval})

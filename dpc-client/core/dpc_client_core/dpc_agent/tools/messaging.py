@@ -202,3 +202,22 @@ def get_tools() -> List[ToolEntry]:
             default_enabled=False,
         ),
     ]
+
+
+# ADR-053: send_user_message asks the owner when someone else asked for the turn. In a group
+# the tool refuses by itself, with nothing sent, so no card is raised there.
+def _send_user_message_approval(ctx: ToolContext, args: dict):
+    from ..owner_approval import Ask, Exempt, clip
+    if (getattr(ctx, "conversation_id", None) or getattr(ctx, "current_task_id", None) or "").startswith("group-"):
+        return Exempt("a group chat: the tool refuses it with nothing sent")
+    return Ask(clip(f"send the owner this message ({args.get('priority') or 'normal'} priority): "
+                    f"{args.get('message') or ''}"))
+
+
+_get_messaging_tools_unflagged = get_tools
+
+
+def get_tools() -> List[ToolEntry]:  # noqa: F811
+    from .registry import mark_owner_approval
+    return mark_owner_approval(_get_messaging_tools_unflagged(),
+                               {"send_user_message": _send_user_message_approval})

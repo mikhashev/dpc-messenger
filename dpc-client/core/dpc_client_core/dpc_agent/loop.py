@@ -1764,12 +1764,17 @@ async def _execute_with_timeout(
     t0 = time.monotonic()
     note_turn(tool=fn_name)
     card_hold = current_card_hold()
+    # The moment this call is given up on. A worker that outlives it is not stopped, so an
+    # owner's approval that arrives later must start nothing (ADR-053 D-c).
+    from .owner_approval import run_with_call_deadline
+    deadline = t0 + timeout_sec if timeout_sec else None
     try:
         # Use run_in_executor to avoid blocking the event loop
         result = await asyncio.wait_for(
             loop.run_in_executor(
                 executor,
-                lambda: _execute_single_tool_for(
+                lambda: run_with_call_deadline(
+                    deadline, _execute_single_tool_for,
                     origin, tools, tc, logs_dir, task_id, round_number, session_id, ctx=ctx,
                     card_hold=card_hold,
                 ),
@@ -2605,6 +2610,16 @@ async def run_llm_loop(
                 _args_msg = ""
             emit_progress(_args_msg or f"Executing {tool_name}...", tool_name, round_idx)
             timeout = tools.get_timeout(tc["function"]["name"])
+            # ADR-053 D-c: a flagged call on a turn the owner did not ask for waits for the
+            # owner's card first; its budget is the tool's own plus that wait.
+            _approval_wait = getattr(tools, "approval_wait_for", None)
+            if callable(_approval_wait):
+                try:
+                    _extra = _approval_wait(tc["function"]["name"], _loop_ctx)
+                    if isinstance(_extra, int) and not isinstance(_extra, bool) and _extra > 0:
+                        timeout += _extra
+                except Exception:
+                    log.debug("approval_wait_for failed for %s", tool_name, exc_info=True)
             if _loop_ctx is not None:
                 # The address _store_tool_output gives this call, for a tool that
                 # keeps more than it returns (store_beside_call).

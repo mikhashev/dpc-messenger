@@ -280,7 +280,8 @@ async def test_a_group_wake_up_publishes_into_that_group():
     published = {}
 
     class _Service:
-        async def send_group_agent_message(self, group_id, agent_name, text, tool_calls=None):
+        async def send_group_agent_message(self, group_id, agent_name, text, tool_calls=None,
+                                           asker=None):
             published.update(group_id=group_id, agent_name=agent_name, text=text)
             return "msg-1"
 
@@ -370,7 +371,8 @@ async def test_a_refused_group_post_reaches_the_task_log(caplog):
     from dpc_client_core.dpc_agent.agent import DpcAgent
 
     class _Service:
-        async def send_group_agent_message(self, group_id, agent_name, text, tool_calls=None):
+        async def send_group_agent_message(self, group_id, agent_name, text, tool_calls=None,
+                                           asker=None):
             return {"status": "error",
                     "message": f"agent name not registered for this node in this group: {agent_name}"}
 

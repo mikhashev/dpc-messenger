@@ -40,11 +40,14 @@ def _handler(agents=("ext:CC_mike",)):
     return GroupTextHandler(svc), svc.local_api.broadcast_event
 
 
-async def _mention(handler, text, sender_name="Ark", is_agent=False):
+async def _mention(handler, text, sender_name="Ark", is_agent=False, verification="legacy"):
     payload = {"message_id": "m1", "text": text, "sender_name": sender_name}
     if is_agent:
         payload["is_agent"] = True
-    await handler._handle_agent_mentions("g1", payload, text, sender_name, "node-peer")
+    if verification == "verified":
+        payload["sender_type"] = "agent" if is_agent else "human"
+    await handler._handle_agent_mentions("g1", payload, text, sender_name, "node-peer",
+                                         verification=verification)
 
 
 @pytest.mark.asyncio
@@ -62,9 +65,21 @@ async def test_the_registered_tag_is_woken_by_its_own_name():
 async def test_at_all_from_a_human_peer_wakes_the_registered_tag():
     """The send path computes `mention_all`; the peer path never passed it."""
     handler, broadcast = _handler()
-    await _mention(handler, "@all статус?")
+    await _mention(handler, "@all статус?", verification="verified")
     tags = [c.args[1]["agent_tag"] for c in broadcast.await_args_list]
     assert tags == ["cc_mike"], f"@all from a peer woke {tags}"
+
+
+@pytest.mark.asyncio
+async def test_at_all_from_a_post_whose_signature_did_not_verify_wakes_nobody():
+    """ADR-053 D-a (Zcode's review): an unverified post is of unknown kind, so it does not
+    speak for every agent at once; it may still name one."""
+    for verdict in ("legacy", "unverified"):
+        handler, broadcast = _handler()
+        await _mention(handler, "@all статус?", verification=verdict)
+        assert broadcast.await_count == 0, verdict
+        await _mention(handler, "@CC_mike статус?", verification=verdict)
+        assert broadcast.await_count == 1, verdict
 
 
 @pytest.mark.asyncio

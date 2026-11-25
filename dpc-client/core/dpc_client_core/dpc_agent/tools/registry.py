@@ -22,7 +22,7 @@ import logging
 import math
 import pathlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..utils import safe_relpath, is_path_in_sandbox, get_agent_root
@@ -337,6 +337,12 @@ class ToolContext:
     turn_class: Optional[str] = None
     open_layers: Optional[frozenset] = None
 
+    # Who asked for this turn (agent.Asker, ADR-053): a separate axis from the room. A
+    # flagged tool (ToolEntry.owner_approval_for_others) asks the owner first when the
+    # asker is not the owner. DpcAgent.process sets it on every turn; None is nobody's
+    # turn and is not the owner (fail closed).
+    asker: Optional[Any] = None
+
     # Skill store for execute_skill tool (set by DpcAgent.process())
     skill_store: Optional[Any] = None
 
@@ -514,6 +520,18 @@ class ToolEntry:
     # Runs only on the owner's own turns (agent.OWNER_TURN): outside them the tool is not
     # offered and a call is refused before its body runs. See owner_only_refusal.
     owner_only: bool = False
+    # ADR-053: every call asked for by someone who is not the owner (ToolContext.asker) goes
+    # to the owner as an approval card first. Checked in one place, ToolRegistry.execute
+    # (owner_approval.open_gate). A registry test requires every tool to carry it or to be
+    # named in its table of tools with no card.
+    owner_approval_for_others: bool = False
+    # Optional (D-d): approval_check(ctx, args) -> owner_approval.Refuse | Exempt | ToolAsks
+    # | Ask, or None to ask with the arguments as "what exactly". Called only on a turn the
+    # owner did not ask for.
+    approval_check: Optional[Callable] = None
+    # The tool's own timeout already holds a 60 s approval wait (run_shell, schedule_task,
+    # music_propose_job), so the loop adds none on a foreign turn (D-c).
+    budget_holds_approval: bool = False
 
 
 def is_owner_turn(ctx: Optional["ToolContext"]) -> bool:
@@ -709,6 +727,17 @@ class ToolRegistry:
         """The names of the tools marked owner_only."""
         return {e.name for e in self._entries.values() if e.owner_only}
 
+    def owner_approval_names(self) -> set:
+        """The names of the tools marked owner_approval_for_others (ADR-053)."""
+        return {e.name for e in self._entries.values() if e.owner_approval_for_others}
+
+    def approval_wait_for(self, name: str, ctx: Optional["ToolContext"] = None) -> int:
+        """Seconds the loop adds to this call's budget for the owner's card (ADR-053 D-c):
+        60 for a flagged tool on a turn the owner did not ask for, unless its own timeout
+        already holds the wait; else 0."""
+        from ..owner_approval import approval_wait_for
+        return approval_wait_for(self._entries.get(name), ctx if ctx is not None else self._ctx)
+
     def list_non_core_tools(self) -> List[Dict[str, str]]:
         """Return name+description of all non-core tools."""
         result = []
@@ -776,6 +805,21 @@ class ToolRegistry:
         if arg_error is not None:
             return arg_error
 
+        # ADR-053: a flagged tool asked for by someone who is not the owner goes to the owner
+        # first. After the owner_only refusal and the argument check, so the card shows the
+        # arguments the handler will get; the gate's mark lives until the handler returns.
+        from ..owner_approval import open_gate
+        gate = open_gate(entry, _ctx, args)
+        if gate.refusal is not None:
+            return gate.refusal
+        try:
+            return self._run_handler(entry, name, _ctx, args)
+        finally:
+            gate.close()
+
+    def _run_handler(self, entry: "ToolEntry", name: str, _ctx: "ToolContext",
+                     args: Dict[str, Any]) -> str:
+        """The handler's call, sync or async, with the registry's error words."""
         try:
             result = entry.handler(_ctx, **args)
             # Handle async handlers
@@ -811,16 +855,29 @@ class ToolRegistry:
             return f"⚠️ TOOL_ERROR ({name}): {type(e).__name__}: {e}"
 
     def override_handler(self, name: str, handler: Callable) -> None:
-        """Override the handler for a registered tool (used for closure injection)."""
+        """Override the handler for a registered tool (used for closure injection).
+
+        `dataclasses.replace`, not a field-by-field copy: a flag the copy forgot was
+        silently dropped (ADR-053 D-h)."""
         entry = self._entries.get(name)
         if entry:
-            self._entries[name] = ToolEntry(
-                name=entry.name,
-                schema=entry.schema,
-                handler=handler,
-                is_code_tool=entry.is_code_tool,
-                timeout_sec=entry.timeout_sec,
-                is_core=entry.is_core,
-                default_enabled=entry.default_enabled,
-                owner_only=entry.owner_only,
-            )
+            self._entries[name] = replace(entry, handler=handler)
+
+
+def mark_owner_approval(entries: List["ToolEntry"],
+                        checks: Dict[str, Optional[Callable]],
+                        budget_holds_approval: Tuple[str, ...] = ()) -> List["ToolEntry"]:
+    """Set `owner_approval_for_others` on the named tools of a module (ADR-053 step 2), with
+    each one's `approval_check` (None: ask with the arguments as "what exactly").
+
+    A name the module does not export is an error, so a renamed tool cannot fall out of
+    the flag silently.
+    """
+    names = {e.name for e in entries}
+    missing = sorted(set(checks) - names)
+    if missing:
+        raise ValueError(f"mark_owner_approval: no such tool in this module: {missing}")
+    return [replace(e, owner_approval_for_others=True, approval_check=checks[e.name],
+                    budget_holds_approval=e.name in budget_holds_approval)
+            if e.name in checks else e
+            for e in entries]

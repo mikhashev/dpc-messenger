@@ -1180,3 +1180,52 @@ def get_tools() -> List[ToolEntry]:
             default_enabled=False,
         ),
     ]
+
+
+# ---------------------------------------------------------------------------
+# ADR-053: every git write asks the owner when someone else asked for the turn
+# ---------------------------------------------------------------------------
+
+def _git_write_approval(verb: str, init: bool = False):
+    """The approval_check of a git write: what `_closed_git_write` refuses is refused before
+    any card (ADR-053 2.7, the same gate the tool applies); otherwise the card names the
+    repository, resolved, and the rest of the call."""
+    def check(ctx: ToolContext, args: Dict[str, Any]):
+        import json
+        from pathlib import Path
+        from ..owner_approval import Ask, Refuse, clip
+        path = args.get("path") or "."
+        repo_path = args.get("repo_path")
+        refusal = _closed_git_write(ctx, path, None if init else repo_path, init=init)
+        if refusal:
+            return Refuse(refusal)
+        try:
+            where = (Path(repo_path).expanduser().resolve() if repo_path
+                     else (ctx.agent_root / path).resolve())
+        except (OSError, ValueError):
+            where = repo_path or path
+        rest = {k: v for k, v in args.items() if k not in ("path", "repo_path") and v is not None}
+        shown = f"git {verb} in {where}"
+        if rest:
+            shown += ": " + json.dumps(rest, ensure_ascii=False, default=str, sort_keys=True)
+        return Ask(clip(shown))
+    return check
+
+
+_get_git_tools_unflagged = get_tools
+
+
+def get_tools() -> List[ToolEntry]:  # noqa: F811 (the flags of ADR-053 on the list above)
+    """Export git tools for registry, with every write flagged (ADR-053 2.5)."""
+    from .registry import mark_owner_approval
+    return mark_owner_approval(_get_git_tools_unflagged(), {
+        "git_add": _git_write_approval("add"),
+        "git_commit": _git_write_approval("commit"),
+        "git_init": _git_write_approval("init", init=True),
+        "git_checkout": _git_write_approval("checkout"),
+        "git_merge": _git_write_approval("merge"),
+        "git_tag": _git_write_approval("tag"),
+        "git_reset": _git_write_approval("reset"),
+        "git_snapshot": _git_write_approval("snapshot"),
+        "git_push": _git_write_approval("push"),
+    })

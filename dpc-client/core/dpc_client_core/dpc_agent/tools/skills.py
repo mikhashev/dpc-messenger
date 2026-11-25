@@ -203,7 +203,14 @@ def _list_my_processes(ctx: "ToolContext") -> str:
              f"Memory ceiling: {ceiling}."]
     if not rows:
         lines.append("No process started by your tools is in the registry.")
-    lines.extend(_process_line(r, ceiling_mb) for r in live + ended)
+    # A command line can quote a path or a secret: not shown on a turn that is not the
+    # owner's (ADR-048; Zcode's review of ADR-053).
+    from .core import _not_owner
+    if _not_owner(ctx) is not None:
+        rows_shown = [dict(r, command="(withheld: this turn is not the owner's)") for r in live + ended]
+    else:
+        rows_shown = live + ended
+    lines.extend(_process_line(r, ceiling_mb) for r in rows_shown)
     return "\n".join(lines)
 
 
@@ -499,3 +506,15 @@ def get_tools() -> "List[ToolEntry]":
             default_enabled=True,
         ),
     ]
+
+
+# ADR-053 (Mike's answer to Q3, #138): running or importing a skill asks the owner when
+# someone else asked for the turn; kill_my_process does not (it stops only this agent's own
+# processes).
+_get_skill_tools_unflagged = get_tools
+
+
+def get_tools() -> "List[ToolEntry]":  # noqa: F811
+    from .registry import mark_owner_approval
+    return mark_owner_approval(_get_skill_tools_unflagged(),
+                               {"execute_skill": None, "import_skill_from_agent": None})

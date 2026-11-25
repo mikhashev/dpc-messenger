@@ -7446,3 +7446,45 @@ def get_tools() -> List[ToolEntry]:
             default_enabled=False,
         ),
     ]
+
+
+# ADR-053: the browser actions ask the owner when someone else asked for the turn; the tools
+# that only read (snapshot, screenshot, extract, wait_for, scroll, collect, switch_tab,
+# close) do not (Mike's answer to Q3, #138).
+BROWSER_ACTION_TOOLS = ("browser_navigate", "browser_click", "browser_fill", "browser_select",
+                        "browser_download")
+
+# The plain web fetchers send a URL the model chose out of this node (Zcode's review: a way
+# out for what the turn has read). Mike decided at AI Studio group #148 (2026-11-25) that on
+# a foreign request they ask the owner too: browse_page without the owner's login,
+# fetch_json, check_url, search_web. One switch, so the decision is one line.
+CARD_FOR_PLAIN_WEB_FETCH = True
+PLAIN_WEB_FETCH_TOOLS = ("fetch_json", "check_url", "search_web")
+
+
+def _browse_page_approval(ctx: ToolContext, args: Dict[str, Any]):
+    """browse_page with the owner's login (`use_auth`) acts as the owner on that site, and
+    `save_to` writes a file: both ask (Zcode's review, P1). A plain fetch asks only when
+    CARD_FOR_PLAIN_WEB_FETCH is on."""
+    from ..owner_approval import Ask, Exempt, clip
+    url = str(args.get("url") or "")
+    if args.get("use_auth"):
+        return Ask(clip(f"open {url} logged in as the owner ({args.get('use_auth')})"
+                        + (f" and save it to {args.get('save_to')}" if args.get("save_to") else "")))
+    if args.get("save_to"):
+        return Ask(clip(f"open {url} and save it to {args.get('save_to')}"))
+    if CARD_FOR_PLAIN_WEB_FETCH:
+        return Ask(clip(f"open {url}"))
+    return Exempt("a plain fetch without the owner's login (CARD_FOR_PLAIN_WEB_FETCH is off)")
+
+
+_get_browser_tools_unflagged = get_tools
+
+
+def get_tools() -> List[ToolEntry]:  # noqa: F811
+    from .registry import mark_owner_approval
+    checks: Dict[str, Any] = {name: None for name in BROWSER_ACTION_TOOLS}
+    checks["browse_page"] = _browse_page_approval
+    if CARD_FOR_PLAIN_WEB_FETCH:
+        checks.update({name: None for name in PLAIN_WEB_FETCH_TOOLS})
+    return mark_owner_approval(_get_browser_tools_unflagged(), checks)

@@ -226,7 +226,8 @@ class TestTheRoomLockGivesRoomBusy:
         seen = []
         rg.set_turn_listener(seen.append)
 
-        async def invoke(group_id, text, sender_name, agent_id, trigger_message_id, mention_depth=0):
+        async def invoke(group_id, text, sender_name, agent_id, trigger_message_id, mention_depth=0,
+                         asker=None):
             async with hold(get_run_gate(agent_id), {"conversation_id": group_id}):
                 await release.wait()
 
