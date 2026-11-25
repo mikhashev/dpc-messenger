@@ -1105,6 +1105,15 @@ class ConsensusManager:
             proposal = KnowledgeCommitProposal.from_dict(payload)
             conversation_id = proposal.conversation_id or ""
 
+            # This node's proposals start here and never arrive from a peer.
+            if proposal.proposed_by == self.node_id:
+                logger.warning(
+                    "Refusing PROPOSE_KNOWLEDGE_COMMIT from %s for %s: proposal %s claims "
+                    "to be this node's own",
+                    sender_node_id, conversation_id, proposal.proposal_id,
+                )
+                return False
+
             existing = self.sessions.get(proposal.proposal_id)
             if existing is not None and getattr(existing, "received_from", None) is None:
                 logger.warning(
@@ -1179,11 +1188,20 @@ class ConsensusManager:
     def record_peer_result(self, session: VotingSession, sender_node_id: str, status: str) -> bool:
         """Take a KNOWLEDGE_COMMIT_RESULT a peer sent about one of our sessions.
 
-        False when the sender is not a participant: the result is not this
-        node's business to show or relay. Otherwise True, and the status moves
-        only from "voting" to an outcome. A result never reopens a session —
-        a session back in "voting" counts the next vote to a second finalize.
+        False when the sender is not a participant, or when the proposal is
+        this node's own (this node announces that outcome; a peer's word would
+        close the vote and drop the real votes still coming): such a result is
+        neither shown nor relayed. Otherwise True, and the status moves only
+        from "voting" to an outcome. A result never reopens a session — a
+        session back in "voting" counts the next vote to a second finalize.
         """
+        if getattr(session, "received_from", None) is None:
+            logger.warning(
+                "Ignoring KNOWLEDGE_COMMIT_RESULT from %s for %s (%s): the proposal is "
+                "this node's own",
+                sender_node_id, session.proposal.proposal_id, session.proposal.conversation_id,
+            )
+            return False
         roster = set(session.proposal.participants or ())
         if sender_node_id not in roster:
             logger.warning(

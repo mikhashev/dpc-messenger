@@ -186,10 +186,17 @@ def _result(status):
     return {"proposal_id": "proposal-0001", "status": status}
 
 
+def _peer_session(status="voting"):
+    """A session for a proposal PEER made; a result about it is PEER's to send."""
+    proposal = _proposal()
+    proposal.proposed_by = PEER
+    return VotingSession(proposal=proposal, status=status, received_from=PEER)
+
+
 @pytest.mark.asyncio
 async def test_a_result_from_a_non_participant_changes_nothing_and_goes_nowhere():
     consensus = _consensus()
-    consensus.sessions["proposal-0001"] = VotingSession(proposal=_proposal())
+    consensus.sessions["proposal-0001"] = _peer_session()
     handler, service, sent = _result_handler(consensus)
 
     await handler.handle(OTHER, _result("rejected"))
@@ -202,7 +209,7 @@ async def test_a_result_from_a_non_participant_changes_nothing_and_goes_nowhere(
 @pytest.mark.asyncio
 async def test_a_participants_result_closes_an_open_session():
     consensus = _consensus()
-    consensus.sessions["proposal-0001"] = VotingSession(proposal=_proposal())
+    consensus.sessions["proposal-0001"] = _peer_session()
     handler, service, _sent = _result_handler(consensus)
 
     await handler.handle(PEER, _result("rejected"))
@@ -216,7 +223,7 @@ async def test_a_participants_result_closes_an_open_session():
 @pytest.mark.parametrize("claimed", ["voting", "approved", "rejected", "finalizing"])
 async def test_a_result_never_moves_a_closed_session(closed, claimed):
     consensus = _consensus()
-    consensus.sessions["proposal-0001"] = VotingSession(proposal=_proposal(), status=closed)
+    consensus.sessions["proposal-0001"] = _peer_session(closed)
     handler, _service, _sent = _result_handler(consensus)
 
     await handler.handle(PEER, _result(claimed))
@@ -227,7 +234,7 @@ async def test_a_result_never_moves_a_closed_session(closed, claimed):
 @pytest.mark.asyncio
 async def test_a_result_cannot_set_an_open_session_to_something_that_is_not_an_outcome():
     consensus = _consensus()
-    consensus.sessions["proposal-0001"] = VotingSession(proposal=_proposal())
+    consensus.sessions["proposal-0001"] = _peer_session()
     handler, _service, _sent = _result_handler(consensus)
 
     await handler.handle(PEER, _result("finalizing"))
@@ -239,8 +246,9 @@ async def test_a_result_cannot_set_an_open_session_to_something_that_is_not_an_o
 async def test_an_approved_proposal_is_not_applied_a_second_time():
     """The PoC shape: approve, then a result saying «voting», then a vote again."""
     consensus = _consensus()
-    proposal = _proposal()
-    consensus.sessions[proposal.proposal_id] = VotingSession(proposal=proposal)
+    session = _peer_session()
+    proposal = session.proposal
+    consensus.sessions[proposal.proposal_id] = session
     await consensus.cast_vote(proposal.proposal_id, "approve", broadcast_func=AsyncMock())
     await consensus.handle_vote_message(PEER, {"proposal_id": proposal.proposal_id,
                                                "voter_node_id": PEER, "vote": "approve"})
@@ -252,6 +260,43 @@ async def test_an_approved_proposal_is_not_applied_a_second_time():
                                                "voter_node_id": PEER, "vote": "approve"})
 
     assert len(consensus.applied) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_peers_result_never_closes_a_proposal_this_node_made(caplog):
+    """Zcode's P2: a participant's «rejected» closed our open vote and the
+    real votes still coming were dropped. We announce our own outcome."""
+    consensus = _consensus()
+    proposal = _proposal()  # proposed_by=ME, no received_from: ours
+    consensus.sessions[proposal.proposal_id] = VotingSession(proposal=proposal)
+    handler, service, sent = _result_handler(consensus)
+
+    await handler.handle(PEER, _result("rejected"))
+
+    assert consensus.sessions[proposal.proposal_id].status == "voting"
+    service.local_api.broadcast_event.assert_not_awaited()
+    assert sent == []
+    assert any(PEER in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+    await consensus.cast_vote(proposal.proposal_id, "approve", broadcast_func=AsyncMock())
+    await consensus.handle_vote_message(PEER, {"proposal_id": proposal.proposal_id,
+                                               "voter_node_id": PEER, "vote": "approve"})
+
+    assert consensus.sessions[proposal.proposal_id].status == "approved"
+    assert len(consensus.applied) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_peer_proposal_claiming_to_be_ours_is_refused(caplog):
+    """Zcode's P3: this node's proposals never arrive from a peer."""
+    consensus = _consensus()
+    consensus.peer_proposal_roster = _roster({GROUP: [ME, PEER]})
+    proposal = _proposal()  # proposed_by=ME, roster and chat otherwise legitimate
+
+    assert await consensus.handle_proposal_message(PEER, proposal.to_dict()) is False
+    assert consensus.sessions == {}
+    assert any(PEER in r.getMessage() and GROUP in r.getMessage()
+               for r in caplog.records if r.levelname == "WARNING")
 
 
 @pytest.mark.asyncio
