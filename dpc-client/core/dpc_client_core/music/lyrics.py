@@ -5,13 +5,15 @@
 
 1. `lrc`: a `.lrc` sidecar next to the audio file, same base name. Read only; it must
    hold timed lines (a sidecar with none is reported and skipped).
-2. `tags`: lyrics embedded in the file, read through ffprobe (`run_probe`, like the
-   library): the format and audio-stream tags `lyrics`, `lyrics-<lang>` (ffmpeg's name
-   for an ID3 USLT frame, `lyrics-<description>-<lang>` with a description),
-   `UNSYNCEDLYRICS` and `SYNCEDLYRICS`. Text with LRC stamps is taken as synced, other
-   text as unsynced lines. ffprobe does not surface ID3 SYLT (synced) frames: checked
-   with ffmpeg 8.1.2 on a hand-built tag holding both a USLT and a SYLT frame, where only
-   the USLT came back. So SYLT-only files have no lyrics from this step.
+2. `tags`: lyrics embedded in the file. First the ID3 SYLT (synced) frame, read directly
+   by `id3_sylt` (ffprobe does not surface it: checked with ffmpeg 8.1.2 on a hand-built
+   tag holding both a USLT and a SYLT frame, where only the USLT came back); a SYLT with
+   timed lines wins over USLT and needs no ffprobe. A SYLT in MPEG-frame timestamps
+   (format 1) is not converted, is named in the step's detail and the chain goes on.
+   Then ffprobe (`run_probe`, like the library): the format and audio-stream tags
+   `lyrics`, `lyrics-<lang>` (ffmpeg's name for an ID3 USLT frame,
+   `lyrics-<description>-<lang>` with a description), `UNSYNCEDLYRICS` and `SYNCEDLYRICS`.
+   Text with LRC stamps is taken as synced, other text as unsynced lines.
 3. `lrclib`: **the local LRCLIB cache only**. The automatic chain (`get`, which the
    player runs on every track change) never sends a request: it shows what an earlier
    explicit lookup cached for the same track hash and query, and otherwise reports the
@@ -104,7 +106,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
-from . import lyrics_filter, schemas
+from . import id3_sylt, lyrics_filter, schemas
 from .identity import FFPROBE_TIMEOUT_S, MediaTools
 from .library import MusicLibraryError
 from .store import atomic_write_json, atomic_write_text, music_dir_of
@@ -989,28 +991,40 @@ class MusicLyrics:
                     else:
                         chain.append(_step("lrc", "none", f"{sidecar[0].name} has no timed lines"))
 
-        # (b) embedded tags
+        # (b) embedded tags: ID3 SYLT read directly (ffprobe does not surface it), then ffprobe's tags
         probed: Optional[Dict[str, Any]] = None
         if found is not None:
             chain.append(_step("tags", "not_needed"))
         elif path is None:
             chain.append(_step("tags", "skipped", "the track has no file now"))
         else:
-            tools = await self._media_tools()
-            if not tools.ffprobe:
-                chain.append(_step("tags", "unavailable", "ffprobe was not found, so embedded tags cannot be read"))
+            sylt: Optional[id3_sylt.SyltResult] = None
+            try:
+                sylt = await asyncio.to_thread(id3_sylt.read_id3_sylt, path)
+            except OSError as exc:
+                logger.info("music: could not read the ID3 tag of %s: %s", path, exc)
+            sylt_note = "; ".join(sylt.skipped) if sylt is not None else ""
+            if sylt is not None and sylt.lines:
+                found = make_lyrics(track_hash, "tags", sylt.lines, synced=True, language=sylt.language)
+                chain.append(_step("tags", "found", f"tag SYLT: {len(sylt.lines)} timed lines"))
             else:
-                probed = await asyncio.to_thread(read_tags, path, tools)
-                picked = pick_lyrics_tag(probed["tags"]) if probed else None
-                if probed is None:
-                    chain.append(_step("tags", "error", "ffprobe could not read the file"))
-                elif picked is None:
-                    chain.append(_step("tags", "none", "no lyrics tag (ID3 SYLT is not read by ffprobe)"))
+                tools = await self._media_tools()
+                if not tools.ffprobe:
+                    chain.append(_step("tags", "unavailable", "ffprobe was not found, so embedded tags cannot be read"
+                                       + (f" ({sylt_note})" if sylt_note else "")))
                 else:
-                    lines, synced, language = lines_from_text(picked[1])
-                    found = make_lyrics(track_hash, "tags", lines, synced=synced, language=language)
-                    chain.append(_step("tags", "found",
-                                       f"tag {picked[0]}: {len(lines)} {'timed' if synced else 'unsynced'} lines"))
+                    probed = await asyncio.to_thread(read_tags, path, tools)
+                    picked = pick_lyrics_tag(probed["tags"]) if probed else None
+                    if probed is None:
+                        chain.append(_step("tags", "error", "ffprobe could not read the file"
+                                           + (f" ({sylt_note})" if sylt_note else "")))
+                    elif picked is None:
+                        chain.append(_step("tags", "none", "no lyrics tag" + (f" ({sylt_note})" if sylt_note else "")))
+                    else:
+                        lines, synced, language = lines_from_text(picked[1])
+                        found = make_lyrics(track_hash, "tags", lines, synced=synced, language=language)
+                        chain.append(_step("tags", "found",
+                                           f"tag {picked[0]}: {len(lines)} {'timed' if synced else 'unsynced'} lines"))
 
         # (c) LRCLIB: the local cache only. This chain runs on every track change with
         # no click, so it never sends anything; "Find on LRCLIB" (`lookup_lrclib`) does.

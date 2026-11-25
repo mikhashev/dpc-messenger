@@ -538,7 +538,7 @@ def _id3v24(frames):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="needs ffmpeg and ffprobe")
-async def test_a_real_uslt_frame_is_read_and_a_sylt_frame_is_not(tmp_path):
+async def test_a_real_file_with_uslt_and_sylt_shows_the_sylt_and_a_sylt_only_file_shows_lyrics(tmp_path):
     raw = tmp_path / "raw.mp3"
     subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
                     "-id3v2_version", "0", "-write_xing", "0", str(raw)], check=True, timeout=60)
@@ -560,13 +560,14 @@ async def test_a_real_uslt_frame_is_read_and_a_sylt_frame_is_not(tmp_path):
                       client=Lrclib(ok(record())).client())
     answer = await svc.get(TRACK_ID)
     assert answer["lyrics"]["source"] == "tags"
-    assert answer["lyrics"]["lines"] == [{"t_start": 1.0, "text": "timed"}]
-    assert "lyrics-eng" in answer["chain"][1]["detail"]
+    assert answer["lyrics"]["lines"] == [{"t_start": 1.0, "text": "sylt one"}]  # SYLT beats USLT
+    assert "SYLT" in answer["chain"][1]["detail"]
 
     svc2 = MusicLyrics(tmp_path / "dpc2", FakeLibrary(only_sylt), lrclib_enabled=lambda: False, tools=tools,
                        client=Lrclib(ok(record())).client())
     answer = await svc2.get(TRACK_ID)
-    assert answer["lyrics"] is None and answer["chain"][1]["state"] == "none"
+    assert answer["lyrics"]["lines"] == [{"t_start": 1.0, "text": "sylt one"}]
+    assert answer["lyrics"]["source"] == "tags" and answer["chain"][1]["state"] == "found"
 
 
 # -- the local_api door ---------------------------------------------------------------
