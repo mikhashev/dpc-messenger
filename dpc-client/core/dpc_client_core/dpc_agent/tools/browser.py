@@ -2023,6 +2023,51 @@ _CLICK_PROBE_DOWNLOAD_MS = 5000
 # is what failed, and carrying the probe lines when it timed out.
 _CLICK_DIAGNOSIS_ATTR = "_dpc_click_diagnosis"
 
+# Where an action on this element would take the page, read from the element and
+# the document and never by acting (ADR-053, Zcode #184 P3). `intent` is "click",
+# "fill" or "select". A link gives its resolved href; a submit control, or any field
+# of a form, gives the form's resolved action and method (the control's own
+# formaction/formmethod win); anything else is a script and its target cannot be read.
+_ACTION_DESTINATION_JS = """
+(el, intent) => {
+  const abs = (u) => { try { return new URL(u, document.baseURI).href; } catch (e) { return ''; } };
+  const out = {page: location.href, kind: 'script'};
+  const tag = el.tagName.toLowerCase();
+  const attr = (node, name) => (node && node.getAttribute) ? node.getAttribute(name) : null;
+  if (intent === 'click') {
+    const a = el.closest('a[href], area[href]');
+    if (a) {
+      const raw = (attr(a, 'href') || '').trim();
+      if (/^javascript:/i.test(raw)) { return out; }
+      out.kind = 'link';
+      out.href = abs(raw);
+      out.target = attr(a, 'target') || '';
+      return out;
+    }
+  }
+  const control = el.closest('button, input');
+  const ctype = control ? (attr(control, 'type') || '').toLowerCase() : '';
+  const ctag = control ? control.tagName.toLowerCase() : '';
+  const submits = intent === 'click' && control && (
+    (ctag === 'button' && (ctype === '' || ctype === 'submit')) ||
+    (ctag === 'input' && (ctype === 'submit' || ctype === 'image')));
+  const form = (control && control.form) || el.form || el.closest('form');
+  if (form && (submits || intent !== 'click')) {
+    const own = submits ? attr(control, 'formaction') : null;
+    const rawAction = own !== null ? own : attr(form, 'action');
+    const method = ((submits ? attr(control, 'formmethod') : null) || attr(form, 'method') || 'get').toLowerCase();
+    out.kind = 'form';
+    out.action = rawAction ? abs(rawAction) : document.URL;
+    out.method = method;
+    out.submits = !!submits;
+    if (intent === 'select') { out.onchange = !!attr(el, 'onchange'); }
+    return out;
+  }
+  out.kind = intent === 'click' ? 'script' : 'noform';
+  return out;
+}
+"""
+
 # Returns a word rather than undefined: what the probe answered is how
 # `_click_probes` knows it ran at all when the wait after it times out.
 _JS_CLICK = "el => { el.click(); return 'clicked'; }"
@@ -3759,6 +3804,21 @@ class AuthBrowser:
             delivery=delivery, raf=facts.get("raf"),
         )
         return {"delivery": delivery, "raf": facts.get("raf"), "starved": starved}
+
+    def page_url(self) -> str:
+        """The URL of the page this session shows now."""
+        self._require_open()
+        return str(self._page.url or "")
+
+    def action_destination(self, ref_or_selector: str, intent: str) -> dict:
+        """Where a click, fill or select on this element would lead, read without
+        acting: see `_ACTION_DESTINATION_JS`. Raises on a stale ref or a page that
+        cannot answer; the card reads that as "destination unknown"."""
+        self._require_open()
+        locator = self._resolve_ref(ref_or_selector)
+        return locator.evaluate(
+            _ACTION_DESTINATION_JS, intent, timeout=_CLICK_PROBE_TIMEOUT_MS,
+        ) or {}
 
     def _click_target_facts(self, locator) -> dict:
         """The element, the document and the frame rate, in one bounded call.
@@ -5562,7 +5622,7 @@ async def browse_page(
                 session = await _navigate_with_recovery(
                     session, agent_id, url, [use_auth],
                 )
-                _note_turn_of_binding(session, ctx)
+                _note_turn_of_binding(session, ctx, await _read_page_url(session))
                 html = await _run_in_session(session, "get_page_html")
             else:
                 # headed=False, so this browser stays gated: the route gate
@@ -5978,19 +6038,106 @@ def _turn_token(ctx: Any) -> Optional[str]:
     return token
 
 
-def _note_turn_of_binding(session: Any, ctx: ToolContext) -> None:
+def _origin_of(url: Any) -> Optional[str]:
+    """scheme://host[:port] of a URL, lowercase, or None when it has none (about:blank, a
+    garbled string, nothing)."""
+    try:
+        parts = _urlparse(str(url or "").strip())
+        host = (parts.hostname or "").lower()
+        if not parts.scheme or not host:
+            return None
+        port = f":{parts.port}" if parts.port else ""
+        return f"{parts.scheme.lower()}://{host}{port}"
+    except Exception:
+        return None
+
+
+def _write_marks(session: Any, **marks: Any) -> bool:
+    """Write the per-navigation marks on a session. A session that cannot carry attributes
+    must not break a browse: the write is logged and skipped, and a page with no mark is read
+    as the owner's (`_owner_page_refusal` defaults to it), so a foreign turn is refused and the
+    owner still reads it. Fails closed."""
+    try:
+        for name, value in marks.items():
+            setattr(session, name, value)
+        return True
+    except Exception as e:
+        log.warning("browser marks could not be written (%s: %s); the page counts as the "
+                    "owner's", type(e).__name__, e)
+        return False
+
+
+def _note_turn_of_binding(session: Any, ctx: ToolContext, page_url: Any = None) -> None:
     """Record which turn last opened the page this session shows (browse_page keep_open,
     browser_navigate), per navigation (Zcode #176): the owner's own turn, or one named
     foreign turn. A foreign turn's opening was approved by the owner for that turn only, so
     its page may be read on that turn and on no later one; the owner's next opening resets
-    the mark. When the asker cannot be told, the page counts as the owner's (fail closed)."""
+    the mark. When the asker cannot be told, the page counts as the owner's (fail closed).
+
+    `page_url` is where the page is now: its origin is the one the owner's approval covered
+    (Zcode #184 P3), and a foreign action that leaves it needs a fresh approval. A fresh
+    opening, or the owner's own action, also clears a "moved off" mark."""
     from ..owner_approval import asker_is_owner
     try:
         on_owner_turn = bool(asker_is_owner(ctx))
     except Exception:
         on_owner_turn = True
-    session._bound_on_owner_turn = on_owner_turn
-    session._bound_turn_token = None if on_owner_turn else _turn_token(ctx)
+    _write_marks(
+        session,
+        _bound_on_owner_turn=on_owner_turn,
+        _bound_turn_token=None if on_owner_turn else _turn_token(ctx),
+        _approved_origin=_origin_of(page_url),
+        _moved_to_origin=None,
+    )
+
+
+def _reevaluate_mark_after_action(session: Any, ctx: ToolContext, page_url: Any) -> None:
+    """Re-read the per-navigation mark after an action that may have moved the page
+    (click, fill, select, download, switch_tab; Zcode #184 P3).
+
+    The owner's own action makes the page the owner's again. A foreign turn's action that
+    left the page on an origin other than the one the owner approved, or on one that cannot
+    be told (fail closed), marks the page: it is not read on a foreign turn until
+    browser_navigate opens it again and the owner is asked."""
+    from ..owner_approval import asker_is_owner
+    try:
+        on_owner_turn = bool(asker_is_owner(ctx))
+    except Exception:
+        on_owner_turn = False
+    if on_owner_turn:
+        _note_turn_of_binding(session, ctx, page_url)
+        return
+    now = _origin_of(page_url)
+    approved = getattr(session, "_approved_origin", None)
+    if now is None or approved is None or now != approved:
+        _write_marks(session, _moved_to_origin=now or "an address that could not be read")
+
+
+async def _read_page_url(session: Any) -> Optional[str]:
+    """Where the session's page is now, or None when it cannot be asked."""
+    try:
+        url = await _run_in_session(session, "page_url", _touch=False, _timeout=5)
+    except Exception as e:
+        log.debug("page url unavailable: %s", e)
+        return None
+    return url if isinstance(url, str) and url else None
+
+
+def _reevaluates_mark(handler):
+    """Decorator for the browser actions that can move the page: after the action, whatever
+    its answer, the per-navigation mark is re-read against where the page is now."""
+    @functools.wraps(handler)
+    async def wrapper(ctx, *args, **kwargs):
+        try:
+            return await handler(ctx, *args, **kwargs)
+        finally:
+            try:
+                session = _active_browser_sessions.get(ctx.agent_root.name)
+                if session is not None:
+                    _reevaluate_mark_after_action(session, ctx, await _read_page_url(session))
+            except Exception as e:
+                log.warning("browser mark could not be re-read after an action: %s", e)
+    return wrapper
 
 
 def _owner_page_refusal(ctx: ToolContext, session: Any, tool: str) -> Optional[str]:
@@ -6007,6 +6154,14 @@ def _owner_page_refusal(ctx: ToolContext, session: Any, tool: str) -> Optional[s
     from ..owner_approval import asker_is_owner, turn_asker
     if asker_is_owner(ctx):
         return None
+    moved = getattr(session, "_moved_to_origin", None)
+    if moved:
+        who = turn_asker(ctx).label()
+        log.info("%s refused for %s: the page moved to %s after the owner's approval",
+                 tool, who, moved)
+        return (f"⚠️ {tool} was not run: an action moved the open page to {moved}, which is "
+                f"not the address the owner approved, and the page is logged in as the owner. "
+                f"Open the page you mean with browser_navigate, which asks the owner.")
     bound_token = getattr(session, "_bound_turn_token", None)
     if getattr(session, "_bound_on_owner_turn", True) is False:
         if bound_token is not None and bound_token == getattr(ctx, "_browser_turn_token", None):
@@ -6099,7 +6254,7 @@ async def browser_navigate(ctx: ToolContext, url: str) -> str:
                 agent_id, type(e).__name__, str(e).split(chr(10))[0],
             )
             return f"⚠️ Navigate failed: {type(e).__name__}: {e}"
-        _note_turn_of_binding(session, ctx)
+        _note_turn_of_binding(session, ctx, await _read_page_url(session))
     status_note = ""
     if snapshot.startswith(HTTP_ERROR_PREFIX):
         head, _, snapshot = snapshot.partition("\n\n")
@@ -6192,6 +6347,7 @@ async def browser_scroll(
 
 
 @_reports_late_results
+@_reevaluates_mark
 async def browser_click(
     ctx: ToolContext, ref_or_selector: str, timeout: int = 30000,
 ) -> str:
@@ -6246,6 +6402,7 @@ async def browser_click(
 
 
 @_reports_late_results
+@_reevaluates_mark
 async def browser_fill(
     ctx: ToolContext, ref_or_selector: str, text: str,
 ) -> str:
@@ -6366,6 +6523,7 @@ def _select_answer(ref: str, result: dict) -> str:
 
 
 @_reports_late_results
+@_reevaluates_mark
 async def browser_select(
     ctx: ToolContext,
     ref_or_selector: str,
@@ -6736,6 +6894,7 @@ def _download_answer(
 
 
 @_reports_late_results
+@_reevaluates_mark
 async def browser_download(
     ctx: ToolContext,
     ref_or_selector: str,
@@ -6777,6 +6936,7 @@ async def browser_download(
 
 
 @_reports_late_results
+@_reevaluates_mark
 async def browser_switch_tab(ctx: ToolContext, index: int) -> str:
     """Switch the active page to tab at `index` in the browser
     context (0-based)."""
@@ -7553,6 +7713,95 @@ def _browse_page_approval(ctx: ToolContext, args: Dict[str, Any]):
     return Exempt("a plain fetch without the owner's login (CARD_FOR_PLAIN_WEB_FETCH is off)")
 
 
+UNKNOWN_DESTINATION = "destination unknown (script)"
+_CARD_HREF_LIMIT = 220
+_CARD_TEXT_LIMIT = 120
+_DESTINATION_READ_SEC = 8
+
+
+def _read_destination(ctx: ToolContext, ref: str, intent: str) -> Tuple[str, Optional[dict]]:
+    """(the page's URL, what the element would lead to) for an approval card, read from the
+    open page without acting. The card is built on a worker thread with no event loop, so the
+    read goes straight to the session's own thread. Anything that cannot be read gives
+    (url or "", None): the card then says the destination is unknown."""
+    session = _get_session_or_error(ctx.agent_root.name)
+    if session is None:
+        return "", None
+    page = ""
+    try:
+        executor = session._get_executor()
+        page = str(executor.submit(session.page_url).result(timeout=_DESTINATION_READ_SEC) or "")
+        info = executor.submit(session.action_destination, ref, intent).result(
+            timeout=_DESTINATION_READ_SEC)
+        return page, (info if isinstance(info, dict) and info else None)
+    except Exception as e:
+        log.info("card: destination of %s not read: %s: %s", ref, type(e).__name__,
+                 str(e).split(chr(10))[0])
+        return page, None
+
+
+def _destination_words(page_url: str, info: Optional[dict], intent: str) -> str:
+    """The card's sentence for where an action leads (Zcode #184 P3)."""
+    from ..owner_approval import clip
+    if not info:
+        return UNKNOWN_DESTINATION
+    here = _origin_of(page_url or info.get("page"))
+    kind = info.get("kind")
+
+    def _where(url: str, by: str = "") -> str:
+        there = _origin_of(url)
+        shown = clip(url, _CARD_HREF_LIMIT) + by
+        if there is None:
+            return shown
+        return shown + (" (the same origin as the page)" if there == here
+                        else f" (ANOTHER origin than the page: {there})")
+
+    if kind == "link":
+        new_tab = " in a new tab" if info.get("target") == "_blank" else ""
+        return f"leads to the link {_where(str(info.get('href') or ''))}{new_tab}"
+    if kind == "form":
+        method = str(info.get("method") or "get").upper()
+        action = _where(str(info.get("action") or ""), f" by {method}")
+        if intent == "click":
+            return f"submits the form to {action}"
+        extra = " and its onchange script may submit it" if info.get("onchange") else ""
+        return f"a field of a form that posts to {action}{extra}"
+    if kind == "noform":
+        return "a field that is not inside a form"
+    return UNKNOWN_DESTINATION
+
+
+def _browser_click_approval(ctx: ToolContext, args: Dict[str, Any]):
+    """browser_click: the card names where the click leads, or says it cannot tell."""
+    from ..owner_approval import Ask, clip
+    ref = str(args.get("ref_or_selector") or "")
+    page, info = _read_destination(ctx, ref, "click")
+    return Ask(clip(f"click {ref}: {_destination_words(page, info, 'click')}"
+                    f" [on page {clip(page, _CARD_HREF_LIMIT) or 'unknown'}]"))
+
+
+def _browser_fill_approval(ctx: ToolContext, args: Dict[str, Any]):
+    """browser_fill: the card names the text and the form the field belongs to."""
+    from ..owner_approval import Ask, clip
+    ref = str(args.get("ref_or_selector") or "")
+    page, info = _read_destination(ctx, ref, "fill")
+    text = clip(str(args.get("text") or ""), _CARD_TEXT_LIMIT)
+    return Ask(clip(f"fill {ref} with {text!r}: {_destination_words(page, info, 'fill')}"
+                    f" [on page {clip(page, _CARD_HREF_LIMIT) or 'unknown'}]"))
+
+
+def _browser_select_approval(ctx: ToolContext, args: Dict[str, Any]):
+    """browser_select: the card names the option and the form the select belongs to."""
+    from ..owner_approval import Ask, clip
+    ref = str(args.get("ref_or_selector") or "")
+    page, info = _read_destination(ctx, ref, "select")
+    named = ", ".join(f"{k}={clip(str(args[k]), _CARD_TEXT_LIMIT)!r}"
+                      for k in ("value", "label", "index") if args.get(k) is not None)
+    return Ask(clip(f"select {named or '(no option named)'} in {ref}: "
+                    f"{_destination_words(page, info, 'select')}"
+                    f" [on page {clip(page, _CARD_HREF_LIMIT) or 'unknown'}]"))
+
+
 _get_browser_tools_unflagged = get_tools
 
 
@@ -7560,6 +7809,9 @@ def get_tools() -> List[ToolEntry]:  # noqa: F811
     from .registry import mark_owner_approval
     checks: Dict[str, Any] = {name: None for name in BROWSER_ACTION_TOOLS}
     checks["browse_page"] = _browse_page_approval
+    checks["browser_click"] = _browser_click_approval
+    checks["browser_fill"] = _browser_fill_approval
+    checks["browser_select"] = _browser_select_approval
     if CARD_FOR_PLAIN_WEB_FETCH:
         checks.update({name: None for name in PLAIN_WEB_FETCH_TOOLS})
     return mark_owner_approval(_get_browser_tools_unflagged(), checks)
