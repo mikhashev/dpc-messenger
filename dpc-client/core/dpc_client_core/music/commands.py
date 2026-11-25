@@ -138,6 +138,7 @@ from .lineage import LineageError, build_lineage, write_lineage_files
 from .store import music_dir_of
 from .lyrics import MusicLyrics
 from . import lyrics_prep
+from . import provenance as mp_provenance
 from .peaks import PeaksError, get_peaks
 from .runner import MusicJobRunner
 from .stream import DEFAULT_STREAM_PORT, MusicStreamServer
@@ -636,9 +637,19 @@ class MusicCommandsMixin:
         if self._music_runner_instance is not None:
             self._music_runner_instance.wake()
 
+    def _music_provenance_node_id(self) -> Optional[str]:
+        """This node's public id for a take's provenance record (`node_id`), or None when the person
+        turned `[music] provenance_node_id` off. Only the id peers see (`p2p_manager.node_id`), never key
+        or token material; the lossy export withholds it (`provenance.withhold_node_id`)."""
+        if str(self._music_config_value("provenance_node_id", "true")).strip().lower() in _FALSE:
+            return None
+        node_id = getattr(getattr(self, "p2p_manager", None), "node_id", None)
+        return node_id if isinstance(node_id, str) else None
+
     async def start_music_jobs(self) -> None:
         """Start the job runner (it resumes queued jobs); called at service start. A
         failure is logged and leaves jobs queued."""
+        mp_provenance.set_node_id_source(self._music_provenance_node_id)
         try:
             store = await self._music_jobs()
             if self._music_runner_instance is None:

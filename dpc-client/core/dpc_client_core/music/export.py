@@ -86,7 +86,9 @@ are reduced to file names: the ffmpeg binary, the source and the output; the rec
 **The source's own record** (PROVENANCE §3, Mike 2026-11-21): a track made since then carries a
 full `mp.provenance/1` inside its FLAC (or WAV `DPCP` item), read straight from the file when
 ffprobe is absent. It is strictly validated (`provenance.parse_embedded`) and carried over whole
-as `source_record`; the sidecar, which is the same record, then adds only its ids to `take`. When
+as `source_record`; the sidecar, which is the same record, then adds only its ids to `take`. The
+record's `node_id` (the node's public id) is replaced by `withheld_on_export` in both: the node id is a
+tracking identifier, so it stays in the library's copy and does not travel in an export. When
 the library has no lyrics for the track, `USLT` is written from the file's own lyrics tag, else
 from the record's `lyrics` (never for an instrumental).
 
@@ -1149,7 +1151,7 @@ class MusicExporter:
         parsed: Optional[Dict[str, Any]] = None
         if carried:
             parsed, problem = mp_provenance.parse_embedded(carried, max_bytes=PROVENANCE_MAX_BYTES)
-            record["source_record"] = parsed
+            record["source_record"] = mp_provenance.withhold_node_id(parsed) if parsed is not None else None
             if parsed is None:
                 record["source_record_note"] = f"the source's DPC_PROVENANCE was not carried over: {problem}"
         if source.take_record is not None:
@@ -1157,7 +1159,7 @@ class MusicExporter:
             if parsed is not None and take.get("schema") == mp_provenance.SCHEMA:
                 # The sidecar is the same record as the file's: only what the file cannot hold.
                 take = {k: take.get(k) for k in ("schema", "take_id", "library_track_id") if k in take}
-            record["take"] = take
+            record["take"] = mp_provenance.withhold_node_id(take) if take.get("schema") == mp_provenance.SCHEMA else take
         text = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
         if len(text.encode("utf-8")) > max_bytes:
             for key in ("take", "source_record"):

@@ -451,7 +451,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 ### mp.qc/1
 
 - **Met in:** code, wire
-- **Meaning:** The SPEC §8.1 QC record of one take, stored as the take's `qc`: stage 1 is `deterministic` (a copy of the take's **mp.qa/1**, null when it has none) with `stage1` (the **music QA gate** summary, so a clipped take is flagged whatever a judge says) and the advisory `lyrics_wer` (read from a stored transcription only, never a warning, gate or rank); stage 2 is the **QC judge**'s `judge`, `scores` (six, 0-10), `issues` with times, `reasons` and `confidence`, with the judge `absent` until someone asks. A take whose stage-1 QA is done gets the record when it is added; a judge's result or a refresh replaces it. QC never accepts or rejects a take and never blocks Keep or Discard. Ranking by `scores.overall` is off by default (SPEC decision 26).
+- **Meaning:** The SPEC §8.1 QC record of one take, stored as the take's `qc`: stage 1 is `deterministic` (a copy of the take's **mp.qa/1**, null when it has none) with `stage1` (the **music QA gate** summary, so a clipped take is flagged whatever a judge says) and the advisory `lyrics_wer` (read from a stored transcription only, never a warning, gate or rank); stage 2 is the **QC judge**'s `judge`, `scores` (six, 0-10), `issues` with times, `reasons` and `confidence`, with the judge `absent` until someone asks. A take whose stage-1 QA is done gets the record when it is added; a take made before QA gets it from `backfill_music_qa`; a judge's result or a refresh replaces it. QC never accepts or rejects a take and never blocks Keep or Discard. Ranking by `scores.overall` is off by default (SPEC decision 26).
 - **Defined in:** [music/qc.py](../dpc-client/core/dpc_client_core/music/qc.py), [music/job_schemas.py — `check_qc`](../dpc-client/core/dpc_client_core/music/job_schemas.py)
 
 ### QC judge
@@ -611,7 +611,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 ### node_id
 
 - **Met in:** code, rules, screen, wire
-- **Meaning:** `dpc-node-` plus the first 32 hex characters of the SHA-256 of the node's RSA public key; the certificate's Common Name and the key to everything that names a node.
+- **Meaning:** `dpc-node-` plus the first 32 hex characters of the SHA-256 of the node's RSA public key; the certificate's Common Name and the key to everything that names a node. A generated take's `mp.provenance/1` record also holds it as `node_id` (the id peers see, never key material; `[music] provenance_node_id` turns it off, and the lossy MP3 export replaces it by `withheld_on_export`).
 - **Defined in:** [specs/dptp_v1.md §4](../specs/dptp_v1.md#node-id-format)
 
 ### peer

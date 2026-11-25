@@ -58,6 +58,21 @@ non-commercial. A licence this module has no source for is `unknown`, never a gu
 genotype and the substrate, so no id changes. `summarize` carries `licence_key` and `non_commercial`
 into the library entry, so takes that must stay non-commercial can be told apart without opening files.
 
+**Lineage and identity fields** (card THE-PROVENANCE-RECORD-STILL-LEAVES-...-OPEN).
+
+- `parents` is `[]` for a generated song (no parent) and one entry for a region edit, in the vocabulary of
+  `lineage.py`: `id` (the parent's node id there: its take, else `source:<library id>`), `edge_kind: "edit"`,
+  `op` (the job's action), `N_delta`, and the base's ids and hash. `N_delta` is 1 when the repaint's text came
+  from the parent; it is `not_stored` with `N_delta_note` when the caption or lyrics were given with the job
+  (they may differ from the parent's, which the record cannot compare). Clone and mutate are kinds of a synthesis
+  edge and no builder here makes a take by one (a same-style or cover take is a new generation of its own), so
+  they are not written.
+- `node_id` is this node's public id (`dpc-node-...`, `p2p_manager.node_id`: the id peers see, never key or
+  token material), set through `set_node_id_source`; `not_stored` when no source is set or `[music]
+  provenance_node_id` is off. The lossy export replaces it by `withheld_on_export` (`withhold_node_id`).
+- `build` stays `not_stored` with `build_note` giving the reason: the engine reports no build, compiler or CUDA
+  architecture on `/health` or `/props`. The device's `compute_capability` is recorded beside the driver.
+
 **Legacy records.** Until 2026-11-22 `genome_sha256` was the hash of the whole genotype bucket
 (the wide definition), and 55 re-tagged files carry that value. A record **without
 `genome_basis` is legacy**: its stored `genome_sha256` / `render_sha256` mean the wide
@@ -85,6 +100,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 logger = logging.getLogger(__name__)
 
 SCHEMA = "mp.provenance/1"
+EDIT_ENGINE_LOCAL = "dpc"   # a removal is DPC's own sample work, no engine
 TAG = "DPC_PROVENANCE"
 MAX_BYTES = 64 * 1024
 NOT_STORED = "not_stored"
@@ -338,13 +354,17 @@ def flac_command(ffmpeg: str, wav: str, flac: str, tags: Mapping[str, str]) -> L
 
 # -- device (cheap, cached) ---------------------------------------------------------------------
 
+_CAPABILITY_RE = re.compile(r"^\d{1,2}\.\d{1,2}$")
 _DEVICE_CACHE: Optional[Dict[str, Any]] = None
 _DEVICE_LOCK = threading.Lock()
 
 
 def device_identity(runner: Optional[Callable[..., Any]] = None, *, refresh: bool = False) -> Dict[str, Any]:
-    """`{gpu, driver, source}` from `nvidia-smi` when it is there, else `{gpu: not_stored, ...}`.
-    One short probe per process, through the process registry like the other probes."""
+    """`{gpu, driver, compute_capability?, source}` from `nvidia-smi` when it is there, else
+    `{gpu: not_stored, ...}`. `compute_capability` (`12.0`: PROVENANCE §2 asks for it beside the driver)
+    is left out when the driver's `nvidia-smi` does not know the `compute_cap` field (it then answers
+    with an error and the probe is made again for the name and driver alone). One short probe per
+    process, through the process registry like the other probes."""
     global _DEVICE_CACHE
     with _DEVICE_LOCK:
         if _DEVICE_CACHE is not None and not refresh and runner is None:
@@ -355,12 +375,17 @@ def device_identity(runner: Optional[Callable[..., Any]] = None, *, refresh: boo
             try:
                 if runner is None:
                     from .identity import default_runner as runner  # imported at the call: identity imports us
-                done = runner([exe, "--query-gpu=name,driver_version", "--format=csv,noheader"], timeout=8.0)
-                text = done.stdout.decode("utf-8", "replace") if isinstance(done.stdout, bytes) else (done.stdout or "")
-                line = text.strip().splitlines()[0] if done.returncode == 0 and text.strip() else ""
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 2 and parts[0] and parts[1]:
-                    out = {"gpu": parts[0], "driver": parts[1], "source": "nvidia-smi"}
+                for fields in ("name,driver_version,compute_cap", "name,driver_version"):
+                    done = runner([exe, f"--query-gpu={fields}", "--format=csv,noheader"], timeout=8.0)
+                    text = done.stdout.decode("utf-8", "replace") if isinstance(done.stdout, bytes) else (done.stdout or "")
+                    line = text.strip().splitlines()[0] if done.returncode == 0 and text.strip() else ""
+                    parts = [q.strip() for q in line.split(",")]
+                    if len(parts) >= 2 and parts[0] and parts[1]:
+                        out = {"gpu": parts[0], "driver": parts[1], "source": "nvidia-smi"}
+                        if len(parts) >= 3 and _CAPABILITY_RE.match(parts[2]):
+                            out = {"gpu": parts[0], "driver": parts[1], "compute_capability": parts[2],
+                                   "source": "nvidia-smi"}
+                        break
             except Exception as exc:
                 logger.info("music: the GPU probe failed: %s", exc)
         if runner is None or _DEVICE_CACHE is None:
@@ -368,7 +393,52 @@ def device_identity(runner: Optional[Callable[..., Any]] = None, *, refresh: boo
         return out
 
 
+# -- the node's public id -----------------------------------------------------------------------
+
+NODE_ID_RE = re.compile(r"^dpc-node-[A-Za-z0-9]{1,64}$")
+NODE_ID_WITHHELD = "withheld_on_export"
+_NODE_ID_SOURCE: Optional[Callable[[], Optional[str]]] = None
+
+
+def set_node_id_source(source: Optional[Callable[[], Optional[str]]]) -> None:
+    """Where records read this node's public id (`dpc-node-...`, the id peers see; never key or token
+    material). The service sets it when the job runner starts; with none set, or when it answers
+    something that is not a node id (the service answers None when `[music] provenance_node_id` is
+    off), the record's `node_id` is `not_stored`."""
+    global _NODE_ID_SOURCE
+    _NODE_ID_SOURCE = source
+
+
+def node_identity() -> str:
+    """The `node_id` of a record: the public id, or `not_stored`."""
+    source = _NODE_ID_SOURCE
+    if source is None:
+        return NOT_STORED
+    try:
+        value = source()
+    except Exception:
+        logger.warning("music: reading the node id for a provenance record failed", exc_info=True)
+        return NOT_STORED
+    return value if isinstance(value, str) and NODE_ID_RE.match(value) else NOT_STORED
+
+
+def withhold_node_id(rec: Mapping[str, Any]) -> Dict[str, Any]:
+    """A copy of `rec` for a file that is shared on purpose (the lossy export): the `node_id` a
+    record holds is replaced by `withheld_on_export` (Zcode and Ark, PROVENANCE review: the node id is a
+    tracking identifier, so off in exports, on in the library copy). The record in the library is not
+    touched."""
+    out = dict(rec)
+    if isinstance(out.get("node_id"), str) and out["node_id"] != NOT_STORED:
+        out["node_id"] = NODE_ID_WITHHELD
+    return out
+
+
 # -- the builders -------------------------------------------------------------------------------
+
+BUILD_NOTE = ("not reported: the engine answers /health with a status and /props with its version, models and "
+              "defaults, neither names the build, the compiler or the CUDA architecture, and DPC does not read them "
+              "from the binary; the binary is named by sha256 in engine_binaries")
+BUILD_NOTE_NO_ENGINE = "DPC's own sample work, no engine binary"
 
 
 def _base(*, engine: str, job_id: Optional[str], variant: Optional[int], created_at: str, identity: Mapping[str, Any],
@@ -385,6 +455,8 @@ def _base(*, engine: str, job_id: Optional[str], variant: Optional[int], created
         "engine_commit": _ns(identity.get("commit") or _commit_of(version)),
         "engine_binaries": _binaries_list(identity.get("binaries")),
         "build": NOT_STORED,
+        "build_note": BUILD_NOTE_NO_ENGINE if engine == EDIT_ENGINE_LOCAL else BUILD_NOTE,
+        "node_id": node_identity(),
         "device": dict(device) if device else {"gpu": NOT_STORED, "driver": NOT_STORED},
         "backend": server_args.get("device") or NOT_STORED,
         "reproducible_within": REPRODUCIBLE_WITHIN.get(engine, NOT_STORED),
@@ -518,7 +590,6 @@ def build_yue2_record(*, job_id: str, variant: int, created_at: str, params: Map
     return rec
 
 
-EDIT_ENGINE_LOCAL = "dpc"   # a removal is DPC's own sample work, no engine
 
 
 def _with_parent_licence(licence: Dict[str, Any], parent_key: Optional[str]) -> Dict[str, Any]:
@@ -532,6 +603,34 @@ def _with_parent_licence(licence: Dict[str, Any], parent_key: Optional[str]) -> 
     found = {p["licence"] for p in parts}
     nc: Optional[bool] = True if found & NON_COMMERCIAL_LICENCES else (None if LICENCE_UNKNOWN in found else False)
     return {"key": "+".join(sorted(found)), "non_commercial": nc, "components": parts}
+
+
+N_DELTA_NOTE = ("the repaint's caption or lyrics were given with the job, and the record does not hold the "
+                "parent's text to compare with, so the number of changed fields is not known")
+
+
+def edit_parent(parent: Mapping[str, Any], action: str, edit: Mapping[str, Any]) -> Dict[str, Any]:
+    """The one `parents` entry of a region edit, in the vocabulary of `lineage.py`: `id` is the parent's node
+    id there (the take it came from, else `source:<library id>`), `edge_kind` is `edit` and `op` the job's
+    action (`regenerate_region`, `fix_seam`, `remove_region`). Clone and mutate are kinds of a synthesis
+    edge; a region edit is neither, so there is no guess to make.
+
+    `N_delta` (EVOLUTION section 5: the number of intentional fields changed from the parent) is **1**
+    for a region edit whose text came from the parent (the region is the one change; the seed and the
+    engine window are not fields the person chose). When the caption or the lyrics were given with the
+    job (`caption_from` / `lyrics_from` is `params`) they may differ from the parent's, which the
+    record cannot compare, so `N_delta` is `not_stored` with `N_delta_note`."""
+    take_id, library_id = parent.get("take_id"), parent.get("library_track_id")
+    node = take_id if isinstance(take_id, str) and take_id else (f"source:{library_id}" if library_id else NOT_STORED)
+    entry: Dict[str, Any] = {"id": node, "edge_kind": "edit", "op": action}
+    if any(edit.get(k) == "params" for k in ("caption_from", "lyrics_from")):
+        entry["N_delta"] = NOT_STORED
+        entry["N_delta_note"] = N_DELTA_NOTE
+    else:
+        entry["N_delta"] = 1
+    entry.update({k: parent.get(k) for k in ("role", "library_track_id", "content_hash", "version_id",
+                                              "take_id", "job_id", "comment_id", "licence_key")})
+    return entry
 
 
 def build_edit_record(*, job_id: str, variant: int, created_at: str, action: str, task_type: str,
@@ -571,8 +670,7 @@ def build_edit_record(*, job_id: str, variant: int, created_at: str, action: str
         "duration_received_s": duration_received_s,
         "loudness": dict(loudness) if loudness else NOT_STORED,
         "relation": "region_edit",
-        "parents": [{k: parent.get(k) for k in ("role", "library_track_id", "content_hash", "version_id",
-                                                 "take_id", "job_id", "comment_id", "licence_key")}],
+        "parents": [edit_parent(parent, action, edit)],
         "edit": dict(edit),
         **_chain(engine_output, postprocess, output),
     })
@@ -713,6 +811,10 @@ def validate_embedded(rec: Any) -> None:
         v = rec.get(key)
         if v is not None and v != NOT_STORED and not (isinstance(v, str) and _SHA_RE.match(v)):
             raise ValueError(f"{key} is not a sha256")
+    node = rec.get("node_id")
+    if node is not None and node not in (NOT_STORED, NODE_ID_WITHHELD) and not (
+            isinstance(node, str) and NODE_ID_RE.match(node)):
+        raise ValueError("node_id is not a node id")
     basis = rec.get("genome_basis")
     if basis is not None and basis != NOT_STORED and not (isinstance(basis, str) and _BASIS_RE.match(basis)):
         raise ValueError("genome_basis is not a plain name")
