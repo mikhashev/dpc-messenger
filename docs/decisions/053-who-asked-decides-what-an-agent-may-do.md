@@ -15,8 +15,9 @@ session: "AI Studio group chat (group-60aff6110f02), 2026-11-25 — Mike's decis
 
 # ADR-053 — Who asked decides what an agent may do
 
-> **Accepted 2026-11-25 (Mike, AI Studio group chat #105, #108, #123, #124, #126, #128).
-> Nothing here is built.** This is a proposed implementation of decisions Mike has made.
+> **Accepted 2026-11-25 (Mike, AI Studio group chat #105, #108, #123, #124, #126, #128,
+> #135, #138, #148). Built on `dev` 2026-11-25 (steps 1-9; see
+> [As built](#as-built-2026-11-25)), not observed live.**
 > The section [Decision](#decision) states what he decided. The section
 > [Details CC derived from the code](#details-cc-derived-from-the-code) holds points that
 > are CC's reading of the code and are not Mike's words; they are open to review. Every
@@ -152,35 +153,42 @@ this ADR (see [Q1](#open-questions)).
 `owner_only` (`ToolEntry.owner_only`, `registry.py:516`). Proposed name:
 `owner_approval_for_others` (see the [glossary](../GLOSSARY.md#owner_approval_for_others)).
 It is checked in one place, `ToolRegistry.execute`, next to the `owner_only` refusal
-(`registry.py:766-772`), so that a new tool cannot skip it. **Mike-approved list**, with
-the card on every call:
+(`registry.py:766-772`), so that a new tool cannot skip it. **The list**, one named list,
+with the card on every call:
 
-- `run_shell` at **every tier**: Tier 0 `git push`, `copy`, `del` and redirects included;
-- `write_file`;
-- every git write: `git_add`, `git_commit`, `git_init`, `git_checkout`, `git_merge`,
-  `git_tag`, `git_reset`, `git_snapshot`, `git_push` (the callers of `_closed_git_write`
-  in `tools/git.py`);
-- `repo_delete`;
-- `schedule_task`;
-- `send_user_message`;
-- browser actions;
-- added by Mike's answer to Q3 (AI Studio group #138, 2026-11-25): `execute_skill`,
-  `import_skill_from_agent`, `register_task_type`, `unregister_task_type`, and the two
-  tools that spend the GPU card, `describe_image` and `transcribe_audio_file`.
+- Mike's list (#105-#128): `run_shell` at **every tier** (Tier 0 `git push`, `copy`, `del`
+  and redirects included); `write_file`; every git write (`git_add`, `git_commit`,
+  `git_init`, `git_checkout`, `git_merge`, `git_tag`, `git_reset`, `git_snapshot`,
+  `git_push`, the callers of `_closed_git_write` in `tools/git.py`); `repo_delete`;
+  `schedule_task`; `send_user_message`; the browser actions (`browser_navigate`,
+  `browser_click`, `browser_fill`, `browser_select`, `browser_download`).
+- Mike's answer to Q3 (AI Studio group #138, 2026-11-25) names seven tools: six with a
+  card, `execute_skill`, `import_skill_from_agent`, `register_task_type`,
+  `unregister_task_type`, and the two that spend the GPU card, `describe_image` and
+  `transcribe_audio_file`; and `kill_my_process` without one. The browser tools that only
+  read carry no card.
+- Mike's call at AI Studio group #148 (2026-11-25): the four plain web fetchers,
+  `browse_page` (with or without the owner's login), `fetch_json`, `check_url` and
+  `search_web`, carry the card too: each sends a URL the model chose out of this node, a
+  way out for whatever the turn has read (Zcode's review). One switch in `tools/browser.py`
+  (`CARD_FOR_PLAIN_WEB_FETCH`) holds this.
+- Zcode's review: `browse_page` with `use_auth` acts as the owner on that site, and
+  `list_auth_domains` tells which sites those are; both carry the card.
+- The tools that were `owner_only` (2.6): `music_*` x9, ComfyUI x7, `chat_post_file`.
 
 Reads and search carry no card. `update_identity` and `update_scratchpad` are **not** on the
-list: the L5 layer (ADR-048) already closes them on a turn that is not the owner's. Without a
-card by the same answer to Q3: `kill_my_process` and the browser tools that only read.
+list: the L5 layer (ADR-048) already closes them on a turn that is not the owner's.
 
 **The completeness table.** Every registered tool is in one of the two columns; the registry
-test of step 2 fails on a tool in neither.
+test of step 2 (`tests/test_every_registered_tool_is_flagged_or_named_in_the_no_card_table.py`)
+fails on a tool in neither.
 
 | Card on a foreign request (`owner_approval_for_others`) | No card |
 |---|---|
 | `run_shell` (every tier), `write_file`, `repo_delete` | reads: `read_file`, `list_dir`, `list_extended_sandbox_paths`, `search_files`, `search_in_file`, `read_document`, `chat_history`, `knowledge_list`, `memory_search`, `get_dpc_context`, `read_session_archive`, `read_session_detail`, `search_session_archives` |
 | git writes: `git_add`, `git_commit`, `git_init`, `git_checkout`, `git_merge`, `git_tag`, `git_reset`, `git_snapshot`, `git_push` | git reads: `git_status`, `git_diff`, `git_log`, `git_branch` |
-| `schedule_task`, `send_user_message` | self-introspection: `list_my_tools`, `list_my_skills`, `list_agent_skills`, `list_local_agents`, `list_task_types`, `get_task_status`, `get_task_board`, `card_status`, `list_my_processes`, `list_auth_domains` |
-| browser actions: `browser_navigate`, `browser_click`, `browser_fill`, `browser_select`, `browser_download` | web reads: `browse_page`, `fetch_json`, `check_url`, `search_web`; browser reads: `browser_snapshot`, `browser_screenshot`, `browser_extract`, `browser_wait_for`, `browser_scroll`, `browser_collect`, `browser_switch_tab`, `browser_close` |
+| `schedule_task`, `send_user_message` | self-introspection: `list_my_tools`, `list_my_skills`, `list_agent_skills`, `list_local_agents`, `list_task_types`, `get_task_status`, `get_task_board`, `card_status`, `list_my_processes` |
+| browser actions: `browser_navigate`, `browser_click`, `browser_fill`, `browser_select`, `browser_download`; the web fetchers (#148): `browse_page`, `fetch_json`, `check_url`, `search_web`; `list_auth_domains` | browser reads: `browser_snapshot`, `browser_screenshot`, `browser_extract`, `browser_wait_for`, `browser_scroll`, `browser_collect`, `browser_switch_tab`, `browser_close` |
 | the former `owner_only` tools (2.6): `music_*` x9, ComfyUI x7, `chat_post_file` | the L5 layer closes them (ADR-048): `update_scratchpad`, `update_identity`, `deduplicate_identity` |
 | Q3: `execute_skill`, `import_skill_from_agent`, `register_task_type`, `unregister_task_type`, `describe_image`, `transcribe_audio_file` | Q3: `kill_my_process` (it stops only this agent's own processes) |
 
@@ -191,15 +199,27 @@ card states the cost: a local engine leaves the card; it comes back in about 25 
 may run cold. A swap saves the live conversation (1.1 GB, about 10 s) and its KV snapshot;
 the restore can fail on a prefix mismatch, and then the next turn runs cold (reviewer
 Johnny's correction of the earlier wording "the conversation cache is dropped"; ADR-052
-holds the lease model). The same cost line is on the cards of `describe_image` and
-`transcribe_audio_file`, which spend the card too.
+holds the lease model). The same cost line is on the cards of `describe_image`,
+`transcribe_audio_file` and `comfyui_submit`, which spend the card too, and on the owner's
+own music card. Two limits found in review (Zcode) and kept:
+
+- `owner_only` was the ComfyUI tools' only guard: they take a path or a server URL as given.
+  On a foreign request their paths now go through the file tools' gate
+  (`tools.core._resolve_file_path`: the sandbox, the profile's grants, what is closed to the
+  turn) and only the default local server is spoken to, both before any card. The owner's
+  own requests are unchanged.
+- `chat_post_file` refuses every group (`chat_files.turn_refusal`), so "with owner approval"
+  reaches only the agent's own 1:1 chat. Posting into a group is ADR-051 D50 decision G,
+  separate work, not built here.
 
 **2.7 `run_shell` and closed paths.** A path that is closed for the turn is refused
 **without a card** (ADR-048, direction of 2026-11-09). The check goes in the shell tool
-handler, like the git gate in `tools/git.py:169-234`. It does **not** go inside
-`validate_extended_path`: `DpcAgent._extended_path_allowed` (`agent.py:501-515`) calls that
-function with a context that has no message source, for Active Recall (`agent.py:697`), and
-a turn-class check there would silently drop extended paths from recall.
+handler (`shell._closed_shell_path`), like the git gate in `tools/git.py:169-234`, and in
+`run_shell`'s `approval_check`, so it comes before the card. It does **not** go inside
+`validate_extended_path`: `DpcAgent._extended_path_allowed` (`agent.py`) calls that function
+with a context that has no message source, for Active Recall. `turn_audience` itself does not
+gate such a bare context, but a default-deny check there (as `is_owner_turn` fails closed on a
+context with no class) would refuse every extended path to recall.
 
 **2.8 One pending card per chat.** A second flagged call in a chat that already has a card
 up is refused at once, with a one-line reason. This answers the board card about
@@ -257,6 +277,14 @@ Whether the author is a human or an agent is read from the signed `sender_type`
 (`signed_mention_depth`, `group_handler.py:65-92`); for an unverified post it is not known.
 Proposed: an asker whose post is not `verified` is foreign, kind "unknown", and the card
 says "not verified". A claimed own-node id must never buy owner rights.
+Added from Zcode's review and built: the wake line logs the verdict ("signature verified",
+"unverified", "legacy"); `unverified` keeps the author the payload claims and `legacy` the
+transport's node, and neither is ever an own node. The history sync is a second peer door
+(`_wake_merged_mentions` hands the record's stored verdict to the same
+`_handle_agent_mentions`), so it gets the same asker. An unverified post is of unknown kind
+for routing too: it may name an agent, whose turn then has a foreign asker, but its `@all`
+wakes nobody. A peer reached over WebRTC through the Hub has a node id the Hub asserted, not
+one a key proved; only a verified signature makes it an own node.
 
 **D-b. One card per call.** A `run_shell` Tier 1 command asked for by a foreign asker gets
 the one card, with the Tier 1 reason on it, not two. The same for any tool that already
@@ -271,7 +299,14 @@ its calls). The other music tools do not: `music_wait` has 915 s (`WAIT_MAX_S` 9
 `music_list_takes`, `music_list_library`, `music_get_lyrics` and `music_playlist_add` have
 30 s each (`ONE_CALL_TOOL_TIMEOUT_S`), which a 60 s card would cut. The budget for a flagged
 call on a foreign turn becomes the tool's own plus the approval wait, except for the three
-tools whose own budget already holds it.
+tools whose own budget already holds it. As built: `ToolEntry.budget_holds_approval` marks
+those three, `ToolRegistry.approval_wait_for` gives the 60 s to every other flagged tool on a
+foreign turn (most 2.5 tools have 30 s, `git_push` 60 s), and a registry-wide test pins it.
+Zcode's review found the second half: the loop's `asyncio.wait_for` cancels the await, not
+the worker thread, so a call the model was told had timed out kept waiting for its card and a
+late "yes" would still run it. The loop now gives the worker the call's deadline
+(`owner_approval.run_with_call_deadline`), and every approval wait (the gate's card, the
+schedule card, the shell's Tier 1 card) voids an answer that comes after it.
 
 **D-d. The gate needs a hook.** To refuse a closed path before the card (2.7), to exempt the
 music return (D-e), and to word "what exactly", `ToolEntry` gets an optional
@@ -295,7 +330,8 @@ no stored asker is treated as foreign.
 
 **D-h. A latent trap in the registry.** `ToolRegistry.override_handler`
 (`registry.py:813-826`) rebuilds a `ToolEntry` field by field. A new flag that is not
-copied there is silently dropped. It has no non-test caller today. The build uses
+copied there is silently dropped. Its one non-test caller is the eval harness
+(`eval/_harness/answer_key_policy.py`, which wraps handlers), and it keeps working. The build uses
 `dataclasses.replace` instead.
 
 **D-i. The tool pool, across chats** (reviewer Johnny). "One card per chat" (2.8) does not
@@ -304,6 +340,27 @@ the whole process, and four chats with one card each still fill it. So at most *
 cards raised for foreign askers are pending across the whole process; a third flagged call
 is refused at once with "another approval is already waiting for the owner". Two leave two
 workers for every other agent's tools.
+
+**D-j. The room axis gaps the review found** (Zcode; ADR-048, closed as the room closes,
+not with cards). `transcripts/` (where `transcribe_audio_file` writes) and `output/` are mixed
+stores (`tools/core.py`, `_MIXED_DIRS`); `get_task_status` withholds a task's result and error,
+`list_my_processes` its command lines, and `get_dpc_context("device")` the device context, on
+a turn that is not the owner's.
+
+**D-k. The knowledge revision turn.** `_agent_auto_revise_proposal` runs as `ui` and pastes
+the voters' comments into the prompt. With a comment from a node outside every own node
+group, that node is the turn's asker (foreign, kind unknown), so a flagged tool the revision
+reaches for asks the owner first; a revision with only own comments stays the owner's.
+
+**D-l. A Telegram card only where only the owner can press it.** Without
+`telegram_owner_user_id` a press counts in any private chat with the presser
+(`AgentTelegramBridge._is_owner_press`), so a Telegram stranger could approve his own request.
+On a foreign turn the card is offered on Telegram only when that id is set; otherwise only on
+the desktop, and with no desktop client it is refused at once.
+
+**D-m. Own nodes for the node's knowledge.** `own_node_group` is per agent, knowledge is the
+node's. The 1:1 rule of point 3 uses the union of every agent profile's `own_node_group`
+(`KnowledgeService._own_nodes`); no node-level setting exists.
 
 ## Considered Options
 
@@ -337,6 +394,15 @@ workers for every other agent's tools.
 - **ADR-048's `run_shell` hole narrows, and does not close.** The path check reads literal
   paths only (ADR-048, Consequences). A Tier 0 command that builds a path at run time is
   still caught by the card for a foreign asker, not by the path check.
+- **The relay rule holds on this node only.** Q2's inheritance is carried on the local path
+  (`send_group_agent_message` -> `_handle_group_agent_mentions` ->
+  `_invoke_agent_in_group`). Across nodes the asker is not on the wire: carrying it would need
+  a signed field and a protocol version step (`message_signing.py`, the preimage versions), so
+  a verified own node's agent post counts as an own agent. External harnesses on this node
+  (CC_windows, Zcode_windows) are the owner by Decision 2.2: a foreigner who addresses one can
+  have it wake an own agent with no card. `cc_group_mention` now carries the asker for the
+  bridge to read, but its reply post carries nothing back; inheritance there is by
+  convention, not code. Recorded as residual risk.
 - **A relayed foreign request keeps its asker.** An own agent woken by a foreign asker can
   post a mention that wakes another own agent. That agent inherits the original asker for
   the whole chain (Q2, decided by Mike, AI Studio group #135, 2026-11-25), so its flagged
@@ -367,7 +433,7 @@ Windows, Linux and macOS.
      `_invoke_agent`), from the author node, the verification verdict (D-a) and the
      signed `sender_type`;
    - local path: `service.py` (`_handle_group_agent_mentions`, `_invoke_agent_in_group`,
-     and its other callers at the file and voice posts), where the asker is this node's
+     and its other callers at the file and image posts; a voice post routes no mention), where the asker is this node's
      human, this node's agent or an external agent on this node;
    - `managers/agent_manager.py` (`process_message`, `process`) carries it;
    - `dpc_agent/agent.py` `process` replaces the unused `sender_node_id` parameter use and
@@ -453,7 +519,8 @@ Each is something a person or a test can see. Check them on a build, not on the 
 14. **No owner at the desktop.** With no UI client attached and no Telegram origin, a
     flagged call on a foreign request is refused at once with "nobody could be asked".
 15. **The picker.** Choosing a group in the agent permissions panel writes
-    `memory.own_node_group` and the next turn logs it (`agent.py`, `_log_own_nodes`);
+    `memory.own_node_group` and the next turn uses it; the log line (`agent.py`,
+    `_log_own_nodes`, run when the agent is created) shows it on the next start;
     choosing none leaves the field absent; a name not in `node_groups` is refused on save.
 16. **Knowledge.** A peer's `APPLY_KNOWLEDGE_COMMIT` for a proposal this node never voted
     on waits for a card and is not applied on refusal; a 1:1 proposal from a node outside
@@ -482,6 +549,39 @@ Each is something a person or a test can see. Check them on a build, not on the 
 - **Q4. The roster has no owner.** The own-node test and the class read the member list,
   which a peer can change (`GROUP-ROSTER-HAS-NO-OWNER`, ADR-038 partly built). This ADR
   inherits that risk from ADR-048 and does not remove it.
+
+## As built (2026-11-25)
+
+Built on `dev` by CC, not pushed, not observed live. Where the build follows the code rather
+than the text above, it says so here.
+
+- **Step 1.** `Asker` (kind, name, node id, `is_owner`, `verified`, `via`) and
+  `asker_for_source`, `peer_post_asker` sit next to `turn_class` in `dpc_agent/agent.py`.
+  The routing computes it (peer path `group_handler._handle_agent_mentions`, local path
+  `service._handle_group_agent_mentions`), `agent_manager` carries it, and
+  `DpcAgent.resolve_asker` decides `is_owner` for a verified node of the agent's
+  `own_node_group`, because that group is per agent and only the agent reads it. The
+  `sender_node_id` parameter stays as the fallback of an older caller (a foreign asker of
+  unknown kind on that node).
+- **Step 2.** `ToolEntry.owner_approval_for_others`, `approval_check`,
+  `budget_holds_approval`; the flags are set per module with `registry.mark_owner_approval`.
+  The gate (`dpc_agent/owner_approval.py`, `open_gate`) runs in `ToolRegistry.execute` after
+  the `owner_only` refusal **and after the argument check**, so the card shows the arguments
+  the handler will get. A bare context (no asker, no source, no class: a test or a probe) is
+  not gated, the rule `tools.core.turn_audience` already applies to the room axis; every turn
+  `DpcAgent.process` makes carries an asker.
+- **Step 3.** The card is the schedule card's machinery, task type `owner_approval`, with
+  `asker`, `tool`, `details` and `cost` fields; the schedule, music and shell cards carry
+  `asker` (and the shell card `cwd`) on a foreign turn. The UI shows them
+  (`ScheduleApprovalDialog` via `utils/scheduleApprovalText.ts`, `ShellApprovalDialog`, which
+  also hides "Approve + Whitelist" on a foreign request).
+- **Step 4.** No tool is `owner_only` now; the filter in `_get_allowed_tools` stays for a
+  later one.
+- **Steps 5-9** as written, with D-a, D-c, D-i to D-m above.
+
+Pinned by tests (`dpc-client/core/tests/`): acceptance checks 1, 2-6, 7, 8, 9, 10, 10a, 11,
+12, 13, 14, 15 (backend half; the picker in `ui/src/lib/utils/ownerApprovalCard.test.ts`) and
+16. Check 17, the full suite on Windows and CI on Linux, is the parent's run.
 
 ## Authors
 

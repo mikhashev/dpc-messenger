@@ -748,6 +748,19 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   each tool's `owner_only`, so the badge can read the registry (`784e1298`); the sandbox check
   under every file tool compares path components, so `<agent root>2` or `<agent root>-backup`
   is no longer inside the agent's folder (`16573047`, Zcode #68 P2). Not observed live.
+
+  **Amended by ADR-053 (Mike, 2026-11-25; built on `dev`, not observed live).** "Refused" on a
+  turn that is not the owner's became "asks the owner when someone else asked": `music_*`,
+  the ComfyUI tools and `chat_post_file` carry `owner_approval_for_others` instead of
+  `owner_only`, are offered on every turn, and each call asked for by someone who is not the
+  owner shows the owner a card (who asked, the chat, the tool, what exactly, and for a GPU
+  tool the cost line). The owner asking in a mixed group runs them with no card.
+  `music_propose_job` keeps its own card, which now names the asker and states the cost. The
+  second line in each tool (`music._not_owner`, `chat_files.turn_refusal`) accepts the owner or
+  a call the owner approved, per call. On a foreign request the ComfyUI tools take only paths
+  the file tools' gate opens and only the local server. `chat_post_file` still refuses every
+  group: posting into groups is decision G (D50), separate work. `list_all_tools` carries
+  `owner_approval_for_others`, and the panel's badge reads "asks you for others".
 - **D44. The agent gets a take by `take_id`, resolved by core, and no directory access**
   (letter D, **revised**: first decided in #46 as "the agent reads `~/.dpc/music/generated/`
   without a `sandbox_extensions` entry"; revised by Mike in #53-#57 on Zcode #51). A read path

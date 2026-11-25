@@ -654,6 +654,38 @@ Tools can be enabled/disabled per agent via profiles:
 
 3. Default tool allowlist (lowest priority)
 
+### Who asked: the owner card (ADR-053)
+
+The switches above say which tools an agent has. Who asked for the turn says whether a
+consequential call runs at once or waits for you:
+
+- **You asked** (the desktop, your own Telegram chat, an external agent or harness on this
+  node, this node's own agents, or a node in the agent's `own_node_group`): tools run as the
+  switches say.
+- **Anyone else asked** (a friend's node in a group, a peer's agent, a Telegram stranger, a
+  post whose signature did not verify): every call of a tool marked
+  `owner_approval_for_others` shows you a card first. It names who asked (name, node id,
+  human or agent, "not verified", and "via Ark" when an own agent relayed it), the chat,
+  the tool and what exactly (the resolved path, the command and its directory). No answer
+  in 60 s refuses the call, and the agent says you are not in focus. With no desktop client
+  attached and no Telegram origin, the call is refused at once.
+
+Marked tools: `run_shell` (every tier), `write_file`, `repo_delete`, every git write,
+`schedule_task`, `send_user_message`, the browser actions and the web fetchers
+(`browse_page`, `fetch_json`, `check_url`, `search_web`), `list_auth_domains`, the music
+tools, the ComfyUI tools, `chat_post_file`, `execute_skill`, `import_skill_from_agent`,
+`register_task_type`, `unregister_task_type`, `describe_image` and `transcribe_audio_file`.
+A tool that spends the GPU card says so on its card. A tool with its own card (a Tier 1
+command, a `check_back`, a music job) shows that one card, with who asked on it.
+
+Bounds: one card waits per chat and two across the whole process; a call past either is
+refused at once. A path the room may not open (ADR-048) is refused before any card. The
+asker survives a scheduled wake, and an approval is for one call only.
+
+The room still decides what the agent may say: in a group with a friend's node in it the
+agent does not quote its private memory, and does not write its scratchpad or identity,
+even when you are the one who asked.
+
 ### Basic Tool Control
 
 Enable or disable individual tools in the `dpc_agent.tools` object:

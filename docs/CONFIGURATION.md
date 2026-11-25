@@ -1636,11 +1636,12 @@ Two keys in an agent's profile, `agent_profiles.<id>.memory` in `privacy_rules.j
 | Key | Default | Meaning |
 |---|---|---|
 | `layer_audience` | `{"L5": "private", "L6": "private", "EXT": "private"}` | Who sees each memory layer. `private`: the owner's turns only; `shared`: also a group with another person's node. With the defaults such a group opens no layer (L6 was `shared` until 2026-11-09). A stranger's turn (Telegram other than the owner's private chat, Discord, no source) sees none. L5 includes the agent's `memory/` folder, so with L5 private the agent has no scratchpad, identity or morning brief in such a group. An absent key keeps its default; another key or value is refused on save |
-| `own_node_group` | absent | The name of a group in the top-level `node_groups` listing your own other nodes (a Linux box, an old PC). A chat group of this node and those nodes only counts as you. Save refuses a name not in `node_groups`; at startup each agent logs the group it uses and which chat groups resolve as own |
+| `own_node_group` | absent | The name of a group in the top-level `node_groups` listing your own other nodes (a Linux box, an old PC). A chat group of this node and those nodes only counts as you, and a request from one of those nodes is yours: its tool calls run without an approval card (ADR-053), when its post's signature verified. Being in the group grants no file rights. Save refuses a name not in `node_groups`; at startup each agent logs the group it uses and which chat groups resolve as own (after a change the line appears on the next start; the next turn already uses the group). The nodes of every agent's group together are also the nodes whose 1:1 knowledge proposals count |
 
 To count the Linux node as yours: Firewall Rules → Node Groups → add a group under any name (say `home-boxes`)
-holding its node id, save, then set `"own_node_group": "home-boxes"` in the agent's memory block and
-save again. The membership a group reports is not owned by anyone (GROUP-ROSTER-HAS-NO-OWNER):
+holding its node id, save, then pick `home-boxes` under Agent Permissions → the agent → Memory
+Settings → Own node group (or set `"own_node_group": "home-boxes"` in the agent's memory block) and
+save again. Choosing "None" removes the field. The membership a group reports is not owned by anyone (GROUP-ROSTER-HAS-NO-OWNER):
 a member list a peer changed changes the answer.
 
 ### OAuth Provider Choice
