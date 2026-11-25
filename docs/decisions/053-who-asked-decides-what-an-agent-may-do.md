@@ -10,7 +10,7 @@ informed: []
 depends_on: [ADR-048]
 related: [ADR-023, ADR-026, ADR-030, ADR-038, ADR-051, ADR-052]
 supersedes: []
-session: "AI Studio group chat (group-60aff6110f02), 2026-11-25 — Mike's decisions at #105, #108, #123, #124, #126 and #128; Zcode's review of commits 702b0510..4d045edf at #125 and its wake count at #130"
+session: "AI Studio group chat (group-60aff6110f02), 2026-11-25 — Mike's decisions at #105, #108, #123, #124, #126, #128, #135 and #138; Zcode's review of commits 702b0510..4d045edf at #125 and its wake count at #130"
 ---
 
 # ADR-053 — Who asked decides what an agent may do
@@ -163,15 +163,36 @@ the card on every call:
 - `repo_delete`;
 - `schedule_task`;
 - `send_user_message`;
-- browser actions.
+- browser actions;
+- added by Mike's answer to Q3 (AI Studio group #138, 2026-11-25): `execute_skill`,
+  `import_skill_from_agent`, `register_task_type`, `unregister_task_type`, and the two
+  tools that spend the GPU card, `describe_image` and `transcribe_audio_file`.
 
 Reads and search carry no card. `update_identity` and `update_scratchpad` are **not** on the
-list: the L5 layer (ADR-048) already closes them on a turn that is not the owner's.
+list: the L5 layer (ADR-048) already closes them on a turn that is not the owner's. Without a
+card by the same answer to Q3: `kill_my_process` and the browser tools that only read.
+
+**The completeness table.** Every registered tool is in one of the two columns; the registry
+test of step 2 fails on a tool in neither.
+
+| Card on a foreign request (`owner_approval_for_others`) | No card |
+|---|---|
+| `run_shell` (every tier), `write_file`, `repo_delete` | reads: `read_file`, `list_dir`, `list_extended_sandbox_paths`, `search_files`, `search_in_file`, `read_document`, `chat_history`, `knowledge_list`, `memory_search`, `get_dpc_context`, `read_session_archive`, `read_session_detail`, `search_session_archives` |
+| git writes: `git_add`, `git_commit`, `git_init`, `git_checkout`, `git_merge`, `git_tag`, `git_reset`, `git_snapshot`, `git_push` | git reads: `git_status`, `git_diff`, `git_log`, `git_branch` |
+| `schedule_task`, `send_user_message` | self-introspection: `list_my_tools`, `list_my_skills`, `list_agent_skills`, `list_local_agents`, `list_task_types`, `get_task_status`, `get_task_board`, `card_status`, `list_my_processes`, `list_auth_domains` |
+| browser actions: `browser_navigate`, `browser_click`, `browser_fill`, `browser_select`, `browser_download` | web reads: `browse_page`, `fetch_json`, `check_url`, `search_web`; browser reads: `browser_snapshot`, `browser_screenshot`, `browser_extract`, `browser_wait_for`, `browser_scroll`, `browser_collect`, `browser_switch_tab`, `browser_close` |
+| the former `owner_only` tools (2.6): `music_*` x9, ComfyUI x7, `chat_post_file` | the L5 layer closes them (ADR-048): `update_scratchpad`, `update_identity`, `deduplicate_identity` |
+| Q3: `execute_skill`, `import_skill_from_agent`, `register_task_type`, `unregister_task_type`, `describe_image`, `transcribe_audio_file` | Q3: `kill_my_process` (it stops only this agent's own processes) |
 
 **2.6 The tools that are `owner_only` today.** `music_*`, the seven ComfyUI tools and
 `chat_post_file` change from "always refused" to "owner approval on a foreign request". The
-card states the cost: a local engine leaves the card, about 25 s to come back, and the
-conversation cache is dropped (the figure is Mike's; ADR-052 holds the lease model).
+card states the cost: a local engine leaves the card; it comes back in about 25 s (measured
+2026-11-25 in the live log: Strata start 11:27:31, smoke passed 11:27:56) and the next turn
+may run cold. A swap saves the live conversation (1.1 GB, about 10 s) and its KV snapshot;
+the restore can fail on a prefix mismatch, and then the next turn runs cold (reviewer
+Johnny's correction of the earlier wording "the conversation cache is dropped"; ADR-052
+holds the lease model). The same cost line is on the cards of `describe_image` and
+`transcribe_audio_file`, which spend the card too.
 
 **2.7 `run_shell` and closed paths.** A path that is closed for the turn is refused
 **without a card** (ADR-048, direction of 2026-11-09). The check goes in the shell tool
@@ -184,7 +205,8 @@ a turn-class check there would silently drop extended paths from recall.
 up is refused at once, with a one-line reason. This answers the board card about
 unanswered approvals starving the tool pool
 (`FOUR-PENDING-APPROVALS-STARVE-EVERY-AGENTS-TOOLS`; the pool is four workers,
-`loop.py:400`).
+`loop.py:400`). It answers it only per chat: the pool is the process's, so a second bound,
+at most two pending cards across the process, is in [D-i](#details-cc-derived-from-the-code).
 
 **2.9 The asker survives a scheduled wake.** A `check_back` scheduled on a foreign request
 wakes with that asker. Today `core.py:2099` stores only `_message_source`, and the wake
@@ -241,9 +263,15 @@ the one card, with the Tier 1 reason on it, not two. The same for any tool that 
 asks (`check_back`, `music_propose_job`): the asker fields are added to that card.
 
 **D-c. The call's clock.** `get_timeout(name)` is the loop's whole budget for a call
-(`loop.py:2607`). `run_shell` already includes the 60 s approval (`shell.py:2303-2305`).
-The music tools have 30 s (`music.py`, one-call timeout), which a 60 s card would cut. The
-budget for a flagged call on a foreign turn becomes the tool's own plus the approval wait.
+(`loop.py:2607`). `run_shell` already includes the 60 s approval (`shell.py:2304-2306`,
+`RUN_SHELL_TOOL_TIMEOUT_SECONDS` = 60 + 300 + 30 = 390 s), and so do `schedule_task`
+(60 + 30 = 90 s) and `music_propose_job` (`PROPOSE_TOOL_TIMEOUT_S` = 100 s, the 60 s card and
+its calls). The other music tools do not: `music_wait` has 915 s (`WAIT_MAX_S` 900 +
+`WAIT_MARGIN_S` 15), and `music_capabilities`, `music_check`, `music_cancel_job`,
+`music_list_takes`, `music_list_library`, `music_get_lyrics` and `music_playlist_add` have
+30 s each (`ONE_CALL_TOOL_TIMEOUT_S`), which a 60 s card would cut. The budget for a flagged
+call on a foreign turn becomes the tool's own plus the approval wait, except for the three
+tools whose own budget already holds it.
 
 **D-d. The gate needs a hook.** To refuse a closed path before the card (2.7), to exempt the
 music return (D-e), and to word "what exactly", `ToolEntry` gets an optional
@@ -269,6 +297,13 @@ no stored asker is treated as foreign.
 (`registry.py:813-826`) rebuilds a `ToolEntry` field by field. A new flag that is not
 copied there is silently dropped. It has no non-test caller today. The build uses
 `dataclasses.replace` instead.
+
+**D-i. The tool pool, across chats** (reviewer Johnny). "One card per chat" (2.8) does not
+protect the pool: the four workers (`dpc_agent/loop.py`, `_TOOL_WORKERS = 4`) are one pool for
+the whole process, and four chats with one card each still fill it. So at most **two** owner
+cards raised for foreign askers are pending across the whole process; a third flagged call
+is refused at once with "another approval is already waiting for the owner". Two leave two
+workers for every other agent's tools.
 
 ## Considered Options
 
@@ -311,6 +346,12 @@ copied there is silently dropped. It has no non-test caller today. The build use
   from being forgotten.
 - **The knowledge door narrows.** A peer's retransmit of a commit this node never judged
   waits for the owner.
+- **In a mixed group the agent cannot write its own notes, even when the owner asked.**
+  `update_scratchpad` and `update_identity` sit on the room axis (L5, `l5_closed_refusal` in
+  `tools/core.py`), not on the asker axis, so Mike's own request in a group with a friend's
+  node is refused there. This is ADR-048 as decided, and Mike's #126 ("personal memory vs
+  group knowledge separation is in the ADRs"); recorded as an accepted consequence (reviewer
+  Johnny), with no change.
 
 ## Implementation plan
 
@@ -398,6 +439,9 @@ Each is something a person or a test can see. Check them on a build, not on the 
    extended path on an owner turn (`_extended_path_allowed` unchanged in behaviour).
 10. **One card per chat.** While a card is up, a second flagged call in the same chat is
     refused at once; the screen shows one card.
+10a. **Two cards per process (D-i).** While two foreign-request cards are pending in two
+    chats, a flagged call in a third chat is refused at once with "another approval is
+    already waiting for the owner"; the tool pool keeps two free workers.
 11. **`owner_only` tools.** A foreign asker's `music_propose_job` raises a card that states
     the cost; "refuse" creates no job file, "approve" runs it once. The next call asks
     again.
@@ -430,12 +474,11 @@ Each is something a person or a test can see. Check them on a build, not on the 
   travels with the post the way `mention_depth` does, and Decision 2.9 does the same for
   `check_back`. Implementation: step 1 (the local path carries the posting turn's asker
   into the woken agent's `process`).
-- **Q3. Tools off Mike's list.** `execute_skill`, `register_task_type`,
-  `unregister_task_type`, `kill_my_process`, `import_skill_from_agent`, `describe_image`
-  and `transcribe_audio_file` have side effects or spend compute and are not on the list. The
-  completeness test forces a decision on each. CC recommends a card for `execute_skill`
-  and the two task-type tools, none for the rest. The browser tools that only read (snapshot,
-  screenshot, extract, wait, scroll, close) need the same decision.
+- **Q3. Tools off Mike's list — decided** (Mike, AI Studio group #138, 2026-11-25). With a
+  card on a foreign request: `execute_skill`, `import_skill_from_agent`, `register_task_type`,
+  `unregister_task_type`, `describe_image` and `transcribe_audio_file` (the last two spend the
+  GPU card). Without a card: `kill_my_process` and the browser tools that only read. Folded
+  into Decision 2.5 and its completeness table.
 - **Q4. The roster has no owner.** The own-node test and the class read the member list,
   which a peer can change (`GROUP-ROSTER-HAS-NO-OWNER`, ADR-038 partly built). This ADR
   inherits that risk from ADR-048 and does not remove it.
