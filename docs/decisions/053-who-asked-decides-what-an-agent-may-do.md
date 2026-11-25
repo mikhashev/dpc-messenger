@@ -682,10 +682,60 @@ Pinned by `test_a_click_card_names_where_it_leads_and_a_foreign_action_that_leav
 `test_chat_post_file_posts_only_allowed_types_by_content_and_leaves_no_partial_copy_after_a_cancel.py`
 and `test_an_agent_reads_back_its_own_past_tool_calls.py`.
 
+### Follow-up 17 (Zcode's check #191 on follow-ups 15 and 15b; 2026-11-26)
+
+1. **The approved origin is read on every read, exactly** (P3). The moved-off mark of
+   follow-up 15 was read once, too early: a click returns before the navigation it started
+   commits, the address read right after it is still the approved one, and the route gate
+   admits any host of the same etld1, so a late jump to another subdomain set no mark; and
+   `browser_navigate` recorded the approved origin once, after DOMContentLoaded, and never saw a
+   later JS or meta redirect. Now, on a foreign turn, `browser_snapshot`, `browser_extract` and
+   `browser_screenshot` (every reader `_owner_page_refusal` guards) compare the page's current
+   origin with the approved origin before they read and again after
+   (`browser._owner_page_read_refusal`, `_origin_drift_refusal`): a mismatch, or an address that
+   cannot be read, refuses and sets the moved mark for later reads, and a page that moved during
+   the read drops what was read (a screenshot file is removed). After click, fill, select,
+   download and switch_tab the session waits for the page to settle before the address is read
+   again (`AuthBrowser.settle_after_action`: 300 ms, then at most 3 s for DOMContentLoaded).
+   Origins are compared exactly (scheme, host and port), never by etld1. The owner's reads do
+   not ask the address.
+2. **data:, blob: and javascript: addresses** (P4). A destination that is not http(s) is neither
+   "the same origin" nor "ANOTHER origin" on the click, fill and select cards: the card says
+   "destination unknown (data/blob/script URL)" (`browser.NON_WEB_DESTINATION`). For a foreign
+   turn a page on such an address (and about:blank, file:) is off the approved origin, which
+   fails closed (`browser._web_origin_of`). The route gate is unchanged: it still lets
+   non-http(s) requests through, and the read-time check is what closes the page.
+3. **The per-file cap counts the copy** (P4). `file_transfer.max_size_mb` is checked against the
+   copy's measured size too: `service.keep_agent_chat_attachment` removes a new copy over the cap,
+   and the 1:1 path of `chat_post_file` checks the size it reads back from the copy, as the
+   per-turn cap already did (the group path already checked its temp copy).
+
+Residuals, stated.
+
+- **A foreign move within the approved origin keeps the page readable, on purpose.** The
+  approval covers an origin, not a URL: a foreign turn that clicks from `/inbox` to
+  `/settings` on the same scheme, host and port reads the new page on that turn. Pinned by
+  `test_a_foreign_click_inside_the_approved_origin_keeps_the_page_readable`.
+- `browser_download` keeps its raw-arguments card, with no destination read from the page.
+- `browser_scroll`, `browser_collect` and `browser_wait_for` still return what they read of a
+  logged-in page on a foreign turn without the origin check; the end-of-turn window close bounds
+  them to the turn that found the window.
+- A navigation that has not committed when the second address read runs is not seen by that
+  read; what was read is then the approved page, and the next read sees the move.
+
+Pinned by `test_a_click_card_names_where_it_leads_and_a_foreign_action_that_leaves_the_approved_origin_needs_a_new_approval.py`
+(the late subdomain jump after a foreign click, the settle wait before the address is read, a
+JS redirect after navigate, a move during the read, port / scheme / host compared exactly, a
+data:, blob: or about: page off-origin, the non-web card label, and in a real Chromium the
+page-side reader for a data: link and a javascript: form action),
+`test_an_approved_foreign_navigation_covers_its_own_turn_and_who_asked_fails_closed.py`,
+`test_a_foreign_turn_leaves_no_owner_window_and_cards_and_lines_say_what_they_are_about.py` and
+`test_chat_post_file_posts_only_allowed_types_by_content_and_leaves_no_partial_copy_after_a_cancel.py`.
+
 ## Authors
 
 - **Mike** — Decision
-- **Zcode** — Review (#125, #130, #143, #154)
+- **Zcode** — Review (#125, #130, #143, #154, #184, #191)
 - **CC** — Design, research, this record
 
 ## References
