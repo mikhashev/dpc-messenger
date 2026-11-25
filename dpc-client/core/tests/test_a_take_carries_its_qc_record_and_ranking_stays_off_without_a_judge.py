@@ -344,6 +344,36 @@ async def test_a_failing_call_and_an_alias_that_cannot_hear_are_failed_judges(tm
 
 
 @pytest.mark.asyncio
+async def test_a_failed_re_judge_keeps_the_last_good_verdict_and_records_the_attempt_beside_it(tmp_path):
+    """Review #180 2.2: a failed re-judge overwrote a good verdict."""
+    judge = _AudioJudge()
+    service = _service(tmp_path, judge)
+    store = service._music_jobs_instance
+    _, takes = _review(store, tmp_path)
+    tid = takes[0]["id"]
+    good = (await service.judge_music_take(take_id=tid))["qc"]
+    assert good["judge"]["status"] == "done" and "last_attempt" not in good
+    judge.answer = RuntimeError("llamacpp_server audio failed: card held")
+    out = (await service.judge_music_take(take_id=tid))["qc"]
+    assert out["judge"] == good["judge"] and out["scores"] == good["scores"] and out["issues"] == good["issues"]
+    att = out["last_attempt"]
+    assert att["status"] == "failed" and "card held" in att["error"] and att["alias"] == "music_flamingo" and att["at"]
+    assert store.get_take(tid)["qc"]["last_attempt"] == att
+    # a stage-1 refresh keeps both; the next good verdict clears the attempt
+    refreshed = await service.get_music_job_qc(job_id=takes[0]["job_id"], refresh=True)
+    first = next(t for t in refreshed["takes"] if t["take_id"] == tid)["qc"]
+    assert first["last_attempt"] == att and first["scores"] == good["scores"]
+    judge.answer = GOOD
+    again = (await service.judge_music_take(take_id=tid))["qc"]
+    assert again["judge"]["status"] == "done" and "last_attempt" not in again
+    # the schema refuses an attempt without a done verdict beside it, or with other keys
+    with pytest.raises(SchemaError):
+        js.check_qc({**takes[1]["qc"], "last_attempt": att})
+    with pytest.raises(SchemaError):
+        js.check_qc({**out, "last_attempt": {**att, "extra": 1}})
+
+
+@pytest.mark.asyncio
 async def test_the_command_maps_its_errors(tmp_path):
     none = _service(tmp_path)
     _, takes = _review(none._music_jobs_instance, tmp_path)
