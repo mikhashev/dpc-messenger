@@ -909,14 +909,21 @@ def local_wake_sender(sender_name: str, is_agent_sender: bool, asker: Any,
     A post on the local path was written on this node, so its verdict is that; when it
     carries the asker of an earlier turn (an own agent relaying a request), the line names
     that asker too, with its own signature verdict, so a wake can be counted by who started
-    the chain."""
+    the chain.
+
+    The asker's stored `is_owner` is never read (Zcode #176), as `DpcAgent.resolve_asker`
+    never reads it: "this node" is a verified asker whose node is this node; whether another
+    verified node is an own node is the woken agent's to decide, so the line says
+    "verified" and no more."""
     kind = "agent" if is_agent_sender else "human"
     words = (f"{sender_name or 'someone'} (node {(this_node_id or '?')[:20]}, {kind}, "
              f"written on this node)")
     if asker is not None:
-        verdict = ("this node" if getattr(asker, "is_owner", False)
-                   else "verified" if getattr(asker, "verified", False) else "not verified")
-        node = (getattr(asker, "node_id", "") or "?")[:20]
+        asker_node = getattr(asker, "node_id", "") or ""
+        verified = getattr(asker, "verified", False) is True
+        verdict = ("this node" if verified and this_node_id and asker_node == this_node_id
+                   else "verified" if verified else "not verified")
+        node = (asker_node or "?")[:20]
         words += (f", asked by {getattr(asker, 'name', '') or 'someone'} (node {node}, "
                   f"{getattr(asker, 'kind', '') or 'unknown'}, signature {verdict})")
     return words

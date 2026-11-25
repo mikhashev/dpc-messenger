@@ -122,9 +122,10 @@ async def test_a_logged_in_page_with_no_record_of_its_turn_is_treated_as_the_own
 @pytest.mark.asyncio
 async def test_a_page_the_owner_approved_for_this_foreign_turn_can_be_read(tmp_path, sessions):
     session = _Session()
-    session._bound_on_owner_turn = False
     browser._active_browser_sessions["agent_ark"] = session
-    assert "owner's inbox" in await browser.browser_extract(_ctx(tmp_path, FRIEND))
+    ctx = _ctx(tmp_path, FRIEND)
+    browser._note_turn_of_binding(session, ctx)
+    assert "owner's inbox" in await browser.browser_extract(ctx)
 
 
 @pytest.mark.asyncio

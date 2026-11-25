@@ -2064,14 +2064,25 @@ def _end_foreign_turn(ctx: Any, agent_id: str) -> Optional[threading.Thread]:
         return None
 
     def _run() -> None:
-        try:
-            closed = asyncio.run(close_browser_sessions_of(
-                agent_id, interactive_only=True, why="End of a turn the owner did not ask for"))
-            if closed:
-                log.info("End of a foreign turn: closed the browser window of %s", agent_id)
-        except Exception:
-            log.warning("End of a foreign turn: closing the browser of %s failed", agent_id,
-                        exc_info=True)
+        # One retry (Zcode #176): a window that survives this close stays readable only on
+        # the turn that opened it (browser._owner_page_refusal), but it should not stay.
+        for attempt in (1, 2):
+            try:
+                closed = asyncio.run(close_browser_sessions_of(
+                    agent_id, interactive_only=True,
+                    why="End of a turn the owner did not ask for"))
+                if closed:
+                    log.info("End of a foreign turn: closed the browser window of %s", agent_id)
+                if agent_id not in get_active_browser_sessions():
+                    return
+                failure = "the window is still open"
+            except Exception as e:
+                failure = f"{type(e).__name__}: {e}"
+            if attempt == 1:
+                log.info("End of a foreign turn: closing the browser of %s failed (%s); "
+                         "trying once more", agent_id, failure)
+        log.warning("End of a foreign turn: the browser window of %s could not be closed (%s)",
+                    agent_id, failure)
 
     thread = threading.Thread(target=_run, name="dpc_agent_foreign_turn_end", daemon=True)
     thread.start()

@@ -590,9 +590,10 @@ class DpcAgent:
         stored asker (a scheduled task's `_asker`) says `is_owner: true` as it was when the
         task was queued, and the own node group may have changed since, or the row may have
         been written by hand. At the owner's own doors (`ui`, `telegram_owner`,
-        `external_agent`, D-f) the door is the owner, unless the asker names a node this
-        agent knows is neither this node nor an own node; everywhere else only a verified
-        node that is this node or an own node is the owner.
+        `external_agent`, D-f) the door is the owner, unless the asker names a node that is
+        neither this node nor an own node; when this node's id is not known, a named node
+        that is not an own node is foreign too (fail closed, Zcode #176). Everywhere else
+        only a verified node that is this node or an own node is the owner.
         """
         if asker is None:
             if message_source == "group":
@@ -604,7 +605,7 @@ class DpcAgent:
         _name, own, _why = self._own_nodes()
         on_own_node = bool(asker.node_id) and (asker.node_id == this_node or asker.node_id in own)
         if is_owner_caller(message_source):
-            foreign_node = bool(asker.node_id) and bool(this_node) and not on_own_node
+            foreign_node = bool(asker.node_id) and not on_own_node
             is_owner = not foreign_node
         else:
             is_owner = bool(asker.verified) and on_own_node

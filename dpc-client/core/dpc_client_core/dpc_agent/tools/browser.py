@@ -5965,15 +5965,32 @@ def _get_session_or_error(agent_id: str) -> Optional["AuthBrowser"]:
     return session
 
 
+def _turn_token(ctx: Any) -> Optional[str]:
+    """A token naming this turn, kept on its context (a ToolContext is one per turn), or None
+    when the context takes no attribute."""
+    token = getattr(ctx, "_browser_turn_token", None)
+    if token is None:
+        token = uuid.uuid4().hex
+        try:
+            setattr(ctx, "_browser_turn_token", token)
+        except Exception:
+            return None
+    return token
+
+
 def _note_turn_of_binding(session: Any, ctx: ToolContext) -> None:
-    """Record whether the page this session shows was last opened on the owner's own turn
-    (browse_page keep_open, browser_navigate). A foreign turn's opening was approved by the
-    owner for that turn, so its page may be read on it; an owner turn's may not."""
+    """Record which turn last opened the page this session shows (browse_page keep_open,
+    browser_navigate), per navigation (Zcode #176): the owner's own turn, or one named
+    foreign turn. A foreign turn's opening was approved by the owner for that turn only, so
+    its page may be read on that turn and on no later one; the owner's next opening resets
+    the mark. When the asker cannot be told, the page counts as the owner's (fail closed)."""
     from ..owner_approval import asker_is_owner
     try:
-        session._bound_on_owner_turn = asker_is_owner(ctx)
+        on_owner_turn = bool(asker_is_owner(ctx))
     except Exception:
-        pass
+        on_owner_turn = True
+    session._bound_on_owner_turn = on_owner_turn
+    session._bound_turn_token = None if on_owner_turn else _turn_token(ctx)
 
 
 def _owner_page_refusal(ctx: ToolContext, session: Any, tool: str) -> Optional[str]:
@@ -5982,14 +5999,24 @@ def _owner_page_refusal(ctx: ToolContext, session: Any, tool: str) -> Optional[s
     A window kept open under the owner's login (a scoped, not anonymous session) whose page
     was last opened on the owner's own turn is not read on a turn someone else asked for:
     the read-only browser tools ask nobody (Mike's answer to Q3, #138). A session with no
-    record of the turn that opened it counts as the owner's (fail closed)."""
+    record of the turn that opened it counts as the owner's (fail closed). A page a foreign
+    turn opened is read on that same turn only: a later foreign turn did not get the owner's
+    approval for it (Zcode #176)."""
     if not getattr(session, "_etld1s", None) or getattr(session, "_anonymous", False):
-        return None
-    if getattr(session, "_bound_on_owner_turn", True) is False:
         return None
     from ..owner_approval import asker_is_owner, turn_asker
     if asker_is_owner(ctx):
         return None
+    bound_token = getattr(session, "_bound_turn_token", None)
+    if getattr(session, "_bound_on_owner_turn", True) is False:
+        if bound_token is not None and bound_token == getattr(ctx, "_browser_turn_token", None):
+            return None
+        who = turn_asker(ctx).label()
+        log.info("%s refused for %s: the page was opened logged in as the owner on an earlier "
+                 "turn", tool, who)
+        return (f"⚠️ {tool} was not run: the open page was opened logged in as the owner on "
+                f"an earlier turn, and the owner's approval covered that turn only. Open it "
+                f"again with browser_navigate, which asks the owner.")
     who = turn_asker(ctx).label()
     log.info("%s refused for %s: the page was opened logged in as the owner on his own turn",
              tool, who)

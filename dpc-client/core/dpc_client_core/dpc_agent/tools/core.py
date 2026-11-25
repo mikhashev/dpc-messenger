@@ -2020,6 +2020,18 @@ NO_TASK_PROCESSOR_REFUSAL = (
     "⚠️ Not scheduled: this agent has no running task processor, so nothing would run "
     "the task. Nothing was queued.")
 
+NO_REPLY_ADDRESS_REFUSAL = (
+    "⚠️ Not scheduled: this turn has no chat behind it (no task id and no conversation id), "
+    "so the wake would have nowhere to answer. Nothing was queued.")
+
+
+def _wake_reply_address(ctx: ToolContext) -> Optional[str]:
+    """Where a task scheduled on this turn answers (Zcode #176): the turn's task id, else
+    its conversation id. None when the turn has neither, and then nothing is scheduled: a
+    wake with no address used to run as its own task id, a chat nobody reads."""
+    return (getattr(ctx, "current_task_id", None) or getattr(ctx, "conversation_id", None)
+            or None)
+
 
 def schedule_task(
     ctx: ToolContext,
@@ -2096,6 +2108,9 @@ def schedule_task(
         # agent's own queue). Refused before any approval card is shown.
         if not ctx._agent.queue.is_running():
             return NO_TASK_PROCESSOR_REFUSAL
+        reply_to = _wake_reply_address(ctx)
+        if not reply_to:
+            return NO_REPLY_ADDRESS_REFUSAL
 
         # Map priority string
         from ..task_queue import TaskPriority
@@ -2189,8 +2204,7 @@ def schedule_task(
         #   so streaming progress and the final result appear in the right chat.
         # _reply_telegram_chat_id: set when the trigger came from Telegram,
         #   so the result is sent back to that Telegram chat automatically.
-        if ctx.current_task_id:
-            data["_reply_conversation_id"] = ctx.current_task_id
+        data["_reply_conversation_id"] = reply_to
         if getattr(ctx, "reply_telegram_chat_id", None):
             data["_reply_telegram_chat_id"] = ctx.reply_telegram_chat_id
         # _message_source: the task runs as the turn that scheduled it. Always the
