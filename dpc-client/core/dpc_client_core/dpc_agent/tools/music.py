@@ -48,7 +48,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from ...managers.llama_server_supervisor import current_card_hold
 from ...music import job_schemas as js
-from ...process_registry import SPAWN_ORIGIN
+from ...process_registry import SPAWN_ORIGIN, get_registry
 from .registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
@@ -168,7 +168,8 @@ def _ctx_dict(ctx: ToolContext, name: str) -> Dict[str, Any]:
 
 def _turn_stopped(ctx: ToolContext) -> bool:
     """Whether the person pressed Stop (or Kill) on this turn; the loop puts both events on
-    the context. Reading an asyncio.Event's flag from a tool thread is safe."""
+    the context. Reading an asyncio.Event's flag from a tool thread is safe. A Kill is also
+    read from the process registry, which records the turn before it releases anything."""
     for name in ("turn_stop_event", "turn_kill_event"):
         event = getattr(ctx, name, None)
         try:
@@ -176,6 +177,12 @@ def _turn_stopped(ctx: ToolContext) -> bool:
                 return True
         except Exception:
             continue
+    turn_id = _turn_id()
+    if turn_id:
+        try:
+            return bool(get_registry().turn_was_killed(turn_id))
+        except Exception:
+            return False
     return False
 
 
@@ -313,6 +320,15 @@ def music_capabilities(ctx: ToolContext) -> str:
 APPROVAL_STYLE_CHARS = 80
 
 
+def _eta_is_upper_bound(params: Dict[str, Any]) -> bool:
+    """Whether the job's expected time is a cap-based estimate, read by the person as "up to":
+    YuE2's is (`music_expected_s` never exceeds the duration cap)."""
+    try:
+        return js.engine_of(params) == js.ENGINE_YUE2
+    except Exception:
+        return False
+
+
 def _approval_about(job_type: str, params: Dict[str, Any]) -> str:
     """What the approval card asks (D47), in the person's terms: run one job on the GPU, its type,
     style, number of takes, sung or instrumental, engine, and about how long it takes on the card."""
@@ -329,7 +345,10 @@ def _approval_about(job_type: str, params: Dict[str, Any]) -> str:
         eta = js.music_expected_s(params)
     except Exception:
         eta = None
-    on_card = f"about {int(round(eta))} s on the GPU" if eta else "time on the GPU not known"
+    # YuE2's time is a cap-based estimate (the song cannot outrun its duration cap), so the card
+    # reads it as an upper bound; no other engine has an estimate (follow-up 13, Zcode P3).
+    on_card = (f"up to {int(round(eta))} s on the GPU" if eta and _eta_is_upper_bound(params)
+               else f"about {int(round(eta))} s on the GPU" if eta else "time on the GPU not known")
     return (f"Run a music job on the GPU: {job_type}, \"{style or '(no style)'}\", {takes}, {sung}{long}, "
             f"{engine}, {on_card}")
 
@@ -349,7 +368,7 @@ def _duration_s(params: Dict[str, Any]) -> Optional[float]:
 def _approval_parts(job_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """The same request in parts, for the interface's card (`music` on schedule_approval_request):
     type, style, variants, instrumental and its twin has_lyrics, engine, duration_s, eta_seconds,
-    and lyrics_excerpt (the lyrics' first APPROVAL_LYRICS_CHARS characters, only when there are
+    eta_is_upper_bound (YuE2: the time is a cap-based estimate, "up to"), and lyrics_excerpt (the lyrics' first APPROVAL_LYRICS_CHARS characters, only when there are
     lyrics)."""
     try:
         eta = js.music_expected_s(params)
@@ -365,6 +384,8 @@ def _approval_parts(job_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
         "engine": params.get("engine") or None,
         "duration_s": _duration_s(params),
         "eta_seconds": int(round(eta)) if eta else None,
+        # YuE2's time is an upper bound (cap-based), the card says "up to" (follow-up 13).
+        "eta_is_upper_bound": bool(eta) and _eta_is_upper_bound(params),
     }
     if lyrics:
         parts["lyrics_excerpt"] = (lyrics if len(lyrics) <= APPROVAL_LYRICS_CHARS
@@ -477,21 +498,36 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
         card={"cost": GPU_CARD_COST_LINE})  # ADR-053 2.6: the card states the cost
     if not approved:
         return f"⚠️ The music job was not proposed: {reason}. No job was made."
+    # Stop or Kill pressed after the "yes" (while the answer was on its way, or in the moment
+    # since) makes no job either (follow-up 13, Zcode P3).
     if _turn_stopped(ctx):
         return "⚠️ The music job was not proposed: the turn was stopped. No job was made."
 
+    # What the loop's Stop reads (D48), written before the job exists: a Stop landing during
+    # the call below still finds the job it made.
+    _ctx_dict(ctx, "_music_turns")[turn_id] = who["agent_id"]
     answer = _service_call(ctx, "propose_music_job", type=type, params=params,
                            idempotency_key=idempotency_key or None, requested_by=who)
     refused = _error_text(answer, "music_propose_job")
     if refused:
         return refused + " No job was made."
     job = answer["job"]
-    # What the loop's Stop reads (D48): this context proposed in this turn.
-    _ctx_dict(ctx, "_music_turns")[turn_id] = who["agent_id"]
+    if _turn_stopped(ctx):
+        # The Stop came during the call itself: take the job back at once, not only when the
+        # loop ends the turn (this tool may outlive the loop's own cancel).
+        try:
+            _service_call(ctx, "cancel_music_job", job_id=job.get("id"),
+                          reason="the turn was stopped while the job was being made", requested_by=who)
+        except Exception:
+            log.warning("music_propose_job: cancelling job %s of a stopped turn failed", job.get("id"),
+                        exc_info=True)
+        return ("⚠️ The turn was stopped while the music job was being made; the job was cancelled "
+                f"({job.get('id')}).")
     lines = ["Proposed (approved by the person).", *_job_lines(job)]
     eta = _eta_s(job)
     if eta is not None:
-        lines.append(f"expected time on the card: about {int(round(eta))} s once it starts")
+        bound = "up to" if _eta_is_upper_bound(job.get("params") or {}) else "about"
+        lines.append(f"expected time on the card: {bound} {int(round(eta))} s once it starts")
     hint = _after_propose_hint(job)
     if hint:
         lines.append(hint)
@@ -846,6 +882,14 @@ def _entry(name: str, description: str, properties: Dict[str, Any], required: Li
 
 _JOB_ID = {"type": "string", "description": "The job id music_propose_job returned."}
 
+# The music-return-only mode (ADR-051 D49): said in the music tools' own descriptions, so a model
+# that was given music tools and not schedule_task learns the one call that is open to it.
+CHECK_BACK_ONLY_LINE = (
+    " If schedule_task is not granted to you, the only schedule_task call open to you is a return "
+    "to your own music job that is still queued or running: task_type \"check_back\" with task_data "
+    "{\"music_job_id\": ...}; it asks no approval, and core sets its delay and its text."
+)
+
 
 def get_tools() -> List[ToolEntry]:
     return [
@@ -857,7 +901,7 @@ def get_tools() -> List[ToolEntry]:
                "Propose ONE music generation job (type generate_from_text). The person is asked to "
                "approve it first; refused, no job is made. One job per turn: a repeat in the same turn "
                "returns the turn's job. On a local model the job starts only after this turn ends: do "
-               "not wait for it, schedule a check_back with task_data {\"music_job_id\": ...}.",
+               "not wait for it, schedule a check_back with task_data {\"music_job_id\": ...}." + CHECK_BACK_ONLY_LINE,
                {"type": {"type": "string", "enum": [js.GENERATE_FROM_TEXT],
                          "description": "Job type; only generate_from_text."},
                 "params": {"type": "object",
@@ -870,12 +914,12 @@ def get_tools() -> List[ToolEntry]:
                ["params"], music_propose_job, timeout_sec=PROPOSE_TOOL_TIMEOUT_S),
         _entry("music_check",
                "One look at a music job: its state, what holds the GPU it waits for, and its takes "
-               "(take_id, file) when it is done.",
+               "(take_id, file) when it is done. To come back to a job later, use check_back." + CHECK_BACK_ONLY_LINE,
                {"job_id": _JOB_ID}, ["job_id"], music_check),
         _entry("music_wait",
                "Wait for a music job to finish (polls every 2 s). Returns the takes when done. If this "
                "turn holds the GPU on a local model and the job is queued, it answers at once: the job "
-               "starts after this turn; use check_back. A turn has 900 s of waiting in all.",
+               "starts after this turn; use check_back. A turn has 900 s of waiting in all." + CHECK_BACK_ONLY_LINE,
                {"job_id": _JOB_ID,
                 "timeout": {"type": "integer",
                             "description": f"Seconds to wait (default {WAIT_DEFAULT_S}, at most {WAIT_MAX_S})."}},
