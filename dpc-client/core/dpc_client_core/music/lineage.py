@@ -29,9 +29,13 @@ which is the A/B pick) and `discard` (with its reason text and failure class).
 **The parent of an edit or a song job** is the take whose library entry is the job's stored source track
 (`params.source_track_id`, else the `source_track_id` its takes recorded when they were made, else the
 job's `track_id`), else the take whose file hash is the job's `params.source_content_hash`, else a
-`source` node. The hash fallback is accepted only when exactly one take has that hash and its job is
-already in the graph being built (Zcode #191): a relinked, deleted or cleaned track otherwise stays a
-`source` node with a note naming the take it matched, never a take of another song. Region-edit takes record that
+`source` node. The hash fallback is accepted only when exactly one take of the store has that hash (a
+hash two takes share guesses no parent, Zcode #191): a relinked, deleted or cleaned track otherwise stays a
+`source` node with a note naming the takes it matched, never a take of another song. The link is
+**two-way** (follow-up 19, Zcode #199 finding 4): it joins the two jobs into one graph like an edit parent
+does, so the graph seeded by the descendant pulls in the parent's job (and what hangs off it), and the graph
+seeded by the parent pulls in the descendant. Only a take whose job has no lineage (a note-only edit)
+cannot be joined, and the note says it is outside the graph. Region-edit takes record that
 parent the same way (`parents[0].take_id` in their `mp.provenance/1`, written from the same lookup).
 
 **Not recorded yet** (EVOLUTION.md §13, §14): `prefer` events of a plain A/B without a Keep, the
@@ -277,6 +281,21 @@ class _Index:
         found = self.by_hash.get(h) if isinstance(h, str) and h else None
         return [t for t in (found or []) if t.get("job_id") != job.get("id")]
 
+    def hash_parent_jobs(self, graph_jobs: Mapping[str, Mapping[str, Any]]) -> Dict[str, str]:
+        """`{job id: parent job id}` for the jobs of `graph_jobs` whose source track no take holds and whose
+        `params.source_content_hash` matches exactly one take of the store whose job is a graph job too:
+        the same uniqueness rule `_hash_parents` applies, evaluated once for the whole store so a graph
+        seeded from either end finds the other."""
+        links: Dict[str, str] = {}
+        for jid, job in graph_jobs.items():
+            parent = self.parent_of(job)
+            if parent is None or parent[0] != "source":
+                continue
+            found = self.hash_candidates(job)
+            if len(found) == 1 and found[0].get("job_id") in graph_jobs:
+                links[jid] = found[0]["job_id"]
+        return links
+
 
 HASH_NOTE = "A source found by content hash only was not joined:"
 
@@ -284,9 +303,10 @@ HASH_NOTE = "A source found by content hash only was not joined:"
 def _hash_parents(idx: _Index, members: Sequence[str]) -> Tuple[Dict[str, Tuple[str, str]], List[str]]:
     """The content-hash fallback for the jobs of one graph whose source track no take holds (Zcode
     #191 on 4.2): accepted only when exactly one take of the store has the hash and that take's job is
-    in this graph already. Otherwise the branch stays rooted at its `source` node and a note says
-    why, so a relinked, deleted or cleaned track never pulls in a take of another song, and never
-    moves a branch out of the graph its own track asks for."""
+    in this graph. `_component` joins the two jobs through the same rule (Zcode #199 finding 4), so a
+    unique match is in the graph whichever end it was seeded from; what stays outside is a take whose
+    job has no lineage. Otherwise the branch stays rooted at its `source` node and a note says why, so
+    a relinked, deleted or cleaned track never pulls in a take of another song."""
     inside = set(members)
     parents: Dict[str, Tuple[str, str]] = {}
     notes: List[str] = []
@@ -311,9 +331,13 @@ def _hash_parents(idx: _Index, members: Sequence[str]) -> Tuple[Dict[str, Tuple[
 
 
 def _component(idx: _Index, seeds: Sequence[str]) -> List[str]:
-    """The job ids connected to `seeds` through edit parents (up, down and across siblings)."""
+    """The job ids connected to `seeds` through edit parents (up, down and across siblings) and through a
+    unique content-hash parent (`_Index.hash_parent_jobs`)."""
     graph_jobs = {jid: j for jid, j in idx.jobs.items() if _is_graph_job(j)}
     adj: Dict[str, set] = {jid: set() for jid in graph_jobs}
+    for jid, pj in idx.hash_parent_jobs(graph_jobs).items():   # a unique content-hash parent joins both ways
+        adj[jid].add(pj)
+        adj[pj].add(jid)
     by_source: Dict[str, List[str]] = {}
     for jid, job in graph_jobs.items():
         parent = idx.parent_of(job)

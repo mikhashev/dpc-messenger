@@ -17,7 +17,10 @@ of the person's own words. `sweep_orphans` (run once, on the first comments call
 initial scan has completed) removes only the files of an id the library no longer knows that hold no
 comment (`[]`): what a merge or the deletion of a track's last comment leaves. Before that scan an id
 missing from memory may be a live track not scanned yet, so the sweep waits for
-`MusicLibrary.initial_scan_done` (Zcode #193) and a call before it leaves every file alone.
+`MusicLibrary.initial_scan_done` (Zcode #193) and a call before it leaves every file alone. The flag is
+raised only by a pass in which every watched folder was read to the end (follow-up 19, Zcode #199): a
+folder that is unreadable, partly read, over the folder limit or whose scan raised holds it down, so
+the sweep waits for a later clean pass and the empty file of a live track in such a folder stays.
 
 **A merge past the cap** (follow-up 16, Zcode #188 finding 9): the moved comments are attached
 to the surviving track even when that takes it over `MAX_COMMENTS_PER_TRACK`; the cap only

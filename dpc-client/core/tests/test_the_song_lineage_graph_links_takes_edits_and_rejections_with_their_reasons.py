@@ -173,30 +173,68 @@ def test_the_parent_is_found_by_file_hash_when_the_library_id_changed_and_the_ta
     assert not [n for n in doc["notes"] if n.startswith(lineage.HASH_NOTE)]
 
 
-def test_a_hash_match_in_another_graph_or_not_unique_leaves_the_branch_at_a_source_node_with_a_note():
-    """Zcode #191 on 4.2: the content-hash fallback was store-global, so a relinked, deleted or cleaned
-    track could attach a take of another song, and seeding by the track silently dropped the branch."""
+def _relinked_store():
+    """E's source track was relinked (a new library id), so only the file hash of T1 names its parent."""
     jobs, takes = store()
     jobs[2]["track_id"] = "trk_relinked"
-    jobs[2]["params"]["source_content_hash"] = "sha256:" + "1" * 64      # T1's hash, but T1 is A's, another graph
+    jobs[2]["params"]["source_content_hash"] = "sha256:" + "1" * 64      # T1's hash, T1 is job A's take
+    return jobs, takes
+
+
+@pytest.mark.parametrize("ask", [{"job_id": E}, {"track_id": "trk_relinked"}, {"job_id": E, "track_id": "trk_relinked"}])
+def test_a_graph_seeded_by_the_descendant_pulls_in_the_parent_job_found_by_a_unique_hash(ask):
+    """Follow-up 19 (Zcode #199 finding 4): the hash link only worked when the parent's job was already in
+    the graph, so a graph seeded by the descendant itself always said "outside this graph". The link now
+    joins both jobs, whichever end the graph is seeded from."""
+    jobs, takes = _relinked_store()
+    doc = lineage.build_lineage(jobs, takes, **ask)
+    nodes, edges = by_id(doc), by_id(doc, "edges")
+    assert set(nodes) == {f"intent:{A}", T1, T2, E1, E2}               # A's song comes in with its own branch
+    assert edges[f"{T1}>{E1}"]["kind"] == "edit" and f"source:trk_relinked>{E1}" not in edges
+    assert "source:trk_relinked" not in nodes
+    assert not [n for n in doc["notes"] if n.startswith(lineage.HASH_NOTE)]
+    assert {j["id"] for j in doc["jobs"]} == {A, E}
+    assert [nodes[n]["generation"] for n in (f"intent:{A}", T1, E1)] == [0, 1, 2]
+
+
+def test_a_graph_seeded_by_the_parent_pulls_in_the_descendant_found_by_a_unique_hash():
+    jobs, takes = _relinked_store()
+    doc = lineage.build_lineage(jobs, takes, track_id="trk_one")
+    assert {j["id"] for j in doc["jobs"]} == {A, E}
+    assert by_id(doc, "edges")[f"{T1}>{E1}"]["kind"] == "edit"
+    assert not [n for n in doc["notes"] if n.startswith(lineage.HASH_NOTE)]
+    # an unrelated song (job B) is still its own graph
+    assert B not in {j["id"] for j in doc["jobs"]}
+
+
+def test_a_hash_two_takes_share_is_no_parent_and_no_graph_is_joined_by_it():
+    """Zcode #191 on 4.2 (still true): a hash two takes share is not unique, so no parent is guessed."""
+    jobs, takes = _relinked_store()
+    next(t for t in takes if t["id"] == T2)["file"]["content_hash"] = "sha256:" + "1" * 64
     for ask in ({"job_id": E}, {"track_id": "trk_relinked"}):
         doc = lineage.build_lineage(jobs, takes, **ask)
-        nodes, edges = by_id(doc), by_id(doc, "edges")
-        assert set(nodes) == {"source:trk_relinked", E1, E2}               # A's song is not pulled in
-        assert f"source:trk_relinked>{E1}" in edges and f"{T1}>{E1}" not in edges
+        assert set(by_id(doc)) == {"source:trk_relinked", E1, E2}          # A's song is not pulled in
+        assert f"source:trk_relinked>{E1}" in by_id(doc, "edges")
         [note] = [n for n in doc["notes"] if n.startswith(lineage.HASH_NOTE)]
-        assert T1 in note and A in note and "outside this graph" in note
-    # seeding by the track keeps its own branch (it used to come back as a lone source node)
-    assert lineage.build_lineage(jobs, takes, track_id="trk_relinked")["stats"]["takes"] == 2
-    # the graph of A does not grow E's branch through the hash either
+        assert "matches 2 takes" in note and T1 in note and T2 in note
     assert E not in {j["id"] for j in lineage.build_lineage(jobs, takes, track_id="trk_one")["jobs"]}
-    # a hash two takes share is not unique: no parent is guessed, even inside the graph
-    t2 = next(t for t in takes if t["id"] == T2)
-    t2["file"]["content_hash"] = "sha256:" + "1" * 64
+    # even with both jobs seeded, the branch stays at its source node
     doc = lineage.build_lineage(jobs, takes, track_id="trk_one", job_id=E)
     assert f"source:trk_relinked>{E1}" in by_id(doc, "edges")
+
+
+def test_a_unique_hash_match_in_a_job_with_no_lineage_stays_outside_the_graph_with_a_note():
+    """What cannot be pulled in: the matching take belongs to a note-only edit job, which has no graph."""
+    jobs, takes = _relinked_store()
+    N, N1 = "job_" + "9" * 16, "tak_" + "9" * 16
+    jobs.append(job(N, type="edit", action="note", track_id="trk_noted", created="2026-11-25T09:00:00.000Z",
+                    takes=[N1], params={"takes": 1}))
+    takes.append(take(N1, N, 1, kind="edit", lib="trk_n1", content_hash="sha256:" + "9" * 64))
+    jobs[2]["params"]["source_content_hash"] = "sha256:" + "9" * 64
+    doc = lineage.build_lineage(jobs, takes, job_id=E)
+    assert set(by_id(doc)) == {"source:trk_relinked", E1, E2}
     [note] = [n for n in doc["notes"] if n.startswith(lineage.HASH_NOTE)]
-    assert "matches 2 takes" in note and T1 in note and T2 in note
+    assert N1 in note and N in note and "outside this graph" in note
 
 
 def test_the_parent_is_the_stored_source_track_before_any_take_with_the_same_hash():

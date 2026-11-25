@@ -375,3 +375,116 @@ async def test_the_initial_scan_is_done_only_after_the_poll_loops_first_pass(tmp
         assert library.initial_scan_done is True
     finally:
         await library.stop()
+
+
+async def _wait_for(condition, what, timeout=5.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        assert loop.time() < deadline, what
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["exception", "unreadable_folder", "partial_walk"])
+async def test_the_initial_scan_is_not_done_while_a_watched_folder_failed_and_is_after_a_clean_pass(
+        tmp_path, no_tools, monkeypatch, how):
+    """Follow-up 19 (Zcode #199 finding 1): the flag was raised after the first pass even when every
+    folder scan failed (the exception was swallowed), so the comment sweep could delete the empty
+    comments file of a live track in a folder that was never read. It waits for a clean pass."""
+    from dpc_client_core.music import library as library_module
+    from dpc_client_core.music.library import MusicLibrary
+    music = tmp_path / "Music"
+    music.mkdir()
+    (music / "a.mp3").write_bytes(b"audio")
+    library = MusicLibrary(tmp_path / "dpc", tools=MediaTools(ffmpeg=None, ffprobe=None),
+                           save_delay_s=0.01, poll_interval_s=0.02)
+    await library.open()
+    await library.add_folder(str(music))
+    real_rescan, real_walk = library.rescan_folder, library_module.walk_audio_files
+    passes = []
+
+    async def broken_rescan(folder_id):
+        passes.append(folder_id)
+        raise RuntimeError("the disk went away")
+
+    def unreadable_walk(root):
+        passes.append(root)
+        raise library_module.FolderUnavailable("access denied")
+
+    def partial_walk(root):
+        found, _ = real_walk(root)
+        passes.append(root)
+        return found, [(str(root), "access denied")]
+
+    if how == "exception":
+        monkeypatch.setattr(library, "rescan_folder", broken_rescan)
+    else:
+        monkeypatch.setattr(library_module, "walk_audio_files",
+                            unreadable_walk if how == "unreadable_folder" else partial_walk)
+    library.initial_scan_done = False
+    await library.start()
+    try:
+        await _wait_for(lambda: len(passes) >= 3, "the poll loop did not pass over the folder again")
+        assert library.initial_scan_done is False          # three failed passes, and still no flag
+        monkeypatch.undo()
+        await _wait_for(lambda: library.initial_scan_done, "a clean pass did not raise the flag")
+        assert library.list_folders()[0]["watch_state"] == "polling"
+    finally:
+        await library.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_folder_over_the_limit_or_unwatched_is_told_apart_for_the_initial_scan(tmp_path, no_tools):
+    from dpc_client_core.music.library import MusicLibrary
+    library = MusicLibrary(tmp_path / "dpc", tools=MediaTools(ffmpeg=None, ffprobe=None), save_delay_s=0.01)
+    await library.open()
+    watched, quiet = tmp_path / "Watched", tmp_path / "Quiet"
+    watched.mkdir()
+    quiet.mkdir()
+    await library.add_folder(str(watched))
+    await library.add_folder(str(quiet), watch=False)
+    await library.rescan_all()
+    assert library.initial_scan_done is True                  # an unwatched folder never holds it back
+    library.initial_scan_done = False
+    only = next(f for f in library._folders.values() if f["watch"])
+    library._over_limit = {only["id"]}                        # never scanned: the flag cannot be raised
+    await library.rescan_all()
+    assert library.initial_scan_done is False
+    library._over_limit = set()
+    await library.rescan_all()
+    assert library.initial_scan_done is True
+    await library.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_orphan_sweep_leaves_an_empty_comments_file_while_a_folder_could_not_be_read(
+        tmp_path, no_tools, monkeypatch):
+    """The end to end of finding 1: the track's folder is unreadable, so its id is not in memory and its
+    empty comments file stays until a pass has read every folder."""
+    from dpc_client_core.music import library as library_module
+    service, _, [entry] = await _setup(tmp_path)
+    comments_dir = tmp_path / "dpc" / "music" / "comments"
+    comments_dir.mkdir(parents=True, exist_ok=True)
+    unseen = "trk_" + "e" * 16
+    (comments_dir / f"{unseen}.json").write_text("[]", encoding="utf-8")
+    try:
+        library = service._music_library_instance
+        comments = service._music_comments_instance
+        comments._swept, library.initial_scan_done = False, False
+
+        def unreadable(root):
+            raise library_module.FolderUnavailable("access denied")
+
+        monkeypatch.setattr(library_module, "walk_audio_files", unreadable)
+        await library.rescan_all()                            # the folder fails: unavailable, flag stays down
+        assert library.initial_scan_done is False
+        await service.list_music_comments(track_id=entry["id"])
+        assert (comments_dir / f"{unseen}.json").exists() and comments._swept is False
+        monkeypatch.undo()
+        await library.rescan_all()                            # a clean pass
+        assert library.initial_scan_done is True
+        await service.list_music_comments(track_id=entry["id"])
+        assert not (comments_dir / f"{unseen}.json").exists() and comments._swept is True
+    finally:
+        await service.stop_music_library()

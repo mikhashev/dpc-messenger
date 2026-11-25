@@ -365,6 +365,68 @@ def test_a_card_labels_a_data_blob_or_script_destination_as_unknown(tmp_path, se
     assert "same origin" not in ask.details and "ANOTHER origin" not in ask.details
 
 
+# -- follow-up 19 (Zcode #199 finding 3): one origin has one spelling ---------------------------
+
+@pytest.mark.parametrize("url, origin", [
+    ("http://host", "http://host"),
+    ("http://host:80/a", "http://host"),                       # the default port is dropped
+    ("HTTP://Host:80", "http://host"),                         # scheme and host are lowercase
+    ("https://host:443/", "https://host"),
+    ("ws://host:80", "ws://host"),
+    ("wss://host:443", "wss://host"),
+    ("https://host:80", "https://host:80"),                    # another scheme's default is a real port
+    ("http://host:443", "http://host:443"),
+    ("http://host:8080", "http://host:8080"),
+    ("http://host:0", "http://host:0"),                        # a port of zero is not "no port"
+    ("https://Bücher.example/x", "https://xn--bcher-kva.example"),   # IDNA (punycode)
+    ("https://xn--bcher-kva.example:443/", "https://xn--bcher-kva.example"),
+    ("http://[::1]:80/", "http://[::1]"),
+    ("http://[::1]:8080/", "http://[::1]:8080"),
+    ("http://user:pw@host:80/p?q#f", "http://host"),           # credentials, path, query, fragment are not origin
+])
+def test_an_origin_has_one_spelling_the_default_port_and_the_case_and_idna_are_normalised(url, origin):
+    assert browser._origin_of(url) == origin
+
+
+@pytest.mark.parametrize("url", ["http://host:99999", "http://host:abc", "about:blank", "", None, "host"])
+def test_an_origin_that_cannot_be_read_is_none(url):
+    assert browser._origin_of(url) is None
+
+
+def test_web_origin_of_is_the_same_for_a_spelled_default_port_and_still_refuses_other_schemes():
+    assert browser._web_origin_of("https://example.com:443/inbox") == browser._web_origin_of(INBOX)
+    assert browser._web_origin_of("wss://example.com") is None and browser._web_origin_of("ftp://example.com") is None
+    assert browser._web_origin_of("data:text/html,x") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same", ["https://example.com:443/inbox", "HTTPS://EXAMPLE.COM/other"])
+async def test_a_foreign_read_of_a_page_that_spells_its_default_port_is_no_drift(tmp_path, session, same):
+    turn = _ctx(tmp_path, FRIEND)
+    await browser.browser_navigate(turn, INBOX)
+    session.after_click = same                                  # the click lands on the same origin
+    await browser.browser_click(turn, "@e4")
+    assert session._moved_to_origin is None                     # no "moved" mark latched
+    session.url = same
+    assert "the inbox" in await browser.browser_extract(turn)
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_spells_the_default_port_at_navigation_is_still_compared_to_that_origin(tmp_path, session):
+    turn = _ctx(tmp_path, FRIEND)
+    await browser.browser_navigate(turn, "https://example.com:443/inbox")
+    session.url = INBOX
+    assert "the inbox" in await browser.browser_extract(turn)
+    session.url = "https://example.com:8443/inbox"              # a real other port is still another origin
+    assert (await browser.browser_extract(turn)).startswith("⚠️")
+
+
+def test_a_card_calls_an_explicit_default_port_the_same_origin_as_the_page(tmp_path, session):
+    session.destination = {"kind": "link", "href": "https://example.com:443/settings", "target": ""}
+    ask = browser._browser_click_approval(_ctx(tmp_path, FRIEND), {"ref_or_selector": "@e4"})
+    assert "same origin" in ask.details and "ANOTHER" not in ask.details
+
+
 # -- the page-side reader, run in a real browser when one is installed ------------------------
 
 _READER_HTML = """<base href="https://example.com/app/">

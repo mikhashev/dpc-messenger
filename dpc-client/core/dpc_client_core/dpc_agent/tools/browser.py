@@ -6056,16 +6056,31 @@ def _turn_token(ctx: Any) -> Optional[str]:
     return token
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
 def _origin_of(url: Any) -> Optional[str]:
-    """scheme://host[:port] of a URL, lowercase, or None when it has none (about:blank, a
-    garbled string, nothing)."""
+    """scheme://host[:port] of a URL in one canonical form, or None when it has none (about:blank,
+    a garbled string, nothing). Scheme and host are lowercase, a host with non-ASCII letters is its
+    IDNA (punycode) form, an IPv6 host is bracketed, and the scheme's default port (80 for http and
+    ws, 443 for https and wss) is dropped: `http://host` and `http://host:80` are one origin, so a
+    page that spells its default port is no false drift (follow-up 19, Zcode #199 finding 3). Any
+    other port stays, and an unreadable one (`:99999`, `:abc`) gives None, which fails closed."""
     try:
         parts = _urlparse(str(url or "").strip())
+        scheme = (parts.scheme or "").lower()
         host = (parts.hostname or "").lower()
-        if not parts.scheme or not host:
+        if not scheme or not host:
             return None
-        port = f":{parts.port}" if parts.port else ""
-        return f"{parts.scheme.lower()}://{host}{port}"
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            pass   # a label IDNA refuses: kept as it is, the same on both sides of a comparison
+        if ":" in host:
+            host = f"[{host}]"
+        port = parts.port
+        shown = "" if port is None or port == _DEFAULT_PORTS.get(scheme) else f":{port}"
+        return f"{scheme}://{host}{shown}"
     except Exception:
         return None
 

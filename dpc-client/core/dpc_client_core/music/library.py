@@ -324,10 +324,12 @@ class MusicLibrary:
         self._playlists: Dict[str, dict] = {}
         self._by_hash: Dict[Tuple[str, str], List[str]] = {}
         self._loaded = False
-        # True once every watched folder has been scanned since this process started (the poll
-        # loop's first pass, or a completed `rescan_all`). Until then an entry missing from memory
-        # may be a live file not scanned yet, so nothing may conclude "the library no longer knows
-        # this track" (`MusicComments.sweep_orphans`, Zcode #193).
+        # True once every watched folder has been scanned to the end since this process started (a
+        # poll pass or a `rescan_all` in which none failed, none is unavailable or partly read, and
+        # none is over the folder limit; `_watched_folders_scanned_clean`). It stays up once raised.
+        # Until then an entry missing from memory may be a live file not scanned yet, so nothing
+        # may conclude "the library no longer knows this track" (`MusicComments.sweep_orphans`,
+        # Zcode #193).
         self.initial_scan_done = False
         self._queue: Deque[str] = deque()
         self._queued: Set[str] = set()
@@ -606,8 +608,22 @@ class MusicLibrary:
                 # Shutdown goes on; what was not written is lost, and the log says so.
                 logger.exception("music: the final save at shutdown failed")
 
+    def _watched_folders_scanned_clean(self) -> bool:
+        """Whether every watched folder has been walked to the end: none is over the folder limit
+        (never scanned), none is `unavailable` (refused, unreadable, or only partly read). The comment
+        sweep reads `initial_scan_done` as "every live track is in memory", which a folder that was not
+        scanned cannot promise (follow-up 19, Zcode #199 finding 1). A folder with watching off is
+        not polled and does not hold the flag back: its tracks come from the saved library."""
+        for f in self._folders.values():
+            if not f["watch"]:
+                continue
+            if f["id"] in self._over_limit or f.get("watch_state") == "unavailable":
+                return False
+        return True
+
     async def _poll_loop(self) -> None:
         while True:
+            failed = False
             for folder_id in [f["id"] for f in self._folders.values()
                               if f["watch"] and f["id"] not in self._over_limit]:
                 try:
@@ -615,8 +631,12 @@ class MusicLibrary:
                 except MusicLibraryError:
                     pass  # removed while the loop ran
                 except Exception:
+                    failed = True
                     logger.exception("music: polling folder %s failed", folder_id)
-            self.initial_scan_done = True
+            # Raised once and kept: only a pass in which every watched folder scanned cleanly
+            # counts; otherwise the flag waits for a later clean pass.
+            if not failed and self._watched_folders_scanned_clean():
+                self.initial_scan_done = True
             await asyncio.sleep(self.poll_interval_s)
 
     def _spawn(self, coro) -> None:
@@ -1190,7 +1210,8 @@ class MusicLibrary:
 
     async def rescan_all(self) -> List[dict]:
         out = [await self.rescan_folder(fid) for fid in list(self._folders)]
-        self.initial_scan_done = True
+        if self._watched_folders_scanned_clean():
+            self.initial_scan_done = True
         return out
 
     def _wants_reprobe(self, e: dict) -> bool:

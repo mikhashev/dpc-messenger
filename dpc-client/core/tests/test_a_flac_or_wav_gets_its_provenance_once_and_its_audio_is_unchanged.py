@@ -402,3 +402,74 @@ def test_ffprobe_reads_the_tag_from_either_case_of_the_chunk_id(tmp_path, cid):
     wav = put_before_data(make_wav(tmp_path / "a.wav"), id3_chunk(cid, [txxx_frame("DPC_PROVENANCE", '{"a":1}')]))
     out = subprocess.run([FFPROBE, "-v", "error", "-show_format", "-of", "json", str(wav)], capture_output=True)
     assert json.loads(out.stdout)["format"]["tags"]["DPC_PROVENANCE"] == '{"a":1}'
+
+
+# -- a junk or oversize ID3 chunk is not a record (follow-up 19, Zcode #199 finding 2) -----------------------
+
+
+def junk_chunk(cid: bytes, kind: str) -> bytes:
+    body = {"garbage": b"this is not an ID3 tag at all, just bytes!!",
+            "short": b"ID3",
+            "unsynchronised": b"ID3\x04\x00\x80" + b"\0\0\0\x10" + b"\0" * 16,
+            "oversize": b"ID3\x04\x00\x00\0\0\0\0" + b"\0" * (256 * 1024 + 64 * 1024 + 100)}[kind]
+    return cid + struct.pack("<I", len(body)) + body + (b"\0" if len(body) & 1 else b"")
+
+
+def junk_bytes_of(path: Path, cid: bytes) -> list:
+    return [body for c, body in chunks_of(path) if c == cid]
+
+
+@pytest.mark.parametrize("kind", ["garbage", "short", "unsynchronised", "oversize"])
+@pytest.mark.parametrize("junk_first", [True, False])
+def test_a_real_record_next_to_a_junk_id3_chunk_is_readable_and_real_next_to_real_is_ambiguous(tmp_path, kind,
+                                                                                               junk_first):
+    real = id3_chunk(b"id3 ", [txxx_frame("DPC_PROVENANCE", '{"real":1}')])
+    junk = junk_chunk(b"ID3 ", kind)
+    wav = make_wav(tmp_path / "a.wav")
+    for chunk in ((junk, real) if junk_first else (real, junk)):
+        put_before_data(wav, chunk)
+    state = at.wav_provenance_state(wav)
+    assert state == {"status": "present", "text": '{"real":1}', "where": "id3", "reason": None}
+    assert at.wav_read_provenance(wav) == '{"real":1}'
+    before = wav.read_bytes()
+    with pytest.raises(at.AlreadyTagged):                                 # a readable chunk holds it: still refused
+        at.wav_add_provenance(wav, '{"ours":2}')
+    assert wav.read_bytes() == before and not list(tmp_path.glob("*.tagging"))
+
+    both = make_wav(tmp_path / "b.wav")
+    put_before_data(both, real)
+    put_before_data(both, id3_chunk(b"ID3 ", [txxx_frame("DPC_PROVENANCE", '{"other":2}')]))
+    state = at.wav_provenance_state(both)
+    assert state["status"] == "ambiguous" and "2 ID3 chunks" in state["reason"]
+
+
+@pytest.mark.parametrize("kind", ["garbage", "short", "unsynchronised", "oversize"])
+def test_a_write_next_to_a_junk_id3_chunk_goes_ahead_and_leaves_the_junk_byte_for_byte(tmp_path, kind):
+    junk = junk_chunk(b"ID3 ", kind)
+    junk_body = junk[8:8 + struct.unpack("<I", junk[4:8])[0]]
+    wav = put_before_data(make_wav(tmp_path / "a.wav"), junk)
+    md5_before = pcm_md5(wav)
+    at.wav_add_provenance(wav, '{"ours":1}')                              # only junk: the record gets its own chunk
+    assert junk_bytes_of(wav, b"ID3 ") == [junk_body]
+    assert at.wav_provenance_state(wav) == {"status": "present", "text": '{"ours":1}', "where": "id3", "reason": None}
+    assert pcm_md5(wav) == md5_before
+
+    # a readable chunk without the record plus a junk one: the record goes into the readable one
+    mixed = make_wav(tmp_path / "m.wav")
+    put_before_data(mixed, id3_chunk(b"id3 ", [text_frame("TIT2", "Title")]))
+    put_before_data(mixed, junk)
+    at.wav_add_provenance(mixed, '{"ours":2}')
+    assert junk_bytes_of(mixed, b"ID3 ") == [junk_body]
+    assert b"TIT2" in junk_bytes_of(mixed, b"id3 ")[0]
+    assert at.wav_provenance_state(mixed)["text"] == '{"ours":2}'
+    assert not list(tmp_path.glob("*.tagging"))
+
+
+def test_a_legacy_info_record_migrates_past_a_junk_id3_chunk(tmp_path):
+    junk = junk_chunk(b"ID3 ", "garbage")
+    junk_body = junk[8:8 + struct.unpack("<I", junk[4:8])[0]]
+    wav = make_wav(tmp_path / "a.wav", info={"DPCP": '{"old":1}'})
+    put_before_data(wav, junk)
+    assert at.wav_migrate_provenance(wav) is True
+    assert at.wav_provenance_state(wav) == {"status": "present", "text": '{"old":1}', "where": "id3", "reason": None}
+    assert junk_bytes_of(wav, b"ID3 ") == [junk_body]
