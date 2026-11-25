@@ -131,6 +131,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Local engines (ADR-044): Strata base config, card holder, manual stop and reset
     "strata_inspect_base_config",
     "local_engine_status",
+    # The card lease's queue (ADR-052): who holds the GPU card, who waits, the last few grants
+    "get_card_lease_status",
     "stop_local_engine",
     "strata_reset_failure",
     # The model files folder: where the local engines keep their model files

@@ -15,6 +15,7 @@ Usage:
     python cc_group_chat_bridge.py --group GROUP_ID --send "hi" --mention-depth 1  # answer at depth
     python cc_group_chat_bridge.py --group GROUP_ID --chat-context  # the group block, then history
     python cc_group_chat_bridge.py --list --chat-context    # every group with its block
+    python cc_group_chat_bridge.py --card                   # who holds the GPU card, who waits (a file; no backend call)
 
 The group block (chat_context) is what an embedded agent woken in the group gets:
 name, topic, participants and the rest of the group's metadata. A [MENTION] line is
@@ -839,6 +840,163 @@ def format_message(i: int, msg: dict, node_id: str = None) -> str:
     return f"  [{i + 1}] {num}{ts} {sender}{hint}: {preview}"
 
 
+# --- the GPU card's queue (--card): read from the file the backend keeps, never from the backend ---
+
+CARD_STALE_AFTER_S = 60  # the backend refreshes the file every 15 s while it runs
+
+
+def _card_file_path() -> Path:
+    """`<DPC_HOME>/state/card_lease.json`, which the backend rewrites on every change of the card."""
+    return DPC_HOME / "state" / "card_lease.json"
+
+
+def read_card_file(path: Path = None):
+    """(snapshot, "") from the card file, or (None, why) when it is missing or unreadable."""
+    path = path or _card_file_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, f"no card file at {path} (the backend has not written one: it is not running, or too old)"
+    except (OSError, ValueError) as e:
+        return None, f"card file {path} unreadable: {e}"
+    if not isinstance(data, dict):
+        return None, f"card file {path} is not a card snapshot"
+    return data, ""
+
+
+def _pid_alive(pid):
+    """Whether a process with this pid runs: True, False, or None when it cannot be told. Never
+    os.kill on Windows: there any signal but the console events terminates the process."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return ctypes.get_last_error() == 5  # access denied: it exists
+            try:
+                code = ctypes.c_ulong()
+                if not kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)):
+                    return None
+                return code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(ctypes.c_void_p(handle))
+        except Exception:
+            return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def _span(seconds) -> str:
+    if not isinstance(seconds, (int, float)):
+        return "unknown"
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s} s"
+    if s < 3600:
+        return f"{s // 60} min {s % 60:02d} s"
+    return f"{s // 3600} h {s % 3600 // 60:02d} min"
+
+
+def _clock_of(epoch) -> str:
+    if not isinstance(epoch, (int, float)):
+        return "?"
+    return time.strftime("%H:%M:%S", time.localtime(epoch))
+
+
+def _where_of(row: dict) -> str:
+    if row.get("agent_id"):
+        chat = f", chat {row['conversation_id']}" if row.get("conversation_id") else ""
+        return f" (agent {row['agent_id']}{chat})"
+    if row.get("conversation_id"):
+        return f" (chat {row['conversation_id']})"
+    return ""
+
+
+def _holder_line(h: dict, now: float) -> str:
+    name = h.get("display") or h.get("client") or "?"
+    state = h.get("state") or "?"
+    busy = "busy" if h.get("busy") else "idle"
+    since = ""
+    if isinstance(h.get("since"), (int, float)):
+        since = f" since {_clock_of(h['since'])} ({_span(now - h['since'])})"
+    eta = f", about {_span(h['eta_s'])} left" if isinstance(h.get("eta_s"), (int, float)) else ""
+    beside = f", beside {h['beside']}" if h.get("beside") else ""
+    return f"{name}: {h.get('purpose') or 'nothing named'}{_where_of(h)}, {state}/{busy}{beside}{since}{eta}"
+
+
+def _estimate_words(w: dict) -> str:
+    if not w.get("wait_known") or not isinstance(w.get("wait_s"), (int, float)):
+        return "wait unknown"
+    return f"wait at most {_span(w['wait_s'])}" if w.get("wait_upper_bound") else f"wait about {_span(w['wait_s'])}"
+
+
+def format_card(snap: dict, now: float = None, pid_alive=None) -> str:
+    """The card file, readable: who holds the card, who waits in order, the last grants, and a
+    warning when the file is stale (the backend that wrote it is gone, or has not refreshed it)."""
+    now = time.time() if now is None else now
+    lines = []
+    updated = snap.get("updated_at")
+    age = (now - updated) if isinstance(updated, (int, float)) else None
+    pid = snap.get("backend_pid")
+    alive = _pid_alive(pid) if pid_alive is None else pid_alive
+    if snap.get("backend_stopped"):
+        lines.append("[CARD] WARNING: the backend that wrote this file has stopped; DPC holds no card now")
+    elif alive is False:
+        lines.append(f"[CARD] WARNING: stale: the backend that wrote this file (pid {pid}) is not running")
+    elif age is not None and age > CARD_STALE_AFTER_S:
+        lines.append(f"[CARD] WARNING: possibly stale: not refreshed for {_span(age)} (it refreshes every 15 s)")
+    holders = snap.get("holders") or []
+    if not holders:
+        lines.append("[CARD] free: nobody holds the GPU card")
+    else:
+        lines.append(f"[CARD] held by {len(holders)}:")
+        for h in holders:
+            lines.append(f"  {_holder_line(h, now)}")
+    waiters = snap.get("waiters") or []
+    if not waiters:
+        lines.append("[CARD] queue: nobody waits")
+    else:
+        lines.append(f"[CARD] queue: {len(waiters)} waiting, first served first:")
+        for w in waiters:
+            name = w.get("display") or w.get("client") or "?"
+            waited = f", waiting {_span(now - w['since'])}" if isinstance(w.get("since"), (int, float)) else ""
+            behind = "; waits for " + ", ".join(w["waits_for"]) if w.get("waits_for") else ""
+            until = ", until cancelled" if w.get("until_cancelled") else ""
+            peer = ", a peer's request" if w.get("for_a_peer") else ""
+            lines.append(f"  {w.get('position', '?')}. {name}: {w.get('purpose') or 'nothing named'}"
+                         f"{_where_of(w)}{waited}, {_estimate_words(w)}{until}{peer}{behind}")
+    recent = snap.get("recent") or []
+    if recent:
+        lines.append(f"[CARD] recent ({len(recent)}, oldest first):")
+        for r in recent:
+            extra = []
+            if isinstance(r.get("waited_s"), (int, float)):
+                extra.append(f"waited {_span(r['waited_s'])}")
+            if isinstance(r.get("held_s"), (int, float)):
+                extra.append(f"held {_span(r['held_s'])}")
+            if r.get("why"):
+                extra.append(str(r["why"]))
+            tail = f" ({'; '.join(extra)})" if extra else ""
+            lines.append(f"  {_clock_of(r.get('at'))} {str(r.get('event', '?')).replace('_', ' ')}: "
+                         f"{r.get('display') or r.get('client') or '?'}"
+                         f" - {r.get('purpose') or 'nothing named'}{tail}")
+    state = "running" if alive else "not running" if alive is False else "unknown"
+    when = f"{_clock_of(updated)} ({_span(age)} ago)" if age is not None else "?"
+    lines.append(f"[CARD] file updated {when}, backend pid {pid} ({state})")
+    return "\n".join(lines)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """The CLI; factored out so tests can read its help."""
     parser = argparse.ArgumentParser(
@@ -877,6 +1035,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="With --listen: one JSON object per line instead of [MENTION]")
     parser.add_argument("--once", action="store_true",
                         help="With --listen: exit 0 after the first matching mention")
+    parser.add_argument("--card", action="store_true",
+                        help="Print who holds the GPU card and who waits for it, from the file the "
+                             "backend keeps (~/.dpc/state/card_lease.json); the backend is not called, "
+                             "so it works while the backend is busy or stopped, and says when the "
+                             "file is stale")
     parser.add_argument("--chat-context", action="store_true", dest="chat_context",
                         help="Ask the backend for the group block an embedded agent is given "
                              "(name, topic, participants, the rest of the metadata): with "
@@ -901,6 +1064,14 @@ def _send_and_consume(group_id: str, text: str, name: str, explicit) -> int:
 def main(argv=None):
     """The CLI. Exits through sys.exit as it always has; a read returns None."""
     args = _build_parser().parse_args(argv)
+
+    if args.card:
+        snap, why = read_card_file()
+        if snap is None:
+            print(f"[CARD] unknown: {why}")
+            sys.exit(1)
+        print(format_card(snap))
+        sys.exit(0)
 
     if args.list:
         groups = list_groups(with_chat_context=args.chat_context)

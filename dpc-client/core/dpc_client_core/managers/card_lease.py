@@ -35,13 +35,20 @@ holder (`commit_memory.forget_vram_reading`). Slice S4: the music engines are cl
 `music:acestep`, built by `music.engine_base.SupervisedEngine`), so the cell has its production pair;
 `holders_in_the_way` names a waiter's holders for the music job's `card_wait`. Not here yet: the probe
 of foreign GPU use (S8).
+
+The queue is visible (Mike, 2026-11-25): `queue_snapshot()` is one plain dict of who holds the card, who
+waits in order and the last few grants and releases; `add_change_listener` tells `card_lease_state`
+on every change, which writes it to `~/.dpc/state/card_lease.json` for CC and pushes it to the Agent map.
 """
 
 import asyncio
+import collections
 import contextlib
 import contextvars
 import logging
 import math
+import os
+import threading
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
@@ -90,6 +97,17 @@ _YIELDS: "set[asyncio.Future]" = set()
 _CLOSED: Optional[str] = None
 
 _WHERE_ORDER = ("busy_holder", "yielding", "lease_line", "card_queue")
+
+# The queue made visible (`queue_snapshot`): the last grants, releases and leavings, newest last,
+# bounded; the listeners told on every change (the file for CC and the Agent map's push, in
+# `card_lease_state`); the lock the snapshot and the record are read and written under, so a
+# snapshot taken from another thread never sees a half-written entry. The lease line itself is
+# written only on the owner loop, where the snapshot is taken in production.
+RECENT_MAX = 10
+SNAPSHOT_SCHEMA = "card_lease/1"
+_RECENT: "collections.deque[Dict[str, Any]]" = collections.deque(maxlen=RECENT_MAX)
+_SNAPSHOT_LOCK = threading.RLock()
+_LISTENERS: List[Callable[[], None]] = []
 
 
 # --- refusals (L3) -------------------------------------------------------------------------------
@@ -316,6 +334,8 @@ class CardLease:
         self._grant_no = 0
         self._granted_at: Optional[float] = None
         self._since: Optional[float] = None
+        # What the grant was asked for (the snapshot's purpose for a warm grant with no open use).
+        self._grant_what = ""
         self._starting = False
         self._draining = False
         self._swap_for: Optional[str] = None
@@ -507,25 +527,30 @@ class CardLease:
 
     # -- grant, use, release --
 
-    def _grant(self, what: str) -> None:
+    def _grant(self, what: str, waited_s: Optional[float] = None) -> None:
         self._granted = True
         self._grant_no += 1
         self._granted_at = _clock()
         self._since = time.time()
+        self._grant_what = what
         self._starting = False
         self._beside = None
         self._beside_peak = None
         _the_card_changed()
         logger.info("card: %s granted (%s)", self.display, what)
+        _remember("granted", self, what, waited_s=waited_s)
+        _note_changed()
 
     def _open(self, what: str, arrival: int, hold: Any) -> _Use:
         use = _Use(what, arrival, hold)
         self._uses.append(use)
+        _note_changed()
         return use
 
     def _close_now(self, use: Optional[_Use]) -> None:
         if use is not None and use in self._uses:
             self._uses.remove(use)
+            _note_changed()
             _wake()
 
     def _release_now(self, why: str) -> None:
@@ -540,6 +565,8 @@ class CardLease:
         self._beside_peak = None
         _the_card_changed()
         logger.info("card: %s let go (%s), held %.0f s", self.display, why, held)
+        _remember("released", self, self._grant_what, why=why, held_s=held)
+        _note_changed()
         # The next waiter is granted in this same stretch (L5a point 2).
         _settle()
         _wake()
@@ -811,7 +838,8 @@ def _proceed(waiter: _LeaseWaiter) -> None:
     """Grant `waiter`, in the stretch of the check that found nothing in its way."""
     lease = waiter.lease
     if not lease._granted:
-        lease._grant(waiter.what)
+        waited = time.time() - waiter.queued_at
+        lease._grant(waiter.what, waited_s=waited if waited >= 0.05 else None)
         waiter.made_the_grant = True
     waiter.grant_no = lease._grant_no
     if waiter.opens_a_use:
@@ -846,12 +874,28 @@ def _wake() -> None:
             waiter.event.set()
 
 
-def _leaves(waiter: _LeaseWaiter) -> None:
+def _why_it_left(error: Optional[BaseException]) -> str:
+    """A waiter's leaving, in a word for the snapshot's record: cancelled, refused (with the
+    refusal's class and words) or failed."""
+    if error is None:
+        return "left the line"
+    if isinstance(error, LeaseRefusal):
+        return f"{type(error).__name__}: {str(error)[:160]}"
+    if isinstance(error, asyncio.CancelledError):
+        return "cancelled"
+    return f"failed: {type(error).__name__}"
+
+
+def _leaves(waiter: _LeaseWaiter, error: Optional[BaseException] = None) -> None:
     """Out of the line however it ended, in one synchronous stretch. A grant that reached a waiter
     whose caller has already gone (a cancel racing the grant) is given back: nobody would release
     it."""
     if waiter in _LEASE_LINE:
         _LEASE_LINE.remove(waiter)
+    if not waiter.granted:
+        _remember("left_the_line", waiter.lease, waiter.what, why=_why_it_left(error),
+                  waited_s=time.time() - waiter.queued_at)
+    _note_changed()
     if waiter.granted:
         lease = waiter.lease
         if waiter.use is not None:
@@ -1400,6 +1444,7 @@ def _tell(waiter: _LeaseWaiter, blockers: List[Tuple[str, Any, Optional[str]]],
     waiter.said = said
     logger.info("card: %s waits for %s (%s); wait %s, %s", waiter.lease.display, who, why,
                 _wait_words(estimate["wait_s"]), waiter.bound_words())
+    _note_changed()
     if on_wait is not None:
         try:
             on_wait(estimate)
@@ -1484,6 +1529,7 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
         waiter.give_up_at = _clock() + waiter.wait_s
     waiter.event = asyncio.Event()
     _LEASE_LINE.append(waiter)
+    _note_changed()
     try:
         while True:
             if waiter.granted:
@@ -1520,8 +1566,8 @@ async def _enter(lease: CardLease, what: str, *, wait_s: Optional[float], backgr
             _tell(waiter, blockers, on_wait)
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(waiter.event.wait(), min(_LEASE_POLL_S, waiter.give_up_at - now))
-    except BaseException:
-        _leaves(waiter)
+    except BaseException as exc:
+        _leaves(waiter, exc)
         raise
 
 
@@ -1551,6 +1597,7 @@ def _chat_leaves_the_lease_line(conversation_id: str) -> int:
             waiter.event.set()
         taken += 1
     if taken:
+        _note_changed()
         _settle()
         _wake()
     return taken
@@ -1565,12 +1612,183 @@ def close_the_line(why: str) -> None:
 def _close_now(why: str) -> None:
     global _CLOSED
     _CLOSED = why
+    _note_changed()
     for waiter in list(_LEASE_LINE):
         if waiter.granted:
             continue
         waiter.out = LeaseClosed(f"{waiter.lease.display}: the backend is stopping ({why})")
         if waiter.event is not None:
             waiter.event.set()
+
+
+# --- the queue made visible ----------------------------------------------------------------------
+
+
+def add_change_listener(listener: Callable[[], None]) -> None:
+    """Call `listener()` whenever the card's lease state changes (a grant, a use opened or closed, a
+    waiter in or out, a wait that names something else, a release). It runs on whatever thread made
+    the change, usually the owner loop's, so it must only note the change and return; one that
+    raises is logged and the rest are told."""
+    with _SNAPSHOT_LOCK:
+        if listener not in _LISTENERS:
+            _LISTENERS.append(listener)
+
+
+def remove_change_listener(listener: Callable[[], None]) -> None:
+    with _SNAPSHOT_LOCK:
+        if listener in _LISTENERS:
+            _LISTENERS.remove(listener)
+
+
+def _note_changed() -> None:
+    """Tell the listeners. Never raises: a reader of the queue must not break a grant."""
+    for listener in list(_LISTENERS):
+        try:
+            listener()
+        except Exception:
+            logger.debug("card: a change listener failed", exc_info=True)
+
+
+def _hold_ids(hold: Any) -> Tuple[Optional[str], Optional[str]]:
+    """(agent_id, conversation_id) of a `_CARD_HOLD`, or (None, None) outside a request."""
+    if hold is None:
+        return None, None
+    return getattr(hold, "agent_id", None) or None, getattr(hold, "conversation_id", None) or None
+
+
+def _remember(event: str, lease: CardLease, purpose: str, *, why: Optional[str] = None,
+              held_s: Optional[float] = None, waited_s: Optional[float] = None) -> None:
+    """One line of the record the snapshot ends with: `granted`, `released` or `left_the_line`."""
+    entry: Dict[str, Any] = {"at": time.time(), "event": event, "client": lease.alias,
+                             "display": lease.display, "purpose": purpose or None}
+    if why is not None:
+        entry["why"] = why
+    if held_s is not None:
+        entry["held_s"] = round(held_s, 1)
+    if waited_s is not None:
+        entry["waited_s"] = round(waited_s, 1)
+    with _SNAPSHOT_LOCK:
+        _RECENT.append(entry)
+
+
+def _supervisor_purpose(holder: Any) -> Tuple[str, Optional[str], Optional[str]]:
+    """(purpose, agent_id, conversation_id) of a supervised engine on the card: whom its alias is
+    held for (`_CARD_HOLDS`), else idle."""
+    agent_id = conversation_id = None
+    words: List[str] = []
+    for hold in list(_sup._CARD_HOLDS.get(holder.alias, [])):
+        if not getattr(hold, "live", True):
+            continue
+        agent_id = agent_id or hold.agent_id or None
+        conversation_id = conversation_id or hold.conversation_id or None
+        who = [f"agent {hold.agent_id}"] if hold.agent_id else []
+        if hold.conversation_id:
+            who.append(f"chat {hold.conversation_id}")
+        elif getattr(hold, "caller", None):
+            who.append(f"caller {hold.caller}")
+        if who:
+            words.append(" in ".join(who))
+    return ("; ".join(words) if words else "idle"), agent_id, conversation_id
+
+
+def _holder_row(holder: Any, state: str) -> Dict[str, Any]:
+    if _a_lease(holder):
+        uses = [use.what for use in holder._uses]
+        agent_id = conversation_id = None
+        for use in holder._uses:
+            agent_id, conversation_id = _hold_ids(use.hold)
+            if agent_id or conversation_id:
+                break
+        return {
+            "client": holder.alias, "display": holder.display, "kind": holder.kind,
+            "engine": holder.ENGINE, "state": state, "busy": holder._busy_for_the_card(state),
+            "purpose": ", ".join(uses) or holder._grant_what or None, "uses": uses,
+            "agent_id": agent_id, "conversation_id": conversation_id, "since": holder._since,
+            "eta_s": holder._eta(), "beside": holder.beside, "vram_mib": holder.vram_mib,
+        }
+    purpose, agent_id, conversation_id = _supervisor_purpose(holder)
+    return {
+        "client": holder.alias, "display": f"{holder.ENGINE} '{holder.alias}'", "kind": "inference",
+        "engine": holder.ENGINE, "state": state, "busy": holder._busy_for_the_card(state),
+        "purpose": purpose, "uses": [], "agent_id": agent_id, "conversation_id": conversation_id,
+        "since": None, "eta_s": None, "beside": None, "vram_mib": None,
+    }
+
+
+def _bound_at(give_up_at: float, now: float, clock: float) -> Optional[float]:
+    return None if math.isinf(give_up_at) else now + give_up_at - clock
+
+
+def _waiter_rows(holders: List[Tuple[Any, str]], now: float, clock: float) -> List[Dict[str, Any]]:
+    """Everyone waiting for the card, in the one order of the card's clock (an owner's request
+    before a peer's, then arrival): the supervisors' places and the lease line together. A place
+    has no estimate (the card queue's rule: a supervisor's wait is unknown until it goes), and
+    names the holders it stands behind."""
+    keyed: List[Tuple[Tuple[bool, int, int], Dict[str, Any]]] = []
+    for place in list(_sup._CARD_QUEUE):
+        waits_for = [h.display if _a_lease(h) else f"{h.ENGINE} '{h.alias}'"
+                     for h, _state in holders if h.alias != place.alias]
+        for order, request in enumerate(list(place.requests)):
+            agent_id, conversation_id = _hold_ids(request.hold)
+            who = [f"agent {agent_id}"] if agent_id else []
+            if conversation_id:
+                who.append(f"chat {conversation_id}")
+            keyed.append(((False, place.arrival, order), {
+                "client": place.alias, "display": place.alias, "kind": "inference",
+                "purpose": " in ".join(who) or "a model call", "agent_id": agent_id,
+                "conversation_id": conversation_id, "since": request.queued_at,
+                "give_up_at": _bound_at(request.give_up_at, now, clock),
+                "until_cancelled": False, "wait_s": None, "wait_known": False,
+                "wait_upper_bound": False, "waits_for": waits_for, "where": "card_queue",
+                "for_a_peer": False,
+            }))
+    for waiter in list(_LEASE_LINE):
+        if waiter.granted or waiter.out is not None:
+            continue
+        try:
+            estimate = _estimate(waiter)
+        except Exception:
+            logger.debug("card: the wait of %s could not be estimated", waiter.lease.display, exc_info=True)
+            estimate = {"wait_s": None, "known": False, "behind": [], "where": "lease_line"}
+        agent_id, conversation_id = _hold_ids(waiter.hold)
+        keyed.append((_line_key(waiter) + (0,), {
+            "client": waiter.lease.alias, "display": waiter.lease.display, "kind": waiter.lease.kind,
+            "purpose": waiter.what, "agent_id": agent_id, "conversation_id": conversation_id,
+            "since": waiter.queued_at, "give_up_at": _bound_at(waiter.give_up_at, now, clock),
+            "until_cancelled": math.isinf(waiter.give_up_at), "wait_s": estimate["wait_s"],
+            "wait_known": bool(estimate["known"]), "wait_upper_bound": bool(estimate.get("upper_bound")),
+            "waits_for": list(estimate["behind"]), "where": estimate["where"],
+            "for_a_peer": waiter.for_a_peer,
+        }))
+    keyed.sort(key=lambda pair: pair[0])
+    return [{"position": position, **row} for position, (_key, row) in enumerate(keyed, start=1)]
+
+
+def queue_snapshot() -> Dict[str, Any]:
+    """The card's queue as a plain dict (JSON-safe), for the Agent map, the file CC reads and
+    `get_card_lease_status`: who holds the card (`holders`, the first also as `holder`; None and
+    `free` when nobody does), who waits in order (`waiters`, with `position`, the lease's own wait
+    estimate `wait_s` / `wait_known` / `wait_upper_bound`, and `waits_for`), and the last
+    `RECENT_MAX` grants, releases and leavings (`recent`, oldest first). A wait that nobody can
+    estimate says `wait_known: false` and `wait_s: null`, never 0 (L10). Read-only: nothing is
+    asked and no number is drawn. It names the owner's chats and agents, so it is for the owner's
+    UI and the owner's own files only. No secrets are in it: aliases, ids, words and times."""
+    with _SNAPSHOT_LOCK:
+        now, clock = time.time(), _clock()
+        holders = list(_sup._live_holders())
+        rows = [_holder_row(h, s) for h, s in holders]
+        return {
+            "schema": SNAPSHOT_SCHEMA,
+            "updated_at": now,
+            "updated_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "backend_pid": os.getpid(),
+            "free": not rows,
+            "closed": _CLOSED,
+            "holder": rows[0] if rows else None,
+            "holders": rows,
+            "waiters": _waiter_rows(holders, now, clock),
+            "recent": list(_RECENT),
+        }
 
 
 # --- the hooks the supervisor module reads ---------------------------------------------------------

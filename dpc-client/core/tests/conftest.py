@@ -188,6 +188,8 @@ def _no_card_claims_cross_tests():
         card_lease._LEASE_LINE.clear()
         card_lease._YIELDS.clear()
         card_lease._CLOSED = None
+        card_lease._RECENT.clear()
+        card_lease._LISTENERS.clear()
         llama_server_supervisor._CARD_CLAIMS.clear()
         llama_server_supervisor._CARD_HOLDS.clear()
         llama_server_supervisor._last_caller_call_at.clear()

@@ -51,6 +51,7 @@ from .providers.base import (
 )
 from .local_api import ENV_VAR_NAME_RE as _ENV_VAR_NAME, LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
+from .card_lease_commands import CardLeaseCommandsMixin
 from .music.commands import MusicCommandsMixin
 from .gateway import (
     GATEWAY_HOST,
@@ -920,7 +921,7 @@ def local_wake_sender(sender_name: str, is_agent_sender: bool, asker: Any,
     return words
 
 
-class CoreService(MusicCommandsMixin):
+class CoreService(MusicCommandsMixin, CardLeaseCommandsMixin):
     """
     The main orchestrating class for the D-PC client's backend.
     Manages all sub-components and the application's lifecycle.
@@ -1684,6 +1685,8 @@ class CoreService(MusicCommandsMixin):
         bind_model_download_service(self.model_download_service)
         # The idle swap reads its two settings at each start, so a change needs no restart.
         bind_local_engine_settings(self.settings)
+        # The card lease's queue, written for CC and pushed to the Agent map (Mike, 2026-11-25).
+        self._start_card_lease_state()
         # The music job runner (ADR-051 D30, D35): resumes queued jobs; it starts the job's
         # engine (yue2.cpp or acestep.cpp) only when a job needs it. A failure is logged and
         # leaves jobs queued.
@@ -2117,6 +2120,7 @@ class CoreService(MusicCommandsMixin):
             from .managers.llama_server_supervisor import (
                 bind_local_engine_settings, bind_model_download_service, bind_owner_loop,
             )
+            self._stop_card_lease_state()
             bind_owner_loop(None)
             bind_model_download_service(None)
             bind_local_engine_settings(None)
