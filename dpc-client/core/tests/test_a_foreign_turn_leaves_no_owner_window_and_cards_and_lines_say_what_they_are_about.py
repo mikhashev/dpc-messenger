@@ -43,6 +43,7 @@ class _Session:
         self._page = object()
         self._headed = True
         self.closed = 0
+        self.url = "https://example.com/inbox"  # where the page is; every foreign read asks
 
 
 @pytest.fixture
@@ -60,6 +61,8 @@ def sessions(monkeypatch):
             return "<html>owner's inbox</html>"
         if method == "detect_scrollable_containers":
             return []
+        if method == "page_url":
+            return session.url
         return None
 
     monkeypatch.setattr(browser, "_run_in_session", _run)
@@ -124,8 +127,11 @@ async def test_a_page_the_owner_approved_for_this_foreign_turn_can_be_read(tmp_p
     session = _Session()
     browser._active_browser_sessions["agent_ark"] = session
     ctx = _ctx(tmp_path, FRIEND)
-    browser._note_turn_of_binding(session, ctx)
+    browser._note_turn_of_binding(session, ctx, session.url)
     assert "owner's inbox" in await browser.browser_extract(ctx)
+    # an approval recorded with no address it covered is not read (fail closed, Zcode #191)
+    browser._note_turn_of_binding(session, ctx)
+    assert (await browser.browser_extract(ctx)).startswith("⚠️")
 
 
 @pytest.mark.asyncio

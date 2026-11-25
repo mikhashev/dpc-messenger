@@ -712,6 +712,12 @@ _NAVIGATION_MARKERS = (
 _NAVIGATION_RETRIES = 2
 _NAVIGATION_SETTLE_TIMEOUT_MS = 5000
 _NAVIGATION_SETTLE_PAUSE_MS = 250
+# After a click, fill, select, download or tab switch, before the page's address is re-read
+# for the per-navigation mark (Zcode #191 P3): a click returns before the navigation it
+# started commits, so the address is read after a short pause and a bounded wait for the
+# document that is there then.
+_ACTION_SETTLE_PAUSE_MS = 300
+_ACTION_SETTLE_TIMEOUT_MS = 3000
 
 
 class PageKeptNavigating(RuntimeError):
@@ -3810,6 +3816,18 @@ class AuthBrowser:
         self._require_open()
         return str(self._page.url or "")
 
+    def settle_after_action(self) -> None:
+        """Bounded wait after an action, so a navigation it started has committed before the
+        address is re-read (Zcode #191 P3): a short pause, then DOMContentLoaded of the
+        document there by then. A timeout or error is swallowed; the reads re-check the
+        address anyway."""
+        try:
+            self._require_open()
+            self._page.wait_for_timeout(_ACTION_SETTLE_PAUSE_MS)
+            self._page.wait_for_load_state("domcontentloaded", timeout=_ACTION_SETTLE_TIMEOUT_MS)
+        except Exception as exc:
+            log.debug("settle after an action did not complete: %s", exc)
+
     def action_destination(self, ref_or_selector: str, intent: str) -> dict:
         """Where a click, fill or select on this element would lead, read without
         acting: see `_ACTION_DESTINATION_JS`. Raises on a stale ref or a page that
@@ -6052,6 +6070,31 @@ def _origin_of(url: Any) -> Optional[str]:
         return None
 
 
+_WEB_SCHEMES = ("http", "https")
+NON_WEB_DESTINATION = "destination unknown (data/blob/script URL)"
+
+
+def _web_origin_of(url: Any) -> Optional[str]:
+    """`_origin_of` for an http(s) URL only: None for data:, blob:, javascript:, file:,
+    about: and anything unreadable. A foreign turn's page on such an address counts as off
+    the approved origin, and the card does not call it the same origin or another one
+    (Zcode #191 P4). Fails closed."""
+    origin = _origin_of(url)
+    return origin if origin and origin.split("://", 1)[0] in _WEB_SCHEMES else None
+
+
+def _where_now(url: Any) -> str:
+    """How a refusal names where the page is: its http(s) origin, or what kind of address."""
+    origin = _web_origin_of(url)
+    if origin:
+        return origin
+    try:
+        scheme = (_urlparse(str(url or "").strip()).scheme or "").lower()
+    except Exception:
+        scheme = ""
+    return f"a non-web address ({scheme}:)" if scheme else "an address that could not be read"
+
+
 def _write_marks(session: Any, **marks: Any) -> bool:
     """Write the per-navigation marks on a session. A session that cannot carry attributes
     must not break a browse: the write is logged and skipped, and a page with no mark is read
@@ -6086,7 +6129,7 @@ def _note_turn_of_binding(session: Any, ctx: ToolContext, page_url: Any = None) 
         session,
         _bound_on_owner_turn=on_owner_turn,
         _bound_turn_token=None if on_owner_turn else _turn_token(ctx),
-        _approved_origin=_origin_of(page_url),
+        _approved_origin=_web_origin_of(page_url),
         _moved_to_origin=None,
     )
 
@@ -6107,10 +6150,10 @@ def _reevaluate_mark_after_action(session: Any, ctx: ToolContext, page_url: Any)
     if on_owner_turn:
         _note_turn_of_binding(session, ctx, page_url)
         return
-    now = _origin_of(page_url)
+    now = _web_origin_of(page_url)
     approved = getattr(session, "_approved_origin", None)
     if now is None or approved is None or now != approved:
-        _write_marks(session, _moved_to_origin=now or "an address that could not be read")
+        _write_marks(session, _moved_to_origin=_where_now(page_url))
 
 
 async def _read_page_url(session: Any) -> Optional[str]:
@@ -6123,9 +6166,21 @@ async def _read_page_url(session: Any) -> Optional[str]:
     return url if isinstance(url, str) and url else None
 
 
+async def _settle_after_action(session: Any) -> None:
+    """The session's bounded settle wait (`settle_after_action`); a session that has none, or
+    a wait that fails, is skipped: the reads re-check the address anyway."""
+    try:
+        await _run_in_session(session, "settle_after_action", _touch=False,
+                              _timeout=_ACTION_SETTLE_TIMEOUT_MS / 1000 + 2)
+    except Exception as e:
+        log.debug("settle after an action skipped: %s", e)
+
+
 def _reevaluates_mark(handler):
     """Decorator for the browser actions that can move the page: after the action, whatever
-    its answer, the per-navigation mark is re-read against where the page is now."""
+    its answer, the page is given a bounded wait to settle (a click returns before the
+    navigation it started commits) and the per-navigation mark is re-read against where the
+    page is now."""
     @functools.wraps(handler)
     async def wrapper(ctx, *args, **kwargs):
         try:
@@ -6134,6 +6189,7 @@ def _reevaluates_mark(handler):
             try:
                 session = _active_browser_sessions.get(ctx.agent_root.name)
                 if session is not None:
+                    await _settle_after_action(session)
                     _reevaluate_mark_after_action(session, ctx, await _read_page_url(session))
             except Exception as e:
                 log.warning("browser mark could not be re-read after an action: %s", e)
@@ -6179,6 +6235,49 @@ def _owner_page_refusal(ctx: ToolContext, session: Any, tool: str) -> Optional[s
             f"owner's own turn, and {who}, who asked for this turn, is not the owner.")
 
 
+def _needs_origin_check(ctx: ToolContext, session: Any) -> bool:
+    """A read on a foreign turn of a page logged in as the owner: the page's address is
+    compared with the approved origin on every read."""
+    if not getattr(session, "_etld1s", None) or getattr(session, "_anonymous", False):
+        return False
+    from ..owner_approval import asker_is_owner
+    try:
+        return not asker_is_owner(ctx)
+    except Exception:
+        return True
+
+
+def _origin_drift_refusal(ctx: ToolContext, session: Any, tool: str, page_url: Any) -> Optional[str]:
+    """None when the page is on exactly the origin the owner approved (scheme, host and
+    port); else the refusal, and the page is marked moved for later reads too. An address
+    that cannot be read, or one that is not http(s), is off the origin (fail closed)."""
+    now = _web_origin_of(page_url)
+    approved = getattr(session, "_approved_origin", None)
+    if now is not None and approved is not None and now == approved:
+        return None
+    where = _where_now(page_url)
+    _write_marks(session, _moved_to_origin=where)
+    from ..owner_approval import turn_asker
+    log.info("%s refused for %s: the page is at %s, not the approved origin %s",
+             tool, turn_asker(ctx).label(), where, approved)
+    return (f"⚠️ {tool} was not run: the open page is now at {where}, not "
+            f"{approved or 'an origin'} the owner approved, and the page is logged in as the "
+            f"owner. Open the page you mean with browser_navigate, which asks the owner.")
+
+
+async def _owner_page_read_refusal(ctx: ToolContext, session: Any, tool: str) -> Optional[str]:
+    """`_owner_page_refusal`, then, for a foreign turn's read of a page it may read, the
+    page's address now against the approved origin (Zcode #191 P3). The mark set after an
+    action is read once, and a late navigation (a click that committed after the action
+    returned, a JS or meta redirect after browser_navigate, a move to another subdomain the
+    route gate lets through) would otherwise go unseen. A reader calls this before and after
+    it reads, so a navigation that commits during the read drops what was read."""
+    refusal = _owner_page_refusal(ctx, session, tool)
+    if refusal or not _needs_origin_check(ctx, session):
+        return refusal
+    return _origin_drift_refusal(ctx, session, tool, await _read_page_url(session))
+
+
 def _format_scrollable_hints(containers: list[dict]) -> str:
     """Format detected scrollable containers as CSS hints for the agent."""
     if not containers:
@@ -6204,7 +6303,7 @@ async def browser_snapshot(ctx: ToolContext, raw: bool = False) -> str:
     session = _get_session_or_error(agent_id)
     if session is None:
         return _NO_SESSION_MSG
-    refusal = _owner_page_refusal(ctx, session, "browser_snapshot")
+    refusal = await _owner_page_read_refusal(ctx, session, "browser_snapshot")
     if refusal:
         return refusal
     lock = _get_session_lock(agent_id)
@@ -6223,6 +6322,9 @@ async def browser_snapshot(ctx: ToolContext, raw: bool = False) -> str:
             )
         except Exception:
             containers = []
+    late = await _owner_page_read_refusal(ctx, session, "browser_snapshot")
+    if late:
+        return late
     css_hints = _format_scrollable_hints(containers)
     if raw:
         return tree + css_hints
@@ -6599,7 +6701,7 @@ async def browser_extract(ctx: ToolContext, save_to: Optional[str] = None) -> st
     session = _get_session_or_error(agent_id)
     if session is None:
         return _NO_SESSION_MSG
-    refusal = _owner_page_refusal(ctx, session, "browser_extract")
+    refusal = await _owner_page_read_refusal(ctx, session, "browser_extract")
     if refusal:
         return refusal
     lock = _get_session_lock(agent_id)
@@ -6612,6 +6714,9 @@ async def browser_extract(ctx: ToolContext, save_to: Optional[str] = None) -> st
                 agent_id, type(e).__name__, str(e).split(chr(10))[0],
             )
             return f"⚠️ Extract failed: {type(e).__name__}: {e}"
+    late = await _owner_page_read_refusal(ctx, session, "browser_extract")
+    if late:
+        return late
     saved_to, save_warning = _save_page_markdown(ctx, save_to, html)
     return f"{_extract_header(len(html), saved_to, save_warning)}\n\n{html}"
 
@@ -6653,7 +6758,7 @@ async def browser_screenshot(
     session = _get_session_or_error(agent_id)
     if session is None:
         return _NO_SESSION_MSG
-    refusal = _owner_page_refusal(ctx, session, "browser_screenshot")
+    refusal = await _owner_page_read_refusal(ctx, session, "browser_screenshot")
     if refusal:
         return refusal
     screenshots_dir = ctx.agent_root / "screenshots"
@@ -6672,6 +6777,13 @@ async def browser_screenshot(
                 agent_id, type(e).__name__, str(e).split(chr(10))[0],
             )
             return f"⚠️ Screenshot failed: {type(e).__name__}: {e}"
+    late = await _owner_page_read_refusal(ctx, session, "browser_screenshot")
+    if late:
+        try:
+            path.unlink(missing_ok=True)  # what the moved page showed is not kept either
+        except OSError:
+            pass
+        return late
     try:
         _cleanup_screenshots_lru(screenshots_dir, max_keep=50)
     except Exception:
@@ -7749,10 +7861,11 @@ def _destination_words(page_url: str, info: Optional[dict], intent: str) -> str:
     kind = info.get("kind")
 
     def _where(url: str, by: str = "") -> str:
-        there = _origin_of(url)
+        there = _web_origin_of(url)
         shown = clip(url, _CARD_HREF_LIMIT) + by
         if there is None:
-            return shown
+            # data:, blob:, javascript: or an address that cannot be read (Zcode #191 P4)
+            return f"{clip(url, _CARD_HREF_LIMIT) or '(no address)'}{by} - {NON_WEB_DESTINATION}"
         return shown + (" (the same origin as the page)" if there == here
                         else f" (ANOTHER origin than the page: {there})")
 

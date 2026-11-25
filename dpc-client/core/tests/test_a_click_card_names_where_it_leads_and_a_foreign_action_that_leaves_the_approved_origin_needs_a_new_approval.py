@@ -50,6 +50,9 @@ class _Session:
         self.url = url
         self.destination = {}
         self.after_click = None  # where a click moves the page
+        self.late_url = None     # where a navigation the click started lands once it commits
+        self.during_read = None  # where the page goes while it is being read
+        self.calls = []
 
     def _get_executor(self):
         return _Executor()
@@ -68,6 +71,17 @@ def session(monkeypatch):
     sess = _Session()
 
     async def _run(s, method, *args, **kwargs):
+        s.calls.append(method)
+        if method == "settle_after_action":
+            if s.late_url is not None:
+                s.url, s.late_url = s.late_url, None
+            return None
+        if method in ("extract", "a11y_snapshot", "screenshot") and s.during_read is not None:
+            s.url = s.during_read
+        if method == "a11y_snapshot":
+            return "the inbox tree", {}
+        if method == "detect_scrollable_containers":
+            return []
         if method == "navigate":
             s.url = args[0]
             return "tree"
@@ -246,6 +260,111 @@ async def test_the_owners_click_off_the_origin_does_not_mark_the_page_for_the_ow
     assert "the inbox" in await browser.browser_extract(owner)
 
 
+# -- Zcode #191 P3: the origin is read again on every read, by exact origin -------------------
+
+@pytest.mark.asyncio
+async def test_a_late_navigation_to_another_subdomain_after_a_foreign_click_is_refused_at_read_time(
+        tmp_path, session):
+    """The click returned before its navigation committed, so the address read after it was
+    still the approved one; the route gate lets mail.example.com through (same etld1)."""
+    turn = _ctx(tmp_path, FRIEND)
+    await browser.browser_navigate(turn, INBOX)
+    await browser.browser_click(turn, "@e4")
+    assert session._moved_to_origin is None
+    session.url = "https://mail.example.com/inbox"              # the navigation commits now
+    for read in (browser.browser_snapshot, browser.browser_extract, browser.browser_screenshot):
+        result = await read(turn)
+        assert result.startswith("⚠️") and "https://mail.example.com" in result, result
+        assert "browser_navigate" in result
+    assert session._moved_to_origin == "https://mail.example.com"
+    # the mark stays even when the page comes back: a fresh navigation asks the owner
+    session.url = INBOX
+    assert (await browser.browser_extract(turn)).startswith("⚠️")
+    assert not list((tmp_path / "agent_ark" / "screenshots").glob("*.png"))
+
+
+@pytest.mark.asyncio
+async def test_the_action_waits_for_the_page_to_settle_before_the_address_is_read(tmp_path, session):
+    turn = _ctx(tmp_path, FRIEND)
+    await browser.browser_navigate(turn, INBOX)
+    session.calls.clear()
+    session.late_url = "https://mail.example.com/inbox"          # commits during the settle wait
+    await browser.browser_click(turn, "@e4")
+    assert session.calls.index("settle_after_action") < session.calls.index("page_url")
+    assert session._moved_to_origin == "https://mail.example.com"
+
+
+@pytest.mark.asyncio
+async def test_a_js_redirect_after_navigate_is_refused_for_a_foreign_turn(tmp_path, session):
+    turn = _ctx(tmp_path, FRIEND)
+    await browser.browser_navigate(turn, INBOX)
+    assert "the inbox" in await browser.browser_extract(turn)
+    session.url = "https://evil.example.net/landing"            # location.href = ... after load
+    result = await browser.browser_extract(turn)
+    assert result.startswith("⚠️") and "https://evil.example.net" in result
+    # the owner still reads his own page
+    assert "the inbox" in await browser.browser_extract(_ctx(tmp_path, MIKE))
+
+
+@pytest.mark.asyncio
+async def test_a_navigation_that_commits_during_the_read_drops_what_was_read(tmp_path, session):
+    turn = _ctx(tmp_path, FRIEND)
+    await browser.browser_navigate(turn, INBOX)
+    session.during_read = "https://mail.example.com/inbox"
+    result = await browser.browser_extract(turn)
+    assert result.startswith("⚠️") and PAGE_TEXT not in result
+    session.during_read = None
+    session.url = INBOX
+    await browser.browser_navigate(turn, INBOX)
+    session.during_read = "https://mail.example.com/x"
+    assert (await browser.browser_snapshot(turn)).startswith("⚠️")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("elsewhere", [
+    "https://example.com:8443/inbox",     # another port
+    "http://example.com/inbox",           # another scheme
+    "https://www.example.com/inbox",      # another host of the same etld1
+])
+async def test_the_approved_origin_is_compared_exactly_scheme_host_and_port(tmp_path, session, elsewhere):
+    turn = _ctx(tmp_path, FRIEND)
+    await browser.browser_navigate(turn, INBOX)
+    session.url = elsewhere
+    assert (await browser.browser_extract(turn)).startswith("⚠️")
+
+
+# -- Zcode #191 P4: data:, blob: and javascript: addresses ------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("address, named", [
+    ("data:text/html,<h1>hi</h1>", "a non-web address (data:)"),
+    ("blob:https://example.com/6f1c", "a non-web address (blob:)"),
+    ("about:blank", "a non-web address (about:)"),
+])
+async def test_a_foreign_turns_page_on_a_non_web_address_is_off_origin(tmp_path, session, address, named):
+    turn = _ctx(tmp_path, FRIEND)
+    await browser.browser_navigate(turn, INBOX)
+    session.after_click = address
+    await browser.browser_click(turn, "@e4")
+    assert session._moved_to_origin == named
+    result = await browser.browser_extract(turn)
+    assert result.startswith("⚠️") and named in result
+
+
+@pytest.mark.parametrize("destination", [
+    {"kind": "link", "href": "data:text/html,<script>x()</script>", "target": ""},
+    {"kind": "link", "href": "blob:https://example.com/6f1c", "target": ""},
+    {"kind": "form", "action": "javascript:void(0)", "method": "post", "submits": True},
+    {"kind": "form", "action": "", "method": "get", "submits": True},
+])
+def test_a_card_labels_a_data_blob_or_script_destination_as_unknown(tmp_path, session, destination):
+    session.destination = destination
+    ask = browser._browser_click_approval(_ctx(tmp_path, FRIEND), {"ref_or_selector": "@e4"})
+    assert browser.NON_WEB_DESTINATION in ask.details
+    assert browser.NON_WEB_DESTINATION == "destination unknown (data/blob/script URL)"
+    assert "same origin" not in ask.details and "ANOTHER origin" not in ask.details
+
+
 # -- the page-side reader, run in a real browser when one is installed ------------------------
 
 _READER_HTML = """<base href="https://example.com/app/">
@@ -256,7 +375,9 @@ _READER_HTML = """<base href="https://example.com/app/">
 <button id=b1><b id=b2>pay</b></button><button id=b3 type=button>plain</button>
 <button id=b4 formaction="/alt" formmethod=get>alt</button>
 <select id=sel onchange="this.form.submit()"><option>1</option></select></form>
-<input id=lonely>"""
+<input id=lonely>
+<a id=a3 href="data:text/html,hi">data</a>
+<form action="javascript:void(0)"><input id=f2></form>"""
 
 
 @pytest.fixture(scope="module")
@@ -284,6 +405,8 @@ def reader_page():
     ("#f1", "fill", {"kind": "form", "action": "https://pay.test/c", "method": "post"}),
     ("#sel", "select", {"kind": "form", "action": "https://pay.test/c", "onchange": True}),
     ("#lonely", "fill", {"kind": "noform"}),
+    ("#a3", "click", {"kind": "link", "href": "data:text/html,hi"}),
+    ("#f2", "fill", {"kind": "form", "action": "javascript:void(0)"}),
 ])
 def test_the_page_side_reader_resolves_links_and_form_actions(reader_page, selector, intent,
                                                               expected):

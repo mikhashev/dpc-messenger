@@ -46,6 +46,7 @@ class _Session:
         self._page = object()
         self._headed = True
         self.closed = 0
+        self.url = "https://example.com/inbox"  # where the page is; every foreign read asks
 
 
 @pytest.fixture
@@ -58,7 +59,10 @@ def sessions(monkeypatch):
             session.closed += 1
             return None
         if method == "navigate":
+            session.url = args[0]
             return "navigated tree"
+        if method == "page_url":
+            return session.url
         if method == "extract":
             return "<html>owner's inbox</html>"
         return None
