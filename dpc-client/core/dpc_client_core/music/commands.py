@@ -134,6 +134,8 @@ from .jobs import DEFAULT_AGENT_QUEUE_MAX, DEFAULT_TURN_JOBS_MAX, MusicJobError,
 from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
 from .loudness import LoudnessError, measure_loudness
 from .qa import qa_summary
+from .lineage import LineageError, build_lineage, write_lineage_files
+from .store import music_dir_of
 from .lyrics import MusicLyrics
 from . import lyrics_prep
 from .peaks import PeaksError, get_peaks
@@ -1036,6 +1038,63 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    async def _music_lineage(self, track_id: Any, job_id: Any) -> Dict[str, Any]:
+        """The `mp.lineage/1` document for a track or job (`lineage.py`); read-only."""
+        tid = _opt_str(track_id, "track_id", "invalid_params") or None
+        jid = _opt_str(job_id, "job_id", "invalid_params") or None
+        if not tid and not jid:
+            raise _bad("invalid_params", "track_id", "given, or a job_id")
+        store = await self._music_jobs()
+        library = await self._music()
+
+        def entry_of(lib_id: str) -> Optional[Dict[str, Any]]:
+            try:
+                return library.get_entry(lib_id)
+            except MusicLibraryError:
+                return None
+
+        def build() -> Dict[str, Any]:
+            jobs = store.list_jobs()
+            takes = [t for j in jobs for t in store.list_takes(j["id"])]
+            return build_lineage(jobs, takes, track_id=tid, job_id=jid, entry_of=entry_of)
+        try:
+            doc = await asyncio.to_thread(build)
+        except LineageError as exc:
+            raise MusicJobError(exc.code, exc.message)
+        if tid and not doc["stats"]["jobs"]:
+            library.get_entry(tid)   # a track the library does not know: unknown_track
+        return doc
+
+    @slow_command
+    async def get_music_lineage(self, track_id: Any = None, job_id: Any = None) -> Dict[str, Any]:
+        """The song lineage graph (`mp.lineage/1`, `lineage.py`) of the job chain holding a library
+        track (`track_id`) or a job (`job_id`): the takes and edit siblings as nodes, what each
+        was made from as edges, and the person's Keep / Discard (with the reason) as events. Read-only;
+        answers `{lineage}`. A track no job explains is a graph of one source node. Errors:
+        `invalid_params`, `not_found` (a job), `unknown_track`."""
+        try:
+            return {"status": "ok", "lineage": await self._music_lineage(track_id, job_id)}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
+    async def write_music_lineage_files(self, track_id: Any = None, job_id: Any = None) -> Dict[str, Any]:
+        """On demand, write `lineage.json` and a static `lineage.html` for the same graph into the
+        generated folder of the job it is asked for (or the track's job): `{lineage, files: {json,
+        html}}`. It changes nothing else. Errors as `get_music_lineage`, and `no_job_folder` for a
+        track with no job of its own (an imported file)."""
+        try:
+            doc = await self._music_lineage(track_id, job_id)
+            focus = next((n for n in doc["nodes"] if n["id"] == doc["root"]["node_id"]), None)
+            folder_job = (focus or {}).get("job_id")
+            if not folder_job:
+                raise MusicJobError("no_job_folder", "this track has no job folder of its own to write beside")
+            folder = music_dir_of(self.settings.dpc_home_dir) / "generated" / folder_job
+            files = await asyncio.to_thread(write_lineage_files, doc, folder)
+            return {"status": "ok", "lineage": doc, "files": files}
+        except Exception as exc:
+            return _error(exc)
+
     @slow_command
     async def get_music_track(self, track_id: str) -> Dict[str, Any]:
         """The library entry and its `mp.track/1` (null while the duration is unknown).
@@ -1475,6 +1534,8 @@ MUSIC_COMMANDS = (
     "list_music_library",
     "get_music_track",
     "get_music_track_peaks",
+    "get_music_lineage",
+    "write_music_lineage_files",
     "hide_music_track",
     "unhide_music_track",
     "remove_missing_music_tracks",

@@ -158,6 +158,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "get_music_stream_info",
     # Timecoded listening notes on a library track (mp.comment/1)
     "get_music_track_peaks",
+    # The song lineage graph (music/lineage.py, mp.lineage/1): read-only, plus an on-demand file write
+    "get_music_lineage", "write_music_lineage_files",
     "list_music_comments", "add_music_comment", "update_music_comment", "delete_music_comment",
     # Lyrics preparation (music/lyrics_prep.py): syllables, meter, stress marks; read-only
     "prepare_music_lyrics",
