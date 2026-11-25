@@ -46,6 +46,7 @@
   import MusicLyrics from './MusicLyrics.svelte';
   import MusicCreate from './MusicCreate.svelte';
   import MusicComments from './MusicComments.svelte';
+  import MusicEvolution from './MusicEvolution.svelte';
   import MusicWaveform from './MusicWaveform.svelte';
   import MarqueeText from '../MarqueeText.svelte';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
@@ -1042,6 +1043,8 @@
             <MusicLyrics entry={cur} currentTime={loaded ? p.currentTime : 0} duration={shownDuration} {loaded} />
 
             <MusicComments trackId={cur?.id ?? null} currentTime={loaded ? p.currentTime : 0} duration={shownDuration} {loaded} openSignal={commentSignal} {regionRequest} onclose={() => (draftRegion = null)} />
+
+            <MusicEvolution trackId={cur?.id ?? null} />
 
             <section class="card" aria-labelledby="up-next-label">
               <div class="section-head">
