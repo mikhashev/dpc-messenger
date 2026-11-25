@@ -13,7 +13,8 @@
 
 **The level** (`transcriber_gain_db`). A recording louder than the transcriber hears cleanly (above
 -14 LUFS integrated, or a peak above -1 dBFS) is brought down by one gain to -16 LUFS, its peak held at
--1.5 dBFS; no limiter, so what clipping cut off stays cut. Within bounds it goes as it is.
+-1.5 dBFS; no limiter, so what clipping cut off stays cut. Within bounds it goes as it is. With no
+loudness reading, the peak half of the rule still applies (a peak above -1 dBFS comes down to -1.5).
 
 **The vocal line** (`keep_vocal_voice`): Ruach's "Vocal melody only" transcription keeps the score's
 Vocal voice. Here the Ins voice's notes become rests of the same length instead of the voice being
@@ -51,15 +52,18 @@ LEVEL_PEAK_CEILING_DB = -1.5
 
 def transcriber_gain_db(lufs: Optional[float], peak_db: Optional[float]) -> Optional[float]:
     """The one gain (dB) that brings a recording too loud for the transcriber to -16 LUFS with its peak
-    at -1.5 dBFS at most, or None when it goes as it is (within bounds, or not measured)."""
-    if not isinstance(lufs, (int, float)) or not math.isfinite(lufs):
+    at -1.5 dBFS at most, or None when it goes as it is (within bounds, or nothing known). A reading with
+    no loudness is judged on its peak alone: over -1 dBFS, the gain that brings the peak to -1.5 dBFS (the
+    rule's peak half is not lost on a partial reading; follow-up 18, Zcode #195)."""
+    lufs_ok = isinstance(lufs, (int, float)) and not isinstance(lufs, bool) and math.isfinite(lufs)
+    peak_ok = isinstance(peak_db, (int, float)) and not isinstance(peak_db, bool) and math.isfinite(peak_db)
+    if not (lufs_ok and lufs > LEVEL_LUFS_MAX or peak_ok and peak_db > LEVEL_PEAK_MAX_DB):
         return None
-    peak = peak_db if isinstance(peak_db, (int, float)) and math.isfinite(peak_db) else -math.inf
-    if not (lufs > LEVEL_LUFS_MAX or peak > LEVEL_PEAK_MAX_DB):
-        return None
+    if not lufs_ok:
+        return round(LEVEL_PEAK_CEILING_DB - peak_db, 2)
     gain = LEVEL_TARGET_LUFS - lufs
-    if peak + gain > LEVEL_PEAK_CEILING_DB:
-        gain = LEVEL_PEAK_CEILING_DB - peak
+    if peak_ok and peak_db + gain > LEVEL_PEAK_CEILING_DB:
+        gain = LEVEL_PEAK_CEILING_DB - peak_db
     return round(gain, 2)
 
 

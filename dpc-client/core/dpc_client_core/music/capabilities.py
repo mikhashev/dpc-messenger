@@ -572,7 +572,9 @@ class MusicCapabilities:
                     "cover_length": "the source's length on both engines: acestep.cpp takes it from the source, "
                                     "yue2.cpp is asked for it (duration and semantic min_tokens); QA mode same",
                     "cover_source_s": {js.ENGINE_ACESTEP: {"min": js.ACESTEP_COVER_MIN_S, "max": js.DURATION_MAX_S},
-                                       js.ENGINE_YUE2: {"min": js.YUE2_COVER_MIN_S, "max": js.YUE2_COVER_MAX_S}},
+                                       js.ENGINE_YUE2: {"min": js.YUE2_COVER_MIN_S, "max": js.yue2_cover_door_max_s(0),
+                                                        "note": "with no text; the context is shared with the score "
+                                                                "and the lyrics, so a long text shortens it"}},
                     "reference_audio_max_s": js.REFERENCE_AUDIO_MAX_S,
                     "cover_cot_default": js.COVER_COT_DEFAULT,
                 },

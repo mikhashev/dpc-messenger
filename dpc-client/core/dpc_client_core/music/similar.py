@@ -53,6 +53,8 @@ import asyncio
 import json
 import logging
 import math
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
@@ -76,6 +78,9 @@ MULTIPART_PART = "cover.multipart.part"
 # DPC's own temp files of a song job in `generated/<job>/`: removed when the job ends, swept at runner start
 # (`sweep_temp_parts`) after a crash.
 TEMP_PARTS = (SOURCE_PART, LEVELLED_PART, MULTIPART_PART)
+# One yue2.cpp `/synth` answer on disk while it is split into its take (`MusicJobRunner._produce_yue2`); a hard kill
+# in the middle leaves it, and it is large. Matched by this exact shape only, never by `*.part`.
+SYNTH_VARIANT_PART = re.compile(r"synth\.v[0-9]+\.multipart\.part")
 SOURCE_FORMAT = "wav, PCM 24-bit, 48 kHz, stereo (DPC's ffmpeg decode of the source)"
 INSTRUMENTAL_LYRICS = "[Instrumental]"
 TITLE_PREFIX = {js.GENERATE_SIMILAR: "Same style as", js.COVER: "Cover of",
@@ -90,6 +95,15 @@ YUE2_SEMANTIC_MAX_TOKENS = 9000
 # renders whole 1920-sample latent frames of the source; yue2.cpp is held between a second under and a
 # second over it (`yue2_cover_length`), so two seconds covers the rounding up of the cap.
 COVER_SAME_TOLERANCE_S = {js.ENGINE_ACESTEP: 0.05, js.ENGINE_YUE2: 2.0}
+# `/transcribe` is given time that grows with the source, the way `/synth` is (`MusicJobRunner._produce_yue2`: six
+# seconds per audio second and five minutes), and never less than a job's flat engine timeout.
+TRANSCRIBE_S_PER_SOURCE_S = 6.0
+TRANSCRIBE_SLACK_S = 300.0
+
+
+def transcribe_timeout_s(flat_s: float, source_s: float) -> float:
+    """The seconds `/transcribe` may take for a source of `source_s` seconds."""
+    return max(float(flat_s), float(source_s) * TRANSCRIBE_S_PER_SOURCE_S + TRANSCRIBE_SLACK_S)
 
 
 def yue2_cover_length(source_s: float) -> Dict[str, Any]:
@@ -99,7 +113,7 @@ def yue2_cover_length(source_s: float) -> Dict[str, Any]:
     second under the source (the end token is banned until then, src/sampling.h:96), with `max_tokens`
     raised past the preset's 9000 only when the source needs it."""
     floor = max(0, math.floor((source_s - 1.0) * js.YUE2_FRAME_RATE))
-    need = math.ceil((source_s + 1.0) * js.YUE2_FRAME_RATE)
+    need = js.yue2_cover_frames(source_s)
     sampling: Dict[str, int] = {"min_tokens": floor}
     if need > YUE2_SEMANTIC_MAX_TOKENS:
         sampling["max_tokens"] = need
@@ -264,8 +278,8 @@ class _Prepared:
 
 
 def sweep_temp_parts(generated_root: Path, active: Optional[set] = None) -> List[Path]:
-    """Remove song jobs' temp files (`TEMP_PARTS`, by name only) left in `generated/<job>/` by a crash, except
-    under the jobs in `active`; the removed paths."""
+    """Remove song jobs' temp files (`TEMP_PARTS` and a yue2 `synth.v<n>.multipart.part`, by name only) left in
+    `generated/<job>/` by a crash, except under the jobs in `active`; the removed paths."""
     removed: List[Path] = []
     try:
         folders = [d for d in Path(generated_root).iterdir() if d.is_dir()]
@@ -274,7 +288,11 @@ def sweep_temp_parts(generated_root: Path, active: Optional[set] = None) -> List
     for folder in folders:
         if active and folder.name in active:
             continue
-        for name in TEMP_PARTS:
+        try:
+            names = [n for n in os.listdir(folder) if n in TEMP_PARTS or SYNTH_VARIANT_PART.fullmatch(n)]
+        except OSError:
+            continue
+        for name in names:
             p = folder / name
             try:
                 p.unlink()
@@ -546,16 +564,18 @@ async def _cover_on_acestep(runner: Any, job: dict, prepared: _Prepared, engine:
 
 
 async def _transcribe(runner: Any, job_id: str, engine: Any, wav: Path, melody_only: bool,
-                      engine_job: List[Optional[str]]) -> bytes:
+                      engine_job: List[Optional[str]], source_s: float = 0.0) -> bytes:
     """yue2.cpp `POST /transcribe` (the source as the `audio` part, `melody_only` as a field), polled to
-    its end like any engine job; the answer's bytes (`{"abc": ...}`)."""
+    its end like any engine job, within a time that grows with the source (`transcribe_timeout_s`); the
+    answer's bytes (`{"abc": ...}`)."""
     from .runner import _JobFailure
     await runner._check(job_id)
     fields = {"melody_only": "1"} if melody_only else None
     eid = await engine.submit_form("/transcribe", b"{}", [("audio", wav, "audio/wav")], fields=fields)
     engine_job[0] = eid
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + runner.engine_job_timeout_s
+    timeout_s = transcribe_timeout_s(runner.engine_job_timeout_s, source_s)
+    deadline = loop.time() + timeout_s
     while True:
         await runner._check(job_id)
         status = await engine.job_status(eid)
@@ -565,8 +585,7 @@ async def _transcribe(runner: Any, job_id: str, engine: Any, wav: Path, melody_o
             raise _JobFailure(engine.with_log_tail(f"{engine.DISPLAY} /transcribe job {eid} {status}"))
         if loop.time() > deadline:
             await engine.cancel(eid)
-            raise _JobFailure(f"{engine.DISPLAY} /transcribe job {eid} did not finish within "
-                              f"{runner.engine_job_timeout_s:g} s")
+            raise _JobFailure(f"{engine.DISPLAY} /transcribe job {eid} did not finish within {timeout_s:g} s")
         await asyncio.sleep(runner.engine_poll_s)
     _ctype, raw = await engine.fetch_result(eid, None)
     engine_job[0] = None
@@ -574,26 +593,63 @@ async def _transcribe(runner: Any, job_id: str, engine: Any, wav: Path, melody_o
 
 
 async def _level_for_transcriber(runner: Any, source_wav: Path, out_dir: Path) -> Tuple[Path, Dict[str, Any]]:
-    """The file SheetSage2 hears and what was done to it: the source as it is, or (too loud for it, the rule of
-    `cover_score.transcriber_gain_db`) one gain on its mono mix, written as `transcribe.wav.part`. A loudness
-    that cannot be measured leaves the source as it is, said."""
+    """The file SheetSage2 hears and what was done to it. The loudness is measured on the mono mix, the one
+    that is sent (Zcode #195: a stereo reading is up to 6 LU hotter than its mono mix, so one gain from it
+    left a fully correlated source 3 LU under target). Too loud for it (the rule of
+    `cover_score.transcriber_gain_db`): one gain on that mono mix, written as `transcribe.wav.part`; else the
+    source as it is. A reading with no LUFS is leveled on its peak alone; one with nothing in it (or a failed
+    measurement) on the mix's own sample peak, which this counts. `said["path"]` names which ran:
+    `measured`, `peak_only` (no LUFS), `lufs_sample_peak` (no peak, the sample peak stands in) or
+    `sample_peak_only` (nothing was measured); `unreadable` leaves the source as it is."""
     from . import region_edit as re_
+    dest = out_dir / LEVELLED_PART
+
+    def downmix() -> Tuple[Any, int, float]:
+        pcm = re_.read_pcm(source_wav)
+        mono = pcm.data.mean(axis=1, keepdims=True)
+        re_.write_wav_s24(dest, [mono], rate=pcm.rate, channels=1)
+        peak = float(abs(mono).max()) if mono.size else 0.0
+        return mono, pcm.rate, (20.0 * math.log10(peak) if peak > 0 else -math.inf)
+
     try:
-        loud = await asyncio.to_thread(runner._measure, source_wav)
+        mono, rate, sample_peak = await asyncio.to_thread(downmix)
     except Exception as exc:
-        return source_wav, {"gain_db": None, "measured": False, "reason": f"not measured: {exc}"[:200]}
-    lufs, peak = loud.get("lufs_i"), loud.get("true_peak_dbtp")
+        return source_wav, {"gain_db": None, "measured": False, "path": "unreadable",
+                            "reason": f"the source could not be mixed to mono: {exc}"[:200]}
+    loud: Dict[str, Any] = {}
+    reason = None
+    try:
+        loud = dict(await asyncio.to_thread(runner._measure, dest))
+    except Exception as exc:
+        reason = f"not measured: {exc}"[:200]
+
+    def number(v: Any) -> Optional[float]:
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+
+    lufs, peak = number(loud.get("lufs_i")), number(loud.get("true_peak_dbtp"))
+    peak_from = "true_peak" if peak is not None else None
+    if peak is None and math.isfinite(sample_peak):
+        peak, peak_from = round(sample_peak, 2), "sample_peak"
+    path = ("measured" if lufs is not None and peak_from == "true_peak" else
+            "peak_only" if lufs is None and peak_from == "true_peak" else
+            "lufs_sample_peak" if lufs is not None else "sample_peak_only")
     gain = cs.transcriber_gain_db(lufs, peak)
-    said = {"measured": True, "lufs_i": lufs, "true_peak_dbtp": peak, "gain_db": gain,
-            "rule": "above -14 LUFS or -1 dBFS peak: one gain to -16 LUFS, peak at most -1.5 dBFS (Ruach Studio)"}
+    said: Dict[str, Any] = {"measured": lufs is not None or loud.get("true_peak_dbtp") is not None, "path": path,
+                            "lufs_i": lufs, "true_peak_dbtp": peak, "peak_from": peak_from, "gain_db": gain,
+                            "measured_on": "the mono mix that is sent",
+                            "rule": "above -14 LUFS or -1 dBFS peak: one gain to -16 LUFS, peak at most -1.5 dBFS "
+                                    "(Ruach Studio); with no LUFS, the peak to -1.5 dBFS"}
+    if reason:
+        said["reason"] = reason
     if gain is None:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
         return source_wav, said
 
     def write() -> Path:
-        pcm = re_.read_pcm(source_wav)
-        mono = pcm.data.mean(axis=1, keepdims=True) * (10.0 ** (gain / 20.0))
-        dest = out_dir / LEVELLED_PART
-        re_.write_wav_s24(dest, [mono], rate=pcm.rate, channels=1)
+        re_.write_wav_s24(dest, [mono * mono.dtype.type(10.0 ** (gain / 20.0))], rate=rate, channels=1)
         return dest
 
     return await asyncio.to_thread(write), said
@@ -628,6 +684,31 @@ def _lyrics_against_score(params: Mapping[str, Any], abc: str) -> Tuple[Optional
     return (None if match["unchanged"] else match["lyrics"]), said
 
 
+def check_cover_context(params: Mapping[str, Any], source_s: float, style: Optional[str], lyrics: Optional[str],
+                        score: str) -> Dict[str, int]:
+    """The door's context budget again, now that the score is known (follow-up 18, Zcode #195): prefix (the text
+    as it will be sent and the score) + the semantic budget the request will carry + the end token must fit
+    yue2.cpp's context (src/generate.h:77-83), else the named failure `context_exceeded` with the numbers and no
+    `/synth` is sent. The counts are conservative estimates (`job_schemas.yue2_prompt_tokens`); the answer is the
+    numbers for the take's `song.length.context`."""
+    from .runner import _JobFailure
+    text = (style if style is not None else caption_sent(params)) + chr(10) + (
+        lyrics if lyrics is not None else (lyrics_text(params) or ""))
+    text_bytes, abc_bytes = len(text.encode("utf-8")), len(score.encode("utf-8"))
+    budget = js.yue2_semantic_budget(yue2_cover_length(source_s))
+    prompt = js.yue2_prompt_tokens(text_bytes, abc_bytes)
+    left = js.yue2_context_left(budget, prompt)
+    numbers = {"context": js.YUE2_CONTEXT, "prompt_tokens_est": prompt, "budget_tokens": budget, "left": left,
+               "text_bytes": text_bytes, "score_bytes": abc_bytes}
+    if left < 0:
+        raise _JobFailure(f"context_exceeded: the source is {source_s:g} s, which asks for {budget} music positions "
+                          f"({js.YUE2_FRAME_RATE} a second), and the score ({abc_bytes} bytes) and the text "
+                          f"({text_bytes} bytes) take about {prompt} more; with the end token that is "
+                          f"{prompt + budget + 1} of the {js.YUE2_CONTEXT} yue2.cpp holds, {-left} over. The take would "
+                          "stop short of its source; shorten the lyrics, or cover on acestep")
+    return numbers
+
+
 async def _cover_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: Any,
                          engine_job: List[Optional[str]]) -> None:
     """SheetSage2's score of the source (heard levelled when it is too loud), the Vocal voice alone when asked,
@@ -644,11 +725,12 @@ async def _cover_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: An
         raise _JobFailure(f"yue2.cpp cannot transcribe the source: {problem}. A cover on acestep.cpp runs without "
                           "it (engine acestep)")
     have = {p["name"] for p in (await runner._get(job_id) or {}).get("payloads") or []}
+    source_s = prepared.dress.qa_override["requested_s"] if prepared.dress.qa_override else float(params["duration_s"])
     heard, level = await _level_for_transcriber(runner, prepared.source_wav, out_dir)
     if TRANSCRIBE_PAYLOAD in have:
         raw = await runner._call(runner.store.read_payload, job_id, TRANSCRIBE_PAYLOAD)
     else:
-        raw = await _transcribe(runner, job_id, engine, heard, params.get("cot") == "melody", engine_job)
+        raw = await _transcribe(runner, job_id, engine, heard, params.get("cot") == "melody", engine_job, source_s)
         await runner._call(runner.store.write_payload, job_id, TRANSCRIBE_PAYLOAD, raw, endpoint="/transcribe")
     try:
         abc = json.loads(raw.decode("utf-8")).get("abc")
@@ -659,7 +741,7 @@ async def _cover_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: An
     score = cs.keep_vocal_voice(abc) if params.get("vocal_only") else abc
     style, style_changes = cs.agree_style(caption_sent(params), score)
     lyrics, matched = _lyrics_against_score(params, score)
-    source_s = prepared.dress.qa_override["requested_s"] if prepared.dress.qa_override else float(params["duration_s"])
+    context = check_cover_context(params, source_s, style, lyrics, score)
     for index in range(int(params["variants"])):
         name = yue2_request_name(index + 1)
         if name not in have:
@@ -679,6 +761,7 @@ async def _cover_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: An
     song["style_changes"] = style_changes
     song["section_match"] = matched
     song["length"] = {"source_s": round(source_s, 3), **yue2_cover_length(source_s),
-                      "by": "Ruach Studio's rule for a song over a backing (build/tools/console/app.js:11721-11727)"}
+                      "by": "Ruach Studio's rule for a song over a backing (build/tools/console/app.js:11721-11727)",
+                      "context": context}
     await runner._progress(job_id, 0.1)
     await runner._produce_yue2(job_id, text_view(params), prepared.seed, engine, engine_job)

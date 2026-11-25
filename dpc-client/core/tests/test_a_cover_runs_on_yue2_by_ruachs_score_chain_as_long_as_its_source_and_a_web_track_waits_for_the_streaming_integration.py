@@ -52,7 +52,8 @@ def test_a_recording_too_loud_for_the_transcriber_gets_one_gain_and_one_within_b
     assert cs.transcriber_gain_db(-20.0, -6.0) is None                      # within bounds: as it is
     assert cs.transcriber_gain_db(-9.0, -3.0) == -7.0                       # to -16 LUFS
     assert cs.transcriber_gain_db(-15.0, -0.2) == -1.3                      # a hot peak held at -1.5 dBFS
-    assert cs.transcriber_gain_db(None, 0.0) is None and cs.transcriber_gain_db(float("-inf"), 0.0) is None
+    assert cs.transcriber_gain_db(None, None) is None and cs.transcriber_gain_db(float("-inf"), None) is None
+    assert cs.transcriber_gain_db(None, 0.0) == -1.5                        # no LUFS: the peak half still applies
 
 
 def test_the_vocal_voice_alone_silences_the_ins_voice_and_keeps_bars_chords_and_sections():
@@ -260,7 +261,7 @@ async def test_a_yue2_cover_hears_a_loud_source_levelled_sings_the_vocal_line_wi
     rig.runner._qa_measure = _qa_recorder(calls)
     loud = {"lufs_i": -9.0, "true_peak_dbtp": -0.1, "lra": 3.0}
     real_measure = rig.runner._measure
-    rig.runner._measure = lambda p: loud if p.name == similar.SOURCE_PART else real_measure(p)
+    rig.runner._measure = lambda p: loud if p.name == similar.LEVELLED_PART else real_measure(p)   # the mono mix
     async with rig:
         path = write_base(tmp_path / "music" / "Night Drive.wav", seconds=6.0)
         entry = await rig.library.register_generated(str(path), job_id="job_" + "1" * 16, lineage={"variant": 1})

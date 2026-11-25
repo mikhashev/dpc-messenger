@@ -11,7 +11,8 @@ would; the replay request echoes a sent `abc`. No GPU.
 cancelled), `skip_instrumental` (an adapter whose name holds "instrumental" is left out, as
 the real server leaves out one it cannot merge), `native_abc` (`/transcribe` answers a score in
 SheetSage2's native two-voice dialect with named sections, `NATIVE_ABC`), `follow_length` (a track is
-as long as its semantic `min_tokens` floor at 25 frames a second, the length a cover asks for). `FAKE_YUE2_RECORD`, when set, is a folder where each `/synth` body is written as
+as long as its semantic `min_tokens` floor at 25 frames a second, the length a cover asks for), `big_abc`
+(`/transcribe` answers a score of about 40 kB, more than the context holds). `FAKE_YUE2_RECORD`, when set, is a folder where each `/synth` body is written as
 `<n>-synth.json` and each cancel as `<n>-cancel.txt`. SIGTERM (POSIX) or SIGBREAK (Windows)
 stops it with exit code 0.
 """
@@ -172,6 +173,8 @@ def main():
         abc = "X:1\nT:fake transcription\nK:C\n" + ("|C D E F|" if melody_only else '|"C"C D "G"E F|')
         if "native_abc" in modes:
             abc = NATIVE_ABC
+        if "big_abc" in modes:
+            abc += "|C D E F|" * 4000     # a score of about 40 kB, more than a context holds
         jobs[jid] = {"status": "done", "body": json.dumps({"abc": abc}).encode("utf-8"), "mime": "application/json"}
         return web.json_response({"id": jid})
 

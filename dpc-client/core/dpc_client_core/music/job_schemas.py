@@ -615,6 +615,60 @@ YUE2_COVER_MIN_S = 1025 / 24000
 YUE2_CONTEXT = 24576
 YUE2_FRAME_RATE = 25
 YUE2_COVER_MAX_S = (YUE2_CONTEXT - 1) / YUE2_FRAME_RATE - 1.0
+# The context is shared (follow-up 18, Zcode #195 finding 1): yue2.cpp refuses a request unless
+# `prefix + max_tokens + 1 <= context` (src/generate.h:77-83 at e646d52), and the prefix is the instruction, the
+# style, the lyrics, the score and four special tokens (src/prompt.h:81-96). The frames-only cap above leaves
+# nothing for them, so a cover's length is held to the context that is left after the score and the text.
+# Where the numbers come from:
+# - the score: a planned score is 10.3 to 11.0 tokens per source second (Score song 1857 tokens for the 4223
+#   frames = 169 s of rurock_seed42, 2208 for 5349 frames = 214 s of rurock_seed43; the yue2.cpp trial logs, ai-studio
+#   `engine/yue2-cpp/trial.md`). No real SheetSage2 score was at hand, so the door reserves 16 a second, a half more.
+# - a score's tokens per byte of ABC, 0.74 to 0.79 on the same trial (809 tokens for 1088 bytes, 1857 for 2358, 2208
+#   for 2785); the post-transcription check takes 0.85. A byte-level BPE gives at most one token per byte of ASCII.
+# - the text: 425 tokens for 1582 bytes of Russian lyrics and style, 134 for 407 bytes (the same trial), at most 0.27
+#   a byte; the door and the check take 0.5, with 64 for the instruction, the tags and the special tokens.
+# Ruach Studio holds a backing sung over to 470 s (build/tools/console/app.js:11721-11727) and reckons a long
+# prompt at 6000 rows, the 95th percentile of 407 songs (app.js:1436-1440); its 470 s leaves 12.8k rows for them.
+YUE2_SCORE_TOKENS_PER_S = 16
+YUE2_ABC_TOKENS_PER_BYTE = 0.85
+YUE2_TEXT_TOKENS_PER_BYTE = 0.5
+YUE2_PROMPT_FIXED_TOKENS = 64
+YUE2_SEMANTIC_DEFAULT_MAX_TOKENS = 9000     # the semantic preset's cap (src/sampling.h:47)
+
+
+def yue2_cover_frames(source_s: float) -> int:
+    """The frames a cover's music stage is let run: the source's seconds and one more (Ruach Studio, app.js:11721)."""
+    return math.ceil((source_s + 1.0) * YUE2_FRAME_RATE)
+
+
+def yue2_semantic_budget(body: Mapping[str, Any]) -> int:
+    """The semantic stage's budget as yue2.cpp takes it from a `/synth` body: the preset's `max_tokens` unless
+    the body sets one, clamped to `duration` frames (src/pipeline.h:538-547)."""
+    sampling = body.get("semantic_sampling") or {}
+    budget = sampling.get("max_tokens", YUE2_SEMANTIC_DEFAULT_MAX_TOKENS)
+    frames = int(float(body.get("duration") or 0) * YUE2_FRAME_RATE)
+    return frames if 0 < frames < budget else int(budget)
+
+
+def yue2_prompt_tokens(text_bytes: int, abc_bytes: int) -> int:
+    """A conservative count of the tokens the prompt takes: the text (style, lyrics) and the score."""
+    return (YUE2_PROMPT_FIXED_TOKENS + math.ceil(text_bytes * YUE2_TEXT_TOKENS_PER_BYTE)
+            + math.ceil(abc_bytes * YUE2_ABC_TOKENS_PER_BYTE))
+
+
+def yue2_context_left(budget: int, prompt_tokens: int) -> int:
+    """What is left of the context after the prompt, the budget and the end token; negative when it is not enough."""
+    return YUE2_CONTEXT - (prompt_tokens + budget + 1)
+
+
+def yue2_cover_door_max_s(text_bytes: int) -> float:
+    """The longest source a cover on yue2.cpp is taken at the door, with the context shared with the text and
+    with a score of `YUE2_SCORE_TOKENS_PER_S` a second (a score is not known before it is transcribed):
+    frames (`yue2_cover_frames`) + score + text + the end token fit the context."""
+    fixed = YUE2_CONTEXT - 1 - YUE2_FRAME_RATE - 1 - YUE2_PROMPT_FIXED_TOKENS - math.ceil(
+        text_bytes * YUE2_TEXT_TOKENS_PER_BYTE)
+    # one frame second is for the ceiling of the frames, one of them is `yue2_cover_frames`' second over the source
+    return min(YUE2_COVER_MAX_S, math.floor((fixed - YUE2_FRAME_RATE) / (YUE2_FRAME_RATE + YUE2_SCORE_TOKENS_PER_S)))
 # The longest source whose audio a song job decodes and uploads as a timbre reference (acestep.cpp `ref_audio`,
 # same style or from lyrics): the engine's longest song (acestep.cpp clamps a duration to 600 s, 973517b
 # src/metadata-fsm.h:669) plus a margin. A cover's own ceiling is its engine's (`_song_duration`).
@@ -753,7 +807,8 @@ def _song_lyrics(job_type: str, engine: str, params: Mapping[str, Any]) -> Dict[
             "lyrics_theme": (theme.strip() or None) if theme else None}
 
 
-def _song_duration(job_type: str, engine: str, params: Mapping[str, Any], src_s: Optional[float]) -> float:
+def _song_duration(job_type: str, engine: str, params: Mapping[str, Any], src_s: Optional[float],
+                   text_bytes: int = 0) -> float:
     dmin, dmax, ddefault = DURATION_LIMITS[engine]
     if job_type == COVER:
         # acestep.cpp takes the length from the source (docs/ARCHITECTURE.md, Cover); yue2.cpp is asked for it
@@ -767,11 +822,16 @@ def _song_duration(job_type: str, engine: str, params: Mapping[str, Any], src_s:
                    else "the 1025 samples at 24 kHz SheetSage2 needs to write a score")
             raise SongParamsError("source_too_short", "track_id", f"the source is {src_s:g} s; a cover on "
                                   f"{ENGINE_IDS[engine]} is as long as its source and needs at least {floor:.4f} s ({why})")
-        ceiling = dmax if engine == ENGINE_ACESTEP else YUE2_COVER_MAX_S
+        ceiling = dmax if engine == ENGINE_ACESTEP else yue2_cover_door_max_s(text_bytes)
+        if engine == ENGINE_YUE2 and ceiling < YUE2_COVER_MIN_S:
+            raise SongParamsError("context_exceeded", "lyrics", f"the caption and the lyrics are {text_bytes} bytes; with "
+                                  f"the score a cover on yue2.cpp needs, they leave no room in its {YUE2_CONTEXT}-position "
+                                  "context for the music (shorten the text, or cover on acestep)")
         if src_s > ceiling:
             why = (f"DPC's {dmax} s bound for acestep.cpp" if engine == ENGINE_ACESTEP else
-                   f"yue2.cpp's {YUE2_CONTEXT}-position context at {YUE2_FRAME_RATE} frames a second, with a second to "
-                   "spare")
+                   f"yue2.cpp's {YUE2_CONTEXT}-position context is shared: {YUE2_FRAME_RATE} frames a second of music, "
+                   f"{YUE2_SCORE_TOKENS_PER_S} tokens a second reserved for the score and about "
+                   f"{YUE2_PROMPT_FIXED_TOKENS + math.ceil(text_bytes * YUE2_TEXT_TOKENS_PER_BYTE)} for the text")
             raise SongParamsError("source_too_long", "track_id", f"the source is {src_s:g} s; a cover on "
                                   f"{ENGINE_IDS[engine]} is as long as its source and takes at most {ceiling:g} s ({why})")
         return round(src_s, 3)
@@ -900,7 +960,7 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
         raise ParamsError("variants", f"variants must be a whole number from {VARIANTS_MIN} to {VARIANTS_MAX}, "
                                       f"got {variants!r}")
     out["variants"] = variants
-    out["duration_s"] = _song_duration(job_type, engine, params, out["source_duration_s"])
+    out["duration_s"] = _song_duration(job_type, engine, params, out["source_duration_s"], text_bytes)
     seed = params.get("seed")
     if seed is not None and (not _is_int(seed) or not SEED_MIN <= seed <= SEED_MAX):
         raise ParamsError("seed", f"seed must be a whole number from {SEED_MIN} to {SEED_MAX}, or null to draw one")
