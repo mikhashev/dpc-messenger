@@ -240,6 +240,9 @@ def _take_line(take: Dict[str, Any]) -> str:
     loud = take.get("loudness") or {}
     if isinstance(loud, dict) and loud.get("lufs_i") is not None:
         parts.append(f"{loud['lufs_i']} LUFS")
+    summary = take.get("qa_summary")
+    if isinstance(summary, dict) and summary.get("text"):
+        parts.append(str(summary["text"]))
     if take.get("library_track_id"):
         parts.append(f"library track {take['library_track_id']}")
     parts.append(f"decision {take.get('state')}")
@@ -930,7 +933,7 @@ def get_tools() -> List[ToolEntry]:
                {"job_id": _JOB_ID, "reason": {"type": "string", "description": "Optional reason."}},
                ["job_id"], music_cancel_job),
         _entry("music_list_takes",
-               "A music job's takes: take_id, variant, length, loudness, library track and the take's file.",
+               "A music job's takes: take_id, variant, length, loudness, QA verdict (passed, failed gates or not measured), library track and the take's file.",
                {"job_id": _JOB_ID}, ["job_id"], music_list_takes),
         _entry("music_list_library",
                "The music library's tracks (id, title, artist, album, length, origin) and the person's "

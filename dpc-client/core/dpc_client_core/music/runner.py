@@ -73,9 +73,16 @@ job store, which keeps the state machine; every store call goes through
    level-matched A/B (decision 37). A failed
    measurement is logged and leaves the take's `loudness` null: it is advisory (decision
    29), never a reason to fail the job, and `measure_music_take_loudness` can retry it.
-9. `register_generated(flac, job_id=...)`, then `add_take(... library_track_id=entry id,
-   loudness=...)`.
-10. `finish_job` (`review`), or `fail_job` with the reason.
+9. **Stage-1 QA** (`qa.py`, SPEC §8 "What gates a take"). The same staged FLAC goes through one
+   ffmpeg pass (`astats` for the clipped samples, `silencedetect` for the silence; the loudness
+   record above gives the integrated loudness and true peak, so ebur128 is not run twice) and the
+   take gets a valid `mp.qa/1` as `qa` and the four gates and a verdict as `qa_report` (length
+   against the request, clipping, true peak, silence). It runs off the event loop; a failed run is
+   logged and gives a `qa_report` whose verdict is `not_measured` with the reason and `qa` null.
+   It never fails the job and never rejects a take: it flags.
+10. `register_generated(flac, job_id=...)`, then `add_take(... library_track_id=entry id,
+   loudness=..., qa=..., qa_report=...)`.
+11. `finish_job` (`review`), or `fail_job` with the reason.
 
 **Cancel.** The person's Cancel moves the job to `cancelled` in the store; the runner reads
 the state between steps and on every engine poll, asks the engine to cancel its job
@@ -129,6 +136,7 @@ from .engines import MusicEngines
 from .identity import MediaTools, read_flac_streaminfo
 from .jobs import MusicJobError, MusicJobStore
 from .loudness import LoudnessError, LoudnessMeter, ffmpeg_loudness_meter
+from .qa import LENGTH_CAP, LENGTH_EXACT, QaError, QaMeter, ffmpeg_qa_meter, not_measured_record
 from .store import atomic_write_text, music_dir_of
 
 logger = logging.getLogger(__name__)
@@ -477,6 +485,7 @@ class MusicJobRunner:
         engine_job_timeout_s: float = DEFAULT_ENGINE_JOB_TIMEOUT_S,
         draw_seed: Optional[Callable[[], int]] = None,
         loudness_meter: Optional[LoudnessMeter] = None,
+        qa_meter: Optional[QaMeter] = None,
         device_probe: Optional[Callable[[], Dict[str, Any]]] = None,
     ):
         self.store = store
@@ -486,6 +495,7 @@ class MusicJobRunner:
         self.generated_root = music_dir_of(dpc_home) / "generated"
         self._convert = converter or ffmpeg_converter()
         self._measure = loudness_meter or ffmpeg_loudness_meter()
+        self._qa_measure = qa_meter or ffmpeg_qa_meter()
         self._device_probe = device_probe or prov.device_identity
         self._ffmpeg_version: Optional[str] = None
         self._ffmpeg_version_known = False
@@ -1148,6 +1158,7 @@ class MusicJobRunner:
                                    variant, job_id, info.duration_s, window_s)
             # Loudness of the staged FLAC: advisory (decision 29), and the provenance record holds it.
             loudness = await self._measure_loudness(flac_part, job_id, variant)
+            qa_record = await self._measure_qa(flac_part, job_id, variant, params, take, info.duration_s, loudness)
             created_at = _now()
             record_obj, record_text = await self._take_record(
                 provenance, job_id, variant, flac_part, wav_part, all_tags, loudness, created_at, wav, wav_md5,
@@ -1211,6 +1222,7 @@ class MusicJobRunner:
                 self.store.add_take, job_id, variant=variant, file_uri=flac.as_uri(), content_hash=content_hash,
                 title=title, sample_rate=info.sample_rate or None, channels=info.channels or None,
                 duration_s=info.duration_s, library_track_id=library_id, loudness=loudness,
+                qa=qa_record["qa"], qa_report=qa_record["qa_report"],
                 **({"engine_window_s": window_s, **length_take} if length_take else {}), **dict(take))
         except MusicJobError:
             await self._check(job_id)
@@ -1231,6 +1243,35 @@ class MusicJobRunner:
         except Exception:
             logger.exception("music: measuring the loudness of variant %s of job %s failed", variant, job_id)
         return None
+
+    async def _measure_qa(self, path: Path, job_id: str, variant: int, params: Mapping[str, Any],
+                          take: Mapping[str, Any], duration_s: Optional[float],
+                          loudness: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """`{qa, qa_report}` of the take, never an exception: stage-1 QA flags, it does not fail
+        the job. A measurement that cannot run gives `not_measured`, never a pass. YuE2's
+        `duration_s` is a cap (the model ends the song itself), acestep's is the length asked for."""
+        requested = params.get("duration_s")
+        requested = float(requested) if isinstance(requested, (int, float)) and not isinstance(requested, bool) else None
+        mode = LENGTH_CAP if str(take.get("engine") or "").startswith("yue2") else LENGTH_EXACT
+        try:
+            version = await self._ffmpeg_version_text()
+            record = await asyncio.to_thread(
+                self._qa_measure, path, requested_s=requested, length_mode=mode, duration_s=duration_s,
+                loudness=loudness, tool_version=version)
+            js.check_qa_report(record["qa_report"])
+            if record["qa"] is not None:
+                js.check_qa(record["qa"])
+            if record["qa"] is None:
+                logger.info("music: variant %s of job %s has no mp.qa/1 (not every required number was measured)",
+                            variant, job_id)
+            return {"qa": record["qa"], "qa_report": record["qa_report"]}
+        except Exception as exc:
+            if isinstance(exc, QaError):
+                logger.warning("music: variant %s of job %s has no QA record: %s", variant, job_id, exc)
+            else:
+                logger.exception("music: measuring the QA of variant %s of job %s failed", variant, job_id)
+            return not_measured_record(f"stage-1 QA could not run: {exc}"[:300], requested_s=requested,
+                                       length_mode=mode)
 
     async def _ffmpeg_version_text(self) -> Optional[str]:
         """ffmpeg's version line for the record's post step; asked once, None when it cannot be read."""

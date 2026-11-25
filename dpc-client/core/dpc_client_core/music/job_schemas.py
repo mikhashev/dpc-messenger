@@ -76,9 +76,19 @@ record without them is valid against both shapes:
   fields; received is `file.duration_s`); `library_track_id` (the library entry
   `register_generated` made for the file); `reason_text`, `reason_class`, `decided_at`
   (Discard needs a reason, Mike 2026-11-21: free text, a failure class, or both).
-- `mp.take/1.qa` may be null until stage-1 QA has measured the take (slice 1 step 4);
-  the SPEC makes `mp.qa/1` required with numeric fields, which nothing can fill before
-  the measurement runs.
+- `mp.take/1.qa` is null when stage-1 QA could not fill every required `mp.qa/1` field
+  (ffmpeg missing, a silent file with no true peak, a measurement that failed: `qa.py`), and
+  on takes written before it existed. When it is set it is exactly `mp.qa/1` (`check_qa`):
+  every field present, no extras. A take is never given invented numbers to make it valid.
+- `mp.take/1`: `qa_report`, an object or null: the stage-1 gates beside `qa`
+  (`check_qa_report`, `qa.py`). `mp.qa/1` has no place for a pass/fail, a duration or a silence
+  length (`additionalProperties: false`), so they live here: `{stage: 1, verdict, gates:
+  {length, clipping, true_peak, silence}, advisory: {seams, lyrics_wer}, measurements,
+  thresholds, measured_by, measured_at}`. A gate is `{status: pass|fail|not_measured, detail,
+  ...}` and the verdict is `failed` when a gate failed, `passed` when all four passed and
+  `not_measured` otherwise (a gate that could not be measured is never a pass). The advisory
+  entries never gate (decision 29). A report always exists on a take made by the runner; a
+  failed QA run is a report whose verdict is `not_measured` with the reason.
 - `mp.take/1`: `loudness`, `{lufs_i, lra, true_peak_dbtp, measured_by, measured_at}` or
   null: the ffmpeg ebur128 measurement the level-matched A/B needs (decision 37,
   `loudness.py`). It is not `qa`, because a loudness-only record is not a valid `mp.qa/1`
@@ -223,9 +233,23 @@ _TAKE_KEYS = set(_TAKE_REQUIRED) | {
     # extensions, see the module docstring
     "seed", "synth_batch_size", "synth_batch_index", "payload", "duration_requested_s",
     "library_track_id", "reason_text", "reason_class", "decided_at", "loudness",
-    "engine", "lm_seed", "engine_window_s", "length_check", "length_delta_s",
+    "engine", "lm_seed", "engine_window_s", "length_check", "length_delta_s", "qa_report",
 }
 _LOUDNESS_KEYS = {"lufs_i", "lra", "true_peak_dbtp", "measured_by", "measured_at"}
+
+# mp.qa/1 (SPEC §8), exactly: every key required, no others.
+QA_KEYS = ("integrated_lufs", "true_peak_dbtp", "loudness_delta_lu", "seam_start_jump_db", "seam_end_jump_db",
+           "seam_click_score", "clipped_samples", "lyrics_wer", "measured_by")
+_QA_OPTIONAL = ("simulated",)
+# The stage-1 gates (SPEC §8 "What gates a take", decision 29) and the advisory entries.
+QA_GATES = ("length", "clipping", "true_peak", "silence")
+QA_ADVISORY_ENTRIES = ("seams", "lyrics_wer")
+GATE_PASS, GATE_FAIL, GATE_NOT_MEASURED = "pass", "fail", "not_measured"
+GATE_STATUSES = (GATE_PASS, GATE_FAIL, GATE_NOT_MEASURED)
+QA_PASSED, QA_FAILED, QA_NOT_MEASURED = "passed", "failed", "not_measured"
+QA_VERDICTS = (QA_PASSED, QA_FAILED, QA_NOT_MEASURED)
+_QA_REPORT_KEYS = {"stage", "verdict", "gates", "advisory", "measurements", "thresholds", "measured_by", "measured_at",
+                   "note"}
 _FILE_KEYS = {"uri", "content_hash", "sample_rate", "channels", "duration_s"}
 
 
@@ -721,7 +745,10 @@ def validate_take(take: Any) -> None:
     if "duration_s" in f:
         _expect(s, f["duration_s"] is None or (_is_number(f["duration_s"]) and f["duration_s"] >= 0),
                 "'file.duration_s' must be a number >= 0 or null")
-    _expect(s, take["qa"] is None or isinstance(take["qa"], Mapping), "'qa' must be an object, or null before QA ran")
+    if take["qa"] is not None:
+        check_qa(take["qa"], s)
+    if take.get("qa_report") is not None:
+        check_qa_report(take["qa_report"], s)
     if take["kind"] == "new_track":
         for k in ("variant", "title", "source_track_id"):
             _expect(s, k in take, f"a new_track take needs '{k}'")
@@ -781,6 +808,75 @@ def check_loudness(loudness: Any, schema: str = TAKE) -> None:
         _expect(schema, loudness[k] is None or _is_number(loudness[k]), f"'loudness.{k}' must be a number or null")
     for k in ("measured_by", "measured_at"):
         _expect(schema, _is_str(loudness[k]) and bool(loudness[k]), f"'loudness.{k}' must be a string")
+
+
+def check_qa(qa: Any, schema: str = TAKE) -> None:
+    """Raise `SchemaError` unless `qa` is exactly an `mp.qa/1` (SPEC §8): all of `QA_KEYS`
+    present, nothing else but `simulated`, `integrated_lufs`, `true_peak_dbtp` numbers,
+    `clipped_samples` a whole number >= 0, the loudness delta, the seam fields and the WER
+    numbers or null (the seams >= 0, the WER within 0-1), `measured_by` text."""
+    _expect(schema, isinstance(qa, Mapping), "'qa' must be an object, or null")
+    missing = [k for k in QA_KEYS if k not in qa]
+    extra = sorted(set(qa) - set(QA_KEYS) - set(_QA_OPTIONAL))
+    _expect(schema, not missing, f"'qa' (mp.qa/1) lacks: {', '.join(missing)}")
+    _expect(schema, not extra, f"'qa' (mp.qa/1) has undeclared key(s): {', '.join(extra)}")
+    for k in ("integrated_lufs", "true_peak_dbtp"):
+        _expect(schema, _is_number(qa[k]), f"'qa.{k}' must be a finite number")
+    _expect(schema, _is_int(qa["clipped_samples"]) and qa["clipped_samples"] >= 0,
+            "'qa.clipped_samples' must be an integer >= 0")
+    _expect(schema, qa["loudness_delta_lu"] is None or _is_number(qa["loudness_delta_lu"]),
+            "'qa.loudness_delta_lu' must be a number or null")
+    for k in ("seam_start_jump_db", "seam_end_jump_db", "seam_click_score"):
+        _expect(schema, qa[k] is None or (_is_number(qa[k]) and qa[k] >= 0), f"'qa.{k}' must be a number >= 0 or null")
+    _expect(schema, qa["lyrics_wer"] is None or (_is_number(qa["lyrics_wer"]) and 0 <= qa["lyrics_wer"] <= 1),
+            "'qa.lyrics_wer' must be a number from 0 to 1, or null")
+    _expect(schema, _is_str(qa["measured_by"]) and bool(qa["measured_by"]), "'qa.measured_by' must be text")
+    if "simulated" in qa:
+        _expect(schema, isinstance(qa["simulated"], bool), "'qa.simulated' must be a boolean")
+
+
+def qa_verdict_of(gates: Mapping[str, Mapping[str, Any]]) -> str:
+    """The verdict the gate statuses give: `failed` when any gate failed, `passed` only when
+    every gate passed, `not_measured` otherwise. An unmeasured gate is never a pass."""
+    statuses = [(gates.get(name) or {}).get("status") for name in QA_GATES]
+    if GATE_FAIL in statuses:
+        return QA_FAILED
+    return QA_PASSED if all(st == GATE_PASS for st in statuses) else QA_NOT_MEASURED
+
+
+def check_qa_report(report: Any, schema: str = TAKE) -> None:
+    """Raise `SchemaError` unless `report` is a take's stage-1 `qa_report`: the declared keys,
+    each gate with a status and a detail, the advisory entries never `pass`/`fail`, and the
+    verdict the one `qa_verdict_of` gives."""
+    _expect(schema, isinstance(report, Mapping), "'qa_report' must be an object, or null")
+    needed = _QA_REPORT_KEYS - {"note"}
+    missing = sorted(needed - set(report))
+    extra = sorted(set(report) - _QA_REPORT_KEYS)
+    _expect(schema, not missing, f"'qa_report' lacks: {', '.join(missing)}")
+    _expect(schema, not extra, f"'qa_report' has undeclared key(s): {', '.join(extra)}")
+    _expect(schema, report["stage"] == 1, "'qa_report.stage' must be 1")
+    gates = report["gates"]
+    _expect(schema, isinstance(gates, Mapping) and set(gates) == set(QA_GATES),
+            f"'qa_report.gates' must have exactly {list(QA_GATES)}")
+    for name, gate in gates.items():
+        _expect(schema, isinstance(gate, Mapping) and gate.get("status") in GATE_STATUSES,
+                f"'qa_report.gates.{name}.status' must be one of {GATE_STATUSES}")
+        _expect(schema, _is_str(gate.get("detail")) and bool(gate["detail"]),
+                f"'qa_report.gates.{name}.detail' must be text")
+    advisory = report["advisory"]
+    _expect(schema, isinstance(advisory, Mapping) and set(advisory) == set(QA_ADVISORY_ENTRIES),
+            f"'qa_report.advisory' must have exactly {list(QA_ADVISORY_ENTRIES)}")
+    for name, entry in advisory.items():
+        _expect(schema, isinstance(entry, Mapping) and entry.get("status") in ("measured", GATE_NOT_MEASURED),
+                f"'qa_report.advisory.{name}.status' must be 'measured' or 'not_measured': an advisory entry never gates")
+    _expect(schema, report["verdict"] in QA_VERDICTS, f"'qa_report.verdict' must be one of {QA_VERDICTS}")
+    _expect(schema, report["verdict"] == qa_verdict_of(gates), "'qa_report.verdict' does not follow from the gates")
+    _expect(schema, isinstance(report["measurements"], Mapping) and isinstance(report["thresholds"], Mapping),
+            "'qa_report.measurements' and 'thresholds' must be objects")
+    for k in ("measured_by", "measured_at"):
+        _expect(schema, _is_str(report[k]) and bool(report[k]), f"'qa_report.{k}' must be text")
+    if "note" in report:
+        _expect(schema, report["note"] is None or _is_str(report["note"]), "'qa_report.note' must be text or null")
 
 
 def job_reason_needed(state: str) -> bool:

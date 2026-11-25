@@ -12,6 +12,8 @@ from pathlib import Path
 from dpc_client_core.music.acestep import BINARY_NAME, MODEL_FILES, AceStepServer, read_config
 from dpc_client_core.music.capabilities import MusicCapabilities
 from dpc_client_core.music.identity import MediaTools
+from dpc_client_core.music import job_schemas as js
+from dpc_client_core.music import qa as qa_module
 from dpc_client_core.music.jobs import MusicJobStore
 from dpc_client_core.music.library import MusicLibrary
 from dpc_client_core.music.runner import MusicJobRunner, pcm_md5_and_sha256, read_wav_info
@@ -80,7 +82,7 @@ class Rig:
     """An engine, a job store, a library and a runner over one temp DPC home."""
 
     def __init__(self, home: Path, *, converter=fake_flac, engine_settings=None, start_runner=True,
-                 loudness_meter=fake_loudness):
+                 loudness_meter=fake_loudness, qa_meter=None):
         self.home = home
         self.engine = make_engine(home, settings=engine_settings)
         self.store = MusicJobStore(home, capabilities=MusicCapabilities(self.engine.status))
@@ -90,7 +92,7 @@ class Rig:
         self.runner = MusicJobRunner(
             self.store, self.engine, self._library, dpc_home=home,
             converter=converter, on_job_change=self.events.append, card_poll_s=0.05, engine_poll_s=0.02,
-            loudness_meter=loudness_meter)
+            loudness_meter=loudness_meter, qa_meter=qa_meter or fake_qa)
         self._start_runner = start_runner
 
     async def _library(self):
@@ -147,3 +149,13 @@ def free_env(monkeypatch, modes="", record=None):
     else:
         monkeypatch.delenv("FAKE_ACESTEP_RECORD", raising=False)
 
+
+def fake_qa(flac: Path, *, requested_s=None, length_mode="exact", duration_s=None, loudness=None, tool_version=None) -> dict:
+    """A stage-1 QA record without ffmpeg: every gate passes, the numbers are the fake loudness's."""
+    gates = {name: qa_module._gate(js.GATE_PASS, "fake QA") for name in js.QA_GATES}
+    loud = loudness or {}
+    return qa_module.build_record(
+        gates=gates, measurements={"duration_s": duration_s, "duration_requested_s": requested_s,
+                                   "length_mode": length_mode},
+        integrated_lufs=loud.get("lufs_i"), true_peak_dbtp=loud.get("true_peak_dbtp"), clipped_samples=0,
+        measured_by="fake QA", measured_at="2026-11-25T08:00:00Z")

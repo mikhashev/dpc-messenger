@@ -122,6 +122,7 @@ from .export import (
 from .jobs import DEFAULT_AGENT_QUEUE_MAX, DEFAULT_TURN_JOBS_MAX, MusicJobError, MusicJobStore
 from .library import DEFAULT_POLL_INTERVAL_S, MusicLibrary, MusicLibraryError
 from .loudness import LoudnessError, measure_loudness
+from .qa import qa_summary
 from .lyrics import MusicLyrics
 from .peaks import PeaksError, get_peaks
 from .runner import MusicJobRunner
@@ -868,7 +869,10 @@ class MusicCommandsMixin:
         `kind`, `variant`, `state` (the take's decision: pending, accepted or rejected),
         `job_state`, `library_hidden` (true/false, null without a library entry), `path`
         (absolute, null when the URI is not a local file), `file_exists`,
-        `duration_s`, `sample_rate`, `channels`, `content_hash`, `loudness`. Errors: `not_found`."""
+        `duration_s`, `sample_rate`, `channels`, `content_hash`, `loudness`, `qa` (the stage-1
+        `mp.qa/1`, null when not every field could be measured), `qa_report` (its gates, null on a
+        take made before QA existed) and `qa_summary` (`{verdict, failed, not_measured, text}`,
+        `qa.qa_summary`; read-only). Errors: `not_found`."""
         try:
             tid = _need_str(take_id, "take_id", "invalid_take_id")
             store = await self._music_jobs()
@@ -898,7 +902,8 @@ class MusicCommandsMixin:
                 "path": str(path) if path is not None else None, "file_exists": exists,
                 "duration_s": file.get("duration_s"), "sample_rate": file.get("sample_rate"),
                 "channels": file.get("channels"), "content_hash": file.get("content_hash"),
-                "loudness": take.get("loudness")}}
+                "loudness": take.get("loudness"), "qa": take.get("qa"), "qa_report": take.get("qa_report"),
+                "qa_summary": qa_summary(take)}}
         except Exception as exc:
             return _error(exc)
 

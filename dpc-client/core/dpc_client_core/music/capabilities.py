@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from . import job_schemas as js
+from .qa import THRESHOLDS as QA_THRESHOLDS
 
 logger = logging.getLogger(__name__)
 
@@ -94,16 +95,18 @@ QA_ADVISORY = ("seam_start_jump_db", "seam_end_jump_db", "seam_click_score", "ly
 
 MEASURED = "measured"
 # What produces each field today. `measured` means a producer exists in DPC (loudness.py:
-# integrated LUFS, LRA and true peak through ffmpeg ebur128); `planned` means nothing
+# integrated LUFS, LRA and true peak through ffmpeg ebur128; qa.py: clipped samples through
+# ffmpeg astats, in one stage-1 pass on every take the runner makes); `planned` means nothing
 # produces it yet, so a UI must not present it as a measurement.
 QA_FIELD_STATUS: Dict[str, Dict[str, str]] = {
-    "integrated_lufs": {"status": MEASURED, "reason": "loudness.py, ffmpeg ebur128"},
-    "true_peak_dbtp": {"status": MEASURED, "reason": "loudness.py, ffmpeg ebur128"},
+    "integrated_lufs": {"status": MEASURED, "reason": "loudness.py, ffmpeg ebur128; copied into qa by qa.py"},
+    "true_peak_dbtp": {"status": MEASURED, "reason": "loudness.py, ffmpeg ebur128; copied into qa by qa.py"},
     "loudness_delta_lu": {"status": PLANNED, "reason": "nothing produces it yet"},
     "seam_start_jump_db": {"status": PLANNED, "reason": "seam analysis is not built in DPC"},
     "seam_end_jump_db": {"status": PLANNED, "reason": "seam analysis is not built in DPC"},
     "seam_click_score": {"status": PLANNED, "reason": "seam analysis is not built in DPC"},
-    "clipped_samples": {"status": PLANNED, "reason": "nothing produces it yet"},
+    "clipped_samples": {"status": MEASURED, "reason": "qa.py, ffmpeg astats: samples at the peak when the peak is "
+                        "0.999 of full scale or more (a lower bound)"},
     "lyrics_wer": {"status": PLANNED, "reason": "needs the judge; not built in DPC"},
 }
 
@@ -115,7 +118,7 @@ _FEATURES: Dict[str, Dict[str, str]] = {
     "lyrics_tags": {"status": SUPPORTED, "reason": "sidecar .lrc and file tags through ffprobe; ID3 SYLT is not read"},
     "lyrics_lrclib": {"status": SUPPORTED, "reason": "lrclib.net from core, on the person's explicit lookup"},
     "word_timings": {"status": PLANNED, "reason": "no forced aligner installed"},
-    "qc": {"status": PLANNED, "reason": "stage-1 QA through ffmpeg and the judge are not built in DPC"},
+    "qc": {"status": PLANNED, "reason": "stage 1 (qa.py) is built; the stage-2 judge and QC ranking are not built in DPC"},
 }
 
 
@@ -408,7 +411,12 @@ class MusicCapabilities:
             },
             "qa": {"tool": "ffmpeg", "fields": list(QA_FIELDS),
                    "field_status": {k: dict(v) for k, v in QA_FIELD_STATUS.items()}, "advisory": list(QA_ADVISORY),
-                   "status": PLANNED, "reason": "stage-1 QA through ffmpeg is not built in DPC"},
+                   "status": SUPPORTED,
+                   "reason": "stage 1 is built for takes the runner makes (qa.py): one ffmpeg pass fills qa (mp.qa/1) and "
+                             "qa_report; seam fields, loudness delta and lyrics WER are planned and null; QA flags a take "
+                             "and never rejects it",
+                   "gates": {"names": ["length", "clipping", "true_peak", "silence"], "thresholds": dict(QA_THRESHOLDS),
+                             "advisory_only": ["seams", "lyrics_wer"]}},
             "features": features,
             "take_decisions": {
                 "actions": ["keep", "discard", "none_of_these"],

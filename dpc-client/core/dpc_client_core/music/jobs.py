@@ -940,9 +940,12 @@ class MusicJobStore:
         engine_window_s: Optional[float] = None,
         length_check: Optional[str] = None,
         length_delta_s: Optional[float] = None,
+        qa: Optional[Mapping[str, Any]] = None,
+        qa_report: Optional[Mapping[str, Any]] = None,
     ) -> dict:
         """Record a finished take of a running `generate_from_text` job: a `new_track` take,
-        `pending`, `qa` null until QA runs, `loudness` the runner's ebur128 measurement or
+        `pending`, `qa` the runner's stage-1 `mp.qa/1` or null when it could not be filled and
+        `qa_report` its gates (`qa.py`; both validated), `loudness` the runner's ebur128 measurement or
         null (`loudness.py`), `engine` the engine id that made it and `lm_seed` its token
         seed when the engine reports one. The file is written and registered by the runner
         (`register_generated`). One take per variant and per file (decision 24:
@@ -979,7 +982,8 @@ class MusicJobStore:
                 "title": title,
                 "region": None,
                 "file": file,
-                "qa": None,
+                "qa": dict(qa) if qa is not None else None,
+                "qa_report": copy.deepcopy(dict(qa_report)) if qa_report is not None else None,
                 "decision": js.PENDING,
                 "simulated": simulated,
                 "created_at": self._now(),

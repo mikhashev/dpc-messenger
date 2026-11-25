@@ -18,7 +18,7 @@ from dpc_client_core.music.library import MusicLibrary
 from dpc_client_core.music.runner import MusicJobRunner
 from dpc_client_core.music.yue2 import BACKBONE_FILES, BINARY_NAME, VAE_FILES, Yue2Server, read_config
 
-from tests._acestep_helpers import fake_flac, fake_loudness, install_fake_engine, make_engine
+from tests._acestep_helpers import fake_flac, fake_loudness, fake_qa, install_fake_engine, make_engine
 
 FAKE_SERVER = Path(__file__).with_name("_fake_yue2_server.py")
 VOICES = ("voice-ru-f-contralto-167", "voice-ru-m-bass-82")
@@ -116,7 +116,7 @@ class DualRig:
         self.runner = MusicJobRunner(
             self.store, self.engines, self._library, dpc_home=home,
             converter=fake_flac, on_job_change=self.events.append, card_poll_s=0.05, engine_poll_s=0.02,
-            loudness_meter=fake_loudness)
+            loudness_meter=fake_loudness, qa_meter=fake_qa)
         self._start_runner = start_runner
 
     async def _library(self):
