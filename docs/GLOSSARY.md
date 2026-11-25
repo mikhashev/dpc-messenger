@@ -35,11 +35,11 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **B** — [background call](#background-call) · [`before_message_id`](#before_message_id) · [billing](#billing) · [Block / Unblock](#block--unblock) · [`block_peer` / `unblock_peer`](#block_peer--unblock_peer) · [`blocked_nodes`](#blocked_nodes) · [board / backlog](#board--backlog) · [bridge](#bridge) · [burst](#burst) · [bytes_per_second](#bytes_per_second)
 
-**C** — [caller_kind / route](#caller_kind--route) · [caller_window](#caller_window) · [cancel_knowledge_extraction](#cancel_knowledge_extraction) · [card ask](#card-ask) · [card hold](#card-hold) · [card lease](#card-lease) · [card queue](#card-queue) · [card-borrow](#card-borrow) · [CDN manifest](#cdn-manifest) · [CDN refusal](#cdn-refusal) · [chat_post_file](#chat_post_file) · [CLI](#cli) · [closure line](#closure-line) · [collective](#collective) · [command job](#command-job) · [commit_mb](#commit_mb) · [common_part](#common_part) · [compaction](#compaction) · [composer / pending file](#composer--pending-file) · [compute.currency](#computecurrency) · [connection tier (1–6)](#connection-tier-16) · [consensus / devil's advocate](#consensus--devils-advocate) · [consent_required](#consent_required) · [constraint (C1–C10)](#constraint-c1c10) · [context window](#context-window) · [Control](#control) · [conversation_id / chat](#conversation_id--chat) · [conversation_spill_mib](#conversation_spill_mib) · [cost_amount](#cost_amount) · [cost_reference](#cost_reference) · [counts_source](#counts_source) · [creator](#creator) · [cut call](#cut-call)
+**C** — [caller_kind / route](#caller_kind--route) · [caller_window](#caller_window) · [cancel_knowledge_extraction](#cancel_knowledge_extraction) · [card ask](#card-ask) · [card hold](#card-hold) · [card lease](#card-lease) · [card queue](#card-queue) · [card-borrow](#card-borrow) · [CDN manifest](#cdn-manifest) · [CDN refusal](#cdn-refusal) · [chat_post_file](#chat_post_file) · [CLI](#cli) · [closure line](#closure-line) · [collective](#collective) · [command job](#command-job) · [commit_mb](#commit_mb) · [common_part](#common_part) · [compaction](#compaction) · [composer / pending file](#composer--pending-file) · [compute.currency](#computecurrency) · [connection tier (1–6)](#connection-tier-16) · [consensus / devil's advocate](#consensus--devils-advocate) · [consent_required](#consent_required) · [constraint (C1–C10)](#constraint-c1c10) · [context window](#context-window) · [Control](#control) · [control (region edit)](#control-region-edit) · [conversation_id / chat](#conversation_id--chat) · [conversation_spill_mib](#conversation_spill_mib) · [cost_amount](#cost_amount) · [cost_reference](#cost_reference) · [counts_source](#counts_source) · [creator](#creator) · [cut call](#cut-call) · [cut with shift](#cut-with-shift)
 
 **D** — [decision status](#decision-status) · [deferred](#deferred) · [DHT / seed nodes](#dht--seed-nodes) · [document pipeline](#document-pipeline) · [DPTP](#dptp)
 
-**E** — [effort channel](#effort-channel) · [endpoint_not_served](#endpoint_not_served) · [engine](#engine) · [engine backend](#engine-backend) · [engine time / round trip](#engine-time--round-trip) · [entry](#entry) · [Execute Agent](#execute-agent) · [exit reason](#exit-reason) · [explicit action (DDA)](#explicit-action-dda) · [extended sandbox path](#extended-sandbox-path) · [external agent](#external-agent) · [extraction target](#extraction-target) · [extraction_not_running](#extraction_not_running)
+**E** — [edit zones](#edit-zones) · [effort channel](#effort-channel) · [endpoint_not_served](#endpoint_not_served) · [engine](#engine) · [engine backend](#engine-backend) · [engine time / round trip](#engine-time--round-trip) · [entry](#entry) · [Execute Agent](#execute-agent) · [exit reason](#exit-reason) · [explicit action (DDA)](#explicit-action-dda) · [extended sandbox path](#extended-sandbox-path) · [external agent](#external-agent) · [extraction target](#extraction-target) · [extraction_not_running](#extraction_not_running)
 
 **F** — [feed](#feed) · [FILE_OFFER `text`](#file_offer-text) · [FILE_REQUEST / FILE_REQUEST_DECLINED](#file_request--file_request_declined) · [firewall / privacy rules](#firewall--privacy-rules) · [free commit](#free-commit) · [free_nodes / free_groups](#free_nodes--free_groups)
 
@@ -63,7 +63,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **Q** — [qa_report](#qa_report) · [QC judge](#qc-judge) · [quota block](#quota-block)
 
-**R** — [reach](#reach) · [reasoning effort](#reasoning-effort) · [refusal code](#refusal-code) · [remote inference](#remote-inference) · [`remote:?:<alias>`](#remotealias) · [request_attachment / file_request_status](#request_attachment--file_request_status) · [requested_by](#requested_by) · [resident budget](#resident-budget) · [resolution](#resolution) · [`resolved_via`](#resolved_via) · [resource peaks](#resource-peaks) · [Review Agent](#review-agent) · [roster](#roster) · [round](#round) · [run gate](#run-gate) · [rung](#rung)
+**R** — [reach](#reach) · [reasoning effort](#reasoning-effort) · [refusal code](#refusal-code) · [region edit](#region-edit) · [remote inference](#remote-inference) · [`remote:?:<alias>`](#remotealias) · [request_attachment / file_request_status](#request_attachment--file_request_status) · [requested_by](#requested_by) · [resident budget](#resident-budget) · [resolution](#resolution) · [`resolved_via`](#resolved_via) · [resource peaks](#resource-peaks) · [Review Agent](#review-agent) · [roster](#roster) · [round](#round) · [run gate](#run-gate) · [rung](#rung)
 
 **S** — [sandbox](#sandbox) · [saved_locally / offline_members](#saved_locally--offline_members) · [seconds_left](#seconds_left) · [section / status](#section--status) · [self-wait rule](#self-wait-rule) · [send_without_asking](#send_without_asking) · [served_by](#served_by) · [served_effort](#served_effort) · [serves_images_with_tools](#serves_images_with_tools) · [serving lists](#serving-lists) · [session archive](#session-archive) · [session identifier](#session-identifier) · [session marker](#session-marker) · [shared_proposal_not_editable](#shared_proposal_not_editable) · [shell tier (0/1/2)](#shell-tier-012) · [shell-gate refusal](#shell-gate-refusal) · [skill](#skill) · [sleep consolidation](#sleep-consolidation) · [slot queue](#slot-queue) · [`slow_command`](#slow_command) · [spawn origin](#spawn-origin) · [speed_summary](#speed_summary) · [sprint log](#sprint-log) · [stale reference](#stale-reference) · [star topology](#star-topology) · [stretch](#stretch) · [successor](#successor) · [switch](#switch)
 
@@ -387,6 +387,30 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 - **Met in:** code, screen
 - **Meaning:** One of the four deterministic stage-1 checks of a music take: `length`, `clipping`, `true_peak`, `silence`. Each is `pass`, `fail` or `not_measured` in the take's `qa_report.gates`; the verdict is `failed` if any failed, `passed` only if all four passed, and `not_measured` otherwise, so an unmeasured gate is never a pass. A gate flags the take (the review's "QA failed: clipping" badge) and never rejects it. A quiet tail of 1-5 s is not a silence failure; the seam metrics and lyrics WER are advisory and are not gates.
 - **Defined in:** [music/qa.py — the gates and why these numbers](../dpc-client/core/dpc_client_core/music/qa.py)
+
+### region edit
+
+- **Met in:** code, screen, wire
+- **Meaning:** A music job of type `edit` with one of the built actions: `regenerate_region` and `fix_seam` (acestep.cpp repaints the region and DPC splices it back into the track, two takes) and `remove_region` (DPC fades the region to silence, one take, no engine and no GPU). Proposed from the player's comment form ("Propose edit") or by an agent's `music_propose_job` with type `edit`. Every take is a new file and a new library entry (lineage `region_edit`), a sibling of the other takes; the edited track is never changed. A take keeps the track's length (SPEC decision 23) except a **cut with shift**. Its seam numbers are advisory and never gate (decision 29). `extend_ending` is not built.
+- **Defined in:** [music/region_edit.py — the module docstring](../dpc-client/core/dpc_client_core/music/region_edit.py), [music/runner.py — "Region edits"](../dpc-client/core/dpc_client_core/music/runner.py)
+
+### edit zones
+
+- **Met in:** code, wire
+- **Meaning:** The three ranges of a **region edit** (SPEC flow 3): the **intent** zone is the job's `region` (where the problem is, at most 30 s); the **allowed** zone, `params.allowed_zone`, is what the engine may rework (null means the intent zone; for `fix_seam` at least a 2 s window around the seam); the **splice bounds**, `params.splice_bounds`, are where the take joins the track (null means the allowed zone). Intent ⊆ splice bounds ⊆ allowed. The engine window sent to acestep.cpp is the allowed zone widened to its 25 Hz latent grid; the crossfades lie inside the splice bounds.
+- **Defined in:** [music/region_edit.py — `normalize_params_edit`, `zones_of`, `engine_window`](../dpc-client/core/dpc_client_core/music/region_edit.py)
+
+### control (region edit)
+
+- **Met in:** code, wire
+- **Meaning:** The edited track decoded by ffmpeg to 48 kHz stereo 24-bit PCM: what a **region edit** sends to acestep.cpp as the source audio, what the take is spliced into, and the length a take must keep (the stage-1 length mode `same`, `length_mismatch` otherwise). It is a working file (`control.wav.part`) and is deleted after the job; the job's `edit.request.json` payload records its sha256 and frames, and a resumed job must decode to the same control. Not the **Control** of the agent screens.
+- **Defined in:** [music/runner.py — `ffmpeg_control_decoder`, `_edit_prepare`](../dpc-client/core/dpc_client_core/music/runner.py)
+
+### cut with shift
+
+- **Met in:** code, screen
+- **Meaning:** The one exception to the length rule of a **region edit** (SPEC decision 27): a `remove_region` that ends within 10 s of the track's end may, on the person's word only (never an agent's), cut the region out and move what follows earlier. The take is shorter by the region, and the track's stored lyrics are re-timed onto the take (lines inside the cut go, later lines move earlier).
+- **Defined in:** [music/region_edit.py — `remove`, `retime_lines`](../dpc-client/core/dpc_client_core/music/region_edit.py)
 
 ### `lyrics_prep`
 
