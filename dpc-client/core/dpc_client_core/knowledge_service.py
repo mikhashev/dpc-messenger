@@ -153,6 +153,7 @@ class KnowledgeService:
         self.consensus_manager.on_vote_received = self._on_vote_received
         self.consensus_manager.on_commit_approved = self._on_commit_approved
         self.consensus_manager.on_commit_rejected = self._on_commit_rejected
+        self.consensus_manager.peer_proposal_roster = self._local_roster_for_peer_proposal
 
     # ─────────────────────────────────────────────────────────────
     # Runtime introspection
@@ -373,6 +374,31 @@ class KnowledgeService:
                 "context": "peer",
             },
         ]
+
+    def _local_roster_for_peer_proposal(
+        self, conversation_id: str, sender_node_id: str
+    ) -> Optional[List[str]]:
+        """The voters of a chat a peer's proposal names, from this node's own records.
+
+        None unless this node and the sender share that chat: a group whose
+        roster here lists both, or the 1:1 chat with exactly that sender (the
+        proposer names it by our node id, as we name it by theirs). AI, agent,
+        Telegram and unknown chats are this node's own and a peer has no say
+        in them.
+        """
+        me = getattr(self.p2p_manager, "node_id", None)
+        if not me or not sender_node_id or sender_node_id == me:
+            return None
+        conversation_id = conversation_id or ""
+        if conversation_id.startswith("group-"):
+            group = self.group_manager.get_group(conversation_id) if self.group_manager else None
+            members = list(getattr(group, "members", None) or ())
+            if me in members and sender_node_id in members:
+                return members
+            return None
+        if conversation_id == me:
+            return [sender_node_id, me]
+        return None
 
     def _announce_history_after_repair(self, group_id: str) -> None:
         """Tell connected members that this node's copy of a group just changed.
@@ -1892,7 +1918,10 @@ class KnowledgeService:
                 )
 
             conv_id = proposal.conversation_id
-            if conv_id and conv_id.startswith("agent_"):
+            if (
+                conv_id and conv_id.startswith("agent_")
+                and self.consensus_manager.is_own_proposal(proposal.proposal_id)
+            ):
                 dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
                 if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
                     agent_mgr = dpc_agent_provider._managers.get(conv_id)
@@ -1909,6 +1938,14 @@ class KnowledgeService:
         """Ask the originating agent to revise its knowledge proposal based on change requests."""
         try:
             if not change_requests:
+                return
+            # The comments below go into an owner turn verbatim, so only a
+            # proposal this node made may be revised here.
+            if not self.consensus_manager.is_own_proposal(proposal.proposal_id):
+                logger.warning(
+                    "Not revising proposal %s for %s: this node did not propose it",
+                    proposal.proposal_id, proposal.conversation_id,
+                )
                 return
 
             feedback_lines = "\n".join(

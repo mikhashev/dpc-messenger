@@ -30,6 +30,10 @@ class VotingSession:
     required_dissenter: Optional[str] = None
     deadline: Optional[datetime] = None
     status: str = "voting"  # voting, approved, rejected, timeout
+    # The peer that handed us this proposal; None when this node proposed it.
+    # Decides whose commit an approval makes (_finalize_vote) and whether this
+    # node may revise it (KnowledgeService._agent_auto_revise_proposal).
+    received_from: Optional[str] = None
 
     def __post_init__(self):
         if self.votes is None:
@@ -37,6 +41,11 @@ class VotingSession:
 
 
 VOTE_VALUES = ("approve", "reject", "request_changes", "abstain")
+
+# The `origin` of a commit this node minted from a proposal a peer made: the
+# hash is computed here (every participant computes the same one), but the
+# author is the proposer, not this node, and the record says so.
+PEER_PROPOSAL_ORIGIN = "peer_proposal"
 
 
 def _everyone_answered(session) -> bool:
@@ -93,6 +102,13 @@ class ConsensusManager:
         self.on_commit_ack: Optional[Callable] = None       # Called after apply so service can broadcast COMMIT_ACK
         self.on_commit_apply_failed: Optional[Callable] = None  # Called when _apply_commit fails (disk error etc); arg: (commit, error_msg)
         self.on_apply_retransmit: Optional[Callable] = None  # Called when the ACK window closes on a silent participant; args: (commit, node_ids)
+
+        # (conversation_id, sender_node_id) -> the voters of that chat as this
+        # node knows them, or None when this node and the sender do not share
+        # it. Not set means no peer proposal is accepted (fail closed): the
+        # roster a proposal carries is written by its sender, and trusting it
+        # let one peer be the whole electorate on this node.
+        self.peer_proposal_roster: Optional[Callable[[str, str], Optional[List[str]]]] = None
 
         # Tracks which nodes confirmed successful apply per commit_id (Gap 3 observability)
         self.commit_acks: Dict[str, set] = {}  # commit_id -> set of node_ids that sent COMMIT_ACK
@@ -514,8 +530,19 @@ class ConsensusManager:
                 timestamp=proposal.timestamp,
             )
 
-            # Apply commit to local context; only fire success callbacks if write succeeded
-            apply_ok = await self._apply_commit(commit)
+            # Apply commit to local context; only fire success callbacks if write succeeded.
+            # A peer's proposal is the peer's commit: this node computes the
+            # same hash but neither authored it nor, unless it voted, judged it.
+            received_from = getattr(session, "received_from", None)
+            if received_from is None:
+                apply_ok = await self._apply_commit(commit)
+            else:
+                own_vote = votes.get(self.node_id)
+                apply_ok = await self._apply_commit(
+                    commit,
+                    origin=PEER_PROPOSAL_ORIGIN,
+                    judged_here=own_vote is not None and own_vote.vote != "abstain",
+                )
 
             if not apply_ok:
                 # Disk write failed — mark session as failed so peers can detect missing ACK,
@@ -621,14 +648,18 @@ class ConsensusManager:
     ) -> bool:
         """Apply approved commit to local PCM; False on any error.
 
-        `origin` is "local" or the verdict `verify_provenance()` gave a received
-        commit: one from elsewhere keeps the hash it arrived with, and only a
-        hash we could check is signed with our key (ADR-036 §4).
+        `origin` is "local" (a proposal this node made), PEER_PROPOSAL_ORIGIN (a
+        peer's proposal this node counted to approval itself), or the verdict
+        `verify_provenance()` gave a received commit: one from elsewhere keeps
+        the hash it arrived with, and only a hash we could check is signed with
+        our key (ADR-036 §4). A commit minted here from a peer's proposal hashes
+        itself like a local one but is recorded as the proposer's.
         """
+        minted_here = origin in ("local", PEER_PROPOSAL_ORIGIN)
         # A signature is a judgement, not a delivery receipt: a node that could
         # not read the text the knowledge came from applies it and says so,
         # rather than vouching for it.
-        attested = origin in ("local", "verified") and judged_here
+        attested = (minted_here or origin == "verified") and judged_here
         if not judged_here:
             logger.info(
                 "Applying commit %s without signing it: this node did not judge the proposal",
@@ -645,11 +676,11 @@ class ConsensusManager:
             # 1. parent_commit_id is already set from the proposal (anchored by the proposer
             # at propose time so all nodes compute the same commit_hash). Only fall back to
             # local context.last_commit_id if the proposal pre-dates this fix.
-            if commit.parent_commit_id is None and origin == "local":
+            if commit.parent_commit_id is None and minted_here:
                 commit.parent_commit_id = context.last_commit_id
 
             # 2. Compute hash-based commit ID
-            if origin == "local":
+            if minted_here:
                 commit.compute_hash()  # Sets commit_hash and commit_id
                 logger.info("Created commit %s (hash: %s...)", commit.commit_id, commit.commit_hash[:16])
             else:
@@ -1039,22 +1070,67 @@ class ConsensusManager:
 
         return len(to_remove)
 
-    async def handle_proposal_message(self, sender_node_id: str, payload: Dict[str, Any]) -> None:
+    async def handle_proposal_message(self, sender_node_id: str, payload: Dict[str, Any]) -> bool:
         """Handle PROPOSE_KNOWLEDGE_COMMIT message from peer
 
+        Accepted only for a chat this node shares with the sender
+        (`peer_proposal_roster`), and counted against that chat's roster as this
+        node knows it. A proposal whose own roster names other voters is
+        refused rather than corrected: participants are part of the commit
+        hash, so a corrected roster would mint a commit nobody else holds.
+
         Args:
-            sender_node_id: Node ID of the proposer
+            sender_node_id: the peer that handed us the proposal (the proposer,
+                or a group member relaying it)
             payload: Proposal payload (dict format)
+
+        Returns:
+            True when a voting session was opened for it; False when refused.
         """
         try:
             # Reconstruct proposal from dict
             proposal = KnowledgeCommitProposal.from_dict(payload)
+            conversation_id = proposal.conversation_id or ""
+
+            existing = self.sessions.get(proposal.proposal_id)
+            if existing is not None and getattr(existing, "received_from", None) is None:
+                logger.warning(
+                    "Refusing PROPOSE_KNOWLEDGE_COMMIT from %s for %s: proposal %s is "
+                    "this node's own and a peer cannot replace it",
+                    sender_node_id, conversation_id, proposal.proposal_id,
+                )
+                return False
+
+            resolve = self.peer_proposal_roster
+            roster = resolve(conversation_id, sender_node_id) if resolve else None
+            if not roster or self.node_id not in roster or sender_node_id not in roster:
+                logger.warning(
+                    "Refusing PROPOSE_KNOWLEDGE_COMMIT from %s for %s: not a chat this "
+                    "node shares with the sender",
+                    sender_node_id, conversation_id,
+                )
+                return False
+
+            if set(proposal.participants or ()) != set(roster):
+                logger.warning(
+                    "Refusing PROPOSE_KNOWLEDGE_COMMIT from %s for %s: its roster %s is "
+                    "not this chat's roster here %s",
+                    sender_node_id, conversation_id,
+                    sorted(proposal.participants or ()), sorted(roster),
+                )
+                return False
+
+            # The roster this node counts against is its own, not the payload's.
+            proposal.participants = list(roster)
+            if proposal.required_dissenter not in roster:
+                proposal.required_dissenter = None
 
             # Create voting session
             session = VotingSession(
                 proposal=proposal,
                 required_dissenter=proposal.required_dissenter,
-                deadline=datetime.fromisoformat(proposal.vote_deadline) if proposal.vote_deadline else None
+                deadline=datetime.fromisoformat(proposal.vote_deadline) if proposal.vote_deadline else None,
+                received_from=sender_node_id,
             )
 
             self.sessions[proposal.proposal_id] = session
@@ -1068,8 +1144,16 @@ class ConsensusManager:
             if self.on_proposal_received:
                 await self.on_proposal_received(proposal)
 
+            return True
+
         except Exception as e:
             logger.error("Error handling proposal message from %s: %s", sender_node_id, e, exc_info=True)
+            return False
+
+    def is_own_proposal(self, proposal_id: str) -> bool:
+        """Did this node make that proposal (rather than receive it from a peer)?"""
+        session = self.sessions.get(proposal_id)
+        return session is not None and getattr(session, "received_from", None) is None
 
     async def handle_vote_message(
         self,

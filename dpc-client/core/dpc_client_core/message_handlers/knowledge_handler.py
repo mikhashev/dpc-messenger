@@ -79,7 +79,12 @@ class ProposeKnowledgeCommitHandler(MessageHandler):
             sender_node_id: Node ID of proposer
             payload: Contains commit proposal data
         """
-        await self.service.consensus_manager.handle_proposal_message(sender_node_id, payload)
+        accepted = await self.service.consensus_manager.handle_proposal_message(
+            sender_node_id, payload
+        )
+        # A proposal this node refused is not passed on in its name either.
+        if not accepted:
+            return None
 
         # Relay to group members that can't reach the proposer directly (star topology)
         conversation_id = payload.get("conversation_id", "")
