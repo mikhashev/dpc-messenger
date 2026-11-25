@@ -467,7 +467,9 @@ def _whole_object(text: str) -> Any:
 def _check_schema_answer(obj: Any) -> None:
     """The answer against `judge_schema`, after parsing (a server that did not enforce the schema is caught
     here, and so are the number bounds a grammar cannot hold): exactly the declared keys at every level,
-    integer scores 0-10, at most `JUDGE_MAX_ISSUES` issues of a known kind, the strings within their lengths.
+    integer scores 0-10, at most `JUDGE_MAX_ISSUES` issues of a known kind, each with its four fields and
+    `t_start` and `t_end` numbers >= 0, the strings within their lengths, `confidence` a number from 0 to 1
+    (follow-up 22: the bounds were only documented here and checked later by `parse_judge_answer`).
     Raises `JudgeParseError`."""
     if not isinstance(obj, dict):
         raise JudgeParseError("the judge's answer is not a JSON object")
@@ -490,6 +492,12 @@ def _check_schema_answer(obj: Any) -> None:
     for i, item in enumerate(issues):
         if not isinstance(item, dict) or set(item) - allowed:
             raise JudgeParseError(f"issue {i} is not an object of the schema's keys")
+        lacks = [k for k in ("t_start", "t_end", "kind", "note") if k not in item]
+        if lacks:
+            raise JudgeParseError(f"issue {i} lacks: {', '.join(lacks)}")
+        for k in ("t_start", "t_end"):
+            if not _number(item[k]) or item[k] < 0:
+                raise JudgeParseError(f"issue {i}'s {k} is {item[k]!r}, not a number from 0 up")
         if item.get("kind") not in ISSUE_KINDS:
             raise JudgeParseError(f"issue {i} has the kind {item.get('kind')!r}, not one of the rubric's")
         if not isinstance(item.get("note"), str) or len(item["note"]) > JUDGE_NOTE_MAX_CHARS:
@@ -502,6 +510,8 @@ def _check_schema_answer(obj: Any) -> None:
             raise JudgeParseError(f"issue {i} carries expected_pronunciation but is not a pronunciation issue")
     if not isinstance(obj["reasons"], str) or len(obj["reasons"]) > JUDGE_REASONS_MAX_CHARS:
         raise JudgeParseError(f"the judge's 'reasons' is not text of at most {JUDGE_REASONS_MAX_CHARS} characters")
+    if not _number(obj["confidence"]) or not 0 <= obj["confidence"] <= 1:
+        raise JudgeParseError(f"the judge's confidence is {obj['confidence']!r}, not a number from 0 to 1")
 
 
 def parse_judge_answer(text: str, nonce: Optional[str], *, constrained: bool = False) -> Dict[str, Any]:

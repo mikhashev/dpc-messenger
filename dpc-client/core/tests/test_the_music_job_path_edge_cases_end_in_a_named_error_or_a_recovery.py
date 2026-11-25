@@ -46,7 +46,12 @@ def test_a_text_that_cannot_fit_a_payload_is_refused_at_the_door():
     assert err.value.field == "lyrics" and "shorten" in str(err.value)
     with pytest.raises(js.ParamsError):
         js.normalize_params_from_text({"lyrics": "x", "style": "s" * (js.MAX_SONG_TEXT_BYTES + 1)})
-    assert js.normalize_params_from_text({"lyrics": "x" * (js.MAX_SONG_TEXT_BYTES - 3), "style": "pop"})
+    # the largest accepted text is the byte bound's case; on yue2 it is over the context ceiling (follow-up 22)
+    assert js.normalize_params_from_text({"lyrics": "x" * (js.MAX_SONG_TEXT_BYTES - 3), "style": "pop",
+                                          "engine": "acestep"})
+    with pytest.raises(js.SongParamsError) as ceiling:
+        js.normalize_params_from_text({"lyrics": "x" * (js.MAX_SONG_TEXT_BYTES - 3), "style": "pop"})
+    assert ceiling.value.code == "context_exceeded"
 
 
 def test_a_lone_surrogate_in_the_text_is_refused_not_a_crash_later():

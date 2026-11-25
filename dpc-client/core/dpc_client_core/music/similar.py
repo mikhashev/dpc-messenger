@@ -467,7 +467,7 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
         dress.qa_override = {"requested_s": audio["frames"] / audio["rate"], "length_mode": "same",
                              "same_tolerance_s": COVER_SAME_TOLERANCE_S[key]}
         # The source's peaks beside the take's (`qa.compare_with_source`): a cover keeps its own verdict.
-        peaks = await runner._measure_source(source_wav, job_id, "the source")
+        peaks = await runner._measure_source(source_wav, job_id, "the source", audio["sha256"])
         if peaks is not None:
             dress.qa_override["source"] = {"relation": "cover", "peaks": peaks}
     return _Prepared(seed=seed, dress=dress, files=files, lm_body=lm_body,

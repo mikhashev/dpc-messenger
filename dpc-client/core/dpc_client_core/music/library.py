@@ -81,6 +81,7 @@ noticed until it becomes the primary path; folders may not nest.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -336,6 +337,9 @@ class MusicLibrary:
         self._scanned_clean: Set[str] = set()
         # The first scans `add_folder` started in the background: `wait_hashed` waits for them too.
         self._first_scans: Set[asyncio.Task] = set()
+        # Every walk in flight, whoever started it (`rescan_folder`, `rescan_all`, a poll pass): one future each,
+        # set when it ends. `wait_hashed` waits for them as well (follow-up 22, Zcode #211).
+        self._scans_running: Set["asyncio.Future[None]"] = set()
         self._queue: Deque[str] = deque()
         self._queued: Set[str] = set()
         self._verify: Dict[str, Tuple[str, str]] = {}
@@ -630,8 +634,24 @@ class MusicLibrary:
                 return False
         return True
 
+    @contextlib.contextmanager
+    def _scanning(self):
+        """Mark a walk as in flight for `wait_hashed` while the block runs, even if it raises or is cancelled."""
+        marker = asyncio.get_running_loop().create_future()
+        self._scans_running.add(marker)
+        try:
+            yield
+        finally:
+            self._scans_running.discard(marker)
+            if not marker.done():
+                marker.set_result(None)
+
     async def _poll_pass(self) -> None:
         """One poll pass: every watched folder of the snapshot taken at its start, then the flag."""
+        with self._scanning():
+            await self._poll_pass_body()
+
+    async def _poll_pass_body(self) -> None:
         failed = False
         snapshot = [f["id"] for f in self._folders.values() if f["watch"] and f["id"] not in self._over_limit]
         for folder_id in snapshot:
@@ -962,15 +982,17 @@ class MusicLibrary:
             self.notify_changed("hash", [e["id"]])
 
     async def wait_hashed(self, timeout: float = 60.0) -> None:
-        """Wait until the first scans `add_folder` started have walked their folders and the hash queue
-        is empty (tests, and a caller that needs ids final). A call right after `add_folder(scan=True)`
-        used to find the queue idle, since the walk had queued nothing yet, and return with the folder
-        unscanned. Raises `asyncio.TimeoutError`; a scan still running then is left running."""
+        """Wait until the scans in flight have walked their folders (the first scans `add_folder` started, a
+        `rescan_all` or `rescan_folder` under way, a poll pass) and the hash queue is empty (tests, and a
+        caller that needs ids final). A call right after `add_folder(scan=True)` used to find the queue idle,
+        since the walk had queued nothing yet, and return with the folder unscanned; the same held for a
+        rescan started before the call (follow-up 22). Raises `asyncio.TimeoutError`; a scan still running then is left running."""
         self._ensure_primitives()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-        while self._first_scans:
-            _done, pending = await asyncio.wait(set(self._first_scans), timeout=max(0.0, deadline - loop.time()))
+        while self._first_scans or self._scans_running:
+            waiting = set(self._first_scans) | set(self._scans_running)
+            _done, pending = await asyncio.wait(waiting, timeout=max(0.0, deadline - loop.time()))
             if pending:
                 raise asyncio.TimeoutError(f"{len(pending)} folder scan(s) still running")
         await asyncio.wait_for(self._idle.wait(), max(0.0, deadline - loop.time()))
@@ -1178,6 +1200,10 @@ class MusicLibrary:
         """Walk one folder and reconcile it (layer 2); new and changed files are queued
         for hashing (layer 3). Returns the folder record."""
         self._ensure_primitives()
+        with self._scanning():
+            return await self._rescan_folder_locked(folder_id)
+
+    async def _rescan_folder_locked(self, folder_id: str) -> dict:
         async with self._scan_lock:
             folder = self._folders.get(folder_id)
             if folder is None:
@@ -1241,11 +1267,12 @@ class MusicLibrary:
             return copy.deepcopy(folder)
 
     async def rescan_all(self) -> List[dict]:
-        snapshot = list(self._folders)
-        out = [await self.rescan_folder(fid) for fid in snapshot]
-        if self._watched_folders_scanned_clean(snapshot):
-            self.initial_scan_done = True
-        return out
+        with self._scanning():
+            snapshot = list(self._folders)
+            out = [await self.rescan_folder(fid) for fid in snapshot]
+            if self._watched_folders_scanned_clean(snapshot):
+                self.initial_scan_done = True
+            return out
 
     def _wants_reprobe(self, e: dict) -> bool:
         """A present, hashed entry with no duration that was not re-probed in this process."""

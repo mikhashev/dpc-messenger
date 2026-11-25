@@ -166,6 +166,7 @@ LM_PAYLOAD = "lm.request.json"
 LM_RESULT_PAYLOAD = "lm.result.json"
 SYNTH_PAYLOAD = "synth.request.json"
 EDIT_PAYLOAD = "edit.request.json"
+SOURCE_PEAKS_PAYLOAD = "source.peaks.json"   # the source's one measurement, kept with the job (follow-up 22)
 EDIT_SCHEMA = "dpc.region-edit/1"
 SIDECAR_SCHEMA = "dpc.take-sidecar/1"
 INSTRUMENTAL_LYRICS = "[Instrumental]"   # acestep.cpp's instrumental marker (request.cpp)
@@ -906,6 +907,14 @@ class MusicJobRunner:
         engine = self.engines.get(js.ENGINE_YUE2)
         request_adapters = engine.request_adapters(params.get("adapters") or [])
         instrumental_lyrics = engine.instrumental_lyrics_for(params.get("adapters") or [])
+        if any(name not in have for name in names):
+            # The door's context ceiling again, on the lyrics the body will carry (an instrumental's is the
+            # adapter's tag), before any body is written (follow-up 22).
+            lyrics = params.get("lyrics")
+            why = js.yue2_text_overflow(params["style"], lyrics if lyrics is not None else (instrumental_lyrics or ""),
+                                        float(params["duration_s"]))
+            if why is not None:
+                raise MusicJobError("context_exceeded", f"context_exceeded: {why}")
         wrote = False
         for index, name in enumerate(names):
             if name in have:
@@ -1351,7 +1360,7 @@ class MusicJobRunner:
             self._emit(await self._get(job_id))
         return {"entry": entry, "path": Path(path), "control": control, "pcm": pcm, "control_sha": control_sha,
                 "zones": zones, "request": request, "parent": parent,
-                "source_peaks": await self._measure_source(control, job_id, "the control")}
+                "source_peaks": await self._measure_source(control, job_id, "the control", control_sha)}
 
     async def _edit_start(self, job_id: str) -> bool:
         try:
@@ -1761,16 +1770,48 @@ class MusicJobRunner:
             return not_measured_record(f"stage-1 QA could not run: {exc}"[:300], requested_s=requested,
                                        length_mode=mode)
 
-    async def _measure_source(self, path: Path, job_id: str, what: str) -> Optional[Dict[str, Any]]:
+    async def _measure_source(self, path: Path, job_id: str, what: str,
+                              sha256: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """The source's peaks for `qa.compare_with_source`, never an exception: `{measured: False, reason}`
-        when they cannot be measured, None when this runner makes no comparison (a stand-in take meter)."""
+        when they cannot be measured, None when this runner makes no comparison (a stand-in take meter).
+
+        Measured once per job (follow-up 22, Zcode #211): a measurement is kept with the job as the payload
+        `source.peaks.json`, with the `sha256` of the audio it was taken from, and a resumed job reuses it
+        instead of running the ebur128 + astats pass again. A kept measurement of other audio (the hash
+        changed) is not used; the file is measured again, and the kept record stays as it was (a payload is
+        written once). A failed measurement is not kept."""
         if self._source_measure is None:
             return None
+        if sha256:
+            kept = await self._kept_source_peaks(job_id, sha256)
+            if kept is not None:
+                return kept
         try:
-            return dict(await asyncio.to_thread(self._source_measure, Path(path)))
+            peaks = dict(await asyncio.to_thread(self._source_measure, Path(path)))
         except Exception as exc:
             logger.warning("music: the peaks of %s of job %s could not be measured: %s", what, job_id, exc)
             return {"measured": False, "reason": f"{what} could not be measured: {exc}"[:300]}
+        if sha256 and peaks.get("measured") is True:
+            body = json.dumps({"sha256": sha256, "peaks": peaks}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            try:
+                await self._call(self.store.write_payload, job_id, SOURCE_PEAKS_PAYLOAD, body, endpoint=None)
+            except MusicJobError as exc:
+                logger.warning("music: the peaks of %s of job %s were not kept: %s", what, job_id, exc.message)
+        return peaks
+
+    async def _kept_source_peaks(self, job_id: str, sha256: str) -> Optional[Dict[str, Any]]:
+        """The measurement kept with the job for the audio `sha256`, or None."""
+        job = await self._get(job_id)
+        if not any(p["name"] == SOURCE_PEAKS_PAYLOAD for p in (job or {}).get("payloads") or []):
+            return None
+        try:
+            record = json.loads((await self._call(self.store.read_payload, job_id, SOURCE_PEAKS_PAYLOAD)).decode("utf-8"))
+        except (MusicJobError, OSError, ValueError):
+            return None
+        peaks = record.get("peaks") if isinstance(record, dict) else None
+        if not isinstance(peaks, dict) or record.get("sha256") != sha256 or peaks.get("measured") is not True:
+            return None
+        return peaks
 
     async def _ffmpeg_version_text(self) -> Optional[str]:
         """ffmpeg's version line for the record's post step; asked once, None when it cannot be read."""

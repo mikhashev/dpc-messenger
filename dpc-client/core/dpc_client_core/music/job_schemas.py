@@ -562,6 +562,11 @@ def normalize_params_from_text(params: Any, *, missing_engine: str = DEFAULT_FRO
         raise ParamsError("cot", f"cot must be one of {', '.join(YUE2_COT_MODES)}, got {cot!r}")
     out["cot"] = cot
     out["adapters"] = _normalize_adapters(params.get("adapters", []))
+    # The context is shared with the frames the cap lets run: the same budget a song job gets
+    # (`normalize_params_song`), on the text as the body will carry it. The run checks it again.
+    why = yue2_text_overflow(style, lyrics, duration)
+    if why is not None:
+        raise SongParamsError("context_exceeded", "lyrics", why)
     return out
 
 
@@ -705,6 +710,22 @@ def yue2_song_context(sent_bytes: int, duration_s: float, abc_bytes: int = 0) ->
     prompt = yue2_prompt_tokens(sent_bytes, abc_bytes)
     return {"context": YUE2_CONTEXT, "prompt_tokens_est": prompt, "budget_tokens": budget,
             "left": yue2_context_left(budget, prompt), "text_bytes": sent_bytes, "score_bytes": abc_bytes}
+
+
+def yue2_text_overflow(style: str, lyrics: Optional[str], duration_s: float) -> Optional[str]:
+    """Why the text of a `generate_from_text` job on yue2.cpp does not fit the context with the frames its
+    `duration_s` cap lets run and the end token (no score), or None when it fits. The text counted is the exact
+    text the `/synth` body carries (`song_text_sent` of the style and the lyrics, nothing collapsed); the door
+    (`normalize_params_from_text`) and the run (`runner._yue2_payloads`) both ask this one function (follow-up 22,
+    Zcode #211)."""
+    sent = len(song_text_sent(style, lyrics).encode("utf-8"))
+    room = yue2_song_context(sent, duration_s)
+    if room["left"] >= 0:
+        return None
+    return (f"the style and the lyrics are {sent} bytes as sent, about {room['prompt_tokens_est']} tokens; with the "
+            f"{room['budget_tokens']} music positions a {duration_s:g} s cap asks for and the end token that is "
+            f"{-room['left']} over yue2.cpp's {YUE2_CONTEXT}-position context (shorten the lyrics or the cap, or "
+            "use acestep)")
 
 
 # The longest source whose audio a song job decodes and uploads as a timbre reference (acestep.cpp `ref_audio`,

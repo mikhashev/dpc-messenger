@@ -557,6 +557,8 @@ class MusicJobStore:
                     params = js.normalize_params_from_text(params)
                     params, engine_choice = self.capabilities.choose_engine(job_type, params, at=self._now())
                     self.capabilities.check_params(job_type, params)
+                except js.SongParamsError as exc:
+                    raise MusicJobError(exc.code, exc.message, field=exc.field)
                 except js.ParamsError as exc:
                     raise MusicJobError("invalid_params", exc.message, field=exc.field)
                 prompt = params["style"]
