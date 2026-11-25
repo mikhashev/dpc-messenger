@@ -31,7 +31,7 @@
         type="button"
         class="mk"
         class:region={g.width !== null}
-        style={g.width === null ? `left:${g.left}%` : `left:${g.left}%;width:max(6px,${g.width}%)`}
+        style={g.width === null ? `left:${g.left}%` : `left:${g.left}%;width:max(12px,${g.width}%)`}
         title="{commentTimeLabel(c, formatTime)}: {c.text}"
         aria-label="Comment at {commentTimeLabel(c, formatTime)}: {c.text}"
         onclick={() => onseek(c.t_start)}
@@ -42,18 +42,29 @@
 
 <style>
   .strip { position: relative; height: 12px; margin-top: 2px; }
+  /* The button is 12 px square (the pointer's hit area, MARKER_MIN_HIT_PX); only its 8 px centre is
+     painted (padding + background-clip), so the dot looks as before and is easier to hit. */
   .mk {
     position: absolute;
-    top: 2px;
-    width: 8px;
-    height: 8px;
-    margin-left: -4px;
-    padding: 0;
+    top: 0;
+    width: 12px;
+    height: 12px;
+    margin-left: -6px;
+    padding: 2px;
+    box-sizing: border-box;
     border: 0;
     border-radius: 50%;
     background: #e3b341;
+    background-clip: content-box;
     cursor: pointer;
   }
-  .mk.region { margin-left: 0; height: 6px; top: 3px; border-radius: 3px; background: rgba(88, 166, 255, 0.75); }
+  .mk.region {
+    margin-left: 0;
+    min-width: 12px;
+    padding: 3px 0;
+    border-radius: 3px;
+    background: rgba(88, 166, 255, 0.75);
+    background-clip: content-box;
+  }
   .mk:hover, .mk:focus-visible { outline: 2px solid #ffffff; outline-offset: 1px; }
 </style>

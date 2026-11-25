@@ -606,6 +606,9 @@ export function formFieldOf(coreField: string | null | undefined): FormField {
  *  than one gating block, and is not matched against. */
 export const LUFS_FLOOR = -70;
 
+/** A take within this many dB of the quietest one is played as it is (no gain, "equal loudness"). */
+export const LEVEL_MATCH_EPSILON_DB = 0.05;
+
 export function dbToGain(db: number): number {
     return Math.pow(10, db / 20);
 }
@@ -631,6 +634,27 @@ export interface LevelMatch {
     label: string;
 }
 
+/** Ask again once when a call fails (an answer that is not ok, or a throw), after `delayMs`; the
+ *  second answer is returned whatever it is. `null` (a call already in flight) and an `unavailable`
+ *  answer (the core is not there) are not retried. For a
+ *  loudness measurement that failed on a file still being written or a busy ffmpeg: without it the
+ *  take stays "not level-matched" until the review is opened again. */
+export async function askAgain<T extends { ok: boolean; unavailable?: boolean } | null>(
+    call: () => Promise<T>,
+    delayMs: number,
+    sleep: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms)),
+): Promise<T> {
+    let first: T | undefined;
+    try {
+        first = await call();
+        if (first === null || first.ok || first.unavailable) return first;
+    } catch {
+        first = undefined;
+    }
+    await sleep(delayMs);
+    return call();
+}
+
 /** The display gains that play every take at the quietest one's integrated loudness:
  *  the louder ones are turned down, nothing is turned up (`volume` stops at 1). Without
  *  a usable measurement for every take nothing is changed and the label says so. */
@@ -646,9 +670,15 @@ export function levelMatch(loudness: readonly (TakeLoudness | null | undefined)[
     const floor = lufs.map((v, i) => (v <= LUFS_FLOOR + 0.05 ? takeLetter(i) : null)).filter(Boolean) as string[];
     if (floor.length) return flat(`not level-matched: ${floor.join(', ')} is silent or too short to measure`);
     const target = Math.min(...lufs);
-    const db = lufs.map(v => Math.min(0, target - v));
+    // A difference under LEVEL_MATCH_EPSILON_DB is not turned down at all, so the label "equal
+    // loudness, no change" is true of the gain actually applied (it used to apply the tiny gain and
+    // still say "no change").
+    const db = lufs.map(v => {
+        const d = Math.min(0, target - v);
+        return d > -LEVEL_MATCH_EPSILON_DB ? 0 : d;
+    });
     const gain = db.map(dbToGain);
-    const turned = db.map((d, i) => (d <= -0.05 ? `${formatDb(d)} dB on ${takeLetter(i)}` : null)).filter(Boolean);
+    const turned = db.map((d, i) => (d < 0 ? `${formatDb(d)} dB on ${takeLetter(i)}` : null)).filter(Boolean);
     const label = turned.length ? `matched: ${turned.join(', ')}` : 'matched: equal loudness, no change';
     return { matched: true, db, gain, label };
 }

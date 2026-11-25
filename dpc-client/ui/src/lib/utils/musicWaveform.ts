@@ -11,8 +11,11 @@ export type Peak = [number, number];
 export const MIN_REGION_S = 0.2;
 /** A pointer that moved fewer pixels than this between down and up is a click. */
 export const DRAG_THRESHOLD_PX = 4;
-/** How close (px) the pointer must be to a point marker's line to hit it. */
-export const MARKER_HIT_PX = 6;
+/** How close (px) the pointer must be to a point marker's line to hit it: a hit area of twice this
+ *  (16 px), never under `MARKER_MIN_HIT_PX` for a pointer. */
+export const MARKER_HIT_PX = 8;
+/** The smallest hit area (px) a comment marker may have, in the waveform and in the strip. */
+export const MARKER_MIN_HIT_PX = 12;
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 

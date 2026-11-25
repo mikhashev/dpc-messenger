@@ -40,6 +40,7 @@ import { MUSIC_UNAVAILABLE_TEXT, type MusicAnswer } from '$lib/utils/musicPlayer
 import { backfillProblem, type JobQc } from '$lib/utils/musicQc';
 import {
     JOB_POLL_TICK_MS,
+    askAgain,
     emptyFromTextForm,
     engineKeyOf,
     jobsToPoll,
@@ -303,13 +304,15 @@ export async function discardReasons(prefix: string): Promise<DiscardReason[]> {
 }
 
 const measuring = new Set<string>();
+/** Wait before the one retry of a failed measurement. */
+const MEASURE_RETRY_DELAY_MS = 2000;
 
-/** Measure a take that has no loudness yet (once at a time per take). */
+/** Measure a take that has no loudness yet (once at a time per take; a failure is asked again once). */
 export async function measureTakeLoudness(takeId: string): Promise<MusicAnswer<{ take: MusicTake; measured: boolean }> | null> {
     if (measuring.has(takeId)) return null;
     measuring.add(takeId);
     try {
-        const a = await measureMusicTakeLoudness(takeId);
+        const a = await askAgain(() => measureMusicTakeLoudness(takeId), MEASURE_RETRY_DELAY_MS);
         if (a.ok) putTake(a.data.take);
         return a;
     } finally {

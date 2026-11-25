@@ -6,6 +6,8 @@ import {
     dragToRegion,
     formatTimeFine,
     hitMarker,
+    MARKER_HIT_PX,
+    MARKER_MIN_HIT_PX,
     normalizeRegion,
     resamplePeaks,
     tickTimes,
@@ -96,6 +98,12 @@ describe('marker hit-testing', () => {
     it('hits a point within the tolerance and misses beyond it', () => {
         expect(hitMarker(303, cs, 120, 1200)).toBe('p1');
         expect(hitMarker(320, cs, 120, 1200)).toBeNull();
+    });
+    it('a point marker is hit across at least 12 px, and a pointer 6 px off the line still hits', () => {
+        expect(MARKER_HIT_PX * 2).toBeGreaterThanOrEqual(MARKER_MIN_HIT_PX);
+        const alone = [{ id: 'solo', t_start: 30, t_end: null }];
+        expect(hitMarker(300 - 6, alone, 120, 1200)).toBe('solo');
+        expect(hitMarker(300 + 6, alone, 120, 1200)).toBe('solo');
     });
     it('takes the nearer of two points', () => {
         expect(hitMarker(308, cs, 120, 1200, 8)).toBe('p2');

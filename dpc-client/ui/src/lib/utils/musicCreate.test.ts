@@ -25,6 +25,8 @@ import {
     jobStateText,
     jobsToPoll,
     levelMatch,
+    LEVEL_MATCH_EPSILON_DB,
+    askAgain,
     limitsFrom,
     mergeJobs,
     reasonCheck,
@@ -87,7 +89,23 @@ describe('level matching turns the louder take down to the quieter one', () => {
         const m = levelMatch([loud(-14), loud(-14.02)]);
         expect(m.matched).toBe(true);
         expect(m.label).toBe('matched: equal loudness, no change');
-        expect(m.gain[0]).toBeCloseTo(dbToGain(-0.02), 9);
+        // the label is true of the gain applied: a difference under the threshold is not turned down
+        expect(m.gain).toEqual([1, 1]);
+        expect(m.db).toEqual([0, 0]);
+    });
+
+    it('the label threshold and the applied gain agree on both sides of it', () => {
+        const under = levelMatch([loud(-14), loud(-14 + LEVEL_MATCH_EPSILON_DB * 0.9)]);
+        expect(under.label).toBe('matched: equal loudness, no change');
+        expect(under.gain).toEqual([1, 1]);
+        const over = levelMatch([loud(-14), loud(-14 + LEVEL_MATCH_EPSILON_DB * 1.5)]);
+        expect(over.label).toMatch(/^matched: −0\.1 dB on B$/);
+        expect(over.gain[1]).toBeLessThan(1);
+        // whatever the label says, "no change" only when every gain is exactly 1
+        for (const gap of [0, 0.01, 0.049, 0.05, 0.051, 0.2, 1]) {
+            const m = levelMatch([loud(-14), loud(-14 + gap)]);
+            expect(m.label.includes('no change')).toBe(m.gain.every(g => g === 1));
+        }
     });
 
     it('more takes all meet the quietest', () => {
@@ -579,5 +597,48 @@ describe('the QA badge beside a take', () => {
         expect(takeQaBadge({ ...base, qa_report: null }).kind).toBe('unknown');
         // a report whose verdict is not "passed" is not a pass, whatever its gates say
         expect(takeQaBadge({ ...base, qa_report: report(allPass, 'not_measured') }).kind).toBe('unknown');
+    });
+});
+
+
+// -- a failed measurement is asked again once --------------------------------------------
+
+describe('askAgain', () => {
+    const ok = { ok: true as const, data: 1 };
+    const bad = { ok: false as const, unavailable: false, code: 'measure_failed', message: 'busy' };
+    const noSleep = async () => {};
+
+    it('does not ask twice when the first answer is ok', async () => {
+        let calls = 0;
+        const a = await askAgain(async () => { calls++; return ok; }, 10, noSleep);
+        expect(a).toBe(ok);
+        expect(calls).toBe(1);
+    });
+
+    it('asks once more after an error answer, waits the delay, and returns the second answer', async () => {
+        const answers = [bad, ok];
+        const waits: number[] = [];
+        const a = await askAgain(async () => answers.shift()!, 2000, async ms => { waits.push(ms); });
+        expect(a).toBe(ok);
+        expect(waits).toEqual([2000]);
+    });
+
+    it('asks once more after a throw, and stops after the second failure', async () => {
+        let calls = 0;
+        const a = await askAgain(async () => { calls++; if (calls === 1) throw new Error('boom'); return bad; }, 5, noSleep);
+        expect(a).toBe(bad);
+        expect(calls).toBe(2);
+        let again = 0;
+        const b = await askAgain(async () => { again++; return bad; }, 5, noSleep);
+        expect(b).toBe(bad);
+        expect(again).toBe(2);
+    });
+
+    it('does not retry a call already in flight (null) or an unavailable core', async () => {
+        let calls = 0;
+        expect(await askAgain(async () => { calls++; return null; }, 5, noSleep)).toBeNull();
+        const gone = { ok: false as const, unavailable: true, code: 'not_connected', message: 'x' };
+        expect(await askAgain(async () => { calls++; return gone; }, 5, noSleep)).toBe(gone);
+        expect(calls).toBe(2);
     });
 });
