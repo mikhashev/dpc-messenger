@@ -567,9 +567,9 @@ than the text above, it says so here.
   `budget_holds_approval`; the flags are set per module with `registry.mark_owner_approval`.
   The gate (`dpc_agent/owner_approval.py`, `open_gate`) runs in `ToolRegistry.execute` after
   the `owner_only` refusal **and after the argument check**, so the card shows the arguments
-  the handler will get. A bare context (no asker, no source, no class: a test or a probe) is
-  not gated, the rule `tools.core.turn_audience` already applies to the room axis; every turn
-  `DpcAgent.process` makes carries an asker.
+  the handler will get. Every turn `DpcAgent.process` makes carries an asker. A context with
+  no asker, no source and no class is **not** the owner's since follow-up 13 (below): only a
+  context marked `ToolContext.internal_call` passes as an internal call.
 - **Step 3.** The card is the schedule card's machinery, task type `owner_approval`, with
   `asker`, `tool`, `details` and `cost` fields; the schedule, music and shell cards carry
   `asker` (and the shell card `cwd`) on a foreign turn. The UI shows them
@@ -583,10 +583,81 @@ Pinned by tests (`dpc-client/core/tests/`): acceptance checks 1, 2-6, 7, 8, 9, 1
 12, 13, 14, 15 (backend half; the picker in `ui/src/lib/utils/ownerApprovalCard.test.ts`) and
 16. Check 17, the full suite on Windows and CI on Linux, is the parent's run.
 
+### Follow-up 13 (Zcode's review #154 on this record, #143 on the task queue; 2026-11-25)
+
+Built on `dev` by CC, not pushed, not observed live.
+
+1. **A wake answers in the chat it was scheduled in** (P2). `schedule_task`
+   (`dpc_agent/tools/core.py`) drops every key of the model's `task_data` that starts with
+   `_` and says which in its answer; `_reply_conversation_id` and `_reply_telegram_chat_id`
+   come from the context only, like `_message_source` and `_asker` already did, and
+   `DpcAgent.schedule_task` still sets `_provider_alias` itself. Before, a foreign asker could
+   name `_reply_conversation_id` of a chat made only of the owner's nodes; the wake ran with
+   that room's class (all layers open) and posted there. No owner-asked schedule targets
+   another chat today (nothing documents or uses it), so there is no owner exception: the
+   owner who wants a wake elsewhere schedules it from that chat.
+2. **The two most dangerous handlers check again** (P3). `run_shell` (`tools/shell.py`,
+   `_not_the_owners_call`) and `comfyui_submit` (`tools/comfyui.py`) refuse a foreign asker
+   unless the call carries the gate's per-call mark (`owner_approval.may_run_owner_tool`:
+   approved by the owner, or on its way to the tool's own Tier 1 card), as music's
+   `_not_owner` and `chat_post_file` do. A direct handler call that bypasses
+   `ToolRegistry.execute` no longer skips the card. run_shell's Tier 2 refusal stays first: it
+   is a fixed rule for everybody.
+3. **No turn is not the owner** (P3). `owner_approval.asker_is_owner` no longer treats "no
+   asker, no source, no class" as the owner's: such a context, and no context at all, is
+   foreign. A builder that means an internal call sets `ToolContext.internal_call=True`; a
+   real asker or source always wins over the marker. No live builder sets it: the three that
+   exist are `DpcAgent.process` (every field set), `ToolRegistry.__init__`'s default context
+   (replaced by `set_context` before any call; left unmarked, so a call that ever reached it
+   fails closed) and `DpcAgent._extended_path_allowed` (Active Recall's probe; it calls only
+   `validate_extended_path`, which reads no asker, and keeps working unmarked). The room axis
+   (`tools.core.turn_audience`) keeps its own rule for a bare context; that rule gates memory
+   layers, not tools, and was not part of the review.
+4. **A stored asker's `is_owner` is recomputed** (P3). `DpcAgent.resolve_asker` never reads
+   the given flag: at the owner's doors (`ui`, `telegram_owner`, `external_agent`, D-f) the
+   door is the owner unless the asker names a node this agent knows is neither this node nor
+   an own node; everywhere else only a verified node that is this node or in the agent's
+   `own_node_group`, read now, is the owner. A scheduled task's stored `_asker` with
+   `is_owner: true` from a node since taken out of the group, or written by hand, is foreign.
+5. **The knowledge card shows what would be written** (P3). The owner card for a peer's
+   unvoted commit (`message_handlers/knowledge_handler.py`) adds the first line of each of the
+   first five entries (120 characters each, the rest counted) to `details`, within the card's
+   600-character bound.
+6. **No window under the owner's login outlives a foreign turn** (P3). At the end of a turn
+   whose asker is not the owner, the loop (`loop._end_foreign_turn`, in `run_llm_loop`'s
+   `finally`) closes the agent's interactive browser window on a thread of its own, as the
+   Kill does (`browser.close_browser_sessions_of(..., interactive_only=True)`); the fetch
+   browser carries no identity and is left. `browser_snapshot`, `browser_extract` and
+   `browser_screenshot` refuse,
+   on a foreign turn, a logged-in page (a scoped, not anonymous session) last opened on the
+   owner's own turn (`browser._owner_page_refusal`; `browse_page(keep_open)` and
+   `browser_navigate` record the turn, a session with no record counts as the owner's).
+7. **Task queue** (#143). An overdue `reminder`'s skip line quotes the first line of its text,
+   up to 160 characters (`DpcAgent._post_overdue_notice`); the comment and log line about a
+   task caught in `running` at a restart now say it is retried unless already overdue, when
+   it is skipped as overdue (`task_queue._load_queue`); `DpcAgent.schedule_task` raises when
+   its queue has no running processor, so the Task Board path refuses too.
+8. **A check_back card is withdrawn by Stop** (#92/#103): its approval passes `void_on_stop`,
+   as the music job's and the gate's do; before, only a Kill withdrew it.
+9. **The local-path wake line names the sender** (`service.local_wake_sender`): name, node,
+   human or agent, "written on this node", and for a relayed request its asker with that
+   asker's verdict, so wakes can be counted by human vs agent.
+
+Residuals, stated. A window the owner opened and was still using is closed by the next
+foreign turn of the same agent; reopening it is one call. `browser_scroll`, `collect`,
+`wait_for` and `switch_tab` still return what they read of a logged-in page on a foreign turn
+without that check (the review named snapshot and extract; the end-of-turn close bounds the
+rest to the turn that found the window). A context built by future code without an asker now
+gets a card or a refusal on every flagged tool; that is the intended direction and the
+reason the marker exists. Pinned by
+`test_a_wake_answers_in_the_chat_it_was_scheduled_in_and_the_model_names_no_route.py`,
+`test_the_gate_fails_closed_without_a_turn_and_the_two_most_dangerous_handlers_check_again.py`
+and `test_a_foreign_turn_leaves_no_owner_window_and_cards_and_lines_say_what_they_are_about.py`.
+
 ## Authors
 
 - **Mike** — Decision
-- **Zcode** — Review (#125, #130)
+- **Zcode** — Review (#125, #130, #143, #154)
 - **CC** — Design, research, this record
 
 ## References
