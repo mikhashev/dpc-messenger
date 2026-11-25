@@ -1249,6 +1249,17 @@ class MusicJobRunner:
         want = params.get("source_content_hash")
         if want and entry.get("content_hash") and entry["content_hash"] != want:
             raise _JobFailure("hash_mismatch: the track's file changed since the edit was proposed; propose it again")
+        # The library's hash can lag the file (a rewrite it has not polled yet): the bytes are hashed again now,
+        # by the library's own identity function, before anything is decoded.
+        expected = want or entry.get("content_hash")
+        if expected and hasattr(library, "content_hash_of"):
+            try:
+                now = await library.content_hash_of(Path(path))
+            except OSError as exc:
+                raise _JobFailure(f"the track's file cannot be read to check its hash: {exc}")
+            if now != expected:
+                raise _JobFailure("hash_mismatch: the track's file holds other audio than when the edit was proposed "
+                                  "(its bytes were hashed again at run start); propose it again")
         out_dir.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self._decode_control, Path(path), control)
         pcm = await asyncio.to_thread(re_.read_pcm, control)
@@ -1476,6 +1487,8 @@ class MusicJobRunner:
             after = None
             if cut and self._lyrics_get is not None and self._lyrics_save is not None:
                 after = self._retime_lyrics_after(job["track_id"], zones["intent"])
+            elif cut:
+                after = _lyrics_not_retimed
             await self._store_take(
                 job_id, {"style": request.get("caption") if request else base_title, "duration_s": control_s},
                 out_dir, slug, variant, spliced, 0, spliced.stat().st_size, latent_sha=None,
@@ -1518,7 +1531,11 @@ class MusicJobRunner:
                 return {"lyrics_retimed": {"saved": False, "reason": "the edited track has no stored lyrics"}}
             moved = re_.retime_lines(lines, region_s)
             from .lyrics import format_lrc
-            await self._lyrics_save(library_id, format_lrc({**lyrics, "lines": moved}))
+            try:
+                await self._lyrics_save(library_id, format_lrc({**lyrics, "lines": moved}))
+            except Exception as exc:
+                logger.warning("music: the re-timed lyrics of %s were not saved: %s", library_id, exc)
+                return {"lyrics_retimed": {"saved": False, "reason": f"saving the re-timed lyrics failed: {exc}"}}
             return {"lyrics_retimed": {"saved": True, "lines_before": len(lines), "lines_after": len(moved),
                                        "cut_s": [region_s[0], region_s[1]]}}
         return hook
@@ -1793,6 +1810,12 @@ class MusicJobRunner:
 
 
 LENGTH_TOLERANCE_S = 0.5
+
+
+async def _lyrics_not_retimed(library_id: Optional[str]) -> Dict[str, Any]:
+    """A cut-with-shift take made by a runner with no lyrics store wired: the skip is recorded, not silent."""
+    return {"lyrics_retimed": {"saved": False, "reason": "lyrics_hooks_not_wired: this runner has no lyrics store, "
+                                                         "so the base's lyrics were not re-timed for the cut"}}
 
 
 def length_check_of(window_s: float, received_s: float) -> Dict[str, Any]:

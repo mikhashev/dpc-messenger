@@ -1411,6 +1411,15 @@ class MusicLibrary:
             raise MusicLibraryError("unknown_track", f"no track {track_id}")
         return {**copy.deepcopy(e), "deletable": self._is_deletable(e)}
 
+    async def content_hash_of(self, path: Path) -> str:
+        """The content hash of the file at `path` now, by the same identity function and media tools the
+        library hashes its entries with (`identify`): a region edit re-hashes its base at run start and
+        refuses a file that changed since the proposal (SPEC §6 `hash_mismatch`). Raises `OSError` when the
+        file cannot be read."""
+        tools = self._tools or await asyncio.to_thread(MediaTools.discover)
+        ident = await asyncio.to_thread(identify, Path(path), tools)
+        return ident.content_hash
+
     def get_track_path(self, track_id: str) -> Optional[Path]:
         """Where the track's bytes are now, or None when it is missing or has no file.
         The track stream serves these bytes by `track_id` (`music/stream.py`, ADR-051 N8)."""

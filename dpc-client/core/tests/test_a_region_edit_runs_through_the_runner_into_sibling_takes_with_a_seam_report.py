@@ -81,11 +81,13 @@ class EditRig(Rig):
         self.keep = Keep(home / "kept-wavs")
         self.saved_lyrics = {}
         self.base_lyrics = kw.pop("base_lyrics", None)
+        hooks = kw.pop("lyrics_hooks", True)
         self.runner = MusicJobRunner(
             self.store, self.engine, self._library, dpc_home=home, converter=self.keep,
             on_job_change=self.events.append, card_poll_s=0.05, engine_poll_s=0.02, loudness_meter=fake_loudness,
-            qa_meter=edit_qa(self.qa_calls), control_decoder=fake_decoder, lyrics_get=self._lyrics_get,
-            lyrics_save=self._lyrics_save, draw_seed=lambda: 4242)
+            qa_meter=edit_qa(self.qa_calls), control_decoder=fake_decoder,
+            lyrics_get=self._lyrics_get if hooks else None, lyrics_save=self._lyrics_save if hooks else None,
+            draw_seed=lambda: 4242)
 
     async def _lyrics_get(self, track_id):
         return self.base_lyrics
@@ -258,6 +260,21 @@ async def test_a_cut_with_shift_shortens_the_take_and_gives_it_the_bases_lyrics_
 
 
 @pytest.mark.asyncio
+async def test_a_cut_with_shift_on_a_runner_without_lyrics_hooks_records_why_the_lyrics_were_not_retimed(tmp_path, monkeypatch):
+    """Review #180 1.5: the re-timing was skipped silently when the lyrics hooks were not wired."""
+    free_env(monkeypatch)
+    install_fake_engine(tmp_path)
+    async with EditRig(tmp_path, lyrics_hooks=False) as rig:
+        entry, _base = await rig.base()
+        job = rig.propose(entry, "remove_region", {"t_start": 4.5, "t_end": 5.5}, {"cut_with_shift": True})
+        done = await rig.wait_for(job["id"], DONE)
+        assert done["state"] == js.REVIEW, done.get("state_reason")
+        (take,) = rig.store.list_takes(job["id"])
+        retimed = sidecar_of(take)["lyrics_retimed"]
+        assert retimed["saved"] is False and retimed["reason"].startswith("lyrics_hooks_not_wired")
+
+
+@pytest.mark.asyncio
 async def test_an_agent_cannot_ask_for_a_cut_with_shift(tmp_path):
     from tests._music_jobs_helpers import store_at
     store = store_at(tmp_path)
@@ -292,6 +309,31 @@ async def test_a_track_whose_file_changed_since_the_proposal_is_refused_as_a_has
         job = rig.propose(stale, "remove_region", {"t_start": 2.0, "t_end": 3.0})
         done = await rig.wait_for(job["id"], DONE)
         assert done["state"] == js.UNSUPPORTED and done["state_reason"].startswith("hash_mismatch")
+
+
+@pytest.mark.asyncio
+async def test_a_base_whose_bytes_changed_behind_the_librarys_back_is_refused_before_it_is_decoded(tmp_path, monkeypatch):
+    """Review #180 1.1: the runner compared the library's stored hash with the proposal's copy and never hashed
+    the file itself; a rewrite the library had not polled yet was decoded and edited."""
+    free_env(monkeypatch)
+    install_fake_engine(tmp_path)
+    async with EditRig(tmp_path) as rig:
+        entry, base = await rig.base()
+        decoded = []
+        real = rig.runner._decode_control
+        rig.runner._decode_control = lambda src, dest: (decoded.append(src), real(src, dest))
+        t = np.arange(6 * RATE) / RATE
+        x = np.round(0.2 * np.sin(2 * np.pi * 330 * t) * 32767).astype("<i2")
+        with wave.open(str(base), "wb") as w:            # other audio, the library not told
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(RATE)
+            w.writeframes(np.stack([x, x], axis=1).tobytes())
+        assert rig.library.get_entry(entry["id"])["content_hash"] == entry["content_hash"]
+        job = rig.propose(entry, "remove_region", {"t_start": 2.0, "t_end": 3.0})
+        done = await rig.wait_for(job["id"], DONE)
+        assert done["state"] == js.UNSUPPORTED and done["state_reason"].startswith("hash_mismatch")
+        assert "hashed again" in done["state_reason"] and decoded == []
 
 
 @pytest.mark.asyncio

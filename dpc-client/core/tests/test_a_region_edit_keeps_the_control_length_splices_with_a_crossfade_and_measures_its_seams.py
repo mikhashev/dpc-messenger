@@ -67,6 +67,7 @@ def test_a_removal_makes_one_take_and_takes_no_model_params():
     ({}, {"t_start": 0, "t_end": 31}, "region"),                                       # over 30 s
     ({}, {"t_start": 50, "t_end": 61}, "region"),                                      # past the end
     ({}, {"t_start": 5, "t_end": 5}, "region"),                                        # empty
+    ({}, {"t_start": 5, "t_end": 5.00002}, "region"),                                  # about one sample
     ({"allowed_zone": {"t_start": 11, "t_end": 20}}, {"t_start": 10, "t_end": 14}, "allowed_zone"),
     ({"splice_bounds": {"t_start": 9, "t_end": 14}}, {"t_start": 10, "t_end": 14}, "splice_bounds"),
     ({"crossfade_ms": 5}, {"t_start": 10, "t_end": 14}, "crossfade_ms"),
@@ -94,6 +95,22 @@ def test_cut_with_shift_is_the_persons_word_and_only_near_the_end():
                                   duration_s=60)
 
 
+@pytest.mark.parametrize("action", ["regenerate_region", "fix_seam", "remove_region"])
+def test_a_region_shorter_than_the_minimum_is_refused_at_proposal_as_region_too_short(action):
+    """Review #180 1.4: a zone of about one frame made remove duplicate a frame and fail as a bug."""
+    short = {"t_start": 5.0, "t_end": 5.0 + re_.MIN_REGION_S / 2}
+    with pytest.raises(re_.EditError) as exc:
+        re_.normalize_params_edit(action, {}, short, duration_s=60)
+    assert exc.value.field == "region" and exc.value.message.startswith("region_too_short")
+    # the minimum itself passes (a regenerate also needs room for its two default crossfades)
+    at_least = re_.MIN_REGION_S if action != "regenerate_region" else 2 * re_.CROSSFADE_MS_DEFAULT / 1000.0
+    ok = re_.normalize_params_edit(action, {}, {"t_start": 5.0, "t_end": 5.0 + at_least}, duration_s=60)
+    assert ok["takes"] == re_.takes_for(action)
+    # the removal itself refuses a one-sample region by name instead of a length_mismatch
+    with pytest.raises(re_.EditError, match="region_too_short"):
+        re_.remove(pcm(tone(1.0, 220)), (0.5, 0.5 + 1.0 / RATE), 75.0)
+
+
 def test_a_track_whose_length_is_not_known_cannot_be_edited_yet():
     with pytest.raises(re_.EditError) as exc:
         re_.normalize_params_edit("regenerate_region", {}, {"t_start": 1, "t_end": 2}, duration_s=None)
@@ -108,9 +125,24 @@ def test_the_engine_window_is_the_allowed_zone_widened_to_the_25_hz_grid_and_sur
     assert w.start_s <= 10.013 and w.end_s >= 14.021
     # acestep.cpp computes (int)(s * 48000 / 1920): the values sent land on the same frames
     assert int(w.sent_start_s * RATE / 1920) == 250 and int(w.sent_end_s * RATE / 1920) == 351
-    # never beyond the control's last latent frame
+    # never beyond the control's last whole latent frame
     tail = re_.engine_window((59.0, 60.0), control_frames=int(59.99 * RATE))
-    assert tail.frame_end == math.ceil(int(59.99 * RATE) / 1920)
+    assert tail.frame_end == int(59.99 * RATE) // 1920
+
+
+def test_a_source_that_is_not_a_whole_number_of_latent_frames_never_gets_a_window_past_its_end():
+    """Review #180 1.3: `repainting_end` stayed on the next grid line past the source's length."""
+    frames = 6 * RATE + 700                       # 6 s plus a partial latent frame (700 of 1920 samples)
+    w = re_.engine_window((5.0, frames / RATE), control_frames=frames)
+    assert w.frame_end == frames // 1920 == 150 and w.end_s * RATE <= frames
+    assert w.sent_end_s <= frames / RATE and int(w.sent_end_s * RATE / 1920) == 150
+    assert w.clamped_to_source is True and w.as_dict()["clamped_to_source"] is True
+    # a source within the 2 ms nudge of a grid line: the end sent is the source's length, still on the line
+    near = 6 * RATE + 40
+    n = re_.engine_window((5.0, near / RATE), control_frames=near)
+    assert n.sent_end_s <= near / RATE and int(n.sent_end_s * RATE / 1920) == n.frame_end == 150
+    # a window inside the source is not marked
+    assert "clamped_to_source" not in re_.engine_window((1.0, 2.0), control_frames=frames).as_dict()
 
 
 def test_the_repaint_request_is_acestep_cpps_repaint_with_every_take_in_one_batch_and_float_output():
@@ -149,6 +181,31 @@ def test_when_the_engine_reproduced_the_boundary_material_the_crossfade_is_equal
     assert all(s.shape == "equal_gain" and s.coherence >= re_.COHERENCE_LINEAR_MIN for s in result.seams)
     take = joined(result)
     assert np.max(np.abs(take - control.data)) < 1e-5   # equal-gain on coherent sides adds no bump
+
+
+def test_an_equal_power_crossfade_that_would_pass_full_scale_is_gain_normalised_inside_the_fade_only():
+    """Review #180 1.2: sin + cos is ~1.41x at the midpoint; loud, partly correlated sides went over full
+    scale and the take failed its clipping gate. Outside the two fades the samples stay bit-exact."""
+    control = pcm(tone(6.0, 50, amp=0.9))
+    engine = pcm(tone(6.0, 50, amp=0.9, phase=math.pi / 3))   # corr = cos 60 deg = 0.5: equal-power
+    result = re_.splice(control, engine, (2.0, 4.0), 75.0)
+    take = joined(result)
+    assert all(s.shape == "equal_power" for s in result.seams)
+    for s in result.seams:
+        g = s.level_guard
+        assert g["applied"] == "gain_normalised" and g["peak_before"] > re_.FULL_SCALE >= g["peak_after"]
+        assert s.as_dict(RATE)["level_guard"] == g
+    assert float(np.max(np.abs(take))) <= re_.FULL_SCALE
+    a, b = result.splice_frames
+    xf = int(round(0.075 * RATE))
+    assert float(np.max(np.abs(take[:a] - control.data[:a]))) == 0.0
+    assert float(np.max(np.abs(take[b:] - control.data[b:]))) == 0.0
+    assert float(np.max(np.abs(take[a + xf:b - xf] - engine.data[a + xf:b - xf]))) == 0.0
+    entry = re_.seams_entry("regenerate_region", result, RATE, crossfade_ms=75.0)["entry"]
+    assert all(m["level_guard"]["applied"] == "gain_normalised" for m in entry["seams"])
+    # quiet sides need no guard, and the record says so
+    quiet = re_.splice(pcm(tone(6.0, 220)), pcm(tone(6.0, 330)), (2.0, 4.0), 75.0)
+    assert all(s.level_guard is None and s.as_dict(RATE)["level_guard"] is None for s in quiet.seams)
 
 
 def test_a_splice_that_reaches_the_track_edge_has_no_seam_there():

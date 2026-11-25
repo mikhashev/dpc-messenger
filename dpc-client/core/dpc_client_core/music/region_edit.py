@@ -27,9 +27,15 @@ construction and everything outside the splice bounds is the control's samples, 
 moved to the quietest sample pair within `ZERO_CROSS_SEARCH_MS` inward (a near-zero crossing). The shape
 follows the measured coherence of the two sides over the fade (normalised correlation at lag 0, the
 runner's splice is sample-aligned): **equal-gain (linear)** when |corr| >= `COHERENCE_LINEAR_MIN`, else
-**equal-power**. SPEC: the length and the coherence threshold are not chosen; `CROSSFADE_MS_DEFAULT`
+**equal-power**. An equal-power fade sums to up to ~1.41x at its midpoint, so when that mix would go
+past full scale its gains are normalised to sum to 1 inside that fade only (`level_guard` on the seam:
+`gain_normalised`, with the peak before and after); outside the fades every sample is the control's or
+the engine's, bit for bit. SPEC: the length and the coherence threshold are not chosen; `CROSSFADE_MS_DEFAULT`
 (75 ms, inside the 50-100 ms Forge measured passing) and 0.85 (the top of the 0.62-0.85 gap Ark
 measured) are start values, recorded on every take, to tune live (decision 28: checked live).
+
+**The smallest zone**: a region shorter than `MIN_REGION_S` is refused at proposal as `region_too_short`
+(one latent frame is 40 ms; a removal needs room for its two fades).
 
 **remove_region** removes the sound, not the time (decision 23): the region becomes silence with a fade
 out and a fade in of `CROSSFADE_MS_DEFAULT` **inside** the region, so every sample outside the region is
@@ -81,6 +87,8 @@ COHERENCE_LINEAR_MIN = 0.85       # start value (SPEC §6: threshold not chosen,
 ZERO_CROSS_SEARCH_MS = 10.0
 NEAR_END_S = 10.0                 # decision 27: "near the end" for cut_with_shift (start value)
 EDGE_EPS_S = 0.01                 # a region may reach the track's probed end within this
+MIN_REGION_S = 0.05               # the shortest intent zone: more than one 40 ms latent frame (region_too_short)
+FULL_SCALE = 8388607 / 8388608    # the largest sample a 24-bit take holds; a crossfade stays at or under it
 
 RATE = 48000                      # acestep.cpp works at 48 kHz stereo; the control is decoded to it
 CHANNELS = 2
@@ -157,6 +165,9 @@ def normalize_params_edit(action: str, params: Any, region: Any, *, duration_s: 
     if intent[1] > duration_s + EDGE_EPS_S:
         raise EditError(f"the region ends at {intent[1]:g} s, past the end of the track ({duration_s:g} s)", "region")
     intent = (intent[0], min(intent[1], duration_s))
+    if intent[1] - intent[0] < MIN_REGION_S - 1e-9:
+        raise EditError(f"region_too_short: the region is {(intent[1] - intent[0]) * 1000.0:.0f} ms; at least "
+                        f"{MIN_REGION_S * 1000.0:g} ms (MIN_REGION_S)", "region")
     if intent[1] - intent[0] > MAX_REGION_S + 1e-9:
         raise EditError(f"the region is {intent[1] - intent[0]:.1f} s; at most {MAX_REGION_S:g} s (limits.max_region_s)",
                         "region")
@@ -261,6 +272,9 @@ class EngineWindow:
     frame_end: int
     sent_start_s: float   # what goes into repainting_start / repainting_end
     sent_end_s: float
+    # True when the window was cut back to the source's last whole latent frame (the source is not a whole
+    # number of frames and the allowed zone reached into its partial last frame).
+    clamped_to_source: bool = False
 
     @property
     def start_s(self) -> float:
@@ -271,20 +285,32 @@ class EngineWindow:
         return self.frame_end / GRID_HZ
 
     def as_dict(self) -> Dict[str, Any]:
-        return {"t_start": round(self.start_s, 4), "t_end": round(self.end_s, 4), "grid_hz": GRID_HZ,
-                "repainting_start": self.sent_start_s, "repainting_end": self.sent_end_s}
+        out = {"t_start": round(self.start_s, 4), "t_end": round(self.end_s, 4), "grid_hz": GRID_HZ,
+               "repainting_start": self.sent_start_s, "repainting_end": self.sent_end_s}
+        if self.clamped_to_source:
+            out["clamped_to_source"] = True
+        return out
 
 
 def engine_window(allowed: Tuple[float, float], control_frames: int, rate: int = RATE) -> EngineWindow:
-    """The allowed zone widened to acestep.cpp's 25 Hz latent grid and clamped to the control. The
+    """The allowed zone widened to acestep.cpp's 25 Hz latent grid and clamped to the control's whole
+    latent frames: `repainting_end` never goes past the source's length, also when the source is not a
+    whole number of frames (its partial last frame is then not repainted; `clamped_to_source`). The
     values sent sit `WINDOW_NUDGE_S` past each grid line, so the engine's `(int)(s * 25)`
-    (pipeline-synth-ops.cpp) lands on the line and a float that falls just short cannot drop a frame."""
-    total = int(math.ceil(control_frames / (rate / GRID_HZ)))
-    f0 = max(0, int(math.floor(allowed[0] * GRID_HZ + 1e-9)))
-    f1 = min(total, int(math.ceil(allowed[1] * GRID_HZ - 1e-9)))
+    (pipeline-synth-ops.cpp) lands on the line and a float that falls just short cannot drop a frame;
+    the end is also held at or under the source's length in seconds."""
+    whole = int(control_frames // (rate / GRID_HZ))
+    if whole < 1:
+        raise EditError("the source is shorter than one latent frame (40 ms)")
+    f0 = min(whole - 1, max(0, int(math.floor(allowed[0] * GRID_HZ + 1e-9))))
+    wanted = int(math.ceil(allowed[1] * GRID_HZ - 1e-9))
+    f1 = min(whole, wanted)
     if f1 <= f0:
-        f1 = min(total, f0 + 1)
-    return EngineWindow(f0, f1, round(f0 / GRID_HZ + WINDOW_NUDGE_S, 4), round(f1 / GRID_HZ + WINDOW_NUDGE_S, 4))
+        f1 = min(whole, f0 + 1)
+    source_s = math.floor(control_frames / rate * 10000.0 + 1e-6) / 10000.0
+    sent_end = min(round(f1 / GRID_HZ + WINDOW_NUDGE_S, 4), source_s)
+    return EngineWindow(f0, f1, round(f0 / GRID_HZ + WINDOW_NUDGE_S, 4), sent_end,
+                        clamped_to_source=wanted > whole)
 
 
 def build_repaint_request(*, caption: str, lyrics: str, window: EngineWindow, seed: int, takes: int,
@@ -446,6 +472,26 @@ def _shape_for(corr: Optional[float]) -> str:
     return "equal_gain" if corr is not None and abs(corr) >= COHERENCE_LINEAR_MIN else "equal_power"
 
 
+def _crossfade(fading_out: np.ndarray, fading_in: np.ndarray, shape: str) -> Tuple[np.ndarray, Optional[Dict[str, Any]]]:
+    """One crossfade block and its `level_guard`. An equal-power mix whose peak would pass `FULL_SCALE`
+    (sin + cos reaches ~1.41 at the midpoint) is made again with its gains divided by their sum, so the
+    gains add up to 1 and no sample is louder than the louder side; only this block changes."""
+    g_in, g_out = _gains(fading_out.shape[0], shape)
+    mix = fading_out * g_out + fading_in * g_in
+    peak = float(np.max(np.abs(mix))) if mix.size else 0.0
+    if shape != "equal_power" or peak <= FULL_SCALE:
+        return mix.astype(np.float32), None
+    total = g_in + g_out
+    mix = fading_out * (g_out / total) + fading_in * (g_in / total)
+    after = float(np.max(np.abs(mix)))
+    guard: Dict[str, Any] = {"applied": "gain_normalised", "peak_before": round(peak, 4), "peak_after": round(after, 4),
+                             "reason": "the equal-power sum would pass full scale; the gains inside this crossfade "
+                                       "are divided by their sum"}
+    if after > FULL_SCALE:
+        guard["note"] = "the sides' own samples pass full scale inside the fade; the 24-bit take clips them"
+    return mix.astype(np.float32), guard
+
+
 @dataclass
 class Seam:
     """One edge where the take joins the control, in frames: the fade spans [start, end)."""
@@ -455,11 +501,16 @@ class Seam:
     shape: str
     coherence: Optional[float]
     kind: str = "crossfade"   # "crossfade" | "fade_out" | "fade_in"
+    # What kept a crossfade under full scale: None (not needed) or {applied, peak_before, peak_after, ...}.
+    level_guard: Optional[Dict[str, Any]] = None
 
     def as_dict(self, rate: int) -> Dict[str, Any]:
-        return {"side": self.side, "kind": self.kind, "t_start": round(self.start / rate, 4),
-                "t_end": round(self.end / rate, 4), "fade_ms": round((self.end - self.start) * 1000.0 / rate, 2),
-                "shape": self.shape, "coherence": self.coherence}
+        out = {"side": self.side, "kind": self.kind, "t_start": round(self.start / rate, 4),
+               "t_end": round(self.end / rate, 4), "fade_ms": round((self.end - self.start) * 1000.0 / rate, 2),
+               "shape": self.shape, "coherence": self.coherence}
+        if self.kind == "crossfade":
+            out["level_guard"] = self.level_guard
+        return out
 
 
 @dataclass
@@ -509,16 +560,17 @@ def splice(control: Pcm, engine: Pcm, splice_s: Tuple[float, float], crossfade_m
     inner_from, inner_to = a, b
     for seam in seams:
         if seam.side == "start":
-            g_in, g_out = _gains(xf, seam.shape)
-            pieces.append((c[seam.start:seam.end] * g_out + e[seam.start:seam.end] * g_in).astype(np.float32))
+            block, seam.level_guard = _crossfade(c[seam.start:seam.end], e[seam.start:seam.end], seam.shape)
+            pieces.append(block)
             inner_from = seam.end
     end_seam = next((s for s in seams if s.side == "end"), None)
     if end_seam is not None:
         inner_to = end_seam.start
     pieces.append(e[inner_from:inner_to])
     if end_seam is not None:
-        g_in, g_out = _gains(xf, end_seam.shape)
-        pieces.append((e[end_seam.start:end_seam.end] * g_out + c[end_seam.start:end_seam.end] * g_in).astype(np.float32))
+        block, end_seam.level_guard = _crossfade(e[end_seam.start:end_seam.end], c[end_seam.start:end_seam.end],
+                                                 end_seam.shape)
+        pieces.append(block)
     pieces.append(c[b:])
     frames = sum(p.shape[0] for p in pieces)
     if frames != n:
@@ -533,8 +585,8 @@ def remove(control: Pcm, region_s: Tuple[float, float], fade_ms: float, *, cut_w
     rate, n = control.rate, control.frames
     r0 = max(0, int(round(region_s[0] * rate)))
     r1 = min(n, int(round(region_s[1] * rate)))
-    if r1 <= r0:
-        raise EditError("the region is empty at the control's rate")
+    if r1 - r0 < 2:
+        raise EditError("region_too_short: the region is under two samples at the control's rate")
     f = max(1, int(round(fade_ms * rate / 1000.0)))
     c = control.data
     seams: List[Seam] = []
