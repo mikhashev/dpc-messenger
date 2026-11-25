@@ -39,6 +39,62 @@ log = logging.getLogger(__name__)
 # The text a run returns when it only thought; not an answer on its own.
 _THINKING_FALLBACK = "(thinking completed - see reasoning for details)"
 
+# The doors of an agent's own 1:1 chat with a person, and the door name the
+# agent is told (AN-AGENT-IS-TOLD-THE-CHAT-TYPE-ONLY-IN-A-GROUP-...).
+_ONE_TO_ONE_DOORS = {
+    "ui": "ui",
+    "telegram_owner": "telegram",
+    "telegram": "telegram",
+    "discord": "discord",
+}
+
+
+def one_to_one_chat_context(
+    conversation_id: str,
+    message_source: Optional[str],
+    sender_name: str,
+    agent_name: str,
+    owner_name: str,
+    owner_node_id: str,
+    chat_name: str = "",
+    telegram_chat_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """The chat block of a turn in the agent's own 1:1 chat with a person.
+
+    The group doors build theirs in service._group_chat_context; a turn from a
+    1:1 door had none, so turn_context said only {id, type: chat} and the agent
+    had to guess. Same keys as the group block (`chat_type`, `chat_name`,
+    `chat_id`, `description`, `participants`), plus `door` and `person`.
+
+    Only what is fixed for the conversation goes in (no time, no counter), so the
+    block reads the same on every turn of one chat. None for any other door, and
+    for a Telegram group chat (a negative chat id): that is not a 1:1.
+    """
+    door = _ONE_TO_ONE_DOORS.get(message_source or "")
+    if door is None:
+        return None
+    if door == "telegram" and str(telegram_chat_id or "").startswith("-"):
+        return None
+    if message_source in ("ui", "telegram_owner"):
+        # The owner of this node, whatever name the door gave.
+        person = {"name": owner_name or "User", "node_id": owner_node_id, "is_owner": True}
+        person_label = f"{person['name']} (User)"
+    else:
+        name = sender_name if sender_name and sender_name != "User" else "unknown"
+        person = {"name": name, "is_owner": False}
+        person_label = name if door == "discord" else f"{name} (Telegram)"
+    if door == "telegram" and telegram_chat_id:
+        person["telegram_chat_id"] = str(telegram_chat_id)
+    return {
+        "chat_type": "1:1",
+        "chat_name": chat_name or conversation_id,
+        "chat_id": conversation_id,
+        "description": "",
+        "participants": [person_label, f"{agent_name} [agent on this node]"],
+        "door": door,
+        "person": person,
+    }
+
 
 # One run at a time per agent, across every surface that can start one.
 #
@@ -1230,6 +1286,28 @@ class DpcAgentManager:
         monitor.save_history()
         return notice
 
+    def _one_to_one_chat_context(self, conversation_id: str, message_source: Optional[str],
+                                 sender_name: str, agent_name: str,
+                                 telegram_chat_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """one_to_one_chat_context with this node's owner and the service's chat name."""
+        service = getattr(self, "service", None)
+        p2p = getattr(service, "p2p_manager", None)
+        try:
+            owner_name = (p2p.get_display_name() if p2p is not None else "") or ""
+        except Exception:
+            owner_name = ""
+        chat_name = ""
+        resolve = getattr(service, "_conversation_display_name", None)
+        if resolve is not None:
+            try:
+                chat_name = resolve(conversation_id) or ""
+            except Exception:
+                chat_name = ""
+        return one_to_one_chat_context(
+            conversation_id, message_source, sender_name, agent_name,
+            owner_name=owner_name, owner_node_id=getattr(p2p, "node_id", "") or "",
+            chat_name=chat_name, telegram_chat_id=telegram_chat_id)
+
     def _turn_asker(self, asker: Optional[Any], message_source: Optional[str],
                     sender_name: str) -> Optional[Any]:
         """The asker handed to the agent (ADR-053): the routed one, or for a door other
@@ -1343,6 +1421,10 @@ class DpcAgentManager:
 
         agent_display_name = self._agent_display_name or self.agent_id or "DPC Agent"
         self._current_agent_display_name = agent_display_name
+        if chat_context is None:
+            chat_context = self._one_to_one_chat_context(
+                conversation_id, message_source, sender_name, agent_display_name,
+                telegram_chat_id)
 
         # Emit early progress so the UI knows which agent is processing
         # BEFORE any streaming text arrives (fixes empty name in collapsible
