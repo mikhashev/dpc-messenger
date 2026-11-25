@@ -150,17 +150,29 @@ export function parseWindowState(raw: string | null | undefined): WindowState | 
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 
+function readStored(storage: StorageLike | null | undefined, spec: WindowSpec): WindowState | null {
+    try {
+        return parseWindowState(storage?.getItem(spec.key));
+    } catch {
+        return null;
+    }
+}
+
+/** The window exactly as it was left, not fitted to this viewport (the default box when nothing is
+ *  remembered). For a window that draws a clamped view of its saved box and saves only what the
+ *  person moves or resizes, so a small viewport never moves the remembered place for good. */
+export function loadSavedWindowState(
+    storage: StorageLike | null | undefined, vp: Viewport, spec: WindowSpec = AGENT_MAP_WINDOW,
+): WindowState {
+    return readStored(storage, spec) ?? { rect: defaultRect(vp, spec.limits), minimised: false };
+}
+
 /** The remembered window fitted to this viewport, or the default box. Storage
  *  that throws or is absent is the same as nothing remembered. */
 export function loadWindowState(
     storage: StorageLike | null | undefined, vp: Viewport, spec: WindowSpec = AGENT_MAP_WINDOW,
 ): WindowState {
-    let stored: WindowState | null = null;
-    try {
-        stored = parseWindowState(storage?.getItem(spec.key));
-    } catch {
-        stored = null;
-    }
+    const stored = readStored(storage, spec);
     if (!stored) return { rect: defaultRect(vp, spec.limits), minimised: false };
     const state: WindowState = { rect: clampRect(stored.rect, vp, stored.minimised, spec.limits), minimised: stored.minimised };
     // Passed through as stored: the window that keeps a mini width fits it to the viewport itself.

@@ -50,6 +50,7 @@ import {
     MINI_PLAYER_MODES_WIDTH,
     MINI_PLAYER_POSITION_WIDTH,
     fitMusicPlayer,
+    musicPlayerView,
     minimiseMusicPlayer,
     miniPlayerRect,
     miniPlayerShows,
@@ -58,7 +59,7 @@ import {
     resizeMiniWidth,
     restoreMusicPlayer,
 } from './musicPlayer';
-import { HEADER_HEIGHT, loadWindowState, saveWindowState } from './windowGeometry';
+import { HEADER_HEIGHT, loadSavedWindowState, loadWindowState, saveWindowState } from './windowGeometry';
 
 const all = () => true;
 const q = (ids: string[], index = 0, context: string | null = null): QueueState => ({ ids, index, context });
@@ -427,6 +428,65 @@ describe('the mini-player bar keeps its own corner', () => {
         const s = memory();
         s.setItem('dpc.musicPlayer.window', JSON.stringify({ rect: window1, minimised: false }));
         expect(fitMusicPlayer(loadWindowState(s, VP, MUSIC_PLAYER_WINDOW), VP)).toEqual({ rect: window1, minimised: false });
+    });
+});
+
+describe('a smaller viewport only draws the saved boxes smaller, it never moves them', () => {
+    const BIG = { width: 2576, height: 1400 };
+    const SMALL = { width: 1000, height: 600 };
+    const saved = { rect: { x: 600, y: 300, width: 1600, height: 900 }, minimised: true, miniWidth: 480, miniX: 2000, miniY: 1300 };
+
+    function memory() {
+        const m = new Map<string, string>();
+        return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m };
+    }
+
+    it('draws the window and the bar inside a small viewport and leaves the saved state untouched', () => {
+        const before = JSON.parse(JSON.stringify(saved));
+        const view = musicPlayerView(saved, SMALL);
+        expect(view.window).toEqual({ x: 0, y: 0, width: 1000, height: 600 });
+        expect(view.bar).toEqual({ x: 520, y: 600 - HEADER_HEIGHT, width: 480, height: HEADER_HEIGHT });
+        expect(saved).toEqual(before);
+    });
+
+    it('draws the saved place and width again when the viewport is large again', () => {
+        musicPlayerView(saved, SMALL);
+        const view = musicPlayerView(saved, BIG);
+        expect(view.window).toEqual(saved.rect);
+        expect(view.bar).toEqual({ x: 2000, y: 1300, width: 480, height: HEADER_HEIGHT });
+    });
+
+    it('a bar saved without a corner is drawn at the window corner, and a narrower viewport narrows only the drawing', () => {
+        const old = { rect: { x: 300, y: 120, width: 1600, height: 900 }, minimised: true };
+        expect(musicPlayerView(old, BIG).bar).toEqual({ x: 300, y: 120, width: 1600, height: HEADER_HEIGHT });
+        expect(musicPlayerView(old, SMALL).bar).toEqual({ x: 0, y: 120, width: 1000, height: HEADER_HEIGHT });
+    });
+
+    it('loadSavedWindowState hands back the box as it was left, where loadWindowState fits it', () => {
+        const s = memory();
+        saveWindowState(s, saved, MUSIC_PLAYER_WINDOW);
+        expect(loadSavedWindowState(s, SMALL, MUSIC_PLAYER_WINDOW)).toEqual(saved);
+        expect(loadWindowState(s, SMALL, MUSIC_PLAYER_WINDOW).rect).toEqual({ x: 0, y: 300, width: 1000, height: 600 });
+    });
+
+    it('a temporary small viewport followed by a flag-only save keeps the remembered boxes', () => {
+        // The component's path: load as saved, draw into SMALL, save only the flag, load in BIG.
+        const s = memory();
+        saveWindowState(s, { ...saved, minimised: false }, MUSIC_PLAYER_WINDOW);
+        let state = loadSavedWindowState(s, SMALL, MUSIC_PLAYER_WINDOW);
+        musicPlayerView(state, SMALL);
+        state = { ...state, minimised: true };
+        saveWindowState(s, state, MUSIC_PLAYER_WINDOW);
+        const again = loadSavedWindowState(s, BIG, MUSIC_PLAYER_WINDOW);
+        expect(again).toEqual(saved);
+        expect(musicPlayerView(again, BIG).bar).toEqual({ x: 2000, y: 1300, width: 480, height: HEADER_HEIGHT });
+    });
+
+    it('nothing remembered gives the default box for this viewport', () => {
+        const state = loadSavedWindowState(memory(), SMALL, MUSIC_PLAYER_WINDOW);
+        expect(state.minimised).toBe(false);
+        expect(state.rect.width).toBeLessThanOrEqual(SMALL.width);
+        expect('miniWidth' in state).toBe(false);
     });
 });
 

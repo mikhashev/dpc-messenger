@@ -73,7 +73,7 @@
   import {
     HEADER_HEIGHT,
     isClick,
-    loadWindowState,
+    loadSavedWindowState,
     moveRect,
     resizeRect,
     saveWindowState,
@@ -88,17 +88,15 @@
     canRevealFile,
     currentId,
     dropIndex,
-    fitMusicPlayer,
     formatTime,
     hiddenEntries,
     matchesFilter,
     missingEntries,
-    minimiseMusicPlayer,
-    miniPlayerRect,
     miniPlayerShows,
     miniPosition,
     moveItem,
     moveMiniPlayer,
+    musicPlayerView,
     nextPlaylistName,
     originBadgeTitle,
     originTag,
@@ -106,7 +104,6 @@
     repeatLabel,
     resizeMiniWidth,
     resolveDuration,
-    restoreMusicPlayer,
     trackSubtitle,
     type LibraryEntry,
     type MiniPosition,
@@ -157,6 +154,9 @@
   // -- the window ------------------------------------------------------------------
 
   let rootEl = $state<HTMLDivElement | null>(null);
+  // The boxes below are what the person left, as saved: a small viewport never changes them. What is
+  // drawn is `placed`, a view of them pulled into the viewport as it is now (musicPlayerView), and only
+  // the person's own move or resize writes a box and saves it.
   // The full window's box: where it is open, and where a restore brings it back.
   let rect = $state<WindowRect>({ x: 0, y: 0, width: 0, height: 0 });
   // The mini-player bar's own width; null until the bar is resized (then it is as wide as the window).
@@ -168,10 +168,12 @@
   let dragged = false;
 
   const viewport = () => ({ width: window.innerWidth, height: window.innerHeight });
-  // The bar's box at its own corner and width (both are kept in the viewport by fitMusicPlayer).
-  const barRect = () => miniPlayerRect(rect, miniWidth, viewport(), mini);
+  // The viewport as the last resize left it, so the drawn boxes follow it.
+  let vp = $state(viewport());
+  // The window's and the bar's boxes drawn now: the saved ones pulled into view.
+  let placed = $derived(musicPlayerView(windowState(), vp));
   // Minimised, the window is drawn as the bar: at the bar's corner and width.
-  let shown = $derived(minimised ? barRect() : rect);
+  let shown = $derived(minimised ? placed.bar : placed.window);
   let shownWidth = $derived(shown.width);
   let miniShows = $derived(miniPlayerShows(shownWidth));
 
@@ -207,25 +209,22 @@
     if (!open) return;
     untrack(() => {
       view = 'listen';
-      const w = loadWindowState(storage(), viewport(), MUSIC_PLAYER_WINDOW);
-      apply(fitMusicPlayer({ ...w, minimised }, viewport()));
+      vp = viewport();
+      // As it was left, not fitted: a viewport smaller than last time must not shrink the saved box.
+      apply({ ...loadSavedWindowState(storage(), vp, MUSIC_PLAYER_WINDOW), minimised });
       tick().then(() => rootEl?.focus({ preventScroll: true }));
     });
   });
 
-  // Minimised or restored, from the bar or from the Music Player button: the bar goes
-  // to its own corner, the window comes back at its own.
+  // Minimised or restored, from the bar or from the Music Player button: the bar is drawn at its
+  // own corner, the window at its own. Only the flag is saved; the boxes stay as they were.
   let lastMinimised = minimised;
   $effect(() => {
     const m = minimised;
     untrack(() => {
       if (m === lastMinimised) return;
       lastMinimised = m;
-      if (open) {
-        const w = { ...windowState(), minimised: m };
-        apply(m ? minimiseMusicPlayer(w, viewport()) : restoreMusicPlayer(w, viewport()));
-        remember();
-      }
+      if (open) remember();
     });
   });
 
@@ -243,7 +242,8 @@
     if (kind === 'move' && target.closest('button, input, select')) return;
     // The bar's handle is not the bar: its press must never become the bar's "click to restore".
     if (kind === 'mini-resize') e.stopPropagation();
-    const start = kind === 'mini-resize' || (kind === 'move' && minimised) ? barRect() : { ...rect };
+    // The press starts from what is drawn, so a drag follows the pointer even when the saved box is out of view.
+    const start = kind === 'mini-resize' || (kind === 'move' && minimised) ? { ...placed.bar } : { ...placed.window };
     gesture = { kind, px: e.clientX, py: e.clientY, start };
     dragged = false;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -264,7 +264,11 @@
     } else if (gesture.kind === 'resize') rect = resizeRect(s, dx, dy, viewport(), LIMITS);
     // Minimised, only the bar moves, kept in view at its own width.
     else if (minimised) mini = moveMiniPlayer(s, dx, dy, viewport());
-    else rect = moveRect(s, dx, dy, viewport(), false, LIMITS);
+    // A move changes the place only: the saved size stays, even when a small viewport draws it smaller.
+    else {
+      const moved = moveRect(s, dx, dy, viewport(), false, LIMITS);
+      rect = { ...rect, x: moved.x, y: moved.y };
+    }
   }
 
   function endGesture(e: PointerEvent) {
@@ -281,8 +285,9 @@
     remember();
   }
 
+  // A resize of the viewport redraws the boxes inside it; it saves nothing.
   function refit() {
-    if (open) apply(fitMusicPlayer(windowState(), viewport()));
+    if (open) vp = viewport();
   }
 
   // -- the library -----------------------------------------------------------------
@@ -892,7 +897,7 @@
     aria-modal="false"
     aria-labelledby="music-player-title"
     tabindex="-1"
-    style="left: {shown.x}px; top: {shown.y}px; width: {shownWidth}px; height: {minimised ? HEADER_HEIGHT : rect.height}px"
+    style="left: {shown.x}px; top: {shown.y}px; width: {shownWidth}px; height: {minimised ? HEADER_HEIGHT : placed.window.height}px"
   >
     <div
       class="mp-head"

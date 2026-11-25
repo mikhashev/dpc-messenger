@@ -731,9 +731,23 @@ function withMini(state: WindowState, miniWidth: number | undefined, at: MiniPos
     return out;
 }
 
+/** What is drawn for a saved state in this viewport: the whole window and the whole bar at its own
+ *  width and corner, each pulled back into view. A view only: the saved state is not changed and
+ *  must stay as the person left it, so a temporary small window or screen never moves the
+ *  remembered place or width for good (backlog THE-MINI-PLAYER-FIT-TO-A-SMALLER-SCREEN-...).
+ *  A state without a bar corner of its own draws the bar at the window's corner. */
+export function musicPlayerView(saved: WindowState, vp: Viewport): { window: WindowRect; bar: WindowRect } {
+    return {
+        window: clampRect(saved.rect, vp, false, MUSIC_PLAYER_WINDOW.limits),
+        bar: miniPlayerRect(saved.rect, saved.miniWidth, vp, miniPosition(saved)),
+    };
+}
+
 /** Both boxes fitted to the viewport: the whole window, and the whole bar at its own
  *  width. A minimised state without a corner of its own (stored before the bar had
- *  one) takes the window's corner as the bar's, where the bar was drawn then. */
+ *  one) takes the window's corner as the bar's, where the bar was drawn then.
+ *  A clamped copy for drawing or a pure check: the component does not save it
+ *  (`musicPlayerView` is what it draws), because saving it would keep the clamp for good. */
 export function fitMusicPlayer(state: WindowState, vp: Viewport): WindowState {
     const miniWidth = state.miniWidth !== undefined ? miniPlayerWidth(state.miniWidth, state.rect.width, vp) : undefined;
     let at = miniPosition(state);

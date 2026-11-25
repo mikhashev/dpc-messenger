@@ -57,7 +57,7 @@ describe('playback outlives the window', () => {
 
 describe('the window follows the Agent map pattern', () => {
     it('remembers its box under its own key through windowGeometry', () => {
-        expect(player).toContain('loadWindowState(storage(), viewport(), MUSIC_PLAYER_WINDOW)');
+        expect(player).toContain('loadSavedWindowState(storage(), vp, MUSIC_PLAYER_WINDOW)');
         expect(player).toContain('saveWindowState(storage(), windowState(), MUSIC_PLAYER_WINDOW)');
         expect(player).toContain('const w: WindowState = { rect, minimised };');
     });
@@ -76,10 +76,27 @@ describe('the window follows the Agent map pattern', () => {
 
     it('minimised, a drag moves only the bar, and the bar is drawn at its own corner', () => {
         expect(player).toContain('else if (minimised) mini = moveMiniPlayer(s, dx, dy, viewport());');
-        expect(player).toContain("const start = kind === 'mini-resize' || (kind === 'move' && minimised) ? barRect() : { ...rect };");
+        expect(player).toContain("const start = kind === 'mini-resize' || (kind === 'move' && minimised) ? { ...placed.bar } : { ...placed.window };");
         expect(player).toContain('style="left: {shown.x}px; top: {shown.y}px;');
-        expect(player).toContain('apply(m ? minimiseMusicPlayer(w, viewport()) : restoreMusicPlayer(w, viewport()));');
-        expect(player).toContain('if (open) apply(fitMusicPlayer(windowState(), viewport()));');
+    });
+
+    it('a small viewport is only drawn into: it never rewrites the saved boxes', () => {
+        // The drawn boxes are a view of the saved ones (musicPlayerView), redrawn on a resize.
+        expect(player).toContain('let placed = $derived(musicPlayerView(windowState(), vp));');
+        expect(player).toContain('if (open) vp = viewport();');
+        // Nothing on the open, minimise or resize paths writes a clamped box back or saves one.
+        expect(player).not.toContain('fitMusicPlayer');
+        expect(player).not.toContain('minimiseMusicPlayer');
+        expect(player).not.toContain('restoreMusicPlayer');
+        expect(player).not.toContain('loadWindowState(');
+        expect(player).toContain('apply({ ...loadSavedWindowState(storage(), vp, MUSIC_PLAYER_WINDOW), minimised });');
+        const refit = player.match(/function refit\(\) \{([\s\S]*?)\n {2}\}/);
+        expect(refit![1]).not.toContain('apply(');
+        expect(refit![1]).not.toContain('remember(');
+        // Minimising or restoring saves the flag with the boxes as they were.
+        expect(player).toContain('if (open) remember();');
+        // A drag of the window moves its place only; the saved size stays.
+        expect(player).toContain('rect = { ...rect, x: moved.x, y: moved.y };');
     });
 
     it('a narrow bar hides k / n, shuffle and repeat but keeps restore and close', () => {
