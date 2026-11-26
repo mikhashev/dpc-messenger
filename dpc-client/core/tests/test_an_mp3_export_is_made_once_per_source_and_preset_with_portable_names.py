@@ -400,7 +400,7 @@ def test_a_partly_failed_run_prunes_nothing_and_a_clean_run_after_it_does(tmp_pa
     # the clean run prunes b, which is no longer in the playlist
     exporter, _ = _exporter(root)
     clean = exporter.export_playlist("pl_1", "Mix", [a, c])
-    assert clean["removed"] == ["02 - Band - Second.mp3"] or sorted(clean["removed"]) == ["02 - Band - Second.mp3"]
+    assert clean["removed"] == ["02 - Band - Second.mp3"]
     assert sorted(p.name for p in folder.iterdir()) == ["01 - Band - First.mp3", "02 - Band - Third.mp3"]
 
 
@@ -429,6 +429,41 @@ def test_a_run_with_an_unavailable_source_prunes_nothing_and_a_hidden_skip_still
     answer = exporter.export_playlist("pl_1", "Mix", [a, SkippedTrack("trk_b", "Second", "hidden", "hidden")])
     assert answer["removed"] == ["02 - Band - Second.mp3"]
     assert [p.name for p in folder.iterdir()] == ["01 - Band - First.mp3"]
+
+
+def test_a_playlist_rename_with_blocked_prune_updates_surviving_file_paths(tmp_path):
+    root = tmp_path / "out"
+    exporter, _ = _exporter(root)
+    a = _source(tmp_path, "a.flac", content_hash="md5:aaaa", title="First")
+    b = _source(tmp_path, "b.flac", content_hash="md5:bbbb", title="Second")
+    exporter.export_playlist("pl_1", "Mix", [a, b])
+
+    # Rename the playlist to "Evening mix" while b is unavailable so prune is blocked
+    # and the earlier "02 - Band - Second.mp3" stays in the renamed folder.
+    answer = exporter.export_playlist(
+        "pl_1", "Evening mix",
+        [a, SkippedTrack("trk_b", "Second", "not in the library", "unknown_track")],
+    )
+    assert answer["removed"] == []
+    surviving = root / "Evening mix" / "02 - Band - Second.mp3"
+    assert surviving.is_file()
+
+    index_data = json.loads((root / ".dpc-exports.json").read_text(encoding="utf-8"))
+    pl_record = next(p for p in index_data["playlists"] if p["playlist_id"] == "pl_1")
+    assert pl_record["folder"] == "Evening mix"
+    file_paths = [f["path"] for f in pl_record["files"]]
+    assert "Evening mix/02 - Band - Second.mp3" in file_paths
+    assert all(not p.startswith("Mix/") for p in file_paths)
+
+    info = exporter.exports_for({"md5:bbbb": ["trk_b"]})
+    assert [c["folder"] for c in info["trk_b"][0]["playlists"]] == ["Evening mix"]
+    assert exporter.is_export_path(surviving) is not None
+    assert exporter.is_export_path(root / "Mix" / "02 - Band - Second.mp3") is None
+
+    # A subsequent clean run still prunes the stale file cleanly.
+    clean = exporter.export_playlist("pl_1", "Evening mix", [a])
+    assert clean["removed"] == ["02 - Band - Second.mp3"]
+    assert not surviving.exists()
 
 
 def test_where_a_hard_link_is_refused_the_playlist_file_is_copied(tmp_path, monkeypatch):

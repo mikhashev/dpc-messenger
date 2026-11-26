@@ -1239,7 +1239,8 @@ class MusicExporter:
             if any(r["status"] == "error" or (r["status"] == "skipped" and r.get("code") != "hidden")
                    for r in results):
                 removed, kept = [], []
-                files = planned + [f for key, f in owned.items()
+                files = planned + [{**f, "path": self._rel(folder / Path(f["path"]).name)}
+                                   for key, f in owned.items()
                                    if key not in keep_keys and (folder / Path(f["path"]).name).exists()]
             else:
                 removed, kept = self._prune(folder, owned, keep_keys)
