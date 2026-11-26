@@ -112,12 +112,14 @@ def test_a_yue2_cover_without_lyrics_is_missing_lyrics_and_a_song_from_lyrics_ne
 
 def test_same_style_keeps_what_is_kept_and_refuses_unknown_keys_and_engines():
     p = js.normalize_params_song("generate_similar", {"caption": "synthwave", "keep": {"bpm": 96, "key": "E minor"},
-                                                      "lyrics_mode": "new", "lyrics_theme": "night roads"},
+                                                      "lyrics_mode": "new", "lyrics_theme": "night roads",
+                                                      "engine": "acestep"},
                                  track_id=TRACK, source=LOCAL)
     assert p["keep"] == {"bpm": 96, "key": "E minor"} and p["lyrics"] is None and p["lyrics_theme"] == "night roads"
     assert p["duration_s"] == 31 and p["reference"] == "description" and p["reference_uri"] is None
-    for bad, field in (({"caption": "x", "colour": "red"}, "colour"), ({"caption": "x", "engine": "yue2"}, "engine"),
-                       ({"caption": "x", "keep": {"tempo": 90}}, "keep"), ({"caption": " "}, "caption"),
+    for bad, field in (({"caption": "x", "colour": "red"}, "colour"), ({"caption": "x", "engine": "ace"}, "engine"),
+                       ({"caption": "x", "keep": {"tempo": 90}}, "keep"),
+                       ({"caption": " ", "engine": "acestep"}, "caption"),
                        ({"caption": "x", "cover_strength": 0.5}, "cover_strength")):
         with pytest.raises(js.ParamsError) as err:
             js.normalize_params_song("generate_similar", bad, track_id=TRACK, source=LOCAL)
@@ -146,13 +148,15 @@ def test_the_door_refuses_a_web_tracks_audio_a_track_still_hashing_and_a_missing
     store = store_at(tmp_path)
     web = {"kind": "web", "content_hash": None, "duration_s": 200.0, "title": "A stream"}
     for job_type, params in (("cover", {"caption": "punk", "lyrics_mode": "none", "engine": "acestep"}),
-                             ("generate_similar", {"caption": "punk", "reference": "audio"})):
+                             ("generate_similar", {"caption": "punk", "reference": "audio", "engine": "acestep"}),
+                             ("generate_similar", {"caption": "punk"})):
         with pytest.raises(MusicJobError) as err:
             store.create_job(job_type, params, track_id=TRACK, base_version_id=VERSION, source=web)
         assert err.value.code == "web_source_pending_integration" and err.value.field == "track_id"
         assert "Yandex Music / SoundCloud integration" in err.value.message
     # a same-style song from a web track's description needs no audio: allowed (SPEC: web tracks fully allowed)
-    ok = store.create_job("generate_similar", {"caption": "punk"}, track_id=TRACK, base_version_id=VERSION, source=web)
+    ok = store.create_job("generate_similar", {"caption": "punk", "engine": "acestep"}, track_id=TRACK,
+                          base_version_id=VERSION, source=web)
     assert ok["state"] == js.QUEUED and ok["prompt"] == "punk" and ok["params"]["source_kind"] == "web"
     js.validate_job(ok)
     hashing = dict(LOCAL, content_hash=None)
@@ -279,6 +283,7 @@ async def test_same_style_with_an_audio_reference_sends_the_kept_metadata_to_the
     async with SongRig(tmp_path) as rig:
         entry, _ = await rig.source()
         job = rig.propose("generate_similar", entry, {"caption": "synthwave, warm pads", "reference": "audio",
+                                                      "engine": "acestep",
                                                       "keep": {"bpm": 96, "key": "E minor", "timesig": "4",
                                                                "genre": "synthwave"},
                                                       "variants": 1, "duration_s": 20})
@@ -305,7 +310,7 @@ async def test_same_style_from_a_description_decodes_nothing_and_new_lyrics_go_t
     async with SongRig(tmp_path) as rig:
         entry, _ = await rig.source()
         rig.runner._decode_control = lambda *a: (_ for _ in ()).throw(AssertionError("no decode for a description"))
-        job = rig.propose("generate_similar", entry, {"caption": "lo-fi", "lyrics_mode": "new",
+        job = rig.propose("generate_similar", entry, {"caption": "lo-fi", "lyrics_mode": "new", "engine": "acestep",
                                                       "lyrics_theme": "rainy mornings", "variants": 1})
         done = await rig.wait_for(job["id"], DONE)
         assert done["state"] == js.REVIEW, done.get("state_reason")
@@ -344,7 +349,8 @@ async def test_a_song_from_the_lyrics_on_acestep_sings_the_lines_and_a_changed_s
 @pytest.mark.asyncio
 @pytest.mark.parametrize("job_type, params", [
     ("cover", {"caption": "punk", "lyrics_mode": "none", "engine": "acestep"}),
-    ("generate_similar", {"caption": "synthwave", "reference": "audio", "lyrics_mode": "none", "variants": 1}),
+    ("generate_similar", {"caption": "synthwave", "reference": "audio", "lyrics_mode": "none", "variants": 1,
+                          "engine": "acestep"}),
 ])
 async def test_a_source_whose_bytes_changed_behind_the_librarys_back_is_refused_before_it_is_decoded_or_sent(
         tmp_path, monkeypatch, job_type, params):
@@ -467,8 +473,8 @@ def test_the_agents_approval_card_names_the_source_the_mode_and_what_of_the_sour
     parts = tool._song_parts("cover", p)
     assert parts["source_title"] == "Night Drive" and parts["mode"] == "cover" and parts["relation"] == "cover of"
     assert parts["has_lyrics"] is True and parts["style"] == "bossa nova"
-    ref = js.normalize_params_song("generate_similar", {"caption": "x", "reference": "audio"}, track_id=TRACK,
-                                   source=LOCAL)
+    ref = js.normalize_params_song("generate_similar", {"caption": "x", "reference": "audio", "engine": "acestep"},
+                                   track_id=TRACK, source=LOCAL)
     assert "timbre reference" in tool._song_about("generate_similar", ref)
     args, rest, problem = tool._song_split({"caption": "x"})
     assert problem and "track_id" in problem

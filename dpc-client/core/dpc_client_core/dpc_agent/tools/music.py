@@ -443,6 +443,12 @@ def _song_about(job_type: str, params: Dict[str, Any]) -> str:
     uses = []
     if job_type == js.COVER:
         uses.append("its audio (melody" + (" and lyrics" if params.get("lyrics_mode") == "reuse" else "") + ")")
+    elif job_type == js.GENERATE_SIMILAR and params.get("engine") == js.ENGINE_YUE2:
+        sec = params.get("source_section") or {}
+        uses.append(f"its audio codes from {sec.get('start_s', 0):g} to {sec.get('end_s', 0):g} s as the opening "
+                    "(cut off each take)")
+        if not (params.get("caption") or "").strip() or params.get("keep_from_source"):
+            uses.append("a description of it by the audio describer")
     elif params.get("reference") == "audio":
         uses.append("its audio as a timbre reference")
     if job_type != js.COVER and params.get("lyrics_mode") == "reuse":
@@ -1042,7 +1048,13 @@ def get_tools() -> List[ToolEntry]:
                                           "reuse; reuse fills the track's stored lyrics), lyrics_theme, "
                                           "reference (description or audio: the source as a timbre "
                                           "reference, unverified), engine (acestep or yue2, see "
-                                          "music_capabilities song_jobs), variants, duration_s, seed; a cover "
+                                          "music_capabilities song_jobs), variants, duration_s, seed; same "
+                                          "style runs on yue2 by default: a section of the source's own codes "
+                                          "opens the song (source_section {start_s, end_s}, 10-60 s, the first "
+                                          "30 s by default) and is cut off each take, duration_s is the new "
+                                          "part, an empty caption leaves the style to the audio describer and "
+                                          "keep_from_source [genre, bpm, key, timesig, mood, vocals] asks it "
+                                          "for those values; a cover "
                                           "runs on yue2 by default (it needs the lyrics; acestep needs none), "
                                           "is as long as its source, and takes cover_strength (acestep, 0-1) or "
                                           "cot (melody, the default, or full) and vocal_only (yue2). "

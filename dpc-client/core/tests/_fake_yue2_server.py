@@ -4,7 +4,12 @@ the server's own request checks (a 400 for `lm_batch_size` over `--max-batch`, a
 `synth_batch_size` outside 1-9, an adapter not in `--adapters`), and a multipart result per
 track (the replay request as JSON, a short wav24, the latents). With `--transcriber`, `POST
 /transcribe` (multipart `audio`, optional field `melody_only`) answers a canned ABC score, as SheetSage2
-would; the replay request echoes a sent `abc`. No GPU.
+would; the replay request echoes a sent `abc`. With `--tokenizer`, `POST /tokenize` (multipart `audio`, a WAV)
+answers `{"codes": "..."}`, 25 codes a second of the WAV, as the audio tokenizer would. A `/synth` with
+`source_tokens` is a continuation, checked as yue2.cpp checks it (exclusive with `semantic_tokens`, a non-empty
+section, a budget left after it: src/pipeline.h:352-411): its track is the section (a 300 Hz tone, the section's
+length exactly) followed by 1.5 s of new music (a 900 Hz tone), and the replay's codes are the section's and the
+new ones. No GPU.
 
 `FAKE_YUE2_MODE` (comma-separated) picks a misbehaviour: `exit_at_start`, `wrong_model`
 (`/props` names another backbone), `fail_synth`, `slow_synth` (stays running until
@@ -29,6 +34,9 @@ import sys
 from aiohttp import web
 
 from _fake_acestep_server import wav24
+import io
+import math
+import wave
 
 BOUNDARY = "yue2-batch-boundary"
 # 4/4 at 120 BPM: a bar is 2 s. An intro bar with no voice, two verse bars, two chorus bars.
@@ -66,6 +74,21 @@ def scan(folder, skip=""):
     return out
 
 
+def two_tones(first_s, second_s, sample_rate=48000, channels=2):
+    """A wav24 of `first_s` seconds at 300 Hz then `second_s` at 900 Hz: a continuation's section and its new part,
+    told apart by their pitch."""
+    n1, n2 = int(round(first_s * sample_rate)), int(round(second_s * sample_rate))
+    data = bytearray()
+    for i in range(n1 + n2):
+        freq = 300 if i < n1 else 900
+        v = int(0.3 * 8388607 * math.sin(2 * math.pi * freq * i / sample_rate))
+        data += (v & 0xFFFFFF).to_bytes(3, "little") * channels
+    block = channels * 3
+    fmt = struct.pack("<HHIIHH", 1, channels, sample_rate, sample_rate * block, block, 24)
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(data)) + bytes(data)
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -77,6 +100,7 @@ def main():
     ap.add_argument("--device")
     ap.add_argument("--max-seq", type=int)
     ap.add_argument("--transcriber")
+    ap.add_argument("--tokenizer")
     args = ap.parse_args()
     modes = set(filter(None, os.environ.get("FAKE_YUE2_MODE", "").split(",")))
     record = os.environ.get("FAKE_YUE2_RECORD")
@@ -124,12 +148,28 @@ def main():
         sem = dict({"min_tokens": 200, "max_tokens": 9000}, **(r.get("semantic_sampling") or {}))
         if not 0 <= int(sem["min_tokens"]) <= int(sem["max_tokens"]):
             return bad("semantic preset outside the protocol bounds")
+        continued = None
+        if r.get("source_tokens"):
+            if r.get("semantic_tokens"):
+                return bad("semantic_tokens and source_tokens are exclusive")
+            values = [int(c) for c in str(r["source_tokens"]).split(",") if c.strip()]
+            a = min(max(round(float(r.get("source_start", 0)) * 25), 0), len(values))
+            end = float(r.get("source_end", -1))
+            b = len(values) if end < 0 else min(max(round(end * 25), 0), len(values))
+            budget = int(sem["max_tokens"]) - (b - a)
+            if float(r.get("duration") or 0) > 0:
+                budget = min(budget, int(float(r["duration"]) * 25) - (b - a))
+            continued = (values[a:b], budget)
         names = {a["name"] for a in adapters}
         for a in r.get("adapters") or []:
             if a.get("name") not in names:
                 return bad("adapter not found: " + str(a.get("name")))
         jid = secrets.token_hex(8)
         jobs[jid] = {"status": "running", "body": b"", "mime": "application/json"}
+        if continued is not None and (not continued[0] or continued[1] < 1):
+            jobs[jid]["status"] = "failed"
+            log("[Continue] FATAL: empty section or nothing left to write")
+            return web.json_response({"id": jid})
         if "fail_synth" in modes:
             jobs[jid]["status"] = "failed"
             log("synth failed on purpose")
@@ -143,12 +183,17 @@ def main():
         for i in range(n):
             replay = dict(r, seed=seed + i, lm_seed=lm_seed, lm_batch_size=1, synth_batch_size=1,
                           abc=r.get("abc") or "X:1\nK:Em\n|E2 G2|", semantic_tokens=",".join(str(100 + k) for k in range(25)))
+            if continued is not None:
+                replay.pop("source_tokens", None)
+                replay["semantic_tokens"] = ",".join(str(v) for v in continued[0] + [7] * 37)
             parts += (f"--{BOUNDARY}\r\nContent-Type: application/json\r\n\r\n".encode()
                       + json.dumps(replay, ensure_ascii=False).encode("utf-8") + b"\r\n")
             seconds = 0.05
             if "follow_length" in modes and (r.get("semantic_sampling") or {}).get("min_tokens"):
                 seconds = int(r["semantic_sampling"]["min_tokens"]) / 25
             audio = wav24(seconds, 300 + 15 * ((seed + i) % 10))
+            if continued is not None:
+                audio = two_tones(len(continued[0]) / 25, 1.5)
             parts += f"--{BOUNDARY}\r\nContent-Type: audio/wav\r\n\r\n".encode() + audio + b"\r\n"
             latent = struct.pack("<64f", *([float(seed + i)] * 64))
             parts += (f"--{BOUNDARY}\r\nContent-Type: application/octet-stream\r\n\r\n".encode() + latent + b"\r\n")
@@ -176,6 +221,27 @@ def main():
         if "big_abc" in modes:
             abc += "|C D E F|" * 4000     # a score of about 40 kB, more than a context holds
         jobs[jid] = {"status": "done", "body": json.dumps({"abc": abc}).encode("utf-8"), "mime": "application/json"}
+        return web.json_response({"id": jid})
+
+    async def tokenize(req):
+        reader = await req.multipart()
+        audio = None
+        async for part in reader:
+            data = await part.read(decode=False)
+            if part.name == "audio":
+                audio = bytes(data)
+        recorded("tokenize.json", json.dumps({"audio_bytes": len(audio or b"")}).encode("utf-8"))
+        if audio is None:
+            return bad("multipart audio part required")
+        try:
+            with wave.open(io.BytesIO(audio)) as w:
+                seconds = w.getnframes() / w.getframerate()
+        except Exception:
+            return bad("cannot decode audio")
+        jid = secrets.token_hex(8)
+        codes = ",".join(str((k * 37) % 1000) for k in range(int(seconds * 25)))
+        jobs[jid] = {"status": "done", "body": json.dumps({"codes": codes}).encode("utf-8"),
+                     "mime": "application/json"}
         return web.json_response({"id": jid})
 
     async def job_get(req):
@@ -207,6 +273,8 @@ def main():
                         web.get("/job", job_get), web.post("/job", job_post)])
         if args.transcriber:
             app.add_routes([web.post("/transcribe", transcribe)])
+        if args.tokenizer:
+            app.add_routes([web.post("/tokenize", tokenize)])
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, args.host, args.port)

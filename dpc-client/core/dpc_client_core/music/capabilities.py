@@ -95,6 +95,10 @@ ENGINE_WORDS = {"acestep": "acestep.cpp", "yue2": "yue2.cpp"}
 SONG_WORDS = {
     ("generate_similar", "acestep"): "acestep.cpp text2music (/lm, then /synth): the caption with the kept attributes; "
                                      "kept BPM, key and time signature go to the LM as metadata",
+    ("generate_similar", "yue2"): "yue2.cpp (the default same-style engine): the describer writes the source's style "
+                                  "tags when asked, /tokenize reads the source's codes, then /synth opens on a "
+                                  "section of them (the first 30 s by default) and writes on in the style; the "
+                                  "section is cut off each take",
     ("generate_from_lyrics", "acestep"): "acestep.cpp text2music with the track's lyrics (/lm, then /synth)",
     ("generate_from_lyrics", "yue2"): "yue2.cpp text-to-song with the track's lyrics (one /synth per variant)",
     ("cover", "acestep"): "acestep.cpp task cover: the source's audio and the target caption in one /synth, no LM; "
@@ -108,6 +112,10 @@ SONG_WORDS = {
 COVER_FALLBACK_WORDS = "a cover on acestep.cpp runs without it and needs no lyrics (engine acestep)"
 AUDIO_REFERENCE_WORDS = ("; the source's audio goes as acestep.cpp's ref_audio, a timbre reference (whether it steers "
                          "the style beyond timbre is not verified)")
+# What a yue2 same-style refusal offers instead (Mike 2026-11-26: acestep.cpp text2music is the second choice).
+SAME_STYLE_FALLBACK_WORDS = "same style on acestep.cpp runs without it (engine acestep)"
+SAME_STYLE_UNVERIFIED_WORDS = ("; whether the source's sound carries into the continuation is not verified (its codes "
+                               "re-rendered come out in the model's own voice)")
 
 # SPEC §7 / §8: the canonical stage-1 list of mp.qa/1, and the advisory ones (decision 29).
 QA_FIELDS = ("integrated_lufs", "true_peak_dbtp", "loudness_delta_lu", "seam_start_jump_db", "seam_end_jump_db",
@@ -200,8 +208,11 @@ class MusicCapabilities:
     def __init__(self, engine_probe: Optional[EngineProbe] = None, *,
                  engines: Optional[Mapping[str, Any]] = None,
                  default_engine: str = js.DEFAULT_FROM_TEXT_ENGINE,
-                 ffmpeg_probe: Optional[Callable[[], bool]] = None):
+                 ffmpeg_probe: Optional[Callable[[], bool]] = None,
+                 describer_probe: Optional[Callable[[], Mapping[str, Any]]] = None):
         self._probe: EngineProbe = engine_probe or adapter_not_built_probe
+        # The describer of a same-style song (`describe.py`): `{status, alias, reason}`; none without a probe.
+        self._describer_probe = describer_probe
         self._engines: Dict[str, Any] = dict(engines or {})
         self.default_engine = default_engine
         # Every edit decodes the track with ffmpeg (the control, region_edit.py).
@@ -321,10 +332,36 @@ class MusicCapabilities:
         except Exception as exc:
             return f"checking the SheetSage2 transcriber failed: {exc}"
 
+    def _yue2_tokenizer_problem(self) -> Optional[str]:
+        """Why yue2.cpp cannot read a source's codes (`--tokenizer`), or None. A stand-in engine that does not say
+        (a single test probe) cannot."""
+        engine = self._engines.get(js.ENGINE_YUE2)
+        ask = getattr(engine, "tokenizer_problem", None)
+        if not callable(ask):
+            return "this yue2.cpp supervisor does not report the audio tokenizer"
+        try:
+            return ask()
+        except Exception as exc:
+            return f"checking the audio tokenizer failed: {exc}"
+
+    def describer_status(self) -> Dict[str, Any]:
+        """`{status, alias, reason}` of the describer (`describe.py`): `supported` when an audio alias is set up. It
+        is advice, so a same-style song runs without it, from what the person types."""
+        if self._describer_probe is None:
+            return {"status": UNSUPPORTED, "alias": None, "reason": "no describer is set up in this DPC"}
+        try:
+            st = dict(self._describer_probe())
+        except Exception as exc:
+            return {"status": UNSUPPORTED, "alias": None, "reason": f"checking the describer failed: {exc}"}
+        return {"status": st.get("status") if st.get("status") in (SUPPORTED, UNSUPPORTED) else UNSUPPORTED,
+                "alias": st.get("alias"), "reason": str(st.get("reason") or "")}
+
     def song_engine_status(self, job_type: str, key: str, *, needs_audio: bool,
                            statuses: Optional[Mapping[str, EngineStatus]] = None) -> Dict[str, str]:
         """`{status, reason}` of one song job type on one engine (`job_schemas.SONG_ENGINES`)."""
         engine = (statuses or {}).get(key) or self.engine_status(key)
+        same_style_yue2 = job_type == js.GENERATE_SIMILAR and key == js.ENGINE_YUE2
+        needs_audio = needs_audio or same_style_yue2       # it always reads the source's codes
         if not engine.available:
             return {"status": UNSUPPORTED, "reason": f"{ENGINE_WORDS.get(key, key)}: {engine.reason}"}
         if needs_audio and not self._ffmpeg():
@@ -334,6 +371,15 @@ class MusicCapabilities:
             problem = self._yue2_transcriber_problem()
             if problem:
                 return {"status": UNSUPPORTED, "reason": f"yue2.cpp cover: {problem}; {COVER_FALLBACK_WORDS}"}
+        if same_style_yue2:
+            problem = self._yue2_tokenizer_problem()
+            if problem:
+                return {"status": UNSUPPORTED, "reason": f"yue2.cpp same style: {problem}; {SAME_STYLE_FALLBACK_WORDS}"}
+            d = self.describer_status()
+            told = (f"; describer {d['alias']}" if d["status"] == SUPPORTED else
+                    f"; no describer ({d['reason']}): the style comes from what is typed")
+            return {"status": SUPPORTED, "reason": SONG_WORDS[(job_type, key)] + told + SAME_STYLE_UNVERIFIED_WORDS,
+                    "verified": False}
         return {"status": SUPPORTED, "reason": SONG_WORDS[(job_type, key)]
                 + (AUDIO_REFERENCE_WORDS if needs_audio and job_type != js.COVER else "")}
 
@@ -355,7 +401,9 @@ class MusicCapabilities:
     def song_features(self, statuses: Optional[Mapping[str, EngineStatus]] = None) -> Dict[str, Dict[str, Any]]:
         """`features.audio_reference` (a same-style song with the source as acestep.cpp's timbre
         reference), `features.cover`, per engine for the cover (`cover_engines`, the default and the fallback
-        engine with why), and `features.web_source_audio` (planned: the streaming integration)."""
+        engine with why), `features.same_style` in the same shape (`same_style_engines`: yue2 needs the audio
+        tokenizer, and says whether a describer is set up), `features.describe` (the describer, `describe.py`)
+        and `features.web_source_audio` (planned: the streaming integration)."""
         ref = self.song_engine_status(js.GENERATE_SIMILAR, js.ENGINE_ACESTEP, needs_audio=True, statuses=statuses)
         cover = {k: self.song_engine_status(js.COVER, k, needs_audio=True, statuses=statuses)
                  for k in js.SONG_ENGINES[js.COVER]}
@@ -365,6 +413,14 @@ class MusicCapabilities:
         if cover[default]["status"] != SUPPORTED:
             fallback = next((k for k in js.SONG_ENGINES[js.COVER] if k != default
                              and cover[k]["status"] == SUPPORTED), None)
+        same = {k: self.song_engine_status(js.GENERATE_SIMILAR, k, needs_audio=False, statuses=statuses)
+                for k in js.SONG_ENGINES[js.GENERATE_SIMILAR]}
+        any_same = next((v for v in same.values() if v["status"] == SUPPORTED), None)
+        same_default = js.SONG_DEFAULT_ENGINE[js.GENERATE_SIMILAR]
+        same_fallback = None
+        if same[same_default]["status"] != SUPPORTED:
+            same_fallback = next((k for k in js.SONG_ENGINES[js.GENERATE_SIMILAR] if k != same_default
+                                  and same[k]["status"] == SUPPORTED), None)
         return {
             "audio_reference": ref if ref["status"] != SUPPORTED else {
                 "status": SUPPORTED, "reason": AUDIO_REFERENCE_WORDS.lstrip("; "), "verified": False},
@@ -373,6 +429,18 @@ class MusicCapabilities:
                       "cover_engines": cover, "default_engine": default,
                       "fallback_engine": fallback,
                       "fallback_reason": cover[default]["reason"] if fallback else None},
+            # Same style per engine (Mike 2026-11-26: yue2 by default, acestep the second), the same shape as cover.
+            "same_style": {**(any_same or {"status": UNSUPPORTED,
+                                           "reason": "; ".join(v["reason"] for v in same.values())}),
+                           "same_style_engines": same, "default_engine": same_default,
+                           "fallback_engine": same_fallback,
+                           "fallback_reason": same[same_default]["reason"] if same_fallback else None,
+                           "section_s": {"min": js.SIMILAR_SECTION_MIN_S, "max": js.SIMILAR_SECTION_MAX_S,
+                                         "default": js.SIMILAR_SECTION_DEFAULT_S},
+                           "max_total_s": js.SIMILAR_YUE2_MAX_TOTAL_S,
+                           "keep_from_source": list(js.KEEP_FROM_SOURCE_KEYS)},
+            # The describer (`describe.py`): it describes the source, never ranks a take.
+            "describe": self.describer_status(),
             # A web track's audio (a cover, an audio reference): the streaming integration (music/web_sources.py).
             "web_source_audio": web_sources.integration_status(),
         }

@@ -100,6 +100,14 @@ resolves a take to its file path and facts without the job's request. A caller t
 "Stop X" on a job waiting for the card is the existing `stop_local_engine` command with the
 holder's alias from `job.card_wait.holders`; nothing here stops another engine.
 
+**The describer of a same-style song** (`music/describe.py`, Mike 2026-11-26 option 3 "both"): the audio alias
+`[music] describe_alias` names (`DPC_MUSIC_DESCRIBE_ALIAS`; unset means `music_flamingo` when that alias is a loaded
+provider, `none` turns it off) describes a source for Same style. `describe_music_track {track_id, refresh?}` is the
+form's "Describe source": it decodes the track's file, asks the describer once (or answers the description kept for
+the same audio hash, unless `refresh`), keeps it by the hash and answers `{description, suggestion}` (the style line
+and the Keep values the form fills, for the person to edit before Create). A same-style job on yue2.cpp asks the same
+function through the runner and reuses that kept description. Never a rank: it describes.
+
 **Lyrics preparation** (`prepare_music_lyrics {text, language?, choices?, engine?}`, music/lyrics_prep.py): read-only,
 changes nothing, stores nothing. It answers `{report}`: syllables per line, a meter check per section, the
 audit of the author's U+0301 marks, the stress status of every Russian word, the marked text, and the two
@@ -141,6 +149,7 @@ from . import lyrics_prep
 from . import provenance as mp_provenance
 from .peaks import PeaksError, get_peaks
 from .runner import MusicJobRunner
+from . import describe as mp_describe
 from .stream import DEFAULT_STREAM_PORT, MusicStreamServer
 from .yue2 import Yue2Server, read_config as read_yue2_config
 
@@ -578,7 +587,8 @@ class MusicCommandsMixin:
                 engines = self._music_engine_set()
                 store = MusicJobStore(self.settings.dpc_home_dir,
                                       capabilities=MusicCapabilities(engines=dict(engines.items()),
-                                                                     default_engine=engines.default))
+                                                                     default_engine=engines.default,
+                                                                     describer_probe=self._music_describer_status))
                 await asyncio.to_thread(store.open)
                 self._music_jobs_instance = store
         return self._music_jobs_instance
@@ -656,7 +666,7 @@ class MusicCommandsMixin:
                 self._music_runner_instance = MusicJobRunner(
                     store, self._music_engine_set(), self._music, dpc_home=self.settings.dpc_home_dir,
                     on_job_change=self._music_job_changed, lyrics_get=self._music_stored_lyrics,
-                    lyrics_save=self._music_save_take_lyrics)
+                    lyrics_save=self._music_save_take_lyrics, describer=self._music_describe_for_job)
             self._music_runner_instance.start()
         except Exception:
             logger.exception("music: the job runner did not start")
@@ -795,6 +805,123 @@ class MusicCommandsMixin:
             store = await self._music_jobs()
             # The report probes the engines and reads their files: off the loop.
             return {"status": "ok", "capabilities": await asyncio.to_thread(store.capabilities.report)}
+        except Exception as exc:
+            return _error(exc)
+
+    # -- the describer of a same-style song (music/describe.py) -------------------------------
+
+    def _music_describe_alias(self) -> Tuple[Optional[str], str]:
+        """`(alias, reason)`: the alias `[music] describe_alias` names, or `music_flamingo` when unset and loaded;
+        `(None, why)` when there is none, it is turned off, or the named alias is not a loaded provider."""
+        raw = self._music_config_value("describe_alias", "auto")
+        text = str(raw).strip() if raw is not None else "auto"
+        providers = dict(getattr(getattr(self, "llm_manager", None), "providers", None) or {})
+        if text.lower() in mp_describe.DESCRIBE_OFF_WORDS:
+            return None, "the describer is turned off ([music] describe_alias none)"
+        if text.lower() == "auto":
+            if mp_describe.DEFAULT_DESCRIBE_ALIAS in providers:
+                return mp_describe.DEFAULT_DESCRIBE_ALIAS, f"{mp_describe.DEFAULT_DESCRIBE_ALIAS} (the default)"
+            return None, (f"no describer: [music] describe_alias is unset and no {mp_describe.DEFAULT_DESCRIBE_ALIAS} "
+                          "provider is loaded")
+        if text not in providers:
+            return None, f"the describe alias {text!r} is not a loaded provider"
+        return text, f"{text} ([music] describe_alias)"
+
+    def _music_describer(self) -> Tuple[Any, str]:
+        """The describer's provider and alias, or `DescribeError` naming why there is none."""
+        alias, reason = self._music_describe_alias()
+        if alias is None:
+            raise mp_describe.DescribeError("no_describer", reason)
+        provider = dict(getattr(getattr(self, "llm_manager", None), "providers", None) or {}).get(alias)
+        supports = getattr(provider, "supports_audio", None)
+        try:
+            ok = bool(callable(supports) and supports())
+        except Exception:
+            ok = False
+        if not ok:
+            raise mp_describe.DescribeError("no_audio", f"the describe alias {alias!r} takes no audio (a llama-server "
+                                                        "alias with mmproj_kind audio is the describer's engine)")
+        return provider, alias
+
+    def _music_describer_status(self) -> Dict[str, Any]:
+        """The capability report's `features.describe` (`MusicCapabilities.describer_status`)."""
+        try:
+            _provider, alias = self._music_describer()
+        except mp_describe.DescribeError as exc:
+            return {"status": "unsupported", "alias": None, "reason": exc.message}
+        return {"status": "supported", "alias": alias,
+                "reason": f"{alias} describes the source (genre, tags, instruments, vocals, tempo, key, time "
+                          "signature, mood); it never ranks a take"}
+
+    async def _music_describe_source(self, path: Path, content_hash: Optional[str], source_s: float, work_dir: Path,
+                                     *, refresh: bool = False) -> Dict[str, Any]:
+        """A `done` description of the audio at `path` (`describe.describe_audio`): the one kept for its hash unless
+        `refresh`, else asked of the describer and kept. One at a time. `DescribeError` when it cannot be made."""
+        home = self.settings.dpc_home_dir
+        lock = self.__dict__.setdefault("_music_describe_lock", asyncio.Lock())
+        async with lock:
+            if not refresh:
+                kept = await asyncio.to_thread(mp_describe.read_cached, home, content_hash)
+                if kept is not None:
+                    return {**kept, "cached": True}
+            provider, alias = self._music_describer()
+            doc = await mp_describe.describe_audio(provider, alias, Path(path), source_s=source_s,
+                                                   content_hash=content_hash, work_dir=work_dir)
+            if content_hash:
+                try:
+                    await asyncio.to_thread(mp_describe.write_cached, home, doc)
+                except OSError:
+                    logger.warning("music: the description of %s was not kept", content_hash, exc_info=True)
+            return {**doc, "cached": False}
+
+    async def _music_describe_for_job(self, path: Path, content_hash: Optional[str], source_s: float,
+                                      work_dir: Path) -> Dict[str, Any]:
+        """The runner's describer (`similar._describe_for_job`): a description, or the record of why there is none
+        (`skipped` without a describer, `failed` when it ran and failed); never raises."""
+        try:
+            return await self._music_describe_source(path, content_hash, source_s, work_dir)
+        except mp_describe.DescribeError as exc:
+            if exc.code in ("no_describer", "no_audio"):
+                return mp_describe.skipped(exc.message, content_hash)
+            alias, _why = self._music_describe_alias()
+            return mp_describe.failed(exc.message, alias, content_hash)
+
+    @slow_command
+    async def describe_music_track(self, track_id: Any = None, refresh: Any = False) -> Dict[str, Any]:
+        """The form's "Describe source": `{track_id, description, suggestion: {caption, keep}}`, where `description`
+        is the describer's record (`describe.py`: `answer`, `alias`, `model`, `windows`, `cached`) and `suggestion`
+        what the form fills (the style line, and each Keep value the description gives). Errors: `invalid_params`,
+        `invalid_source` (no such track, its file missing), `track_not_ready` (still being hashed),
+        `no_describer`, `no_audio`, `decode_failed`, `failed` (the answer was not the schema's)."""
+        try:
+            tid = _need_str(track_id, "track_id", "invalid_params")
+            if not isinstance(refresh, bool):
+                raise MusicJobError("invalid_params", "refresh must be true or false", field="refresh")
+            library = await self._music()
+            try:
+                entry = library.get_entry(tid)
+            except MusicLibraryError:
+                raise MusicJobError("invalid_source", f"no library track {tid!r}", field="track_id")
+            path = library.get_track_path(tid)
+            if entry.get("missing") or path is None or not Path(path).is_file():
+                raise MusicJobError("invalid_source", "the track's file is missing; relink or rescan it first",
+                                    field="track_id")
+            content_hash = entry.get("content_hash")
+            if not content_hash:
+                raise MusicJobError("track_not_ready", "the track's audio is still being hashed; describe it again in "
+                                                       "a moment", field="track_id")
+            source_s = mp_describe.seconds_or_none(entry.get("duration_s"))
+            if source_s is None:
+                raise MusicJobError("track_not_ready", "the track's length is not known yet", field="track_id")
+            work = self.settings.dpc_home_dir / "temp" / "music-describe"
+            doc = await self._music_describe_source(Path(path), content_hash, source_s, work, refresh=refresh)
+            answer = doc.get("answer") or {}
+            keep = {k: v for k in js.KEEP_FROM_SOURCE_KEYS
+                    if (v := mp_describe.keep_value(k, answer)) is not None}
+            return {"status": "ok", "track_id": tid, "description": doc,
+                    "suggestion": {"caption": answer.get("style") or "", "keep": keep}}
+        except mp_describe.DescribeError as exc:
+            return _error(MusicJobError(exc.code, exc.message))
         except Exception as exc:
             return _error(exc)
 

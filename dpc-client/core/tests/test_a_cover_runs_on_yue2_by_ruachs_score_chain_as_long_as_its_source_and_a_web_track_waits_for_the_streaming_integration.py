@@ -145,7 +145,7 @@ def test_a_cover_is_refused_only_below_or_above_what_its_engine_can_do(engine, s
 
 def test_a_reference_audio_longer_than_the_engines_longest_song_is_refused_at_the_door():
     """Zcode #188 finding 2: the whole source was decoded and uploaded whatever its length."""
-    params = {"caption": "x", "reference": "audio"}
+    params = {"caption": "x", "reference": "audio", "engine": "acestep"}
     js.normalize_params_song("generate_similar", params, track_id=TRACK,
                              source=dict(LOCAL, duration_s=js.REFERENCE_AUDIO_MAX_S))
     with pytest.raises(js.SongParamsError) as err:

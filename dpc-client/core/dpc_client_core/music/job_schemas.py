@@ -111,7 +111,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .schemas import SchemaError
 
@@ -595,10 +595,12 @@ def fallback_params_from_text(params: Mapping[str, Any], engine: str) -> Dict[st
 
 GENERATE_SIMILAR, COVER, GENERATE_FROM_LYRICS = "generate_similar", "cover", "generate_from_lyrics"
 SONG_TYPES = (GENERATE_SIMILAR, COVER, GENERATE_FROM_LYRICS)
-SONG_ENGINES = {GENERATE_SIMILAR: (ENGINE_ACESTEP,), GENERATE_FROM_LYRICS: (ENGINE_YUE2, ENGINE_ACESTEP),
+SONG_ENGINES = {GENERATE_SIMILAR: (ENGINE_YUE2, ENGINE_ACESTEP), GENERATE_FROM_LYRICS: (ENGINE_YUE2, ENGINE_ACESTEP),
                 COVER: (ENGINE_YUE2, ENGINE_ACESTEP)}
-# Mike 2026-11-26: a cover runs on yue2.cpp's score chain by default; acestep.cpp `cover` is the second choice.
-SONG_DEFAULT_ENGINE = {GENERATE_SIMILAR: ENGINE_ACESTEP, GENERATE_FROM_LYRICS: ENGINE_YUE2, COVER: ENGINE_YUE2}
+# Mike 2026-11-26: a cover runs on yue2.cpp's score chain by default; acestep.cpp `cover` is the second choice. The
+# same day, for Same style too: "For Cover or Same style add the choice of engine. We have two and YuE2 is the
+# default" (a continuation of a section of the source, music/similar.py; acestep.cpp text2music is the second).
+SONG_DEFAULT_ENGINE = {GENERATE_SIMILAR: ENGINE_YUE2, GENERATE_FROM_LYRICS: ENGINE_YUE2, COVER: ENGINE_YUE2}
 SONG_RELATIONS = {GENERATE_SIMILAR: "same style as", COVER: "cover of",
                   GENERATE_FROM_LYRICS: "new song from the lyrics of"}
 SONG_DEFAULT_LYRICS_MODE = {GENERATE_SIMILAR: "none", GENERATE_FROM_LYRICS: "reuse", COVER: "reuse"}
@@ -749,6 +751,23 @@ _SONG_KEYS = ("source_track_id", "source_kind", "source_title", "source_content_
               "lyrics_theme",
               "reference", "reference_uri", "variants", "duration_s", "engine", "seed")
 _SONG_COVER_KEYS = ("kept", "melody_source", "cover_strength", "vocal_only", "lyrics_times")
+# Same style on yue2.cpp (Mike 2026-11-26, option 3 "both"): Music Flamingo describes the source and a section of the
+# source's own semantic codes opens the song (yue2.cpp `source_tokens`, `source_start`, `source_end`; e646d52
+# src/pipeline.h:352-411). `source_section` `{start_s, end_s}` is that section, on whole frames (25 a second, the
+# engine rounds the bounds to frames), 10 to 60 s long, the source's first 30 s by default. The section opens the
+# take and is rendered in it, and the requested length counts it (the engine's own rule), so the run asks for
+# section + `duration_s` and cuts the section off each take (`similar._same_style_on_yue2`); `duration_s` is the
+# length of the new part. `keep_from_source` names the kept attributes whose value the describer fills (a Keep box
+# checked with no value typed). The section and the target together stay under yue2.cpp's 9000-frame semantic cap.
+_SONG_SIMILAR_YUE2_KEYS = ("source_section", "keep_from_source")
+SIMILAR_SECTION_MIN_S = 10.0
+SIMILAR_SECTION_MAX_S = 60.0
+SIMILAR_SECTION_DEFAULT_S = 30.0
+# The cap of a take with its section: the semantic preset's `max_tokens` (src/sampling.h:47), which the section
+# shares (src/pipeline.h:378-385); `YUE2_DURATION_MAX_S` x 25 is the same 9000.
+SIMILAR_YUE2_MAX_TOTAL_S = YUE2_DURATION_MAX_S
+# The keep attributes the describer can fill (`describe.py`); `structure` it does not hear.
+KEEP_FROM_SOURCE_KEYS = ("genre", "bpm", "key", "timesig", "mood", "vocals")
 _SONG_SOURCE_KINDS = ("local", "web", "generated")
 
 
@@ -881,8 +900,11 @@ YUE2_COVER_TEMPO_RESERVE_BYTES = len(", 9999 BPM")
 
 
 def _song_duration(job_type: str, engine: str, params: Mapping[str, Any], src_s: Optional[float],
-                   text_bytes: int = 0) -> float:
+                   text_bytes: int = 0, *, section_s: float = 0.0) -> float:
     dmin, dmax, ddefault = DURATION_LIMITS[engine]
+    if section_s:
+        # Same style on yue2.cpp: `duration_s` is the new part, asked for with the section (`_similar_section`).
+        return _similar_duration(params, src_s, section_s, dmin)
     if job_type == COVER:
         # acestep.cpp takes the length from the source (docs/ARCHITECTURE.md, Cover); yue2.cpp is asked for it
         # (music/similar.py `yue2_cover_length`).
@@ -918,6 +940,19 @@ def _song_duration(job_type: str, engine: str, params: Mapping[str, Any], src_s:
         what = "a cap in seconds" if engine == ENGINE_YUE2 else "a number of seconds"
         raise ParamsError("duration_s", f"duration_s must be {what} from {dmin} to {dmax} for {engine}, "
                                         f"got {duration!r}")
+    return duration
+
+
+def _similar_duration(params: Mapping[str, Any], src_s: Optional[float], section_s: float, dmin: float) -> float:
+    """The new part's length of a same-style song on yue2.cpp: from `dmin` up to what the semantic cap leaves after
+    the section (`SIMILAR_YUE2_MAX_TOTAL_S`); by default the source's length, held to that."""
+    dmax = SIMILAR_YUE2_MAX_TOTAL_S - section_s
+    fallback = min(max(math.ceil(src_s or 0), dmin), math.floor(dmax))
+    duration = params.get("duration_s", fallback)
+    if not _is_number(duration) or not dmin <= duration <= dmax:
+        raise ParamsError("duration_s", f"duration_s (the new part, after the {section_s:g} s section that opens it) "
+                                        f"must be from {dmin:g} to {dmax:g} s: the section and the new part together "
+                                        f"stay within yue2.cpp's {SIMILAR_YUE2_MAX_TOTAL_S:g} s, got {duration!r}")
     return duration
 
 
@@ -963,11 +998,68 @@ def _song_yue2(job_type: str, params: Mapping[str, Any]) -> Dict[str, Any]:
     backbone = params.get("backbone", YUE2_BACKBONE_DEFAULT)
     if backbone not in YUE2_BACKBONES:
         raise ParamsError("backbone", f"backbone must be one of {', '.join(YUE2_BACKBONES)}, got {backbone!r}")
+    if job_type == GENERATE_SIMILAR:
+        # A continuation sent without a score renders without one whatever the mode (e646d52 src/pipeline.h:461-466:
+        # a score planned now is not the one the codes follow), so `off` is what runs and the only value taken.
+        cot = params.get("cot", "off")
+        if cot != "off":
+            raise ParamsError("cot", f"same style on yue2.cpp continues the source's codes with no score: cot is off, "
+                                     f"got {cot!r}")
+        return {"backbone": backbone, "cot": cot}
     modes = COVER_COT_MODES if job_type == COVER else YUE2_COT_MODES
     cot = params.get("cot", COVER_COT_DEFAULT if job_type == COVER else YUE2_COT_DEFAULT)
     if cot not in modes:
         raise ParamsError("cot", f"cot must be one of {', '.join(modes)}, got {cot!r}")
     return {"backbone": backbone, "cot": cot}
+
+
+def _on_frames(seconds: float) -> float:
+    """Seconds on whole frames of yue2.cpp's 25 a second (the engine rounds a bound to the nearest frame)."""
+    return round(round(float(seconds) * YUE2_FRAME_RATE) / YUE2_FRAME_RATE, 3)
+
+
+def _similar_section(raw: Any, src_s: Optional[float]) -> Dict[str, float]:
+    """The section of the source that opens a same-style song on yue2.cpp, `{start_s, end_s}` on whole frames:
+    the first `SIMILAR_SECTION_DEFAULT_S` by default, a given one within the source and `SIMILAR_SECTION_MIN_S` to
+    `SIMILAR_SECTION_MAX_S` long. `source_too_short` for a source shorter than the shortest section."""
+    if src_s is None:
+        raise SongParamsError("track_not_ready", "track_id", "the source's length is not known yet; same style on "
+                              "yue2.cpp opens on a section of it once the track is read")
+    if src_s < SIMILAR_SECTION_MIN_S:
+        raise SongParamsError("source_too_short", "track_id", f"the source is {src_s:g} s; same style on yue2.cpp opens "
+                              f"on a section of at least {SIMILAR_SECTION_MIN_S:g} s of it (use acestep)")
+    whole = math.floor(src_s * YUE2_FRAME_RATE) / YUE2_FRAME_RATE
+    if raw is None:
+        return {"start_s": 0.0, "end_s": _on_frames(min(SIMILAR_SECTION_DEFAULT_S, whole))}
+    if not isinstance(raw, Mapping) or set(raw) != {"start_s", "end_s"} or not all(
+            _is_number(raw[k]) for k in ("start_s", "end_s")):
+        raise ParamsError("source_section", "source_section must be {start_s, end_s} in seconds, or null for the "
+                                            f"first {SIMILAR_SECTION_DEFAULT_S:g} s")
+    start, end = _on_frames(raw["start_s"]), _on_frames(raw["end_s"])
+    if start < 0 or end > _on_frames(whole):
+        raise ParamsError("source_section", f"source_section must lie within the source, 0 to {whole:g} s")
+    length = round(end - start, 3)
+    if not SIMILAR_SECTION_MIN_S <= length <= SIMILAR_SECTION_MAX_S:
+        raise ParamsError("source_section", f"source_section must be {SIMILAR_SECTION_MIN_S:g} to "
+                                            f"{SIMILAR_SECTION_MAX_S:g} s long, got {length:g} s")
+    return {"start_s": start, "end_s": end}
+
+
+def _keep_from_source(raw: Any, keep: Mapping[str, Any]) -> List[str]:
+    """The kept attributes whose value the describer fills, in `KEEP_KEYS` order: each one the describer hears
+    (`KEEP_FROM_SOURCE_KEYS`) and not typed in `keep` (a typed value wins and is not asked again)."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(_is_str(k) for k in raw):
+        raise ParamsError("keep_from_source", "keep_from_source must be a list of kept attribute names")
+    unknown = sorted(set(raw) - set(KEEP_FROM_SOURCE_KEYS))
+    if unknown:
+        raise ParamsError("keep_from_source", f"keep_from_source has {', '.join(unknown)}; the describer fills "
+                                              f"{', '.join(KEEP_FROM_SOURCE_KEYS)}")
+    typed = sorted(set(raw) & set(keep))
+    if typed:
+        raise ParamsError("keep_from_source", f"{', '.join(typed)} has a typed value in keep; the typed value is kept")
+    return [k for k in KEEP_KEYS if k in raw]
 
 
 def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str] = None,
@@ -983,22 +1075,26 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
         raise ParamsError("type", f"{job_type!r} is not a song job type")
     if not isinstance(params, Mapping):
         raise ParamsError("params", "params must be an object")
-    extra = sorted(set(params) - set(_SONG_KEYS) - set(_SONG_COVER_KEYS) - set(_YUE2_ONLY_KEYS))
+    extra = sorted(set(params) - set(_SONG_KEYS) - set(_SONG_COVER_KEYS) - set(_YUE2_ONLY_KEYS)
+                   - set(_SONG_SIMILAR_YUE2_KEYS))
     if extra:
         raise ParamsError(extra[0], f"unknown param(s) for {job_type}: {', '.join(extra)}")
     out = _song_source(params, track_id, source)
     out["keep"] = _normalize_keep(params.get("keep"))
-    caption = params.get("caption")
-    if not _is_str(caption) or not caption.strip():
-        what = "the target style" if job_type == COVER else "the style description"
-        raise ParamsError("caption", f"caption is required: {what}")
-    out["caption"] = caption
-    out["caption_basis"] = _short_text(params, "caption_basis", "typed") or "typed"
-    out["source_caption"] = _short_text(params, "source_caption", "") or ""
-
     engine = params.get("engine", SONG_DEFAULT_ENGINE[job_type])
     if engine not in SONG_ENGINES[job_type]:
         raise ParamsError("engine", f"a {job_type} job runs on {' or '.join(SONG_ENGINES[job_type])}, got {engine!r}")
+    similar_yue2 = job_type == GENERATE_SIMILAR and engine == ENGINE_YUE2
+    caption = params.get("caption", "" if similar_yue2 else None)
+    # Same style on yue2.cpp may leave the style to the describer (`describe.py`): an empty caption is its
+    # `caption_basis` `describer`, and the run fails with the reason when no description comes.
+    if not _is_str(caption) or (not caption.strip() and not (similar_yue2 and caption == "")):
+        what = "the target style" if job_type == COVER else "the style description"
+        raise ParamsError("caption", f"caption is required: {what}")
+    out["caption"] = caption
+    basis_default = "describer" if similar_yue2 and not caption else "typed"
+    out["caption_basis"] = _short_text(params, "caption_basis", basis_default) or basis_default
+    out["source_caption"] = _short_text(params, "source_caption", "") or ""
     out["engine"] = engine
     out.update(_song_lyrics(job_type, engine, params))
     # The text the synth request will carry (`song_text_sent`), joiners and the theme's words included: both the
@@ -1012,12 +1108,16 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
         raise ParamsError("lyrics", f"the caption, theme and lyrics come to {sent_bytes} bytes as sent; the limit is "
                                     f"{MAX_SONG_TEXT_BYTES} bytes (about a megabyte of text): shorten them")
 
-    reference = "audio" if job_type == COVER else params.get("reference", "description")
+    always_audio = job_type == COVER or similar_yue2
+    reference = "audio" if always_audio else params.get("reference", "description")
     if job_type == COVER and params.get("reference", "audio") != "audio":
         raise ParamsError("reference", "a cover always uses the source's audio (reference audio)")
+    if similar_yue2 and params.get("reference", "audio") != "audio":
+        raise ParamsError("reference", "same style on yue2.cpp always opens on a section of the source's own audio "
+                                       "codes (reference audio); a description alone runs on acestep")
     if reference not in REFERENCES:
         raise ParamsError("reference", f"reference must be one of {', '.join(REFERENCES)}, got {reference!r}")
-    if reference == "audio" and engine == ENGINE_YUE2 and job_type != COVER:
+    if reference == "audio" and engine == ENGINE_YUE2 and not always_audio:
         raise ParamsError("reference", "yue2.cpp takes no reference audio for a new song; use acestep or "
                                        "reference description")
     out["reference"] = reference
@@ -1039,12 +1139,20 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
         raise ParamsError("variants", f"variants must be a whole number from {VARIANTS_MIN} to {VARIANTS_MAX}, "
                                       f"got {variants!r}")
     out["variants"] = variants
+    section_s = 0.0
+    if similar_yue2:
+        out["source_section"] = _similar_section(params.get("source_section"), out["source_duration_s"])
+        section_s = round(out["source_section"]["end_s"] - out["source_section"]["start_s"], 3)
+        out["keep_from_source"] = _keep_from_source(params.get("keep_from_source"), out["keep"])
     out["duration_s"] = _song_duration(job_type, engine, params, out["source_duration_s"],
-                                       sent_bytes + YUE2_COVER_TEMPO_RESERVE_BYTES)
+                                       sent_bytes + YUE2_COVER_TEMPO_RESERVE_BYTES, section_s=section_s)
     if engine == ENGINE_YUE2 and job_type != COVER:
         # A new song on yue2.cpp shares the context too: its text, the frames its duration cap lets run and the
-        # end token (no score). The run checks it again before /synth (`similar.check_song_context`).
-        room = yue2_song_context(sent_bytes, out["duration_s"])
+        # end token (no score). The run checks it again before /synth (`similar.check_song_context`). Same style
+        # asks for its section and its new part together (the section is in the prompt and counts in the length);
+        # its style is not known before the describer answers, so the door counts the caption as typed and the run
+        # counts the merged style again before the bodies are written.
+        room = yue2_song_context(sent_bytes, out["duration_s"] + section_s)
         if room["left"] < 0:
             raise SongParamsError("context_exceeded", "lyrics", f"the caption and the lyrics are {sent_bytes} bytes as "
                                   f"sent, about {room['prompt_tokens_est']} tokens; with the {room['budget_tokens']} "
@@ -1061,6 +1169,10 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
         if k not in out and k in params:
             where = {"cover_strength": " on acestep", "vocal_only": " on yue2", "lyrics_times": " on yue2"}.get(k, "")
             raise ParamsError(k, f"{k} is a cover param{where}")
+    if not similar_yue2:
+        given = [k for k in _SONG_SIMILAR_YUE2_KEYS if k in params]
+        if given:
+            raise ParamsError(given[0], f"{given[0]} is a param of same style on yue2.cpp")
     if engine == ENGINE_YUE2:
         out.update(_song_yue2(job_type, params))
     else:

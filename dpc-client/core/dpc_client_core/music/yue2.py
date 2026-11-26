@@ -41,7 +41,12 @@ m-a-p in `converted/` is tensor-identical, ai-studio `weights.sha256`), the RS-T
 `rs-tw/YuE2-3B-RS-TW-2.0x0.75-Q8_0.gguf`, and the VAE `serveurperso/YuE2-Vae-F32.gguf`.
 The engine is `not_installed` without the binary, the VAE, or any backbone; a job naming a
 backbone whose file is missing is refused at propose time (`form_info`, read by
-`MusicCapabilities.check_params`).
+`MusicCapabilities.check_params`). Two optional heads on MERT, each loaded from beside its GGUF
+(`MERT-v2-FullSong-<quant>.gguf`): the SheetSage2 transcriber (`--transcriber`, a cover's score,
+`TRANSCRIBER_FILES`) and the audio tokenizer (`--tokenizer`, a same-style song's source codes through
+`/tokenize`, `TOKENIZER_FILES`: Mothersuperior's realaudio v4 head converted with the engine's own
+convert.py and quantize). A missing head is no install problem; the job that needs it is refused with why
+(`transcriber_problem`, `tokenizer_problem`).
 
 **Batch 1.** `--max-batch 1`: the CUDA flash-attention mask bug at batch > 1 is unfixed in
 ggml ef4555b7 (ai-studio `engine/yue2-cpp/BUILD.md`), so the runner sends one request per
@@ -132,6 +137,12 @@ VAE_FILES: Sequence[str] = ("serveurperso/YuE2-Vae-F32.gguf", "converted/YuE2-Va
 TRANSCRIBER_FILES: Sequence[str] = ("serveurperso/SheetSage2-Q8_0.gguf", "converted/SheetSage2-Q8_0.gguf",
                                     "SheetSage2-Q8_0.gguf")
 MERT_NAME = "MERT-v2-FullSong-{quant}.gguf"
+# The audio tokenizer (a same-style song's source codes, `--tokenizer`, `POST /tokenize`): Mothersuperior's realaudio
+# v4 head on MERT, which yue2.cpp loads from beside it like the transcriber's (its src/audio-tokenizer.h:103-123).
+# Converted with the engine's own convert.py and quantize (its README names the Q8_0 file).
+TOKENIZER_FILES: Sequence[str] = ("serveurperso/yue2-mothersuperior-realaudio-tokenizer-v4-Q8_0.gguf",
+                                  "converted/yue2-mothersuperior-realaudio-tokenizer-v4-Q8_0.gguf",
+                                  "yue2-mothersuperior-realaudio-tokenizer-v4-Q8_0.gguf")
 
 ADAPTER_NOTE = ("Voice adapters are trained on real readers' voices without stated consent: "
                 "for local listening only.")
@@ -774,6 +785,10 @@ class Yue2Server(SupervisedEngine):
         if transcriber is not None:
             cmd += ["--transcriber", str(transcriber)]
         self._transcriber_arg = transcriber
+        tokenizer = self.tokenizer_path()
+        if tokenizer is not None:
+            cmd += ["--tokenizer", str(tokenizer)]
+        self._tokenizer_arg = tokenizer
         self._backbone = choice
         return cmd
 
@@ -784,6 +799,25 @@ class Yue2Server(SupervisedEngine):
             quant = path.stem.rsplit("-", 1)[-1]
             if path.is_file() and (path.parent / MERT_NAME.format(quant=quant)).is_file():
                 return path
+        return None
+
+    def tokenizer_path(self) -> Optional[Path]:
+        """The audio tokenizer GGUF with its MERT GGUF beside it, or None (`TOKENIZER_FILES`)."""
+        for rel in TOKENIZER_FILES:
+            path = self.config.models_dir / rel
+            quant = path.stem.rsplit("-", 1)[-1]
+            if path.is_file() and (path.parent / MERT_NAME.format(quant=quant)).is_file():
+                return path
+        return None
+
+    def tokenizer_problem(self) -> Optional[str]:
+        """Why this server cannot serve `/tokenize` (a same-style song's source codes), or None: the files are
+        missing, or the running child was started without them."""
+        if self.tokenizer_path() is None:
+            return (f"the audio tokenizer is missing in {self.config.models_dir} (looked for "
+                    f"{', '.join(TOKENIZER_FILES)} with {MERT_NAME.format(quant='Q8_0')} beside it)")
+        if self.alive() and getattr(self, "_tokenizer_arg", None) is None:
+            return "the running yue2.cpp server was started without --tokenizer; stop it and the next job starts it"
         return None
 
     def transcriber_problem(self) -> Optional[str]:
@@ -934,7 +968,9 @@ class Yue2Server(SupervisedEngine):
             "commit": commit_of(version),
             "binaries": self._binaries_identity(),
             "server_args": self.server_args(),
-            "models": {"backbone": bb, "vae": self._file_identity(self.vae_path(), with_sha=model_sha256)},
+            "models": {"backbone": bb, "vae": self._file_identity(self.vae_path(), with_sha=model_sha256),
+                       **({"tokenizer": self._file_identity(self._tokenizer_arg, with_sha=model_sha256)}
+                          if getattr(self, "_tokenizer_arg", None) is not None and self.alive() else {})},
             "adapters": used,
             **self.build_identity(),
         }

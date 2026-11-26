@@ -560,6 +560,7 @@ class MusicJobRunner:
         control_decoder: Optional[ControlDecoder] = None,
         lyrics_get: Optional[LyricsGet] = None,
         lyrics_save: Optional[LyricsSave] = None,
+        describer: Optional[Callable[[Path, Optional[str], float, Path], Awaitable[Dict[str, Any]]]] = None,
     ):
         self.store = store
         # A `MusicEngines`, a mapping of engine word to supervisor, or one supervisor.
@@ -577,6 +578,9 @@ class MusicJobRunner:
         self._decode_control = control_decoder or ffmpeg_control_decoder()
         self._lyrics_get = lyrics_get
         self._lyrics_save = lyrics_save
+        # A same-style song's describer (`similar._describe_for_job`, `describe.py`): `(source, content hash, seconds,
+        # work dir)` to a description record; None runs none (the record says so).
+        self._describer = describer
         self._ffmpeg_version: Optional[str] = None
         self._ffmpeg_version_known = False
         self.on_job_change = on_job_change
@@ -1616,7 +1620,17 @@ class MusicJobRunner:
             title = f"{style[:60]} (v{variant})" if style else f"Generated take v{variant}"
 
         length_take: Dict[str, Any] = {}
-        await asyncio.to_thread(copy_range, source, start, end, wav_part)
+        cut_s = getattr(dress, "prompt_cut_s", None) if dress is not None else None
+        if cut_s:
+            # A same-style take on yue2.cpp opens with the source's section, rendered: cut off before anything is
+            # measured or stored (`similar.cut_head`).
+            from .similar import PROMPT_CUT_FADE_MS, cut_head
+            try:
+                await asyncio.to_thread(cut_head, source, start, end, wav_part, cut_s, PROMPT_CUT_FADE_MS)
+            except ValueError as exc:
+                raise _JobFailure(f"variant {variant}: {exc}")
+        else:
+            await asyncio.to_thread(copy_range, source, start, end, wav_part)
         try:
             try:
                 wav = await asyncio.to_thread(read_wav_info, wav_part)

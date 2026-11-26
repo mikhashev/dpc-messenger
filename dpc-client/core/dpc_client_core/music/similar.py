@@ -18,6 +18,21 @@ run (`listen_only_source`, `track_not_ready`, `missing_lyrics`).
   timbre is not verified.
 - `generate_from_lyrics` on yue2.cpp: one `/synth` per variant with the lines, the from-text path
   (`MusicJobRunner._produce_yue2`).
+- `generate_similar` on yue2.cpp, the default (Mike 2026-11-26, option 3 "both"), `_same_style_on_yue2`: while the
+  job is queued, the describer (`describe.py`, Music Flamingo by default) listens to the source and its answer
+  fills what the person did not type (the style when the caption is empty, each Keep box checked with no value;
+  typed values win), written as payload `describe.result.json` and kept by the audio's hash; skipped, with the
+  reason recorded, when nothing is asked of it. On the card, yue2.cpp's audio tokenizer (`POST /tokenize`, served
+  when the server runs with `--tokenizer`) turns the source into its semantic codes (25 a second), written as
+  payload `tokenize.result.json` and kept by the audio's hash. Each variant's `/synth` carries the merged style,
+  the lyrics as on the from-text path, the codes as `source_tokens` with the section as `source_start` /
+  `source_end` (`params.source_section`, the first 30 s by default), `cot` off (a continuation without a score
+  renders without one) and `duration` = section + the new part (yue2.cpp counts the section in the length,
+  src/pipeline.h:378-385). The section opens each take and is rendered in it in the model's own sound, so it is
+  cut off sample-exactly before the take is stored (`SongDress.prompt_cut_s`: the first section x sample-rate
+  frames, then a `PROMPT_CUT_FADE_MS` fade-in), and stage-1 QA measures the cut take against the new part's
+  length (a cap, as every yue2 take). Whether the source's sound carries into the continuation is not verified
+  (re-rendering a recording's codes comes out in the model's own voice: ai-studio research-singing-voice.md).
 - `cover` on acestep.cpp: `task_type: cover`, the source as the `audio` part of one `/synth` with every
   variant, no LM (`run_cover`: the source is VAE-encoded and degraded by an FSQ round trip, the caption
   steers the style); `cover_strength` is `audio_cover_strength`. The take is as long as the source.
@@ -60,6 +75,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import cover_score as cs
+from . import describe
 from . import job_schemas as js
 from . import provenance as prov
 from . import web_sources
@@ -72,6 +88,16 @@ logger = logging.getLogger(__name__)
 SONG_PAYLOAD = "song.request.json"
 SONG_SCHEMA = "dpc.song-job/1"
 TRANSCRIBE_PAYLOAD = "transcribe.result.json"
+TOKENIZE_PAYLOAD = "tokenize.result.json"
+TOKENS_DIR_NAME = "tokens"
+# The cut of a same-style take's opening section: a short fade-in at the cut, so the take does not start mid-wave.
+PROMPT_CUT_FADE_MS = 10.0
+# The least new music a continuation is asked to write after its section (`semantic_sampling.min_tokens`, which
+# yue2.cpp counts after the section and holds under its budget, src/pipeline.h:386-387): the end token right after
+# the section would leave nothing once it is cut.
+SIMILAR_MIN_NEW_S = 10.0
+SIMILAR_UNVERIFIED = ("the source's own codes open the song; whether its sound carries into the continuation is not "
+                      "verified (re-rendering a recording's codes comes out in the model's own voice)")
 SOURCE_PART = "source.wav.part"
 LEVELLED_PART = "transcribe.wav.part"
 MULTIPART_PART = "cover.multipart.part"
@@ -150,10 +176,19 @@ def engine_lyrics(params: Mapping[str, Any]) -> str:
     return ""
 
 
-def text_view(params: Mapping[str, Any]) -> Dict[str, Any]:
-    """The job's params in the shape the from-text producers read (`style`, `lyrics`, ...)."""
-    view: Dict[str, Any] = {"style": caption_sent(params), "lyrics": lyrics_text(params),
-                            "variants": params["variants"], "duration_s": params["duration_s"],
+def section_s_of(params: Mapping[str, Any]) -> float:
+    """The length of a same-style song's opening section on yue2.cpp (`params.source_section`), 0 for any other."""
+    sec = params.get("source_section")
+    return round(float(sec["end_s"]) - float(sec["start_s"]), 3) if isinstance(sec, Mapping) else 0.0
+
+
+def text_view(params: Mapping[str, Any], style: Optional[str] = None) -> Dict[str, Any]:
+    """The job's params in the shape the from-text producers read (`style`, `lyrics`, ...). A same-style song on
+    yue2.cpp asks for its section and its new part together (`duration_s` is their sum here), with the merged
+    `style` when the describer filled it."""
+    view: Dict[str, Any] = {"style": style if style is not None else caption_sent(params),
+                            "lyrics": lyrics_text(params), "variants": params["variants"],
+                            "duration_s": round(params["duration_s"] + section_s_of(params), 3),
                             "seed": params.get("seed"), "lyrics_prep": {}, "engine": params["engine"]}
     if params["engine"] == js.ENGINE_YUE2:
         view.update({"backbone": params.get("backbone") or js.YUE2_BACKBONE_DEFAULT,
@@ -196,11 +231,12 @@ def build_cover_body(params: Mapping[str, Any], seed: int) -> bytes:
 
 def build_yue2_song_body(params: Mapping[str, Any], seed: int, abc: Optional[str] = None, *,
                          style: Optional[str] = None, lyrics: Optional[str] = None,
-                         source_s: Optional[float] = None) -> bytes:
+                         source_s: Optional[float] = None, source_tokens: Optional[str] = None) -> bytes:
     """One variant's yue2.cpp `/synth` body: the from-text body; a cover's score as `abc`, its style and lyrics
-    as prepared against the score (`_cover_on_yue2`), and its length from the source (`yue2_cover_length`)."""
+    as prepared against the score (`_cover_on_yue2`), and its length from the source (`yue2_cover_length`); a
+    same-style song's codes as `source_tokens` with its section and the new part's floor (`_same_style_on_yue2`)."""
     from .runner import build_yue2_body
-    req = json.loads(build_yue2_body(text_view(params), seed).decode("utf-8"))
+    req = json.loads(build_yue2_body(text_view(params, style), seed).decode("utf-8"))
     if abc is not None:
         req["abc"] = abc
     if style is not None:
@@ -209,6 +245,12 @@ def build_yue2_song_body(params: Mapping[str, Any], seed: int, abc: Optional[str
         req["lyrics"] = lyrics
     if source_s is not None:
         req.update(yue2_cover_length(source_s))
+    if source_tokens is not None:
+        sec = params["source_section"]
+        req.update({"source_tokens": source_tokens, "source_start": float(sec["start_s"]),
+                    "source_end": float(sec["end_s"]), "cot": "off",
+                    "semantic_sampling": {"min_tokens": int(min(SIMILAR_MIN_NEW_S, params["duration_s"])
+                                                            * js.YUE2_FRAME_RATE)}})
     return json.dumps(req, ensure_ascii=False).encode("utf-8")
 
 
@@ -228,6 +270,12 @@ class SongDress:
     extra_payloads: Dict[str, str] = field(default_factory=dict)
     # A cover's QA terms (`runner._measure_qa`): the source's length, mode `same`, the engine's tolerance.
     qa_override: Optional[Dict[str, Any]] = None
+    # A same-style take on yue2.cpp: the seconds of its opening section, cut off before it is stored
+    # (`runner._store_take`, `cut_head`).
+    prompt_cut_s: Optional[float] = None
+    # The style the engine got when it is not the caption (a same-style song's merged style): the take's title,
+    # lineage and file tags follow it.
+    style_sent: Optional[str] = None
 
     @property
     def relation(self) -> str:
@@ -238,13 +286,21 @@ class SongDress:
 
     def lineage(self, variant: int) -> Dict[str, Any]:
         return {"relation": self.relation, "variant": variant, "source_track_id": self.params["source_track_id"],
-                "source_name": self.params["source_title"], "caption": caption_sent(self.params),
+                "source_name": self.params["source_title"],
+                "caption": self.style_sent if self.style_sent is not None else caption_sent(self.params),
                 "engine": ENGINE_IDS[self.params["engine"]]}
 
     def patch(self, rec: Dict[str, Any]) -> Dict[str, Any]:
         rec["relation"] = self.relation
         rec["parents"] = [dict(self.parent)]
         rec["task_type"] = TASK_TYPE[self.job_type]
+        if self.prompt_cut_s:
+            # The file is the new part: the length asked of it is the new part's, and the replay codes are the
+            # whole render, its opening section included.
+            rec["duration_requested_s"] = self.params["duration_s"]
+            rec["record_notes"] = list(rec.get("record_notes") or []) + [
+                f"the file is the take with its {self.prompt_cut_s:g} s opening section (the source's own codes) cut "
+                "off; semantic_tokens replay the whole render, the section included"]
         rec["song"] = dict(self.song)
         payloads = dict(rec.get("payloads") or {})
         if self.song_payload_sha:
@@ -278,6 +334,7 @@ class _Prepared:
     files: List[Tuple[str, Path, str]]
     lm_body: bytes = b""
     source_wav: Optional[Path] = None
+    style: Optional[str] = None          # a same-style song's merged style (`describe.merged_style`)
 
 
 def sweep_temp_parts(generated_root: Path, active: Optional[set] = None) -> List[Path]:
@@ -367,6 +424,7 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
         raise _JobFailure("hash_mismatch: the source track's file changed since the job was proposed; propose it again")
     audio: Optional[Dict[str, Any]] = None
     files: List[Tuple[str, Path, str]] = []
+    path: Any = None
     if js.song_needs_audio(job_type, params):
         if (entry.get("source") or {}).get("kind") == "web":
             try:
@@ -397,7 +455,9 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
         block = max(1, wav.channels * wav.bits // 8)
         audio = {"format": SOURCE_FORMAT, "frames": wav.data_size // block, "rate": wav.sample_rate,
                  "channels": wav.channels, "sha256": await asyncio.to_thread(_file_sha256, source_wav)}
-        files = [("audio" if job_type == js.COVER else "ref_audio", source_wav, "audio/wav")]
+        # yue2.cpp's same style takes the source through `/tokenize` on the card, not as a part of `/synth`.
+        if not (job_type == js.GENERATE_SIMILAR and params["engine"] == js.ENGINE_YUE2):
+            files = [("audio" if job_type == js.COVER else "ref_audio", source_wav, "audio/wav")]
 
     parent_take = await runner._call(runner.store.find_take_by_library_track, track_id)
     parent = {"role": "source", "library_track_id": track_id, "content_hash": entry.get("content_hash"),
@@ -439,6 +499,8 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
     elif key == js.ENGINE_ACESTEP and SYNTH_PAYLOAD not in have:
         await runner._call(runner.store.write_payload, job_id, SYNTH_PAYLOAD, build_cover_body(params, seed),
                            endpoint="/synth")
+    elif key == js.ENGINE_YUE2 and job_type == js.GENERATE_SIMILAR:
+        pass        # its bodies wait for the codes, on the card (`_same_style_on_yue2`)
     elif key == js.ENGINE_YUE2 and job_type != js.COVER:
         check_song_context(params)
         for index in range(int(params["variants"])):
@@ -457,12 +519,37 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
     for k in ("kept", "melody_source", "cover_strength", "cot", "vocal_only", "lyrics_source"):
         if k in params:
             song[k] = params[k]
-    if job_type != js.COVER and params["reference"] == "audio":
+    if job_type != js.COVER and params["reference"] == "audio" and key == js.ENGINE_ACESTEP:
         song["reference_role"] = "acestep.cpp ref_audio: a timbre reference; style steering not verified"
+    style: Optional[str] = None
+    if job_type == js.GENERATE_SIMILAR and key == js.ENGINE_YUE2:
+        song["reference_role"] = f"yue2.cpp source_tokens: {SIMILAR_UNVERIFIED}"
+        for k in ("source_section", "keep_from_source"):
+            song[k] = params[k]
+        doc = await _describe_for_job(runner, job, have, Path(path), audio, entry)
+        style, merged = describe.merged_style(params, doc.get("answer") if doc.get("status") == describe.DONE
+                                              else None)
+        if not style.strip():
+            raise _JobFailure(f"no_style: the style was left to the describer, and {_describe_reason(doc)}; type a "
+                              "style description and propose the job again")
+        song["describe"] = _describe_said(doc)
+        song["style_sent"] = style
+        song.update(merged)
+        check_song_context(params, style)
     # The source's licence follows its audio, or its own stored lyrics; lines the caller typed under
     # `reuse` are not the source's (Zcode #188, finding 1).
     dress = SongDress(job_type, params, parent, song, song_payload_sha=song_sha,
                       inherit_licence=audio is not None or params.get("lyrics_source") == "stored")
+    if style is not None:
+        dress.style_sent = style
+        dress.prompt_cut_s = section_s_of(params)
+        # The cut take against the new part's length: a cap, as every yue2 take (`runner._measure_qa`).
+        dress.qa_override = {"requested_s": float(params["duration_s"]), "length_mode": "cap"}
+        now = await runner._get(job_id)
+        sha = next((p["sha256"] for p in (now or {}).get("payloads") or [] if p["name"] == describe.DESCRIBE_PAYLOAD),
+                   None)
+        if sha:
+            dress.extra_payloads[describe.DESCRIBE_PAYLOAD] = sha
     if job_type == js.COVER and audio is not None:
         dress.qa_override = {"requested_s": audio["frames"] / audio["rate"], "length_mode": "same",
                              "same_tolerance_s": COVER_SAME_TOLERANCE_S[key]}
@@ -471,7 +558,7 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
         if peaks is not None:
             dress.qa_override["source"] = {"relation": "cover", "peaks": peaks}
     return _Prepared(seed=seed, dress=dress, files=files, lm_body=lm_body,
-                     source_wav=source_wav if audio is not None else None)
+                     source_wav=source_wav if audio is not None else None, style=style)
 
 
 async def _on_the_card(runner: Any, job: dict, prepared: _Prepared, engine: Any) -> None:
@@ -492,6 +579,8 @@ async def _on_the_card(runner: Any, job: dict, prepared: _Prepared, engine: Any)
             await _cover_on_acestep(runner, job, prepared, engine, engine_job)
         elif job_type == js.COVER:
             await _cover_on_yue2(runner, job, prepared, engine, engine_job)
+        elif job_type == js.GENERATE_SIMILAR and key == js.ENGINE_YUE2:
+            await _same_style_on_yue2(runner, job, prepared, engine, engine_job)
         elif key == js.ENGINE_YUE2:
             await runner._produce_yue2(job_id, text_view(params), prepared.seed, engine, engine_job)
         else:
@@ -737,14 +826,16 @@ def check_cover_context(params: Mapping[str, Any], source_s: float, style: Optio
     return numbers
 
 
-def check_song_context(params: Mapping[str, Any]) -> Dict[str, int]:
+def check_song_context(params: Mapping[str, Any], style: Optional[str] = None) -> Dict[str, int]:
     """The door's context check of a new song on yue2.cpp (`generate_from_lyrics`, `generate_similar`) again
-    before its `/synth` bodies are written: the text as the body carries it (`text_view`), the frames its
-    `duration_s` cap lets run and the end token, no score. `context_exceeded` with the numbers otherwise."""
+    before its `/synth` bodies are written: the text as the body carries it (`text_view`, with a same-style song's
+    merged `style`), the frames its `duration_s` cap lets run (a same-style song's section with its new part: the
+    section is in the prompt and the rest is the budget) and the end token, no score. `context_exceeded` with the
+    numbers otherwise."""
     from .runner import _JobFailure
-    view = text_view(params)
+    view = text_view(params, style)
     sent = len(js.song_text_sent(view["style"], view["lyrics"]).encode("utf-8"))
-    numbers = js.yue2_song_context(sent, float(params["duration_s"]))
+    numbers = js.yue2_song_context(sent, float(view["duration_s"]))
     if numbers["left"] < 0:
         raise _JobFailure(f"context_exceeded: the text is {sent} bytes, about {numbers['prompt_tokens_est']} tokens, and "
                           f"the {params['duration_s']:g} s cap asks for {numbers['budget_tokens']} music positions; with "
@@ -829,3 +920,228 @@ async def _cover_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: An
                       "context": context}
     await runner._progress(job_id, 0.1)
     await runner._produce_yue2(job_id, text_view(params), prepared.seed, engine, engine_job)
+
+
+# -- same style on yue2.cpp: the describer, the codes, the section ---------------------------------------
+
+
+def _describe_reason(doc: Mapping[str, Any]) -> str:
+    return str(doc.get("reason") or "the describer gave no answer")
+
+
+def _describe_said(doc: Mapping[str, Any]) -> Dict[str, Any]:
+    """The take's `song.describe`: what the describer was and did, by name and hash (the answer is the payload)."""
+    out: Dict[str, Any] = {"status": doc.get("status"), "payload": describe.DESCRIBE_PAYLOAD}
+    if doc.get("status") == describe.DONE:
+        out.update({"alias": doc.get("alias"), "model": doc.get("model"), "answer_sha256": describe.answer_sha256(doc),
+                    "whole": doc.get("whole"), "windows": doc.get("windows"), "cached": bool(doc.get("cached")),
+                    "role": "describes only; never ranks (it scored every take 10/10 on 2026-11-26)"})
+    else:
+        out["reason"] = _describe_reason(doc)
+    return out
+
+
+async def _describe_for_job(runner: Any, job: dict, have: set, source: Path, audio: Optional[Mapping[str, Any]],
+                            entry: Mapping[str, Any]) -> Dict[str, Any]:
+    """A same-style job's description (`describe.py`), once per job: the payload when the job already has one, else
+    a skipped record when nothing is asked of the describer, else the runner's describer (which reuses one kept by
+    the audio's hash). Written as the payload `describe.result.json` before the card; never raises for the
+    describer's own failure (the record says why)."""
+    job_id, params = job["id"], job["params"]
+    if describe.DESCRIBE_PAYLOAD in have:
+        raw = await runner._call(runner.store.read_payload, job_id, describe.DESCRIBE_PAYLOAD)
+        try:
+            doc = json.loads(raw.decode("utf-8"))
+            if isinstance(doc, dict):
+                return doc
+        except (ValueError, UnicodeDecodeError):
+            pass
+        return describe.failed("the stored description is not JSON", None)
+    content_hash = params.get("source_content_hash") or entry.get("content_hash")
+    if not describe.needs_describer(params):
+        doc = describe.skipped("not asked: the style is typed and no Keep box waits for a value", content_hash)
+    elif getattr(runner, "_describer", None) is None:
+        doc = describe.skipped("this DPC runs no describer", content_hash)
+    else:
+        source_s = (audio["frames"] / audio["rate"]) if audio else float(params.get("source_duration_s") or 0)
+        try:
+            doc = await runner._describer(source, content_hash, source_s, runner.generated_root / job_id)
+        except Exception as exc:       # the describer is advice: its failure is recorded, never the job's
+            logger.warning("music: job %s: the describer failed", job_id, exc_info=True)
+            doc = describe.failed(f"{type(exc).__name__}: {exc}", None, content_hash)
+    body = json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8")
+    await runner._call(runner.store.write_payload, job_id, describe.DESCRIBE_PAYLOAD, body, endpoint=None)
+    have.add(describe.DESCRIBE_PAYLOAD)
+    return doc
+
+
+def cut_head(source: Path, start: int, end: int, dest: Path, cut_s: float, fade_ms: float = PROMPT_CUT_FADE_MS) -> Dict[str, Any]:
+    """Write the WAV at `source[start:end]` (one audio part of an engine answer on disk) to `dest` as 24-bit PCM
+    without its first `cut_s` seconds: exactly `round(cut_s x rate)` frames go, then the first `fade_ms` of what is
+    left rise from silence (a linear fade, so the take does not open mid-wave). Blocking. ValueError when less than
+    a second would be left: the model ended with the section and wrote nothing new."""
+    from . import region_edit as re_
+    import numpy as np
+    pcm = re_.read_pcm(source, start, end)
+    cut = int(round(float(cut_s) * pcm.rate))
+    left = pcm.frames - cut
+    if left < pcm.rate:
+        raise ValueError(f"the take is {pcm.frames / pcm.rate:.2f} s with its {cut_s:g} s opening section; less than a "
+                         "second of new music is left after the cut (the model ended with the section)")
+    body = np.array(pcm.data[cut:], dtype=np.float32)
+    fade = min(left, int(round(float(fade_ms) * pcm.rate / 1000.0)))
+    if fade > 0:
+        body[:fade] *= (np.arange(fade, dtype=np.float32) / np.float32(fade))[:, None]
+    try:
+        re_.write_wav_s24(dest, [body], rate=pcm.rate, channels=pcm.channels)
+    except BaseException:
+        try:
+            Path(dest).unlink()
+        except OSError:
+            pass
+        raise
+    return {"frames_cut": cut, "frames_kept": left, "rate": pcm.rate, "fade_frames": fade}
+
+
+def tokens_cache_path(generated_root: Path, sha256: str) -> Optional[Path]:
+    """`<music>/tokens/<sha256 of the decoded source>.json`: the codes of one decoded audio, kept across jobs."""
+    name = str(sha256 or "").replace(":", "-")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", name):
+        return None
+    return Path(generated_root).parent / TOKENS_DIR_NAME / f"{name}.json"
+
+
+def parse_codes(raw: bytes) -> List[int]:
+    """The codes of a `/tokenize` answer (`{"codes": "1,2,3"}`, yue-server.cpp `run_tokenize`); ValueError when it is
+    not that."""
+    doc = json.loads(raw.decode("utf-8"))
+    text = doc.get("codes") if isinstance(doc, dict) else None
+    if not isinstance(text, str):
+        raise ValueError("the answer has no codes")
+    codes = [int(c) for c in re.split(r"[,\s]+", text) if c]
+    if not codes or any(c < 0 for c in codes):
+        raise ValueError("the codes are empty or negative")
+    return codes
+
+
+async def _tokenize(runner: Any, job_id: str, engine: Any, wav: Path, engine_job: List[Optional[str]],
+                    source_s: float) -> bytes:
+    """yue2.cpp `POST /tokenize` (the source as the `audio` part), polled to its end under one deadline that grows
+    with the source like `/transcribe`'s; the answer's bytes (`{"codes": ...}`)."""
+    from .runner import _JobFailure
+    await runner._check(job_id)
+    timeout_s = transcribe_timeout_s(runner.engine_job_timeout_s, source_s)
+
+    async def call() -> bytes:
+        eid = await engine.submit_form("/tokenize", b"{}", [("audio", wav, "audio/wav")])
+        engine_job[0] = eid
+        while True:
+            await runner._check(job_id)
+            status = await engine.job_status(eid)
+            if status == "done":
+                break
+            if status in ("failed", "cancelled"):
+                raise _JobFailure(engine.with_log_tail(f"{engine.DISPLAY} /tokenize job {eid} {status}"))
+            await asyncio.sleep(runner.engine_poll_s)
+        _ctype, raw = await engine.fetch_result(eid, None)
+        engine_job[0] = None
+        return raw or b""
+
+    try:
+        return await asyncio.wait_for(call(), timeout_s)
+    except asyncio.TimeoutError:
+        eid = engine_job[0]
+        if eid:
+            await engine.cancel(eid)
+        raise _JobFailure(f"{engine.DISPLAY} /tokenize job {eid or '(not yet accepted)'} did not finish within "
+                          f"{timeout_s:g} s")
+
+
+async def _source_codes(runner: Any, job: dict, prepared: _Prepared, engine: Any,
+                        engine_job: List[Optional[str]]) -> Tuple[bytes, bool]:
+    """The source's codes for a same-style job: its payload, else the ones kept for the same decoded audio, else
+    `/tokenize`; written as the payload `tokenize.result.json` and kept by the audio's sha256. `(raw, cached)`."""
+    from .runner import _JobFailure
+    job_id = job["id"]
+    have = {p["name"] for p in (await runner._get(job_id) or {}).get("payloads") or []}
+    if TOKENIZE_PAYLOAD in have:
+        return await runner._call(runner.store.read_payload, job_id, TOKENIZE_PAYLOAD), True
+    audio = prepared.dress.song.get("source_audio") or {}
+    cache = tokens_cache_path(runner.generated_root, audio.get("sha256") or "")
+    raw: Optional[bytes] = None
+    cached = False
+    if cache is not None:
+        try:
+            raw = await asyncio.to_thread(cache.read_bytes)
+            parse_codes(raw)
+            cached = True
+        except (OSError, ValueError):
+            raw = None
+    if raw is None:
+        source_s = (audio.get("frames") or 0) / (audio.get("rate") or 1)
+        raw = await _tokenize(runner, job_id, engine, prepared.source_wav, engine_job, source_s)
+        try:
+            parse_codes(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise _JobFailure(f"the /tokenize answer is not the codes yue2.cpp returns: {exc}")
+        if cache is not None:
+            def keep() -> None:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                from .store import atomic_write_text
+                atomic_write_text(cache, raw.decode("utf-8"))
+            try:
+                await asyncio.to_thread(keep)
+            except OSError:
+                logger.warning("music: the codes of job %s were not kept", job_id, exc_info=True)
+    await runner._call(runner.store.write_payload, job_id, TOKENIZE_PAYLOAD, raw, endpoint="/tokenize")
+    return raw, cached
+
+
+async def _same_style_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: Any,
+                              engine_job: List[Optional[str]]) -> None:
+    """The source's codes (`/tokenize`, once per decoded audio), each variant's `/synth` opening on the section with
+    the merged style, then the from-text yue2 path; `_store_take` cuts the section off each take (module
+    docstring)."""
+    from .runner import _JobFailure, variant_seed, yue2_request_name
+    job_id, params = job["id"], job["params"]
+    backbone = params.get("backbone") or js.YUE2_BACKBONE_DEFAULT
+    await runner._progress(job_id, 0.02)
+    await runner._start_engine(job_id, js.ENGINE_YUE2, engine, backbone=backbone, adapters=[])
+    problem = getattr(engine, "tokenizer_problem", lambda: "the supervisor does not report an audio tokenizer")()
+    if problem:
+        raise _JobFailure(f"yue2.cpp cannot read the source's codes: {problem}. Same style on acestep.cpp runs "
+                          "without it (engine acestep)")
+    raw, cached = await _source_codes(runner, job, prepared, engine, engine_job)
+    try:
+        codes = parse_codes(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise _JobFailure(f"the stored codes of the source do not parse: {exc}")
+    sec = params["source_section"]
+    end_frame = round(float(sec["end_s"]) * js.YUE2_FRAME_RATE)
+    if end_frame > len(codes):
+        raise _JobFailure(f"the section ends at {sec['end_s']:g} s, past the source's {len(codes)} codes "
+                          f"({len(codes) / js.YUE2_FRAME_RATE:g} s at {js.YUE2_FRAME_RATE} a second)")
+    tokens = ",".join(str(c) for c in codes)
+    style = prepared.style if prepared.style is not None else caption_sent(params)
+    context = check_song_context(params, style)
+    have = {p["name"] for p in (await runner._get(job_id) or {}).get("payloads") or []}
+    for index in range(int(params["variants"])):
+        name = yue2_request_name(index + 1)
+        if name not in have:
+            body = build_yue2_song_body(params, variant_seed(prepared.seed, index), style=style,
+                                        source_tokens=tokens)
+            await runner._call(runner.store.write_payload, job_id, name, body, endpoint="/synth")
+    now = await runner._get(job_id)
+    sha = next((p["sha256"] for p in (now or {}).get("payloads") or [] if p["name"] == TOKENIZE_PAYLOAD), None)
+    if sha:
+        prepared.dress.extra_payloads[TOKENIZE_PAYLOAD] = sha
+    song = prepared.dress.song
+    song["codes"] = {"payload": TOKENIZE_PAYLOAD, "count": len(codes), "frame_rate": js.YUE2_FRAME_RATE,
+                     "kept_across_jobs": cached, "by": "yue2.cpp POST /tokenize (the audio tokenizer, --tokenizer)"}
+    song["prompt_cut"] = {"cut": True, "section_s": section_s_of(params), "fade_in_ms": PROMPT_CUT_FADE_MS,
+                          "at": "the section's length x the take's sample rate, in whole samples"}
+    song["length"] = {"section_s": section_s_of(params), "new_part_s": float(params["duration_s"]),
+                      "duration_sent_s": round(float(params["duration_s"]) + section_s_of(params), 3),
+                      "context": context}
+    await runner._progress(job_id, 0.1)
+    await runner._produce_yue2(job_id, text_view(params, style), prepared.seed, engine, engine_job)
