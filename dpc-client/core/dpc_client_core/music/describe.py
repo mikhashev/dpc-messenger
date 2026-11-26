@@ -259,6 +259,16 @@ def plan_windows(source_s: float, context: Optional[int]) -> List[Tuple[float, f
 
 _VOCALS_WORDS = {"none": "instrumental", "male": "male vocals", "female": "female vocals", "mixed": "mixed vocals",
                  "choir": "choir"}
+_BPM_MENTION = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*bpm\b", re.IGNORECASE)
+_KEY_TAG = re.compile(r"^([A-G])([#b♯♭]?)\s*((?i:major|minor|maj|min)|m)$")
+_TIMESIG_TAG = re.compile(r"^(?:(\d+/\d+)(?:\s+time)?|(\d+)\s+time)$", re.IGNORECASE)
+_VOCALS_POS_TAG = re.compile(r"^(?:(?:male|female|mixed|with|lead|backing)\s+)?vocals?$|^choir$", re.IGNORECASE)
+_VOCALS_NEG_TAG = re.compile(r"^(?:instrumental|no\s+vocals?|without\s+vocals?)$", re.IGNORECASE)
+_VOCALS_POS_IN_TEXT = re.compile(
+    r"\b(?:(?:male|female|mixed|with|lead|backing)\s+)?(?<!\bno\s)(?<!\bwithout\s)(?:vocals?|choir)\b",
+    re.IGNORECASE,
+)
+_VOCALS_NEG_IN_TEXT = re.compile(r"\b(?:instrumental|no\s+vocals?|without\s+vocals?)\b", re.IGNORECASE)
 
 
 def keep_value(key: str, answer: Mapping[str, Any]) -> Any:
@@ -280,27 +290,165 @@ def keep_value(key: str, answer: Mapping[str, Any]) -> Any:
     return None
 
 
-def _keep_words(key: str, value: Any, answer: Mapping[str, Any]) -> str:
-    """A filled kept value as the style words the form builds from Keep (musicSimilar.ts `captionFromKeep`)."""
+def _keep_words(key: str, value: Any, answer: Optional[Mapping[str, Any]] = None) -> str:
+    """A kept value as the style words the form builds from Keep (musicSimilar.ts `captionFromKeep`)."""
     if key == "bpm":
         return f"{value} BPM"
-    if key == "timesig":
-        return f"{value} time"
+    if key in ("timesig", "timesignature"):
+        text = str(value).strip()
+        return text if re.search(r"\btime$", text, re.IGNORECASE) else f"{text} time"
     if key == "vocals":
-        return _VOCALS_WORDS.get(str(answer.get("vocals")), "with vocals")
+        if answer is not None:
+            return _VOCALS_WORDS.get(str(answer.get("vocals")), "with vocals")
+        return "instrumental" if str(value).strip().lower() == "instrumental" else (
+            "with vocals" if str(value).strip().lower() == "vocals" else str(value)
+        )
     return str(value)
+
+
+def _typed_keep_value(key: str, raw: Any) -> Any:
+    """Clean one typed `params.keep` value, or None if empty/invalid."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    if key == "bpm":
+        if isinstance(raw, int):
+            return raw if raw > 0 else None
+        if isinstance(raw, str) and raw.strip().isdigit():
+            n = int(raw.strip())
+            return n if n > 0 else None
+        return None
+    text = " ".join(str(raw).split()).strip(" ,;")
+    return text or None
+
+
+def _normalize_key_tag(text: str) -> Optional[Tuple[str, str]]:
+    """Normalized `(tonic, 'major'|'minor')` for a standalone key tag, or None."""
+    m = _KEY_TAG.fullmatch(text.strip())
+    if not m:
+        return None
+    accidental = {"♯": "#", "♭": "b"}.get(m.group(2), m.group(2))
+    mode = "minor" if m.group(3).lower() in ("m", "min", "minor") else "major"
+    return m.group(1) + accidental, mode
+
+
+def _timesig_of_tag(text: str) -> Optional[str]:
+    """Normalized meter token (`3/4`, `4`) for a standalone time-signature tag, or None."""
+    m = _TIMESIG_TAG.fullmatch(text.strip())
+    return (m.group(1) or m.group(2)).lower() if m else None
+
+
+def _has_token(text: str, words: str) -> bool:
+    """Case-insensitive match for `words` not bounded by word, slash, or hyphen characters."""
+    if not text or not words:
+        return False
+    return re.search(rf"(?<![\w/-]){re.escape(words)}(?![\w/-])", text, re.IGNORECASE) is not None
+
+
+def _replace_comma_tag(text: str, predicate: Callable[[str], bool], replacement: str) -> Tuple[str, bool]:
+    """Replace the first comma-separated tag matching `predicate` with `replacement` and drop duplicates."""
+    tags = [t.strip() for t in text.split(",") if t.strip()]
+    out: List[str] = []
+    replaced = False
+    for tag in tags:
+        if predicate(tag):
+            if not replaced:
+                out.append(replacement)
+                replaced = True
+        else:
+            out.append(tag)
+    return ", ".join(out), replaced
+
+
+def _apply_tag_keep(caption_text: str, parts: List[str], words: str,
+                    parse_tag: Callable[[str], Any], want: Any) -> str:
+    """Update a matching comma tag in `caption_text` or append `words` when absent."""
+    tags = [t.strip() for t in caption_text.split(",") if t.strip()]
+    if want is not None and any(parse_tag(t) == want for t in tags):
+        return caption_text
+    if any(parse_tag(t) is not None for t in tags):
+        updated, _ = _replace_comma_tag(caption_text, lambda t: parse_tag(t) is not None, words)
+        return updated
+    if not _has_token(caption_text, words) and not _has_token(", ".join(parts), words):
+        parts.append(words)
+    return caption_text
+
+
+def _apply_typed_keep(caption_text: str, parts: List[str], key: str, value: Any) -> str:
+    """Apply one typed `params.keep` attribute to `caption_text` / `parts`, overriding conflicts."""
+    words = _keep_words(key, value)
+    if key == "bpm":
+        matches = list(_BPM_MENTION.finditer(caption_text))
+        if matches:
+            if all(abs(float(m.group(1)) - float(value)) < 1e-6 for m in matches):
+                return caption_text
+            return _BPM_MENTION.sub(words, caption_text)
+        if not _has_token(", ".join(parts), words):
+            parts.append(words)
+        return caption_text
+    if key in ("key", "keyscale"):
+        return _apply_tag_keep(caption_text, parts, words, _normalize_key_tag, _normalize_key_tag(words))
+    if key in ("timesig", "timesignature"):
+        norm = re.sub(r"\s+time$", "", str(value).strip(), flags=re.IGNORECASE).lower()
+        return _apply_tag_keep(caption_text, parts, words, _timesig_of_tag, norm)
+    if key == "vocals":
+        low = str(value).strip().lower()
+        if low == "instrumental":
+            if _VOCALS_NEG_IN_TEXT.search(caption_text):
+                return caption_text
+            caption_text, replaced = _replace_comma_tag(
+                caption_text, lambda t: _VOCALS_POS_TAG.fullmatch(t) is not None, "instrumental"
+            )
+            if not replaced and not _has_token(", ".join(parts), "instrumental"):
+                parts.append("instrumental")
+            return caption_text
+        if low == "vocals":
+            if _VOCALS_POS_IN_TEXT.search(caption_text):
+                return caption_text
+            caption_text, replaced = _replace_comma_tag(
+                caption_text, lambda t: _VOCALS_NEG_TAG.fullmatch(t) is not None, "with vocals"
+            )
+            if not replaced and not _has_token(", ".join(parts), "with vocals"):
+                parts.append("with vocals")
+            return caption_text
+    if not _has_token(caption_text, words) and not _has_token(", ".join(parts), words):
+        parts.append(words)
+    return caption_text
+
+
+def _already_mentioned(caption_text: str, parts: Sequence[str], key: str, value: Any,
+                       answer: Mapping[str, Any]) -> bool:
+    """Whether `caption_text` or `parts` already names the describer-filled attribute."""
+    joined_parts = ", ".join(parts)
+    words = _keep_words(key, value, answer)
+    if key == "bpm":
+        return bool(_BPM_MENTION.search(caption_text) or _BPM_MENTION.search(joined_parts))
+    if key == "key":
+        if _has_token(caption_text, words) or _has_token(joined_parts, words):
+            return True
+        return any(_normalize_key_tag(t) is not None for t in caption_text.split(",") if t.strip())
+    if key == "timesig":
+        norm = str(value).strip().lower()
+        if _has_token(caption_text, words) or _has_token(joined_parts, words):
+            return True
+        return any(_timesig_of_tag(t) == norm for t in caption_text.split(",") if t.strip())
+    if key == "vocals":
+        return bool(_VOCALS_POS_IN_TEXT.search(caption_text) or _VOCALS_NEG_IN_TEXT.search(caption_text)
+                    or _has_token(joined_parts, words))
+    return _has_token(caption_text, words) or _has_token(joined_parts, words)
 
 
 def merged_style(params: Mapping[str, Any], answer: Optional[Mapping[str, Any]]) -> Tuple[str, Dict[str, Any]]:
     """The style a same-style song on yue2.cpp sends, and what was done: the person's caption when typed, else
-    the description's style line; then each `keep_from_source` value the description gives, as the form's Keep
-    words, unless the style already names it. The caption as sent (`job_schemas.song_caption_sent`, the theme of
-    new lyrics with it) stays first and whole. When the style is the description's own line, its genre and mood
-    are already in it in other words (the live probe: "Acoustic folk, singer-songwriter, ..." then "Acoustic Folk /
-    Singer-Songwriter" again), so only the tempo, key, time signature and vocals are added. `said` records the
-    filled values and what had none."""
-    base = js.song_caption_sent(params.get("caption") or "", params.get("lyrics_theme"))
-    from_describer = not (params.get("caption") or "").strip()
+    the description's style line; then typed `params.keep` values (winning over the describer and
+    `keep_from_source`, updating conflicting tags and avoiding duplicates); then each remaining
+    `keep_from_source` value the description gives, as the form's Keep words, unless the style already names it.
+    The caption as sent (`job_schemas.song_caption_sent`, the theme of new lyrics with it) stays first and whole.
+    When the style is the description's own line, its genre and mood are already in it in other words (the live
+    probe: "Acoustic folk, singer-songwriter, ..." then "Acoustic Folk / Singer-Songwriter" again), so only the
+    tempo, key, time signature and vocals are added from `keep_from_source`. `said` records the filled values
+    and what had none."""
+    raw_caption = params.get("caption") or ""
+    from_describer = not raw_caption.strip()
     filled: Dict[str, Any] = {}
     missing: List[str] = []
     parts: List[str] = []
@@ -309,8 +457,25 @@ def merged_style(params: Mapping[str, Any], answer: Optional[Mapping[str, Any]])
         line = (answer or {}).get("style") or ""
         if not line and answer:
             line = ", ".join(x for x in [answer.get("genre") or "", *(answer.get("tags") or [])] if x)
-        base = js.song_caption_sent(line, params.get("lyrics_theme")) if line else base
+        caption_text = " ".join(line.split())
+    else:
+        caption_text = " ".join(str(raw_caption).split())
+
+    raw_keep = params.get("keep") if isinstance(params.get("keep"), Mapping) else {}
+    ordered_keys = (*js.KEEP_KEYS, *(k for k in raw_keep if k not in js.KEEP_KEYS))
+    typed_keep: Dict[str, Any] = {}
+    for key in ordered_keys:
+        if key not in raw_keep:
+            continue
+        cleaned = _typed_keep_value(key, raw_keep[key])
+        if cleaned is None:
+            continue
+        typed_keep[key] = cleaned
+        caption_text = _apply_typed_keep(caption_text, parts, key, cleaned)
+
     for key in params.get("keep_from_source") or []:
+        if key in typed_keep:
+            continue
         value = keep_value(key, answer or {})
         if value is None:
             missing.append(key)
@@ -318,9 +483,12 @@ def merged_style(params: Mapping[str, Any], answer: Optional[Mapping[str, Any]])
         filled[key] = value
         if line and key in ("genre", "mood"):
             continue
-        words = _keep_words(key, value, answer or {})
-        if words.lower() not in base.lower() and words.lower() not in ", ".join(parts).lower():
-            parts.append(words)
+        if not _already_mentioned(caption_text, parts, key, value, answer or {}):
+            parts.append(_keep_words(key, value, answer or {}))
+
+    base = js.song_caption_sent(caption_text, params.get("lyrics_theme")) if caption_text else (
+        js.song_caption_sent("", params.get("lyrics_theme")) if params.get("lyrics_theme") else ""
+    )
     style = ", ".join(x for x in [base.strip(" ,"), *parts] if x)
     said = {"style_from": "describer" if from_describer else "typed", "keep_filled": filled,
             "keep_without_value": missing}

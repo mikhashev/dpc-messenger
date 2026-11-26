@@ -153,6 +153,66 @@ def test_typed_values_win_and_the_description_fills_only_what_was_left_empty():
     assert describe.needs_describer({"caption": "x", "keep_from_source": ["mood"]})
 
 
+def test_merged_style_keeps_typed_params_keep_and_typed_beats_describer():
+    # Describe-then-edit UI path: caption comes from Flamingo (no BPM/key/timesig), keep carries all checked values,
+    # keep_from_source is empty and answer is None (describer is skipped).
+    style, said = describe.merged_style(
+        {"caption": ANSWER["style"],
+         "keep": {"genre": "kazakh folk", "bpm": 128, "key": "D minor", "timesig": "3/4", "mood": "wistful",
+                  "structure": "verse-chorus", "vocals": "vocals"},
+         "keep_from_source": []},
+        None,
+    )
+    assert style == "kazakh folk ballad, dombra, male vocals, wistful, 128 BPM, D minor, 3/4 time, verse-chorus"
+    assert said == {"style_from": "typed", "keep_filled": {}, "keep_without_value": []}
+
+    # Corrected Keep values replace conflicting tags in a filled caption instead of duplicating or losing them.
+    style, _ = describe.merged_style(
+        {"caption": "kazakh folk ballad, 96 BPM, D minor, 3/4 time, male vocals",
+         "keep": {"bpm": 128, "key": "E minor", "timesig": "4/4", "vocals": "instrumental"}},
+        None,
+    )
+    assert style == "kazakh folk ballad, 128 BPM, E minor, 4/4 time, instrumental"
+
+    # Typed values already matching the caption are not duplicated, and partial numbers ("6 BPM", "4 time") or prose
+    # keys ("A major rock anthem") are not misread or corrupted.
+    style, _ = describe.merged_style(
+        {"caption": "A major rock anthem, 96 BPM, 3/4 time",
+         "keep": {"bpm": 6, "key": "E minor", "timesig": "4"}},
+        None,
+    )
+    assert style == "A major rock anthem, 6 BPM, 4 time, E minor"
+
+    style, _ = describe.merged_style(
+        {"caption": "indie rock, 96 bpm, d minor, 3/4 time, with vocals",
+         "keep": {"bpm": 96, "key": "D minor", "timesig": "3/4", "vocals": "vocals"}},
+        None,
+    )
+    assert style == "indie rock, 96 bpm, d minor, 3/4 time, with vocals"
+
+    # Typed params.keep wins over Flamingo's keep_from_source when both name a field, and over Flamingo's style line.
+    style, said = describe.merged_style(
+        {"caption": "folk", "keep": {"bpm": 128}, "keep_from_source": ["bpm", "key"]},
+        ANSWER,
+    )
+    assert style == "folk, 128 BPM, D minor"
+    assert said == {"style_from": "typed", "keep_filled": {"key": "D minor"}, "keep_without_value": []}
+
+    style, said = describe.merged_style(
+        {"caption": "", "keep": {"bpm": 128, "genre": "synthwave"}, "keep_from_source": ["key"]},
+        dict(ANSWER, style="kazakh folk ballad, 96 BPM, male vocals"),
+    )
+    assert style == "kazakh folk ballad, 128 BPM, male vocals, synthwave, D minor"
+    assert said == {"style_from": "describer", "keep_filled": {"key": "D minor"}, "keep_without_value": []}
+
+    # Lyrics theme stays attached to the caption before kept values; vocals='vocals' adds 'with vocals' when absent.
+    style, _ = describe.merged_style(
+        {"caption": "synthwave", "lyrics_theme": "night roads", "keep": {"bpm": 128, "vocals": "vocals"}},
+        None,
+    )
+    assert style == "synthwave, lyrics about night roads, 128 BPM, with vocals"
+
+
 def test_a_four_minute_source_is_heard_whole_and_a_long_one_in_three_windows():
     assert describe.plan_windows(237.4, 16384) == [(0.0, 237.4)]
     w = describe.plan_windows(900.0, 16384)
@@ -494,3 +554,52 @@ async def test_describe_source_answers_the_suggestion_and_keeps_it_by_the_audio_
     assert record["status"] == "skipped" and "music_flamingo" in record["reason"]
     missing = await service.describe_music_track(track_id="trk_ffffffffffffffff")
     assert missing["code"] == "invalid_source"
+
+
+@pytest.mark.asyncio
+async def test_describe_then_edit_keep_reaches_yue2_style_and_style_sent_through_propose_music_job(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(describe, "ffmpeg_window_decoder", lambda *a, **k: _copy_decoder([]))
+    rig, _record = await _rig(tmp_path, monkeypatch, describer=None)
+    async with rig:
+        path = _write_source(tmp_path / "music" / "Two Strings.wav")
+        entry = await rig.library.register_generated(str(path), job_id="job_" + "1" * 16, lineage={"variant": 1})
+        rig.library._entries[entry["id"]]["duration_s"] = 12.0
+        service = _Service(tmp_path, {}, {"music_flamingo": _Describer()}, rig.library)
+        service._music_jobs_instance = rig.store
+        service._music_runner_instance = rig.runner
+        service._music_engines_instance = rig.engines
+
+        described = await service.describe_music_track(track_id=entry["id"])
+        assert described["status"] == "ok", described
+        sugg = described["suggestion"]
+        assert sugg["caption"] == ANSWER["style"]
+
+        # Simulate MusicSimilar applyDescription + editing BPM to 128 and checking Key ('D minor') before Create.
+        params = {
+            "caption": sugg["caption"],
+            "keep": {
+                "genre": sugg["keep"]["genre"],
+                "bpm": 128,
+                "key": sugg["keep"]["key"],
+                "mood": sugg["keep"]["mood"],
+                "vocals": sugg["keep"]["vocals"],
+            },
+            "variants": 1,
+            "seed": 7,
+            "duration_s": 30,
+            "source_section": {"start_s": 2, "end_s": 12},
+        }
+        proposed = await service.propose_music_job(type="generate_similar", track_id=entry["id"], params=params)
+        assert proposed["status"] == "ok", proposed
+        done = await rig.wait_for(proposed["job"]["id"], DONE)
+        assert done["state"] == js.REVIEW, done.get("state_reason")
+
+        expected_style = "kazakh folk ballad, dombra, male vocals, wistful, 128 BPM, D minor"
+        body = json.loads(rig.store.read_payload(done["id"], "synth.v1.request.json"))
+        assert body["style"] == expected_style
+        take = rig.store.list_takes(done["id"])[0]
+        side = _sidecar(take)
+        assert side["song"]["style_sent"] == expected_style
+        assert side["caption_sent"] == expected_style
+        assert rig.library.get_entry(take["library_track_id"])["source"]["lineage"]["caption"] == expected_style

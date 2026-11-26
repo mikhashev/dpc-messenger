@@ -185,6 +185,31 @@ describe('the generate-similar dialog', () => {
         expect(typed.caption).toBe('mine');
     });
 
+    it('sends filled and edited Keep values alongside the described caption on yue2', () => {
+        let f = emptySimilarForm(local);
+        f = applyDescription(f, {
+            caption: 'kazakh folk ballad, dombra, male vocals, wistful',
+            keep: { genre: 'kazakh folk', bpm: 96, key: 'D minor', timesig: '3/4', mood: 'wistful', vocals: 'vocals' },
+        });
+        f.keepValues.bpm = '128';
+        f.keep.key = true;
+        const v = validateSimilarForm(f);
+        expect(v).toEqual({
+            ok: true,
+            type: 'generate_similar',
+            trackId: 'trk_1',
+            params: {
+                caption: 'kazakh folk ballad, dombra, male vocals, wistful',
+                variants: 2,
+                engine: 'yue2',
+                source_section: { start_s: 0, end_s: 30 },
+                duration_s: 212,
+                keep: { genre: 'kazakh folk', bpm: 128, key: 'D minor', mood: 'wistful', vocals: 'vocals' },
+                lyrics_mode: 'none',
+            },
+        });
+    });
+
     it('starts same style on the engine the report says runs, and reads the describer', () => {
         const same = (yue2: string, fallback: string | null) => ({ features: { same_style: { default_engine: 'yue2',
             fallback_engine: fallback, same_style_engines: { yue2: { status: yue2, reason: 'r' }, acestep: { status: 'supported' } } },
