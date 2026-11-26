@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:* ws://localhost:* ws://127.0.0.1:9999 https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: blob: asset: http://asset.localhost https://asset.localhost http://localhost:*; media-src 'self' mediastream: blob: asset: http://asset.localhost https://asset.localhost http://127.0.0.1:9996 http://localhost:9998;",
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:* ws://localhost:* ws://127.0.0.1:9999 https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: blob: asset: http://asset.localhost https://asset.localhost; media-src 'self' mediastream: blob: asset: http://asset.localhost https://asset.localhost http://127.0.0.1:9996 http://localhost:9998;",
       "assetProtocol": {
         "enable": true,
         "scope": [

@@ -43,6 +43,10 @@ describe('tauri.conf.json CSP', () => {
         },
     );
 
+    it('img-src does not allow http://localhost:* (blocks markdown image probing of local HTTP ports)', () => {
+        expect(img).not.toContain('http://localhost:*');
+    });
+
     it('default-src (the fallback for connect-src) allows the backend socket ws://127.0.0.1:9999', () => {
         // coreService.ts API_URL; a CSP host source "localhost" does not match 127.0.0.1.
         expect(directive('default-src')).toContain('ws://127.0.0.1:9999');
