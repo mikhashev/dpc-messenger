@@ -1,443 +1,712 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Based on Ruach Studio by Viktor Zhuromskyy · https://github.com/igrbible/Ruach_Studio · GNU AGPL v3 or later
-#
-# Ported from Ruach Studio (Copyright 2026 Viktor Zhuromskyy), checkout 200fe5ad, build/tools/console/app.js:
-# the recording's level before its score is read (lines 11066-11120), scoreParts (7034-7055), barSeconds
-# (10181-10187) and Match sections (11199-11305). MODIFIED version, not the original Ruach Studio: ported to
-# Python and changed by CC (Claude Code, for DPC) on 2026-11-26 (line times from the stored synced lyrics, not
-# Whisper; untagged lyrics cut at section boundaries first, `pre_tag`; the native ABC read without HeresyAbc;
-# applied by the cover job, not proposed in a dialog). Ruach Studio's section 7 additional terms apply
-# (LICENSE-ADDITIONAL-TERMS.md there): keep the attribution, mark changes, no rights to its name or logo.
-"""What a YuE2 cover does to the source's score and the lyrics before `/synth` (music/similar.py).
+"""The score side of a yue2.cpp cover: what SheetSage2's transcription is used for before the song is sung.
 
-**The level** (`transcriber_gain_db`). A recording louder than the transcriber hears cleanly (above
--14 LUFS integrated, or a peak above -1 dBFS) is brought down by one gain to -16 LUFS, its peak held at
--1.5 dBFS; no limiter, so what clipping cut off stays cut. Within bounds it goes as it is. With no
-loudness reading, the peak half of the rule still applies (a peak above -1 dBFS comes down to -1.5).
+A cover on yue2.cpp (`similar._cover_on_yue2`) sends the engine a score of the source, written by yue2.cpp's
+`/transcribe` in its native two-voice ABC dialect (a `Vocal` voice for the sung line, an `Ins` voice for the
+lead instrument, `% <name>` comment lines that name the sections). This module does the pure text and number
+work around that score:
 
-**The vocal line** (`keep_vocal_voice`): Ruach's "Vocal melody only" transcription keeps the score's
-Vocal voice. Here the Ins voice's notes become rests of the same length instead of the voice being
-removed, the way YuE2 Studio's `abc_tools.strip_chords(keep_voice=...)` silences a voice, so the score
-keeps the native two-voice form yue2.cpp writes and reads (`src/notation.h` writes both voices).
+- `transcriber_gain_db`: whether a recording is too loud for the transcriber, and the one gain that brings it
+  into bounds (the audio side is `similar._level_for_transcriber`).
+- `keep_vocal_voice`: the score with the Ins voice silenced, for "Vocal melody only".
+- `score_head`, `bar_seconds`, `score_parts`: the score's tempo, meter and key, the length of a bar, and its
+  sections with their times and whether the voice sings in them.
+- `pre_tag` and `match_sections` (Match sections): the lyrics' blocks tagged with the section of the score they
+  are sung in, by the times of the track's synced lyrics; tags added for sections the lyrics do not reach; the
+  words never change. `counts_of` sums up its report.
+- `agree_style`: the style caption made to agree with the score's tempo and key.
 
-**The parts** (`score_parts`): each run of `% name` lines opens a part; its start is the Vocal voice's
-time there (bars counted by the meter, at the score's `Q:`), measured from the score's first bar.
-
-**Match sections** (`match_sections`): each block of the lyrics takes the tag of the score section it is
-sung in, by where its first line is sung (a bar's pickup counted in); a block heard late in a section
-(after 75 %) is unsure unless it continues the section before; a section the voice is silent in becomes
-an instrumental tag; a sung section the lyrics skip gets the last block of its kind again (a chorus
-written once and sung again). Words never change. Blocks sung where the line times do not say stay as
-they were ("unsure"). Untagged lyrics are cut into blocks at the section boundaries first (`pre_tag`).
-
-**The style against the score** (`agree_style`): the yue2-style rule of Ruach's `heresy/skills/
-yue2-style/SKILL.md` (lines 64-65, 126): the tempo tag takes the score's `Q:`, a key stays only if it
-agrees with `K:`, and every change is reported.
+The approach follows the ideas of Ruach Studio's cover chain; it is reimplemented from a description of the
+rules, no code copied. Pure functions, standard library only, no I/O.
 """
 
 from __future__ import annotations
 
 import math
 import re
+from fractions import Fraction
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-# -- the level (app.js:11066-11120, HERESY 2651) -------------------------------------------------------
+# -- the level the transcriber hears ----------------------------------------------------------------------
 
-LEVEL_LUFS_MAX = -14.0
-LEVEL_PEAK_MAX_DB = -1.0
-LEVEL_TARGET_LUFS = -16.0
-LEVEL_PEAK_CEILING_DB = -1.5
+LEVEL_LUFS_MAX = -14.0          # louder than this integrated loudness: level it
+LEVEL_PEAK_MAX_DB = -1.0        # or a peak above this
+LEVEL_TARGET_LUFS = -16.0       # the loudness one gain aims at
+LEVEL_PEAK_CEILING_DB = -1.5    # and the peak it may leave at most
 
 
-def transcriber_gain_db(lufs: Optional[float], peak_db: Optional[float],
-                        mix_peak_db: Optional[float] = None) -> Optional[float]:
-    """The one gain (dB) that brings a recording too loud for the transcriber to -16 LUFS with its peak
-    at -1.5 dBFS at most, or None when it goes as it is (within bounds, or nothing known). A reading with
-    no loudness is judged on its peak alone: over -1 dBFS, the gain that brings the peak to -1.5 dBFS (the
-    rule's peak half is not lost on a partial reading; follow-up 18, Zcode #195). A non-finite peak is no peak.
-    With a loudness and no peak, `mix_peak_db` (the measured sample peak of the very mix the gain is applied to)
-    stands in as the ceiling's reference: the gain never lifts it over -1.5 dBFS, and a mix with no peak at all
-    (`-inf`, digital silence) gets no gain (follow-up 20, Zcode #201). Without `mix_peak_db` the gain follows
-    the loudness alone."""
-    lufs_ok = isinstance(lufs, (int, float)) and not isinstance(lufs, bool) and math.isfinite(lufs)
-    peak_ok = isinstance(peak_db, (int, float)) and not isinstance(peak_db, bool) and math.isfinite(peak_db)
-    if not (lufs_ok and lufs > LEVEL_LUFS_MAX or peak_ok and peak_db > LEVEL_PEAK_MAX_DB):
+def _reading(value: Any) -> Optional[float]:
+    """A measured number, or None when the value is no usable reading (None, text, bool, NaN, +-inf)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if not lufs_ok:
-        return round(LEVEL_PEAK_CEILING_DB - peak_db, 2)
-    gain = LEVEL_TARGET_LUFS - lufs
-    if not peak_ok and isinstance(mix_peak_db, (int, float)) and not isinstance(mix_peak_db, bool):
+    return float(value) if math.isfinite(value) else None
+
+
+def transcriber_gain_db(lufs: Any, peak_db: Any, mix_peak_db: Any = None) -> Optional[float]:
+    """The one gain in dB (2 decimals) that brings a recording into the transcriber's bounds, or None to leave
+    it as it is.
+
+    It acts only when the loudness is above `LEVEL_LUFS_MAX` or the peak above `LEVEL_PEAK_MAX_DB`. With a
+    loudness, the gain aims at `LEVEL_TARGET_LUFS` but never leaves the peak above `LEVEL_PEAK_CEILING_DB`; the
+    peak is `peak_db`, or, when that is unknown, `mix_peak_db` (the mix's own sample peak; a non-finite one,
+    such as -inf for digital silence, means no gain at all). With no loudness, the peak alone is brought to the
+    ceiling."""
+    loud, peak = _reading(lufs), _reading(peak_db)
+    too_loud = loud is not None and loud > LEVEL_LUFS_MAX
+    too_hot = peak is not None and peak > LEVEL_PEAK_MAX_DB
+    if not (too_loud or too_hot):
+        return None
+    if loud is None:                                     # only the peak can have triggered
+        return round(LEVEL_PEAK_CEILING_DB - peak, 2)
+    gain = LEVEL_TARGET_LUFS - loud
+    reference = peak
+    if reference is None and isinstance(mix_peak_db, (int, float)) and not isinstance(mix_peak_db, bool):
         if not math.isfinite(mix_peak_db):
             return None
-        peak_db, peak_ok = float(mix_peak_db), True
-    if peak_ok and peak_db + gain > LEVEL_PEAK_CEILING_DB:
-        gain = LEVEL_PEAK_CEILING_DB - peak_db
+        reference = float(mix_peak_db)
+    if reference is not None and reference + gain > LEVEL_PEAK_CEILING_DB:
+        gain = LEVEL_PEAK_CEILING_DB - reference
     return round(gain, 2)
 
 
-# -- the native dialect ----------------------------------------------------------------------------
+# -- reading the score ------------------------------------------------------------------------------------
 
-_NOTE = re.compile(r"(?P<acc>\^\^|__|\^|_|=)?(?P<note>[A-Ga-g])(?P<oct>[,']*)(?P<duration>[0-9]*)(?P<tie>-?)")
-_QUOTED = re.compile(r'"[^"\n]*"')
-_INLINE = re.compile(r"\[[A-Za-z]:[^\]\n]*\]")
+_INLINE_FIELD = re.compile(r"\[[A-Za-z]:[^\]\n]*\]")
+_CHORD_SYMBOL = re.compile(r'"[^"\n]*"')
+_DECORATION = re.compile(r"![^!\n]*!")
+_FIELD_LINE = re.compile(r"^[A-Za-z]:")
+_MULTI_REST = re.compile(r"Z(\d*)")
+_TEMPO = re.compile(r"\s*(?:(\d+)\s*/\s*(\d+)\s*=\s*)?(\d+(?:\.\d+)?)")
+_METER = re.compile(r"(\d+)\s*/\s*(\d+)")
 
 
-def _header_end(lines: Sequence[str]) -> int:
-    """The index after the header's `K:` line (the first one), or -1."""
+def _lines_of(abc: str) -> List[str]:
+    return abc.replace("\r", "").split("\n")
+
+
+def _key_line_index(lines: Sequence[str]) -> Optional[int]:
+    """The index of the line that ends the header (the first one starting with `K:`), or None: not a score."""
     for i, line in enumerate(lines):
         if line.startswith("K:"):
-            return i + 1
-    return -1
+            return i
+    return None
 
 
-def keep_vocal_voice(abc: str) -> str:
-    """The score with the Ins voice's notes turned into rests of the same length (the Vocal voice, the chord
-    symbols, the bars and the sections as they were). A score without a `K:` line is returned unchanged."""
-    lines = abc.replace("\r", "").split("\n")
-    start = _header_end(lines)
-    if start < 0:
-        return abc
-    voice = None
-    out = lines[:start]
-    for line in lines[start:]:
-        s = line.strip()
-        if s.startswith("V:"):
-            voice = s[2:].strip().split()[0] if s[2:].strip() else None
-        elif voice == "Ins" and s.endswith("|") and not s.startswith("%"):
-            # Inline fields (`[K:Am]`) stay as they are: only the notes between them become rests.
-            pieces = re.split(r"(\[[A-Za-z]:[^\]\n]*\])", _QUOTED.sub("", line))
-            line = "".join(p if _INLINE.fullmatch(p) else _NOTE.sub(lambda m: "z" + m.group("duration"), p)
-                           for p in pieces)
-        out.append(line)
-    return "\n".join(out)
+def _first_field(lines: Sequence[str], letter: str) -> Optional[str]:
+    prefix = letter + ":"
+    for line in lines:
+        if line.startswith(prefix):
+            return line[len(prefix):]
+    return None
 
 
-def _meter(text: str) -> Optional[float]:
-    m = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", text)
-    if m and int(m.group(2)):
-        return int(m.group(1)) / int(m.group(2))
-    return 1.0 if text.strip().startswith("C") else None
+def _tempo_of(value: Optional[str]) -> Optional[float]:
+    """Quarter notes a minute from a `Q:` value (`1/4=120`, `120`, `3/8=60`), or None."""
+    if value is None:
+        return None
+    m = _TEMPO.match(value)
+    if not m:
+        return None
+    beats = float(m.group(3))
+    if beats <= 0:
+        return None
+    if m.group(1) is None:
+        return beats
+    num, den = int(m.group(1)), int(m.group(2))
+    if num <= 0 or den <= 0:
+        return None
+    return beats * num * 4 / den
+
+
+def _meter_of(value: Optional[str]) -> Optional[float]:
+    """A bar as a fraction of a whole note from an `M:` value (`3/4` is 0.75, `C` and `C|` are 1.0), or None."""
+    if value is None:
+        return None
+    text = value.strip()
+    if text in ("C", "C|"):
+        return 1.0
+    m = _METER.fullmatch(text)
+    if not m:
+        return None
+    num, den = int(m.group(1)), int(m.group(2))
+    if num <= 0 or den <= 0:
+        return None
+    return num / den
 
 
 def score_head(abc: str) -> Dict[str, Any]:
-    """`{bpm, meter, key}` of the score's header (`Q:1/4=N`, `M:n/d`, `K:`), each None when absent."""
-    q = re.search(r"^Q:\s*(?:(\d+)\s*/\s*(\d+)\s*=\s*)?(\d+(?:\.\d+)?)", abc, re.M)
-    m = re.search(r"^M:\s*(C\|?|\d+\s*/\s*\d+)", abc, re.M)
-    k = re.search(r"^K:\s*(\S+)", abc, re.M)
-    bpm = None
-    if q and float(q.group(3)) > 0:
-        unit = int(q.group(1)) / int(q.group(2)) if q.group(1) and int(q.group(2)) else 0.25
-        bpm = float(q.group(3)) * unit / 0.25
-    return {"bpm": bpm, "meter": _meter(m.group(1)) if m else None, "key": k.group(1) if k else None}
+    """The score's tempo (`bpm`, quarter notes a minute), bar length (`meter`, of a whole note) and key token
+    (`key`), from the first `Q:`, `M:` and `K:` line; each None when absent or unreadable."""
+    lines = _lines_of(abc)
+    key_value = _first_field(lines, "K")
+    tokens = key_value.split() if key_value is not None else []
+    return {"bpm": _tempo_of(_first_field(lines, "Q")), "meter": _meter_of(_first_field(lines, "M")),
+            "key": tokens[0] if tokens else None}
 
 
 def bar_seconds(abc: str) -> float:
-    """A bar's seconds by the score's head (M:, Q:), or 0 when it cannot be read (barSeconds)."""
+    """Seconds in one bar of the score (3 decimals), or 0.0 when unknown or outside 0.3-8 s."""
     head = score_head(abc)
-    if not head["bpm"] or head["meter"] is None:
+    if not head["bpm"] or not head["meter"]:
         return 0.0
-    sec = head["meter"] * 4 * 60 / head["bpm"]
-    return round(sec, 3) if 0.3 <= sec <= 8 else 0.0
+    seconds = round(head["meter"] * 240.0 / head["bpm"], 3)
+    return seconds if 0.3 <= seconds <= 8.0 else 0.0
 
 
-def _bars_in(line: str) -> int:
-    count = 0
-    for bar in line.strip()[:-1].split("|"):
-        z = re.fullmatch(r"\s*Z(\d+)?\s*", bar)
-        count += int(z.group(1) or 1) if z else (1 if bar.strip() else 0)
-    return count
+def _voice_switch(trimmed: str) -> Tuple[bool, Optional[str]]:
+    """Whether a trimmed line is a voice switch (`V: Vocal`), and the voice it names (None for a bare `V:`)."""
+    if not trimmed.startswith("V:"):
+        return False, None
+    words = trimmed[2:].split()
+    return True, (words[0] if words else None)
 
 
-def _sung(text: str) -> bool:
-    return bool(re.search(r"[A-Ga-g]", _INLINE.sub("", re.sub(r"![^!]*!", "", _QUOTED.sub("", text)))))
+def _section_name(trimmed: str) -> Optional[str]:
+    """The name of a `% name` section line, or None for any other line (`%%...` and a bare `%` included)."""
+    return trimmed[2:].strip() if trimmed.startswith("% ") else None
+
+
+def _is_music_line(trimmed: str) -> bool:
+    """A line of bars: it ends with a bar line (`|`, or the closing `|]`) and is neither a comment nor a field."""
+    if not trimmed or trimmed.startswith("%") or _FIELD_LINE.match(trimmed):
+        return False
+    return trimmed.endswith("|") or trimmed.endswith("|]")
+
+
+def _bars_in(trimmed: str) -> int:
+    """How many bars a music line holds: one per non-empty piece between bar lines, `Zn` counting n."""
+    text = _INLINE_FIELD.sub("", _CHORD_SYMBOL.sub("", trimmed))
+    if text.endswith("|]"):
+        text = text[:-2]
+    elif text.endswith("|"):
+        text = text[:-1]
+    total = 0
+    for piece in text.split("|"):
+        piece = piece.strip().strip(":[]").strip()
+        if not piece:
+            continue
+        rest = _MULTI_REST.fullmatch(piece)
+        total += (int(rest.group(1)) if rest.group(1) else 1) if rest else 1
+    return total
+
+
+def _has_notes(trimmed: str) -> bool:
+    text = _INLINE_FIELD.sub("", _DECORATION.sub("", _CHORD_SYMBOL.sub("", trimmed)))
+    return re.search(r"[A-Ga-g]", text) is not None
 
 
 def score_parts(abc: str) -> Dict[str, Any]:
-    """`{bpm, parts: [{name, label, start_s, end_s, sung}]}`: a part from each run of `% name` lines (names of
-    one run joined by " · ", `label` the last), its start the Vocal voice's time there; the last runs to the
-    score's end. `sung`: the Vocal voice has a note in the part. Empty parts when the score has no tempo."""
+    """The score's sections timed by its Vocal voice.
+
+    Returns `{"bpm", "parts"}`, each part `{name, label, start_s, end_s, sung}`: a run of `% name` lines with no
+    other line between them opens one part (names joined by " · ", the label is the last one), music before the
+    first such line makes a part named "Start" with an empty label. Only Vocal bars move the clock; a Vocal
+    `M:` line changes the bar length from there on. `parts` is empty when the score has no `K:` line or no
+    tempo."""
     head = score_head(abc)
-    lines = abc.replace("\r", "").split("\n")
-    start = _header_end(lines)
-    if start < 0 or not head["bpm"]:
-        return {"bpm": head["bpm"], "parts": []}
-    sec_per_quarter = 60.0 / head["bpm"]
+    bpm = head["bpm"]
+    lines = _lines_of(abc)
+    end_of_header = _key_line_index(lines)
+    if end_of_header is None or not bpm:
+        return {"bpm": bpm, "parts": []}
     meter = head["meter"] or 1.0
-    t = 0.0
-    voice = None
+    clock = 0.0
+    voice: Optional[str] = None
     parts: List[Dict[str, Any]] = []
-    cur: Optional[Dict[str, Any]] = None
-    for line in lines[start:]:
-        s = line.strip()
-        if not s:
+    names: List[str] = []           # the run of section names being read
+    run_start = 0.0
+    open_part: Optional[Dict[str, Any]] = None
+
+    def open_run() -> None:
+        nonlocal open_part, names
+        if names:
+            open_part = {"name": " · ".join(names), "label": names[-1], "start_s": run_start, "sung": False}
+            parts.append(open_part)
+            names = []
+
+    for raw in lines[end_of_header + 1:]:
+        trimmed = raw.strip()
+        if not trimmed:
             continue
-        if s.startswith("% "):
-            if cur is None or cur["music"]:
-                cur = {"names": [], "start_s": t, "music": False, "sung": False}
-                parts.append(cur)
-            cur["names"].append(s[2:].strip())
+        name = _section_name(trimmed)
+        if name is not None:
+            if not names:
+                run_start = clock
+            names.append(name)
             continue
-        if cur is None:
-            cur = {"names": [], "start_s": 0.0, "music": False, "sung": False}
-            parts.append(cur)
-        cur["music"] = True
-        if s.startswith("V:"):
-            voice = s[2:].strip().split()[0] if s[2:].strip() else None
+        open_run()
+        if open_part is None:                          # music before any section line
+            open_part = {"name": "Start", "label": "", "start_s": 0.0, "sung": False}
+            parts.append(open_part)
+        switch, named = _voice_switch(trimmed)
+        if switch:
+            voice = named
             continue
-        if s.startswith("M:") and voice == "Vocal":
-            meter = _meter(s[2:]) or meter
+        if voice != "Vocal":
             continue
-        if voice == "Vocal" and s.endswith("|"):
-            t += _bars_in(s) * meter * 4 * sec_per_quarter
-            if _sung(s):
-                cur["sung"] = True
+        if trimmed.startswith("M:"):
+            meter = _meter_of(trimmed[2:]) or meter
+            continue
+        if _is_music_line(trimmed):
+            clock += _bars_in(trimmed) * meter * 240.0 / bpm
+            if _has_notes(trimmed):
+                open_part["sung"] = True
+    open_run()                                         # section lines at the very end
     out = []
-    for j, p in enumerate(parts):
-        name = " · ".join(p["names"]) or "Start"
-        out.append({"name": name, "label": "" if name == "Start" else name.split(" · ")[-1],
-                    "start_s": round(p["start_s"], 3),
-                    "end_s": round(parts[j + 1]["start_s"] if j + 1 < len(parts) else t, 3), "sung": p["sung"]})
-    return {"bpm": head["bpm"], "parts": out}
+    for i, part in enumerate(parts):
+        end = parts[i + 1]["start_s"] if i + 1 < len(parts) else clock
+        out.append({"name": part["name"], "label": part["label"], "start_s": round(part["start_s"], 3),
+                    "end_s": round(end, 3), "sung": part["sung"]})
+    return {"bpm": bpm, "parts": out}
 
 
-# -- match sections (app.js:11199-11305, HERESY 1719) --------------------------------------------------
+# -- the Vocal voice alone ----------------------------------------------------------------------------------
 
-# SheetSage2's labels to lyrics tags; anything else a verse.
-MATCH_TAGS = {
+_NOTE_HEAD = r"(?:\^\^|\^|__|_|=)?[A-Ga-g][,']*"
+_LENGTH = r"\d*/*\d*"
+_NOTE = re.compile(_NOTE_HEAD + r"(" + _LENGTH + r")-?")
+_INS_TOKEN = re.compile(
+    r'(?P<symbol>"[^"\n]*")'
+    r"|(?P<deco>![^!\n]*!)"
+    r"|(?P<field>\[[A-Za-z]:[^\]\n]*\])"
+    r"|(?P<chord>\[(?P<inner>(?:\s*" + _NOTE_HEAD + _LENGTH + r"-?)+)\s*\](?P<outer>" + _LENGTH + r")-?)"
+    r"|(?P<note>" + _NOTE_HEAD + r"(?P<length>" + _LENGTH + r")-?)")
+
+
+def _length_value(text: str) -> Optional[Fraction]:
+    """A written ABC length (`4`, `3/2`, `/`, `//`) as a multiple of the unit length, or None if unreadable."""
+    m = re.fullmatch(r"(\d*)(/*)(\d*)", text)
+    if not m:
+        return None
+    num = int(m.group(1)) if m.group(1) else 1
+    slashes = len(m.group(2))
+    if not slashes:
+        return Fraction(num) if not m.group(3) else None
+    den = int(m.group(3)) * 2 ** (slashes - 1) if m.group(3) else 2 ** slashes
+    return Fraction(num, den) if den else None
+
+
+def _length_text(value: Fraction) -> str:
+    if value == 1:
+        return ""
+    if value.denominator == 1:
+        return str(value.numerator)
+    return (f"/{value.denominator}" if value.numerator == 1 else f"{value.numerator}/{value.denominator}")
+
+
+def _chord_rest(inner: str, outer: str) -> str:
+    """One rest as long as a chord: the chord's first note's length times the length written after it."""
+    first = _NOTE.search(inner)
+    own = first.group(1) if first else ""
+    if not own or not outer:
+        return "z" + (own or outer)
+    a, b = _length_value(own), _length_value(outer)
+    if a is None or b is None:
+        return "z" + outer
+    return "z" + _length_text(a * b)
+
+
+def _silence(trimmed_line: str) -> str:
+    def swap(m: re.Match) -> str:
+        if m.group("symbol") is not None:
+            return ""                                  # a silenced voice carries no harmony
+        if m.group("deco") is not None or m.group("field") is not None:
+            return m.group(0)
+        if m.group("chord") is not None:
+            return _chord_rest(m.group("inner"), m.group("outer"))
+        return "z" + m.group("length")
+
+    return _INS_TOKEN.sub(swap, trimmed_line)
+
+
+def keep_vocal_voice(abc: str) -> str:
+    """The score with every note of the Ins voice turned into a rest of the same written length; the Vocal
+    voice, the header, the bar lines and the section lines stay. A text with no `K:` line comes back as it is."""
+    if re.search(r"(?m)^K:", abc) is None:
+        return abc
+    lines = _lines_of(abc)
+    end_of_header = _key_line_index(lines)
+    if end_of_header is None:
+        return abc
+    out = lines[:end_of_header + 1]
+    voice: Optional[str] = None
+    for raw in lines[end_of_header + 1:]:
+        trimmed = raw.strip()
+        switch, named = _voice_switch(trimmed)
+        if switch:
+            voice = named
+            out.append(raw)
+        elif voice == "Ins" and _is_music_line(trimmed):
+            lead = raw[:len(raw) - len(raw.lstrip())]
+            tail = raw[len(raw.rstrip()):]
+            out.append(lead + _silence(trimmed) + tail)
+        else:
+            out.append(raw)
+    return "\n".join(out)
+
+
+# -- section tags and kinds -------------------------------------------------------------------------------
+
+# SheetSage2's section labels and the lyrics tag each one is sung under. A label not here is a Verse.
+MATCH_TAGS: Dict[str, str] = {
     "intro": "Intro", "verse": "Verse", "pre-chorus": "Pre-Chorus", "chorus": "Chorus", "post-chorus": "Chorus",
     "bridge": "Bridge", "outro": "Outro", "rap": "Verse", "interlude": "Interlude", "instrumental": "Instrumental",
-    "solo": "Instrumental", "fade-out": "Outro", "pre-outro": "Bridge", "loop": "Chorus", "intro and verse": "Verse",
-    "pre-chorus and chorus": "Chorus", "verse and pre-chorus": "Verse", "theme": "Verse", "development": "Bridge",
-    "variation": "Verse", "irregular": "Verse", "preshot": "Intro", "silence": "Intro",
+    "solo": "Instrumental", "fade-out": "Outro", "pre-outro": "Bridge", "loop": "Chorus",
+    "intro and verse": "Verse", "pre-chorus and chorus": "Chorus", "verse and pre-chorus": "Verse",
+    "theme": "Verse", "development": "Bridge", "variation": "Verse", "irregular": "Verse", "preshot": "Intro",
+    "silence": "Intro",
 }
-LATE_SHARE = 0.75          # a block first heard after this share of a section is unsure there
-MATCH_WINDOW = 4           # a sung line is looked for among this many timed rows ahead
-_TAG_LINE = re.compile(r"^\[([^\]]+)\]$")
+LATE_SHARE = 0.75       # a block heard past this share of its section is late for it
+MATCH_WINDOW = 4        # rows looked ahead for a sung line's time
+
+_LABEL_NOISE = re.compile(r"[0-9#.:()]+")
 
 
-def match_kind(label: Any) -> str:
-    """A section's kind: «Verse 2» a verse, SheetSage2's «intro and verse» too; an unknown name stays itself."""
-    k = re.sub(r"\s+", " ", re.sub(r"[\d#.:()]+", " ", str(label or "").lower())).strip()
-    return MATCH_TAGS[k].lower() if k in MATCH_TAGS else k
+def _clean_label(text: Optional[str]) -> str:
+    """A label or tag without numbering and punctuation: `Chorus 2` -> `chorus`, `% Bridge (1)` -> `bridge`."""
+    lowered = _LABEL_NOISE.sub(" ", (text or "").lower())
+    return " ".join(lowered.split())
 
 
-def match_blocks(lines: Sequence[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """The lyrics' blocks `[{tag, body, first, lines}]` (`first`: the index of its first sung line) and the
-    sung lines (not empty, not a `(cue)` or a `[tag]`)."""
-    blocks: List[Dict[str, Any]] = []
-    sung: List[str] = []
-    for line in lines:
-        t = line.strip()
-        m = _TAG_LINE.match(t)
-        if m and m.group(1).strip():
-            blocks.append({"tag": m.group(1).strip(), "body": "", "first": len(sung), "lines": 0})
-            continue
-        if not blocks:
-            blocks.append({"tag": None, "body": "", "first": len(sung), "lines": 0})
-        b = blocks[-1]
-        if b["body"] or t:
-            b["body"] += ("\n" if b["body"] else "") + line
-        if t and t[0] not in "([":
-            b["lines"] += 1
-            sung.append(t)
-    for b in blocks:
-        b["body"] = b["body"].rstrip()
-    return [b for b in blocks if b["tag"] or b["body"].strip()], sung
+def _tag_for(label: Optional[str]) -> str:
+    return MATCH_TAGS.get(_clean_label(label), "Verse")
 
 
-def _spans(parts: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    return [{"tag": MATCH_TAGS.get(p["label"].lower(), "Verse"), "label": p["label"], "start": p["start_s"],
-             "end": p["end_s"], "sung": p["sung"]} for p in parts]
+def match_kind(label: Optional[str]) -> str:
+    """The kind of a section label or lyrics tag, the key two of them are compared by: `Verse 2` -> `verse`,
+    `Post-Chorus` -> `chorus`, an unknown label its cleaned text (`Weird Name` -> `weird name`)."""
+    cleaned = _clean_label(label)
+    return MATCH_TAGS[cleaned].lower() if cleaned in MATCH_TAGS else cleaned
 
 
-def _containing(spans: Sequence[Mapping[str, Any]], at: float) -> int:
-    k = 0
-    for i, x in enumerate(spans):
-        if x["start"] <= at:
-            k = i
-    return k
+# -- lyrics blocks ----------------------------------------------------------------------------------------
+
+_TAG_LINE = re.compile(r"\[([^\]]*)\]")
 
 
-def pre_tag(lines: Sequence[str], times: Sequence[Optional[float]], abc: str) -> Optional[List[str]]:
-    """DPC's addition: lyrics with no `[tag]` line at all, cut into blocks where their timed lines cross a
-    section boundary of the score, each block tagged with its section's tag (as Match sections would name
-    it). None when the lyrics already have tags, a line has no time, or the score has no named sections."""
-    if any(_TAG_LINE.match(x.strip()) for x in lines):
+def _tag_of(line: str) -> Optional[str]:
+    """The inner text of a tag line (`[Verse]` -> `Verse`), or None for any other line."""
+    m = _TAG_LINE.fullmatch(line.strip())
+    if not m or not m.group(1).strip():
         return None
-    spans = _spans(score_parts(abc)["parts"])
-    if not any(x["label"] for x in spans) or len(times) != len(lines):
+    return m.group(1).strip()
+
+
+def _is_sung(line: str) -> bool:
+    text = line.strip()
+    return bool(text) and text[0] not in "(["
+
+
+def _split_text(lines: Sequence[str]) -> List[str]:
+    return "\n".join(lines).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def _section_at(parts: Sequence[Mapping[str, Any]], seconds: float) -> int:
+    """The index of the last part that has started by `seconds` (the first part when none has)."""
+    found = 0
+    for i, part in enumerate(parts):
+        if part["start_s"] <= seconds:
+            found = i
+    return found
+
+
+# -- pre-tagging untagged lyrics --------------------------------------------------------------------------
+
+
+def pre_tag(lines: Sequence[str], times: Sequence[Any], abc: str) -> Optional[List[str]]:
+    """Untagged lyrics cut into blocks at the score's section boundaries by their line times, each block under
+    its section's tag; or None when they should not be pre-tagged (a tag line already, no named section in the
+    score, times not one per line, or a sung line without a time).
+
+    Half a bar of pickup is allowed. A line that is not sung (a `(cue)`) uses its time when it has one, and
+    otherwise stays with the block around it (before the first timed line, with the first block)."""
+    if any(_tag_of(line) is not None for line in lines):
         return None
-    # Half a bar of pickup per line (Match sections counts a whole bar for a block's first line only).
+    if times is None or len(times) != len(lines):
+        return None
+    parts = score_parts(abc)["parts"]
+    if not any(p["label"] for p in parts):
+        return None
+    stamps = [_reading(t) for t in times]
+    if not any(_is_sung(line) for line in lines):
+        return None
+    if any(_is_sung(line) and stamp is None for line, stamp in zip(lines, stamps)):
+        return None
     pickup = (bar_seconds(abc) or 2.0) / 2
     out: List[str] = []
-    current = None
-    for line, t in zip(lines, times):
-        if line.strip():
-            if t is None:
-                return None
-            i = _containing(spans, t + pickup)
-            if i != current:
-                if out and out[-1].strip():
-                    out.append("")
-                out.append(f"[{spans[i]['tag']}]")
-                current = i
+    waiting: List[str] = []            # lines before the first one with a time
+    section: Optional[int] = None
+    for line, stamp in zip(lines, stamps):
+        if not line.strip() or stamp is None:
+            (waiting if section is None else out).append(line)
+            continue
+        here = _section_at(parts, stamp + pickup)
+        if here != section:
+            if section is None:
+                lead = 0
+                while lead < len(waiting) and not waiting[lead].strip():
+                    lead += 1
+                out.extend(waiting[:lead])
+                waiting = waiting[lead:]
+            if out and out[-1].strip():
+                out.append("")
+            out.append(f"[{_tag_for(parts[here]['label'])}]")
+            out.extend(waiting)
+            waiting = []
+            section = here
         out.append(line)
+    out.extend(waiting)
+    return out
+
+
+# -- Match sections ---------------------------------------------------------------------------------------
+
+
+def _blocks_of(lines: Sequence[str]) -> List[Dict[str, Any]]:
+    """The lyrics' blocks: `tag` (None before the first tag line), `body`, `lines` (sung lines in it) and `first`
+    (the index of its first sung line among all sung lines). An untagged block with a blank body is left out."""
+    groups: List[Tuple[Optional[str], List[str]]] = [(None, [])]
+    for line in _split_text(lines):
+        tag = _tag_of(line)
+        if tag is not None:
+            groups.append((tag, []))
+        else:
+            groups[-1][1].append(line)
+    blocks: List[Dict[str, Any]] = []
+    sung_so_far = 0
+    for tag, body_lines in groups:
+        start = 0
+        while start < len(body_lines) and not body_lines[start].strip():
+            start += 1
+        body = "\n".join(body_lines[start:]).rstrip()
+        if tag is None and not body.strip():
+            continue
+        count = sum(1 for line in body_lines if _is_sung(line))
+        blocks.append({"tag": tag, "body": body, "lines": count, "first": sung_so_far if count else None})
+        sung_so_far += count
+    return blocks
+
+
+def _line_times(blocks: Sequence[Mapping[str, Any]], rows: Sequence[Mapping[str, Any]]) -> List[Optional[float]]:
+    """The time each sung line is sung at, found in `rows` within `MATCH_WINDOW` rows of the last match."""
+    sung = [line.strip() for block in blocks for line in block["body"].split("\n") if _is_sung(line)]
+    times: List[Optional[float]] = []
+    cursor = 0
+    for text in sung:
+        hit = None
+        for j in range(cursor, min(cursor + MATCH_WINDOW, len(rows))):
+            row = rows[j]
+            if isinstance(row, Mapping) and str(row.get("text") or "").strip() == text:
+                hit = j
+                break
+        if hit is None:
+            times.append(None)
+            continue
+        row = rows[hit]
+        cursor = hit + 1
+        times.append(None if row.get("guessed") else _reading(row.get("start")))
+    return times
+
+
+def _assign_sections(heard: Sequence[Optional[float]], parts: Sequence[Mapping[str, Any]],
+                     bar: float) -> List[Optional[int]]:
+    """The section each block belongs to: where it is heard, a bar of pickup allowed; a block heard late in a
+    section belongs there only when it continues the block before; never back to an earlier section."""
+    out: List[Optional[int]] = []
+    last: Optional[int] = None
+    for h in heard:
+        if h is None:
+            out.append(None)
+            continue
+        candidate = _section_at(parts, h + bar)
+        part = parts[candidate]
+        share = (h - part["start_s"]) / max(1e-6, part["end_s"] - part["start_s"])
+        if share > LATE_SHARE and candidate != last:
+            out.append(None)
+            continue
+        if last is not None and candidate < last:
+            out.append(None)
+            continue
+        out.append(candidate)
+        last = candidate
     return out
 
 
 def match_sections(abc: str, lines: Sequence[str], rows: Sequence[Mapping[str, Any]], *,
                    copy_bodies: bool = True) -> Dict[str, Any]:
-    """`{lyrics, blocks: [{index, tag, new_tag, section, at, status}], filled: [{section, tag, copied_from}],
-    unchanged}` of the lyrics `lines` against the score's named sections; `rows` are the timed sung lines in
-    the lyrics' order (`{text, start}`, a `start` of None for a line with no time). `ValueError` when the score
-    has no named sections. A sung section the lyrics do not reach is filled with the last block of its kind (a
-    whole chorus, as Ruach does); with `copy_bodies` False it gets its tag alone, and `filled` still names the
-    block it would have copied (the run's fallback when the copies do not fit, `similar._fit_without_copies`)."""
-    spans = _spans(score_parts(abc)["parts"])
-    bar = bar_seconds(abc) or 2.0
-    if not any(x["label"] for x in spans):
+    """The lyrics' blocks retagged with the score section each is sung in, and tags added for the sections the
+    lyrics do not reach; the words never change.
+
+    `rows` are the sung lines of the original lyrics with their start in the source (`{"text", "start"}`, a
+    truthy `guessed` makes a row untimed). An unsung section the lyrics skip gets its tag alone; a sung one gets
+    the tag and, with `copy_bodies`, the body of the last block placed in a section of the same kind (reported
+    in `filled` either way). Returns `{"lyrics", "blocks", "filled", "unchanged"}`.
+
+    Raises ValueError, with a text meant for the person, when the score cannot be split into sections."""
+    found = score_parts(abc)
+    parts = found["parts"]
+    if found["bpm"] is None and _key_line_index(_lines_of(abc)) is not None and "\n% " in "\n" + abc:
+        raise ValueError("the score has no tempo (Q:), so its sections have no times")
+    if not any(p["label"] for p in parts):
         raise ValueError("the score has no named sections")
-    blocks, sung = match_blocks(lines)
-    at: List[Optional[float]] = []
-    j = 0
-    for line in sung:
-        k = j
-        while k < len(rows) and k < j + MATCH_WINDOW and str(rows[k].get("text") or "").strip() != line:
-            k += 1
-        if k < len(rows) and k < j + MATCH_WINDOW:
-            start = rows[k].get("start")
-            ok = isinstance(start, (int, float)) and math.isfinite(start) and not rows[k].get("guessed")
-            at.append(float(start) if ok else None)
-            j = k + 1
-        else:
-            at.append(None)
-    tags = [b["tag"] for b in blocks if b["tag"]]
-    lower = sum(1 for t in tags if t[0] != t[0].upper() and t[0] == t[0].lower()) * 2 > len(tags)
+    blocks = _blocks_of(lines)
+    times = _line_times(blocks, rows)
+    heard = [times[b["first"]] if b["first"] is not None else None for b in blocks]
+    bar = bar_seconds(abc) or 2.0
+    sections = _assign_sections(heard, parts, bar)
 
-    def tag_of(i: int) -> str:
-        return spans[i]["tag"].lower() if lower else spans[i]["tag"]
+    tagged = [b["tag"] for b in blocks if b["tag"]]
+    lower = sum(1 for t in tagged if t[0].islower()) * 2 > len(tagged)
 
-    last = None
-    placed = []
-    for b in blocks:
-        heard = at[b["first"]] if b["lines"] > 0 and b["first"] < len(at) and at[b["first"]] is not None else None
-        section = None
-        if heard is not None:
-            i = _containing(spans, heard + bar)
-            late = (heard - spans[i]["start"]) / max(1e-6, spans[i]["end"] - spans[i]["start"]) > LATE_SHARE
-            section = i if (i == last or not late) else None
-        if section is not None and last is not None and section < last:
-            section = None
-        if section is not None:
-            last = section
-        placed.append({"heard": heard, "section": section})
+    def written_tag(index: int) -> str:
+        tag = _tag_for(parts[index]["label"])
+        return tag.lower() if lower else tag
 
-    out: List[str] = []
-    report: List[Dict[str, Any]] = []
+    chunks: List[str] = []
     filled: List[Dict[str, Any]] = []
-    state = {"current": None, "unsure": False, "placed": False}
-    last_of_kind: Dict[str, int] = {}
-    emitted: set = set()
+    report: List[Dict[str, Any]] = []
+    done: set = set()                           # sections already written
+    by_kind: Dict[str, int] = {}                # section kind -> index of the last block placed in one
+    state = {"current": None, "placed": False, "unsure": False}
 
     def fill(up_to: int, instrumental_only: bool) -> None:
-        begin = 0 if state["current"] is None else state["current"] + 1
-        for i in range(begin, up_to):
-            if i in emitted or (instrumental_only and spans[i]["sung"]):
+        start = 0 if state["current"] is None else state["current"] + 1
+        for s in range(start, up_to):
+            if s in done:
                 continue
-            src = last_of_kind.get(match_kind(spans[i]["label"])) if spans[i]["sung"] and not state["unsure"] else None
-            if spans[i]["sung"] and src is None:
-                continue
-            body = blocks[src]["body"] if src is not None and copy_bodies else ""
-            out.append(f"[{tag_of(i)}]\n{body}" if body else f"[{tag_of(i)}]")
-            emitted.add(i)
+            part = parts[s]
+            source = None
+            if part["sung"]:
+                if instrumental_only or state["unsure"]:
+                    continue
+                source = by_kind.get(match_kind(part["label"]))
+                if source is None:
+                    continue
+            tag = written_tag(s)
+            if source is not None and copy_bodies:
+                chunks.append(f"[{tag}]\n{blocks[source]['body']}")
+            else:
+                chunks.append(f"[{tag}]")
+            filled.append({"section": s + 1, "tag": tag, "copied_from": None if source is None else source + 1})
+            done.add(s)
             state["placed"] = False
-            filled.append({"section": i + 1, "tag": tag_of(i), "copied_from": src + 1 if src is not None else None})
 
-    first_sung = next((i for i, x in enumerate(spans) if x["sung"]), -1)
-    if first_sung >= 0:
-        fill(first_sung, True)
-    for n, b in enumerate(blocks):
-        pl = placed[n]
-        if not b["body"].strip():
-            report.append({"index": n + 1, "tag": b["tag"], "new_tag": None, "section": None, "at": None,
-                           "status": "dropped"})
-            continue
-        mergeable = pl["section"] is not None and pl["section"] == state["current"] and state["placed"]
-        if pl["section"] is None or (pl["section"] == state["current"] and not mergeable):
-            if pl["heard"] is not None:
-                fill(_containing(spans, pl["heard"]), True)
-            out.append(f"[{b['tag']}]\n{b['body']}" if b["tag"] else b["body"])
-            report.append({"index": n + 1, "tag": b["tag"], "new_tag": b["tag"], "section": None, "at": pl["heard"],
-                           "status": "unsure"})
-            state["unsure"] = True
-            state["placed"] = False
-            continue
-        i = pl["section"]
-        if mergeable:
-            out[-1] += "\n\n" + b["body"]
-            report.append({"index": n + 1, "tag": b["tag"], "new_tag": None, "section": i + 1, "at": pl["heard"],
-                           "status": "merged"})
-            continue
-        fill(i, False)
-        keep = bool(b["tag"]) and (match_kind(b["tag"]) == match_kind(spans[i]["label"])
-                                   or match_kind(b["tag"]) == match_kind(spans[i]["tag"]))
-        new_tag = b["tag"] if keep else tag_of(i)
-        out.append(f"[{new_tag}]\n{b['body']}")
-        report.append({"index": n + 1, "tag": b["tag"], "new_tag": new_tag, "section": i + 1, "at": pl["heard"],
-                       "status": "kept" if keep else "renamed"})
-        last_of_kind[match_kind(spans[i]["label"])] = n
-        state["current"] = i
-        state["unsure"] = False
-        state["placed"] = True
-    fill(len(spans), False)
-    result = "\n\n".join(out)
-    return {"lyrics": result, "blocks": report, "filled": filled,
-            "unchanged": result == "\n".join(lines).replace("\r\n", "\n").replace("\r", "\n").strip()}
+    sung_sections = [i for i, p in enumerate(parts) if p["sung"]]
+    if sung_sections:
+        fill(sung_sections[0], True)
+
+    for index, block in enumerate(blocks):
+        entry: Dict[str, Any] = {"index": index + 1, "tag": block["tag"]}
+        h, section = heard[index], sections[index]
+        current = state["current"]
+        if not block["body"].strip():
+            entry.update(new_tag=None, section=None, at=None, status="dropped")
+        elif section is not None and section == current and state["placed"]:
+            chunks[-1] += "\n\n" + block["body"]
+            entry.update(new_tag=None, section=section + 1, at=h, status="merged")
+        elif section is None or (current is not None and section <= current):
+            if h is not None:
+                fill(_section_at(parts, h), True)
+            chunks.append(f"[{block['tag']}]\n{block['body']}" if block["tag"] else block["body"])
+            entry.update(new_tag=block["tag"], section=None, at=h, status="unsure")
+            state["unsure"], state["placed"] = True, False
+        else:
+            fill(section, False)
+            label = parts[section]["label"]
+            own = block["tag"]
+            if own and match_kind(own) in (match_kind(label), match_kind(_tag_for(label))):
+                new_tag, status = own, "kept"
+            else:
+                new_tag, status = written_tag(section), "renamed"
+            chunks.append(f"[{new_tag}]\n{block['body']}")
+            entry.update(new_tag=new_tag, section=section + 1, at=h, status=status)
+            by_kind[match_kind(label)] = index
+            done.add(section)
+            state.update(current=section, unsure=False, placed=True)
+        report.append(entry)
+
+    fill(len(parts), False)
+    lyrics = "\n\n".join(chunks)
+    original = "\n".join(_split_text(lines)).strip()
+    return {"lyrics": lyrics, "blocks": report, "filled": filled, "unchanged": lyrics == original}
+
+
+_STATUSES = ("kept", "renamed", "merged", "unsure", "dropped")
 
 
 def counts_of(report: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
-    """How many blocks were kept, renamed, merged, unsure or dropped."""
-    out = {k: 0 for k in ("kept", "renamed", "merged", "unsure", "dropped")}
-    for b in report:
-        out[b["status"]] = out.get(b["status"], 0) + 1
-    return out
+    """How many blocks of a `match_sections` report have each status; the five known ones always present."""
+    counts = {status: 0 for status in _STATUSES}
+    for item in report:
+        status = item.get("status") if isinstance(item, Mapping) else None
+        if status is not None:
+            counts[status] = counts.get(status, 0) + 1
+    return counts
 
 
-# -- the style against the score (heresy/skills/yue2-style/SKILL.md:64-65, 126) ----------------------
+# -- the style caption --------------------------------------------------------------------------------------
 
-_BPM = re.compile(r"\b(\d{2,3}(?:\.\d+)?)\s*bpm\b", re.I)
-_KEY = re.compile(r"(?<![\w#])([A-G])(#|b|♯|♭)?\s*((?i:major|minor|maj|min))\b")
+_BPM_MENTION = re.compile(r"\b(\d{2,3}(?:\.\d+)?)\s*bpm\b", re.IGNORECASE)
+_KEY_MENTION = re.compile(r"(?<![\w#])([A-G])([#b♯♭]?)\s*((?i:major|minor|maj|min))\b")
+_SCORE_KEY = re.compile(r"([A-G])([#b]?)(.*)")
+_MAJOR_MODES = {"", "maj", "major", "ion", "ionian"}
+_MINOR_MODES = {"m", "min", "minor", "aeo", "aeolian"}
 
 
-def _key_word(letter: str, acc: Optional[str], mode: str) -> str:
-    acc = {"♯": "#", "♭": "b"}.get(acc or "", acc or "")
-    return letter.upper() + acc + ("m" if mode.lower().startswith("min") else "")
+def _score_key(token: Optional[str]) -> Optional[str]:
+    """The score's key token in the form a style mention is normalised to (`Cmaj` -> `C`, `Amin` -> `Am`), the
+    token itself for another mode (`Ddor`), or None when it names no key (`none`, `HP`)."""
+    if not token:
+        return None
+    m = _SCORE_KEY.fullmatch(token)
+    if not m:
+        return None
+    mode = m.group(3).lower()
+    if mode in _MAJOR_MODES:
+        return m.group(1) + m.group(2)
+    if mode in _MINOR_MODES:
+        return m.group(1) + m.group(2) + "m"
+    return token
+
+
+def _tidy_commas(style: str) -> str:
+    text = re.sub(r",(?:\s*,)+", ", ", style)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip().strip(",").strip()
 
 
 def agree_style(style: str, abc: str) -> Tuple[str, List[str]]:
-    """The style with its tempo set to the score's `Q:` (added when it names none) and a key that disagrees
-    with `K:` dropped; and the changes, in words. A score without a tempo leaves the style as it is."""
+    """The style caption made to agree with the score's tempo and key, and each change as a sentence.
+
+    A score's tempo is added when the style names none and replaces one that differs by 1 BPM or more; a key the
+    style names (`A minor`, `F#min`, upper-case letter only) is dropped when it is not the score's key."""
     head = score_head(abc)
+    text = style if isinstance(style, str) else ""
     changes: List[str] = []
-    out = style
     if head["bpm"]:
         q = int(round(head["bpm"]))
-        found = _BPM.search(out)
-        if found is None:
-            out = f"{out.rstrip().rstrip(',')}, {q} BPM"
+        mention = _BPM_MENTION.search(text)
+        if mention is None:
+            base = re.sub(r"[\s,]+$", "", text)
+            text = f"{base}, {q} BPM" if base.strip() else f"{q} BPM"
             changes.append(f"added the score's tempo {q} BPM")
-        elif abs(float(found.group(1)) - q) >= 1:
-            out = out[:found.start()] + f"{q} BPM" + out[found.end():]
-            changes.append(f"tempo {found.group(1)} BPM set to the score's {q} BPM")
-    key = head["key"]
-    if key:
-        def drop(m: "re.Match[str]") -> str:
-            said = _key_word(m.group(1), m.group(2), m.group(3))
-            if said == key:
-                return m.group(0)
-            changes.append(f"key {m.group(0)} dropped: the score is in {key}")
-            return ""
-        out = _KEY.sub(drop, out)
-        out = re.sub(r"\s*,\s*(,\s*)+", ", ", out).strip().strip(",").strip()
-    return out, changes
+        elif abs(float(mention.group(1)) - q) >= 1:
+            text = text[:mention.start()] + f"{q} BPM" + text[mention.end():]
+            changes.append(f"tempo {mention.group(1)} BPM set to the score's {q} BPM")
+    key = _score_key(head["key"])
+    if key is not None:
+        kept: List[str] = []
+        cursor = 0
+        dropped = False
+        for m in _KEY_MENTION.finditer(text):
+            accidental = {"♯": "#", "♭": "b"}.get(m.group(2), m.group(2))
+            minor = m.group(3).lower() in ("min", "minor")
+            if m.group(1) + accidental + ("m" if minor else "") == key:
+                continue
+            kept.append(text[cursor:m.start()])
+            cursor = m.end()
+            dropped = True
+            changes.append(f"key {m.group(0)} dropped: the score is in {head['key']}")
+        if dropped:
+            kept.append(text[cursor:])
+            text = _tidy_commas("".join(kept))
+    return text, changes
