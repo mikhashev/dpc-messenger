@@ -115,7 +115,7 @@ What you are accepting by using it: `dev` is not a release. It holds work in pro
 
 The repository declares **GPL v3** — the licence of the desktop client, which is what you install and run, and the one GitHub shows. That badge names one licence because GitHub only holds one per repository; the other three above are equally in force for their components. **[LICENSING.md](./LICENSING.md) is the authoritative statement** of which licence covers what, including the GPL section 7 exception for iOS distribution.
 
-Third-party code inside the client, with its own notices, is listed in [LICENSING.md](./LICENSING.md#third-party-code). Courtesy mention, not a licence obligation: Cover chain after the approach of Ruach Studio by Viktor Zhuromskyy · https://github.com/igrbible/Ruach_Studio · reimplemented in DPC, no code copied.
+Third-party code inside the client, with its own notices, is listed in [LICENSING.md](./LICENSING.md#third-party-code).
 
 ---
 

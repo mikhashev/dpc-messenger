@@ -33,9 +33,6 @@ export const YUE2_COVER_CAVEATS =
     'Score-based: SheetSage2 transcribes the melody to an ABC score and YuE2 sings it in the new style, as long as ' +
     "the original; the lyrics' blocks follow the score's sections when the stored lyrics are synced; transcription " +
     'errors carry into the cover; MIT code with CC BY-NC weights.';
-/** A courtesy mention (not a licence obligation): the cover chain follows Ruach Studio's approach and is DPC's own code. */
-export const RUACH_ATTRIBUTION =
-    'Cover chain after the approach of Ruach Studio by Viktor Zhuromskyy · https://github.com/igrbible/Ruach_Studio · reimplemented in DPC, no code copied';
 export const ACESTEP_COVER_OFFER = 'Use acestep cover (no lyrics needed)';
 export const MISSING_LYRICS =
     'YuE2 needs the original lyrics for a cover (a technical limit; ACE-Step cover works without lyrics).';

@@ -11,8 +11,8 @@
     are filled by the describer, and "Describe source" fills the fields first for the person to edit; on
     acestep, description or the source's audio as a reference (a timbre reference, marked unverified);
   - Cover (`cover`): "kept from the source: melody and lyrics", a required target style, the engine
-    (yue2.cpp's score chain by default, after Ruach Studio, with its caveats, the score choice and the
-    courtesy mention of Ruach Studio; acestep.cpp cover, the fallback the report names when yue2 cannot run), the cover strength
+    (yue2.cpp's score chain by default, after Ruach Studio, with its caveats, the score choice;
+    acestep.cpp cover, the fallback the report names when yue2 cannot run), the cover strength
     on acestep. A yue2 cover without lyrics offers "Use acestep cover (no lyrics needed)".
 
   Variants, and a duration for a same-style song (a cover is as long as its source). Create is off, with
@@ -31,7 +31,6 @@
     KEEP_KEYS,
     KEEP_LABELS,
     REFERENCE_NOTE,
-    RUACH_ATTRIBUTION,
     SECTION,
     YUE2_COVER_CAVEATS,
     YUE2_SAME_STYLE_NOTE,
@@ -333,7 +332,6 @@
     </div>
     {#if form.engine === 'yue2'}
       <p class="muted tiny">{YUE2_COVER_CAVEATS}</p>
-      <p class="muted tiny" translate="no">{RUACH_ATTRIBUTION}</p>
     {/if}
     {#if form.engine === 'acestep'}<p class="muted tiny">The cover is as long as the source; it works without lyrics.</p>{/if}
   {/if}
