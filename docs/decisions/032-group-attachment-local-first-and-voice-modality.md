@@ -108,7 +108,8 @@ must not flip when a peer goes offline mid-session (D3). Decisions confirmed by 
 - **Boundary = >1 node in the group.** Group with only your node (≤1 node) → default
   voice-to-input. >1 node → user chooses mode explicitly. ("> 1 node", not "has other
   members", so a group whose only other members are node-less bots/services still
-  defaults to dictation.)
+  defaults to dictation.) *Amended 2026-11-26 (Mike): a ≤1-node group that has agents
+  also offers "Send as audio"; see the amendment of that date below.*
 - **Q1 (transcription side) — RESOLVED:** computed **once on the sender**; every
   participant receives the same text. (Not N receivers each running whisper.)
 - **Q3 (1:1 / solo) — RESOLVED:** the "≤1 node → dictation" rule applies to **all
@@ -226,6 +227,34 @@ Q1 (transcribe once on the sender) remains **unimplemented** and is not changed 
 what exists is one transcription per recipient transfer, and the sender's own copy is
 now joined to its message by file name rather than by transfer id, because one message
 becomes N transfers.
+
+## Amendment — 2026-11-26 (Mike): a group of one node with agents takes a recording as audio
+
+Part B counted nodes only, and said so on purpose: "a group whose only other members
+are node-less bots/services still defaults to dictation". On 2026-11-26 Mike recorded a
+sung sample for the music player's voice clone in the AI Studio group (this node alone
+with its agents, the header saying "1 members") and found no way to send the sound
+itself: the recorder dictated only, so the agents never got it
+(A-GROUP-WITH-AGENTS-BUT-ONE-NODE-CANNOT-TAKE-A-RECORDING-AS-AUDIO-SO-AGENTS-NEVER-GET-THE-SOUND;
+ADR-051 Q3, where Zcode, Forge and Ark had all said yes). **Decided (Mike, 2026-11-26):
+"yes, file it and do it".**
+
+- A group whose only node is this one and which **has agents** (an embedded or external
+  agent registered for a member node, `agents` in the group's metadata) offers
+  **🎵 Send as audio** beside **📝 To input box**, as a 1:1 agent chat does
+  (`ui/src/lib/utils/groupRecording.ts`, `groupRecordingRoute` → `audio_file`).
+- Send as audio keeps the recorder's WAV in the group's `files/` through the paperclip's
+  command, `send_group_file` (Part A, phase 3): one record with the words typed as its
+  text, or "Sent file: …" with none. Its @mentions wake agents as any group file's words
+  do, and the woken turn is handed that record as its trigger, so its file marker
+  (`file_attachment_markers`) is in that very turn, as a 1:1 attachment is. The agent
+  opens the file under its existing read access; nothing is widened. The group-chat
+  bridge's history line now names each attachment and where it is kept.
+- No transcript is made on this path, as on the 1:1 one: the text is what was typed.
+- A group of one with **no** agent keeps dictation only, and a group with **more than
+  one node** behaves as before (voice message or dictation); both Part B rules stand there.
+- A browser recorder, which has the bytes and no file, sends a group voice message
+  (`send_group_voice_message`), kept in the group's history the same way.
 
 ## Authors
 

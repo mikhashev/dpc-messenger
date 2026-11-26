@@ -1705,6 +1705,9 @@ Each item is Mike's to decide. Reviewer positions are arguments, not decisions.
   - *2026-11-22: unchanged and still open.* A group of one node plus agents still routes the
     microphone to dictation (`ChatPanel.svelte:1201-1204`); the file half works (the
     agents-only group fix), the microphone half does not.
+  - *2026-11-26: answered yes by Mike ("yes, file it and do it") and built:* such a group
+    offers Send as audio beside dictation, the recording kept as the group's audio file
+    (ADR-032, amendment of 2026-11-26).
 - **Q4. Track identity.** SHA-256 over the whole file changes when a tag is edited.
   `Reported` (Forge, measured on the "Куртка" file, 4 321 302 bytes): a `-c copy` retag
   of title and artist changed the whole-file hash (`1B2DBB4C` → `DC4D3B6F`), while the
