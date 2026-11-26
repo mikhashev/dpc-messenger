@@ -28,6 +28,8 @@ describe('tauri.conf.json CSP', () => {
     const img = directive('img-src');
     const connect = directive('connect-src');
     const def = directive('default-src');
+    const frame = directive('frame-src');
+    const objectSrc = directive('object-src');
 
     it.each([
         'asset:',
@@ -54,13 +56,30 @@ describe('tauri.conf.json CSP', () => {
     it.each([
         "'self'",
         'data:',
-        'http://localhost:*',
         'ws://localhost:*',
         'ws://127.0.0.1:9999',
     ])('connect-src allows %s', (origin) => {
         // data: is required for fetch(imageData.dataUrl) on Telegram pasted screenshots;
         // ws://127.0.0.1:9999 is coreService.ts API_URL (localhost does not match 127.0.0.1).
         expect(connect).toContain(origin);
+    });
+
+    it('default-src does not allow http://localhost:* (blocks iframe/fetch probing of local HTTP ports)', () => {
+        expect(def).not.toContain('http://localhost:*');
+    });
+
+    it('connect-src does not allow http://localhost:* (blocks fetch/XHR probing of local HTTP ports)', () => {
+        expect(connect).not.toContain('http://localhost:*');
+    });
+
+    it("frame-src is explicitly 'self' (does not allow http://localhost:* or *)", () => {
+        expect(frame).toEqual(["'self'"]);
+        expect(frame).not.toContain('http://localhost:*');
+        expect(frame).not.toContain('*');
+    });
+
+    it("object-src is explicitly 'none'", () => {
+        expect(objectSrc).toEqual(["'none'"]);
     });
 
     it('default-src does not allow data: (data: scripts must remain blocked)', () => {
