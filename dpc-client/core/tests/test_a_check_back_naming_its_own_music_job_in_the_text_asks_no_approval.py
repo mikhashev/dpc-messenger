@@ -4,8 +4,9 @@ Forge wrote the job id into the check_back's text instead of `music_job_id`; cor
 recognise its own job and put the approval card in front of the person (ADR-051 D49 says
 a return to one's own still-queued-or-running job asks nothing). Without `music_job_id`,
 a job id in the text fields now counts, under the same strict check: proposed by this
-agent, still queued or running, and only one such job named. Someone else's job, a
-finished one, or a `music_job_id` that fails the check is asked about as before.
+agent in this chat, still queued or running, and only one such job named. Someone else's
+job, a job of the same agent in another chat (backlog P2-5), a finished one, or a
+`music_job_id` that fails the check is asked about as before.
 
 Real code: the music commands, the job store, the schedule_task tool through the loop's
 dispatcher and the approval round-trip (the rig of the music-tools test).
@@ -19,7 +20,7 @@ from dpc_client_core.dpc_agent.tools import music as music_tools
 from dpc_client_core.music import job_schemas as js
 from tests._acestep_helpers import Rig, from_text
 from tests.test_the_owners_agent_makes_music_through_the_music_tools_with_approval_limits_and_the_self_wait_rule import (  # noqa: F401
-    MusicService, Person, QueueAgent, _clean, call, home, make_ctx, registry_for,
+    CHAT, MusicService, Person, QueueAgent, _clean, call, home, make_ctx, registry_for,
 )
 
 
@@ -54,6 +55,34 @@ async def test_its_own_queued_job_named_in_the_text_asks_no_approval(home):
         [task] = _queued(ctx)
         assert task.data["music_job_id"] == job["id"]
         assert task.data["text"] == music_tools.music_return_text(job)
+
+
+@pytest.mark.asyncio
+async def test_its_own_job_of_another_chat_named_in_the_text_is_asked_about(home):
+    """The same agent in a group names the job of its 1:1 with the owner: no exemption (P2-5)."""
+    async with Rig(home, start_runner=False) as rig:
+        person, ctx, reg, job = await _setup(home, rig)
+        assert job["requested_by"]["conversation_id"] == CHAT
+        ctx.conversation_id = "group-friends"
+        ctx.current_task_id = "group-friends"
+        out = await _check_back(reg, ctx, {"text": f"check on {job['id']} and report the takes"})
+        assert out.startswith("✓ Scheduled task"), out
+        assert len(person.asked) == 2 and person.asked[-1]["task_type"] == "check_back"
+        [task] = _queued(ctx)
+        assert "music_job_id" not in task.data
+        assert "A return to your own music job" not in out
+
+
+@pytest.mark.asyncio
+async def test_two_own_jobs_named_in_the_text_are_asked_about(home):
+    """Several matches are no exemption: which one the agent meant is not core's guess."""
+    async with Rig(home, start_runner=False) as rig:
+        person, ctx, reg, job = await _setup(home, rig)
+        await call(reg, ctx, "music_propose_job", turn="turn-2", params=from_text(style="second"))
+        second = [j for j in rig.store.list_jobs() if j["id"] != job["id"]][0]
+        out = await _check_back(reg, ctx, {"text": f"check {job['id']} and {second['id']}"})
+        assert out.startswith("✓ Scheduled task"), out
+        assert person.asked[-1]["task_type"] == "check_back"
 
 
 @pytest.mark.asyncio

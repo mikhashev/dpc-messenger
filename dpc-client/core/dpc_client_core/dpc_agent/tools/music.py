@@ -33,8 +33,8 @@ gives the take's own file and nothing of the job's request (D44).
   (`guards._OUTPUT_KEYED_TOOLS` holds `music_wait` and `music_check`).
 
 `check_back` is the way back to a job (D49): `schedule_task` with task_type `check_back` and
-`music_job_id` in its task data asks no approval when that job is this agent's and still
-queued or running (`own_music_job_to_return_to`); core then sets its delay
+`music_job_id` in its task data asks no approval when that job is this agent's, made in this
+chat, and still queued or running (`own_music_job_to_return_to`); core then sets its delay
 (`check_back_delay_s`) and its wake text (`music_return_text`). `with_check_back` is the
 allowed-tools rule that keeps `schedule_task` available wherever a music tool is; a
 `schedule_task` only that rule brings takes nothing but such a return
@@ -150,17 +150,68 @@ def _turn_id() -> str:
     return (origin.turn_id if origin is not None else "") or ""
 
 
+def _conversation_id(ctx: ToolContext) -> str:
+    """The chat this call runs in: the context's, else the spawn origin's; empty when neither."""
+    origin = SPAWN_ORIGIN.get()
+    return (getattr(ctx, "conversation_id", None) or (origin.conversation_id if origin else "") or "")
+
+
 def _requested_by(ctx: ToolContext) -> Dict[str, Any]:
     """`requested_by` for this call: the agent, its chat and its turn (D46)."""
-    origin = SPAWN_ORIGIN.get()
     who: Dict[str, Any] = {"kind": js.REQUESTER_AGENT, "agent_id": _agent_id(ctx)}
-    conversation = getattr(ctx, "conversation_id", None) or (origin.conversation_id if origin else "")
+    conversation = _conversation_id(ctx)
     if conversation:
         who["conversation_id"] = conversation
     turn = _turn_id()
     if turn:
         who["turn_id"] = turn
     return who
+
+
+def _ours_in_this_chat(ctx: ToolContext, job: Dict[str, Any]) -> bool:
+    """Whether this agent proposed `job` in this very chat: the agent and the conversation both
+    match (backlog P2-5, P2-6: the same agent serves several chats, and a job of one chat is
+    nothing to another). A job that records no conversation (made before D46 recorded it, or
+    from a context with none) is not, and neither is any job when this call knows no chat:
+    fail closed."""
+    rb = js.requested_by_of(job)
+    agent_id, conversation = _agent_id(ctx), _conversation_id(ctx)
+    return (bool(agent_id) and bool(conversation) and rb.get("kind") == js.REQUESTER_AGENT
+            and rb.get("agent_id") == agent_id and rb.get("conversation_id") == conversation)
+
+
+def _owner_asked(ctx: ToolContext) -> bool:
+    """Whether the owner asked for this turn (ADR-053 2.2); any doubt is False."""
+    from ..owner_approval import asker_is_owner
+    try:
+        return bool(asker_is_owner(ctx))
+    except Exception:
+        return False
+
+
+# What music_propose_job answers about a job that is not this agent's in this chat (P2-6): no
+# id, state, holders or result, so a key or a repeat tells nothing of another chat's job.
+KEY_NOT_YOURS_REFUSAL = ("⚠️ music_propose_job: this idempotency_key cannot be used here; give another "
+                         "one or leave it out. No job was made and nothing was asked.")
+REPEAT_NOT_YOURS_REFUSAL = ("⚠️ music_propose_job: this request cannot be proposed here as it is; change "
+                            "it or leave out the idempotency_key. No job was made and nothing was asked.")
+# Core's refusals that are about the job list, not the request's own params.
+_JOB_LIST_CODES = frozenset({"idempotency_conflict", "requester_queue_full", "turn_job_limit"})
+
+
+def _mine(ctx: ToolContext, job: Dict[str, Any], who: Dict[str, Any]) -> bool:
+    """Whether `job`, which core answered with, is this agent's in this chat, or was asked for by
+    exactly this call's requester (this very turn, also in a context that knows no chat)."""
+    return _ours_in_this_chat(ctx, job) or js.requested_by_of(job) == who
+
+
+# Core's pre-card refusal as a turn someone other than the owner asked for sees it (P2-6): what
+# core found in the owner's library (a track, its length, its stored lyrics) or in the job list
+# stays behind the job card, which the owner sees.
+PRE_CARD_REFUSAL_FOR_OTHERS = ("⚠️ music_propose_job: core refused this request before the owner was "
+                               "asked; the reason concerns the owner's library or music jobs and is not "
+                               "shown to a request from someone other than the owner. Nothing was asked "
+                               "or proposed.")
 
 
 def _ctx_dict(ctx: ToolContext, name: str) -> Dict[str, Any]:
@@ -573,12 +624,25 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     if refused:
         return refused
     jobs = listed.get("jobs") or []
+    owner_asked = _owner_asked(ctx)
     if idempotency_key:
-        same = [j for j in jobs if j.get("idempotency_key") == idempotency_key
-                and js.requested_by_of(j).get("agent_id") == who["agent_id"]]
+        # The key is looked up in this agent's jobs of this chat only (P2-6). Core's key space is
+        # one for all chats, so a key another chat (or another agent, or the person) already used
+        # is refused in words that say nothing of that job.
+        keyed = [j for j in jobs if j.get("idempotency_key") == idempotency_key]
+        same = [j for j in keyed if _ours_in_this_chat(ctx, j)]
         if same:
             return ("This idempotency_key already names a job; no new job was made and nothing was asked.\n"
                     + "\n".join(_job_lines(same[0])))
+        if keyed:
+            return KEY_NOT_YOURS_REFUSAL
+    if (type in js.SONG_TYPES and not owner_asked and params.get("lyrics_mode") == "reuse"
+            and params.get("lyrics") is not None):
+        # Lines given under `reuse` are compared with the track's stored lyrics (core's
+        # `reuse_lyrics_differ`): an answer either way would tell someone other than the owner
+        # what the owner's lyrics say (P2-6). Such a request reuses the stored lines unseen.
+        return ("⚠️ music_propose_job: with lyrics_mode reuse on a request from someone other than the "
+                "owner, leave lyrics out: the track's stored lyrics are used. Nothing was asked or proposed.")
     in_turn = _turn_jobs(jobs, who["agent_id"], turn_id)
     turn_max = _limit_of(ctx, "_music_turn_jobs_max")
     if turn_max is not None and len(in_turn) >= turn_max:
@@ -598,10 +662,21 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
                             idempotency_key=idempotency_key or None, requested_by=who, **edit_args)
     refused = _error_text(checked, "music_propose_job")
     if refused:
+        code = checked.get("code") if isinstance(checked, dict) else None
+        if code == "idempotency_conflict":
+            # The key names a job made elsewhere with other params; its id is not this chat's to see.
+            return KEY_NOT_YOURS_REFUSAL
+        if not owner_asked and (type != js.GENERATE_FROM_TEXT or code in _JOB_LIST_CODES):
+            # Before the job card nothing of the owner's library or job list reaches a turn
+            # someone else asked for (P2-6): which track exists, its length, its lyrics.
+            return PRE_CARD_REFUSAL_FOR_OTHERS
         return refused + " Nothing was asked or proposed."
     if checked.get("repeat"):
+        repeat = checked["repeat"]
+        if not _mine(ctx, repeat, who):
+            return REPEAT_NOT_YOURS_REFUSAL
         return ("This request repeats a job already made; no new job was made and nothing was asked.\n"
-                + "\n".join(_job_lines(checked["repeat"])))
+                + "\n".join(_job_lines(repeat)))
     final = checked.get("params") if isinstance(checked.get("params"), dict) else params
 
     # The person's consent first, through schedule_task's machinery (D47). Stop while the card
@@ -633,8 +708,13 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
                            idempotency_key=idempotency_key or None, requested_by=who, **edit_args)
     refused = _error_text(answer, "music_propose_job")
     if refused:
+        if isinstance(answer, dict) and answer.get("code") == "idempotency_conflict":
+            return KEY_NOT_YOURS_REFUSAL
         return refused + " No job was made."
     job = answer["job"]
+    if not _mine(ctx, job, who):
+        # A key another chat took between the check and now: core answered with that job.
+        return REPEAT_NOT_YOURS_REFUSAL
     if _turn_stopped(ctx):
         # The Stop came during the call itself: take the job back at once, not only when the
         # loop ends the turn (this tool may outlive the loop's own cancel).
@@ -876,8 +956,10 @@ _JOB_ID_IN_TEXT_RE = re.compile(r"(?<![0-9A-Za-z_])job_[0-9a-f]{16}(?![0-9A-Za-z
 
 
 def _own_unfinished_job(ctx: ToolContext, job_id: str) -> Optional[Dict[str, Any]]:
-    """The job `job_id` when this agent proposed it and it is still queued or running, else
-    None. Any doubt is None."""
+    """The job `job_id` when this agent proposed it in this chat and it is still queued or
+    running, else None. Any doubt is None. The chat counts (backlog P2-5): the same agent serves
+    several chats, and a return to another chat's job would skip the owner's card, tell this
+    chat that job and its time, and wake here. A job that records no chat is not this chat's."""
     try:
         job, refused = _get_job(ctx, job_id)
     except Exception:
@@ -885,22 +967,21 @@ def _own_unfinished_job(ctx: ToolContext, job_id: str) -> Optional[Dict[str, Any
         return None
     if refused or job is None:
         return None
-    rb = js.requested_by_of(job)
-    agent_id = _agent_id(ctx)
-    if (bool(agent_id) and rb.get("kind") == js.REQUESTER_AGENT and rb.get("agent_id") == agent_id
-            and job.get("state") in _UNFINISHED):
+    if _ours_in_this_chat(ctx, job) and job.get("state") in _UNFINISHED:
         return job
     return None
 
 
 def own_music_job_to_return_to(ctx: ToolContext, data: Any) -> Optional[Dict[str, Any]]:
-    """The music job a check_back's task data names when this agent proposed it and it is
-    still queued or running (D49), else None. Any doubt is None.
+    """The music job a check_back's task data names when this agent proposed it in this chat and
+    it is still queued or running (D49), else None. Any doubt is None.
 
     The job is named by `music_job_id`. Without that field, a job id written in the task's
-    text fields counts when exactly one such id there is a job of this agent's that is still
-    queued or running (an agent wrote «check job_… at 04:26» and core did not know its own
-    job, so it asked for an approval). The own-and-unfinished check is the same either way."""
+    text fields counts when exactly one such id there is a job of this agent's, made in this
+    chat, that is still queued or running (an agent wrote «check job_… at 04:26» and core did
+    not know its own job, so it asked for an approval). The own-in-this-chat-and-unfinished
+    check is the same either way (backlog P2-5: a job of another chat named in the text is not
+    a return). A `music_job_id` that fails the check is not rescued by the text."""
     if not isinstance(data, dict):
         return None
     if "music_job_id" in data:
@@ -917,8 +998,8 @@ def own_music_job_to_return_to(ctx: ToolContext, data: Any) -> Optional[Dict[str
 
 
 def is_return_to_own_music_job(ctx: ToolContext, data: Any) -> bool:
-    """Whether a check_back's task data names a music job this agent proposed that is still
-    queued or running (D49): such a return asks no approval. Anything else, or any doubt,
+    """Whether a check_back's task data names a music job this agent proposed in this chat that
+    is still queued or running (D49): such a return asks no approval. Anything else, or any doubt,
     is False, and the ordinary approval applies."""
     return own_music_job_to_return_to(ctx, data) is not None
 
@@ -935,8 +1016,8 @@ def music_return_text(job: Dict[str, Any]) -> str:
 # unfinished music job (D49, Zcode #67 P1). It guides the model to the one call it may make.
 SCHEDULE_RETURN_ONLY_REFUSAL = (
     "⚠️ schedule_task is not enabled for this agent; only a return to your own music job is: "
-    "task_type \"check_back\" with task_data {\"music_job_id\": \"<a job you proposed that is still "
-    "queued or running>\"}. Core sets its time and its text. Nothing was scheduled.")
+    "task_type \"check_back\" with task_data {\"music_job_id\": \"<a job you proposed in this chat that "
+    "is still queued or running>\"}. Core sets its time and its text. Nothing was scheduled.")
 
 
 def with_check_back(allowed: Optional[set]) -> Optional[set]:

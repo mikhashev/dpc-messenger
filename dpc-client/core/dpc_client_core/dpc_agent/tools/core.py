@@ -2137,7 +2137,7 @@ def schedule_task(
         own_job = own_music_job_to_return_to(ctx, data) if task_type == "check_back" else None
         if return_only and own_job is None:
             named = data.get("music_job_id") if isinstance(data, dict) else None
-            why = (f" Job {named!r} is not a music job you proposed that is still queued or running."
+            why = (f" Job {named!r} is not a music job you proposed in this chat that is still queued or running."
                    if named else " The task_data names no music_job_id.")
             return SCHEDULE_RETURN_ONLY_REFUSAL + why
         if not isinstance(data, dict):

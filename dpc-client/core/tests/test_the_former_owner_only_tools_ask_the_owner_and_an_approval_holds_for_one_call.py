@@ -64,8 +64,10 @@ def music_calls(monkeypatch):
         if method == "check_music_job":
             return {"status": "ok", "params": kwargs.get("params")}
         if method == "propose_music_job":
+            # As core does: the job records who asked (music_propose_job reads it back).
             return {"status": "ok", "job": {"id": "job_0123456789abcdef", "state": "running",
-                                            "params": kwargs.get("params")}}
+                                            "params": kwargs.get("params"),
+                                            "requested_by": kwargs.get("requested_by")}}
         if method == "get_music_job":
             return {"status": "ok", "job": {"id": kwargs.get("job_id"), "state": "running"}}
         return {"status": "ok"}
