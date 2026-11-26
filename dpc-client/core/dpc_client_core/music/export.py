@@ -1228,9 +1228,23 @@ class MusicExporter:
                                 "already_exported": single["already_exported"], "placed": placed["how"],
                                 "limited_db": single["limited_db"]})
             keep_keys = {name_key(Path(p["path"]).name) for p in planned}
-            removed, kept = self._prune(folder, owned, keep_keys)
+            files = planned
+            # A failed track (no ffmpeg, a full disk, a name taken...) or a skipped one whose
+            # source is unavailable (not in the library, file missing or unreadable, e.g. an
+            # offline drive) may have its earlier export as the only copy, and numbering shifts
+            # make it impossible to tell which old file is whose. So nothing is pruned on such
+            # a run. Only "hidden" skips are a deliberate choice and do not block the prune.
+            # The earlier files stay owned in the record, so the next clean run prunes what
+            # is stale.
+            if any(r["status"] == "error" or (r["status"] == "skipped" and r.get("code") != "hidden")
+                   for r in results):
+                removed, kept = [], []
+                files = planned + [f for key, f in owned.items()
+                                   if key not in keep_keys and (folder / Path(f["path"]).name).exists()]
+            else:
+                removed, kept = self._prune(folder, owned, keep_keys)
             record = {"playlist_id": playlist_id, "name": name, "preset": preset, "folder": self._rel(folder),
-                      "exported_at": _now(), "files": planned}
+                      "exported_at": _now(), "files": files}
             if not limit:
                 record["true_peak_limit"] = False
             if previous is not None:

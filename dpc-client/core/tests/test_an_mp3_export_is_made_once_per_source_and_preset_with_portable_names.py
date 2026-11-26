@@ -359,6 +359,78 @@ def test_a_reordered_or_renamed_playlist_replaces_its_last_run_and_keeps_the_per
     assert other["folder"] == str(root / "Evening mix (2bcdef)")
 
 
+def _broken(exporter):
+    exporter._tools = MediaTools(ffmpeg=None, ffprobe=None)
+
+
+def test_a_run_where_every_track_fails_prunes_nothing_and_keeps_the_earlier_files_owned(tmp_path):
+    root = tmp_path / "out"
+    exporter, _ = _exporter(root)
+    a = _source(tmp_path, "a.flac", content_hash="md5:aaaa", title="First")
+    exporter.export_playlist("pl_1", "Mix", [a])
+    exporter.export_playlist("pl_1", "Mix", [a])
+    first = root / "Mix" / "01 - Band - First.mp3"
+    assert first.is_file()
+    # no ffmpeg and a new track: every track of this run fails
+    _broken(exporter)
+    c = _source(tmp_path, "c.flac", content_hash="md5:cccc", title="Third")
+    answer = exporter.export_playlist("pl_1", "Mix", [c])
+    assert answer["tracks"][0]["status"] == "error" and answer["removed"] == []
+    assert first.is_file()
+    # the record still owns the earlier file, so a later clean run prunes it
+    exporter2, _ = _exporter(root)
+    later = exporter2.export_playlist("pl_1", "Mix", [c])
+    assert later["removed"] == ["01 - Band - First.mp3"] and not first.exists()
+
+
+def test_a_partly_failed_run_prunes_nothing_and_a_clean_run_after_it_does(tmp_path):
+    root = tmp_path / "out"
+    exporter, _ = _exporter(root)
+    a = _source(tmp_path, "a.flac", content_hash="md5:aaaa", title="First")
+    b = _source(tmp_path, "b.flac", content_hash="md5:bbbb", title="Second")
+    exporter.export_playlist("pl_1", "Mix", [a, b])
+    folder = root / "Mix"
+    # b leaves the playlist, a stays, a new track fails to encode
+    exporter, _ = _exporter(root, FakeFfmpeg(rc=1))
+    c = _source(tmp_path, "c.flac", content_hash="md5:cccc", title="Third")
+    answer = exporter.export_playlist("pl_1", "Mix", [a, c])
+    assert [t["status"] for t in answer["tracks"]] == ["ok", "error"]
+    assert answer["removed"] == [] and answer["kept"] == []
+    assert sorted(p.name for p in folder.iterdir()) == ["01 - Band - First.mp3", "02 - Band - Second.mp3"]
+    # the clean run prunes b, which is no longer in the playlist
+    exporter, _ = _exporter(root)
+    clean = exporter.export_playlist("pl_1", "Mix", [a, c])
+    assert clean["removed"] == ["02 - Band - Second.mp3"] or sorted(clean["removed"]) == ["02 - Band - Second.mp3"]
+    assert sorted(p.name for p in folder.iterdir()) == ["01 - Band - First.mp3", "02 - Band - Third.mp3"]
+
+
+def test_a_run_with_an_unavailable_source_prunes_nothing_and_a_hidden_skip_still_prunes(tmp_path):
+    root = tmp_path / "out"
+    exporter, _ = _exporter(root)
+    a = _source(tmp_path, "a.flac", content_hash="md5:aaaa", title="First")
+    b = _source(tmp_path, "b.flac", content_hash="md5:bbbb", title="Second")
+    exporter.export_playlist("pl_1", "Mix", [a, b])
+    folder = root / "Mix"
+    both = ["01 - Band - First.mp3", "02 - Band - Second.mp3"]
+    # every item skipped (a library drive offline): the playlist is refused, nothing is touched
+    with pytest.raises(ExportError):
+        exporter.export_playlist("pl_1", "Mix", [SkippedTrack("trk_a", None, "not in the library", "unknown_track"),
+                                                 SkippedTrack("trk_b", None, "not in the library", "unknown_track")])
+    assert sorted(p.name for p in folder.iterdir()) == both
+    # a lost library entry next to a track that still exports: nothing is pruned, files stay owned
+    answer = exporter.export_playlist("pl_1", "Mix", [a, SkippedTrack("trk_b", None, "not in the library",
+                                                                      "unknown_track")])
+    assert answer["removed"] == [] and sorted(p.name for p in folder.iterdir()) == both
+    # a source ExportError raised while building the source is a skip that blocks the prune too
+    answer = exporter.export_playlist("pl_1", "Mix", [a, SkippedTrack("trk_b", "Second", "file missing",
+                                                                      "source_missing")])
+    assert answer["removed"] == [] and sorted(p.name for p in folder.iterdir()) == both
+    # only a hidden skip: the stale export of b is pruned as before
+    answer = exporter.export_playlist("pl_1", "Mix", [a, SkippedTrack("trk_b", "Second", "hidden", "hidden")])
+    assert answer["removed"] == ["02 - Band - Second.mp3"]
+    assert [p.name for p in folder.iterdir()] == ["01 - Band - First.mp3"]
+
+
 def test_where_a_hard_link_is_refused_the_playlist_file_is_copied(tmp_path, monkeypatch):
     root = tmp_path / "out"
     exporter, _ = _exporter(root)
