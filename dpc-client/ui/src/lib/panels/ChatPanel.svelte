@@ -64,7 +64,14 @@
     type AgentChatAttachment, type HeldAgentSend, type UnconfirmedRestore,
   } from '$lib/utils/agentChatAttachment';
   import { groupRecordingRoute, groupRecordingSentNotice } from '$lib/utils/groupRecording';
-  import { discardVoicePreview, removeVoiceTempFile } from '$lib/utils/voiceCleanup';
+  import {
+    cleanupTranscribedVoicePreview,
+    discardVoicePreview,
+    isTauriEnvironment,
+    joinDpcTempPath,
+    removeTempFile,
+    removeVoiceTempFile,
+  } from '$lib/utils/voiceCleanup';
 
   type AIChatMeta = {
     name: string;
@@ -192,6 +199,8 @@
   let chatDraftInputs = $state(new Map<string, string>());
   type VoicePreview = { blob: Blob; duration: number; filePath?: string };
   let voicePreview = $state<VoicePreview | null>(null);
+  let isTranscribing = $state(false);
+  const transcribingPreviews = new Set<VoicePreview>();
   let pendingImage = $state<{ dataUrl: string; filename: string; sizeBytes: number } | null>(null);
   let describeForAgents = $state(false); // "Describe for agents (VL)" toggle, group image sends only
 
@@ -225,9 +234,14 @@
     heldAgentSends.clear();
     unconfirmedAgentSends.clear();
     if (voicePreview !== null) {
-      void discardVoicePreview(voicePreview, () => {
-        voicePreview = null;
-      });
+      const keepTempFile = isTranscribing && transcribingPreviews.has(voicePreview);
+      void discardVoicePreview(
+        voicePreview,
+        () => {
+          voicePreview = null;
+        },
+        { keepTempFile },
+      );
     }
   });
   let isSendingFile = $state(false);
@@ -342,9 +356,14 @@
       if (pendingFile !== null) pendingFile = null;
       untrack(() => {
         if (voicePreview !== null) {
-          void discardVoicePreview(voicePreview, () => {
-            voicePreview = null;
-          });
+          const keepTempFile = isTranscribing && transcribingPreviews.has(voicePreview);
+          void discardVoicePreview(
+            voicePreview,
+            () => {
+              voicePreview = null;
+            },
+            { keepTempFile },
+          );
         }
       });
       previousChatId = currentChat;
@@ -726,25 +745,33 @@
       }
     } else if (activeChatId.startsWith('telegram-')) {
       // Telegram screenshot
+      const tgChatId = activeChatId;
+      let writtenTempPath: string | null = null;
       try {
         const response = await fetch(imageData.dataUrl);
         const blob = await response.blob();
         const arrayBuffer = await blob.arrayBuffer();
         const uint8Array = new Uint8Array(arrayBuffer);
-        const isTauriEnv = typeof window !== 'undefined' && ((window as any).isTauri === true || !!(window as any).__TAURI__);
-        if (isTauriEnv) {
+        if (isTauriEnvironment()) {
           const { writeFile, BaseDirectory, mkdir } = await import('@tauri-apps/plugin-fs');
           const { invoke } = await import('@tauri-apps/api/core');
           const filename = imageData.filename || `screenshot_${Date.now()}.png`;
+          const homeDir = await invoke<string>('get_home_directory');
+          const fullPath = joinDpcTempPath(homeDir, filename);
           await mkdir('.dpc/temp', { baseDir: BaseDirectory.Home, recursive: true });
           await writeFile(`.dpc/temp/${filename}`, uint8Array, { baseDir: BaseDirectory.Home });
-          const homeDir = await invoke<string>('get_home_directory');
-          const fullPath = `${homeDir}/.dpc/temp/${filename}`;
-          await sendToTelegram(activeChatId, text || '', [], undefined, undefined, undefined, fullPath);
+          writtenTempPath = fullPath;
+          const result = await sendToTelegram(tgChatId, text || '', [], undefined, undefined, undefined, fullPath);
+          if (!result || result.status === 'error') {
+            throw new Error(result?.message || 'Failed to send screenshot to Telegram');
+          }
+          // Keep `fullPath` on success: core's `send_to_telegram` only enqueues `file_path`
+          // onto `telegram_manager._outgoing_queue` for asynchronous upload by `_message_sender_loop`,
+          // and `chatHistories` references `file_path` directly in `ImageMessage`.
           chatHistories.update(h => {
             const m = new Map(h);
-            const hist = m.get(activeChatId) || [];
-            m.set(activeChatId, [...hist, {
+            const hist = m.get(tgChatId) || [];
+            m.set(tgChatId, [...hist, {
               id: crypto.randomUUID(), sender: 'user', text: text || '', timestamp: Date.now(),
               attachments: [{ type: 'image', filename, file_path: fullPath, size_bytes: uint8Array.length }],
             }]);
@@ -754,6 +781,9 @@
           throw new Error('Telegram file transfer requires Tauri desktop app');
         }
       } catch (error) {
+        if (writtenTempPath) {
+          await removeTempFile(writtenTempPath);
+        }
         fileOfferToastMessage = `Failed to send screenshot to Telegram: ${error}`;
         showFileOfferToast = true;
         setTimeout(() => (showFileOfferToast = false), 5000);
@@ -1311,8 +1341,6 @@
     }
   }
 
-  let isTranscribing = $state(false);
-
   async function handleTranscribeVoiceMessage() {
     if (!voicePreview) return;
     // The chat and the recording this press belongs to. Switching chats while Whisper
@@ -1320,6 +1348,8 @@
     // the await: the words go to the draft of the chat they were recorded in.
     const originChatId = activeChatId;
     const preview = voicePreview;
+    let succeeded = false;
+    transcribingPreviews.add(preview);
     isTranscribing = true;
     try {
       fileOfferToastMessage = 'Transcribing voice message...';
@@ -1338,18 +1368,16 @@
         transcribeArgs = { audio_base64: await _blobToBase64(preview.blob), mime_type: preview.blob.type || 'audio/webm', provider_alias: selectedProviderId, duration_seconds: preview.duration };
       }
       const response = await sendCommand('transcribe_audio', transcribeArgs);
+      if (!response) throw new Error('Not connected to backend');
       if (response.error) throw new Error(response.error);
       const transcription = response.text || '';
       const inputOwnerChatId = previousChatId || activeChatId;
       const next = appendToChatDraft({ drafts: chatDraftInputs, currentInput }, inputOwnerChatId, originChatId, transcription);
       chatDraftInputs = next.drafts;
       currentInput = next.currentInput;
+      succeeded = true;
 
-      const tempFilePath = voicePreview === preview ? preview.filePath : undefined;
       if (voicePreview === preview) voicePreview = null;
-      if (tempFilePath) {
-        await removeVoiceTempFile(tempFilePath);
-      }
 
       if (originChatId !== inputOwnerChatId) {
         if (transcription) {
@@ -1370,14 +1398,27 @@
       showFileOfferToast = true;
       setTimeout(() => (showFileOfferToast = false), 5000);
     } finally {
-      isTranscribing = false;
+      transcribingPreviews.delete(preview);
+      isTranscribing = transcribingPreviews.size > 0;
+      await cleanupTranscribedVoicePreview(preview, {
+        succeeded,
+        isStillActivePreview: voicePreview === preview,
+        clearActivePreview: () => {
+          if (voicePreview === preview) voicePreview = null;
+        },
+      });
     }
   }
 
   function handleCancelVoicePreview() {
-    void discardVoicePreview(voicePreview, () => {
-      voicePreview = null;
-    });
+    const keepTempFile = isTranscribing && voicePreview !== null && transcribingPreviews.has(voicePreview);
+    void discardVoicePreview(
+      voicePreview,
+      () => {
+        voicePreview = null;
+      },
+      { keepTempFile },
+    );
   }
 
   async function _blobToBase64(blob: Blob): Promise<string> {

@@ -1,6 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { cancelTauriRecording, isTauriEnvironment, removeVoiceTempFile } from '$lib/utils/voiceCleanup';
+  import {
+    cancelBrowserRecordingSession,
+    cancelTauriRecording,
+    createBrowserRecordingSession,
+    finalizeBrowserRecordingSession,
+    isTauriEnvironment,
+    removeVoiceTempFile,
+    stopStreamTracks,
+    type BrowserRecordingSession,
+  } from '$lib/utils/voiceCleanup';
 
   interface VoiceRecorderProps {
     disabled?: boolean;
@@ -17,10 +26,23 @@
   let timerInterval: ReturnType<typeof setInterval> | null = null;
   let activeRecordingPath: string | null = null;
   let recordingCancelled = false;
+  let activeAttemptId = 0;
   let isStopping = false;
   let mediaRecorder: MediaRecorder | null = null;
   let mediaStream: MediaStream | null = null;
-  let discardBrowserRecording = false;
+  let activeBrowserSession: BrowserRecordingSession<MediaRecorder, MediaStream> | null = null;
+
+  function clearBrowserSessionRefs(session: BrowserRecordingSession<MediaRecorder, MediaStream>) {
+    if (activeBrowserSession === session) {
+      activeBrowserSession = null;
+    }
+    if (mediaRecorder === session.recorder) {
+      mediaRecorder = null;
+    }
+    if (mediaStream === session.stream) {
+      mediaStream = null;
+    }
+  }
 
   onMount(() => {
     // Check for Tauri environment
@@ -28,11 +50,13 @@
     console.log('[VoiceRecorder] Environment:', isTauri ? 'Tauri (using Rust backend)' : 'Browser (using getUserMedia)');
 
     return () => {
+      recordingCancelled = true;
+      activeAttemptId++;
       if (timerInterval) {
         clearInterval(timerInterval);
         timerInterval = null;
       }
-      if (isRecording) {
+      if (isRecording || activeRecordingPath !== null || activeBrowserSession !== null) {
         void cancelRecording();
       } else {
         cleanup();
@@ -50,27 +74,30 @@
   async function startRecording() {
     if (isRecording || isStopping) return;
 
+    const attemptId = ++activeAttemptId;
     // Reset state for new recording
     recordingCancelled = false;
-    discardBrowserRecording = false;
     activeRecordingPath = null;
     recordingDuration = 0;
     recordingStartTime = Date.now();
 
     if (isTauri) {
-      await startRecordingTauri();
+      await startRecordingTauri(attemptId);
     } else {
-      await startRecordingBrowser();
+      await startRecordingBrowser(attemptId);
     }
   }
 
   // Tauri/Rust backend recording (works on Linux)
-  async function startRecordingTauri() {
+  async function startRecordingTauri(attemptId: number) {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
 
       // Get DPC home directory for temp files
       const homeDir = await invoke('get_home_directory') as string;
+      if (recordingCancelled || attemptId !== activeAttemptId) {
+        return;
+      }
       const outputDir = `${homeDir}/.dpc/temp`;
 
       console.log('[VoiceRecorder] Starting Rust backend recording to:', outputDir);
@@ -82,7 +109,7 @@
 
       const startedPath = result?.output_path ?? null;
 
-      if (recordingCancelled) {
+      if (recordingCancelled || attemptId !== activeAttemptId) {
         await cancelTauriRecording(startedPath, {
           stopRecording: () => invoke<string>('tauri_stop_recording'),
           getStatus: () => invoke('tauri_get_recording_status'),
@@ -105,18 +132,27 @@
 
     } catch (error) {
       console.error('[VoiceRecorder] Error starting recording (Tauri):', error);
-      alert(`Failed to start recording: ${error}`);
+      if (!recordingCancelled && attemptId === activeAttemptId) {
+        alert(`Failed to start recording: ${error}`);
+      }
     }
   }
 
   // Browser getUserMedia recording (original implementation)
-  async function startRecordingBrowser() {
+  async function startRecordingBrowser(attemptId: number) {
+    let session: BrowserRecordingSession<MediaRecorder, MediaStream> | null = null;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStream = stream;
+      if (recordingCancelled || attemptId !== activeAttemptId) {
+        stopStreamTracks(stream);
+        return;
+      }
       const recorder = new MediaRecorder(stream, {
         mimeType: getSupportedMimeType()
       });
+      session = createBrowserRecordingSession(recorder, stream);
+      activeBrowserSession = session;
+      mediaStream = stream;
       mediaRecorder = recorder;
 
       const audioChunks: Blob[] = [];
@@ -128,18 +164,20 @@
       };
 
       recorder.onstop = () => {
-        const duration = recordingDuration;
         const mimeType = recorder.mimeType || 'audio/webm';
-        const shouldDiscard = discardBrowserRecording;
-        cleanup();
-        if (!shouldDiscard) {
-          const audioBlob = new Blob(audioChunks, { type: mimeType });
-          onRecordingComplete(audioBlob, duration);
-        }
+        finalizeBrowserRecordingSession(
+          session!,
+          () => clearBrowserSessionRefs(session!),
+          (duration) => {
+            const audioBlob = new Blob(audioChunks, { type: mimeType });
+            onRecordingComplete(audioBlob, duration);
+          },
+        );
       };
 
-      if (recordingCancelled) {
-        cleanup();
+      if (recordingCancelled || attemptId !== activeAttemptId) {
+        clearBrowserSessionRefs(session);
+        stopStreamTracks(stream);
         return;
       }
 
@@ -149,15 +187,21 @@
       // Start timer
       timerInterval = setInterval(() => {
         recordingDuration++;
+        if (session) session.duration = recordingDuration;
         if (recordingDuration >= maxDuration) {
           stopRecording();
         }
       }, 1000);
 
     } catch (error) {
-      cleanup();
+      if (session) {
+        clearBrowserSessionRefs(session);
+        stopStreamTracks(session.stream);
+      } else if (attemptId === activeAttemptId) {
+        cleanup();
+      }
       console.error('[VoiceRecorder] Error starting recording (Browser):', error);
-      if (error instanceof Error) {
+      if (!recordingCancelled && attemptId === activeAttemptId && error instanceof Error) {
         if (error.name === 'NotAllowedError') {
           alert('Microphone permission denied. Please allow microphone access to record voice messages.');
         } else if (error.name === 'NotFoundError') {
@@ -241,11 +285,15 @@
   }
 
   function stopRecordingBrowser() {
-    discardBrowserRecording = false;
     isRecording = false;
     if (timerInterval) {
       clearInterval(timerInterval);
       timerInterval = null;
+    }
+    const session = activeBrowserSession;
+    if (session) {
+      session.duration = recordingDuration;
+      session.cancelled = false;
     }
     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
       mediaRecorder.stop();
@@ -256,6 +304,7 @@
 
   async function cancelRecording() {
     recordingCancelled = true;
+    activeAttemptId++;
     const wasRecording = isRecording || activeRecordingPath !== null;
     isRecording = false;
     recordingDuration = 0;
@@ -276,10 +325,13 @@
         });
       }
     } else {
-      discardBrowserRecording = true;
-      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        mediaRecorder.stop();
+      const session = activeBrowserSession;
+      if (session) {
+        cancelBrowserRecordingSession(session, () => clearBrowserSessionRefs(session));
       } else {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+          mediaRecorder.stop();
+        }
         cleanup();
       }
     }
@@ -304,13 +356,10 @@
   }
 
   function cleanup() {
-    if (mediaStream) {
-      for (const track of mediaStream.getTracks()) {
-        track.stop();
-      }
-      mediaStream = null;
-    }
+    stopStreamTracks(mediaStream);
+    mediaStream = null;
     mediaRecorder = null;
+    activeBrowserSession = null;
   }
 </script>
 
