@@ -24,12 +24,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from dpc_client_core.dpc_agent.agent import ASKER_HUMAN, Asker
+from dpc_client_core import service as service_mod
+from dpc_client_core.dpc_agent import owner_approval
+from dpc_client_core.dpc_agent.agent import ASKER_HUMAN, OTHER_NODE_TURN, OWNER_TURN, Asker
 from dpc_client_core.dpc_agent.loop import _execute_with_timeout
 from dpc_client_core.dpc_agent.owner_approval import Exempt, ToolAsks
+from dpc_client_core.dpc_agent.tools import chat_files
 from dpc_client_core.dpc_agent.tools import core as core_tools
 from dpc_client_core.dpc_agent.tools import music as music_tools
 from dpc_client_core.dpc_agent.tools.registry import ToolContext
@@ -502,3 +507,383 @@ async def test_a_job_core_answers_with_after_the_card_from_another_chat_is_not_s
     out = music_tools.music_propose_job.__wrapped__(ctx, params=from_text(), idempotency_key="k")
     assert out == music_tools.REPEAT_NOT_YOURS_REFUSAL and "secret" not in out
     assert calls.count("propose_music_job") == 1
+
+
+# -- Mike #19: read, take, library, lyrics, playlist and chat_post_file(take_id) gates -----------
+
+THIS_NODE = "dpc-node-this-0000"
+FRIEND_NODE = "dpc-node-friend-0002"
+ONE_AGENT = "agent_owner_0001"
+ONE_TO_ONE = ONE_AGENT
+SOLO_GROUP = "group-solo"
+FRIENDS_GROUP = GROUP
+OWNER_ASKER = Asker(ASKER_HUMAN, "Owner", THIS_NODE, is_owner=True, verified=True)
+DONE_STATES = (js.REVIEW, js.ACCEPTED, js.FAILED, js.CANCELLED)
+
+
+class _MultiChatService(MusicService):
+    """MusicService with group_manager, node identity, and group agent file posting."""
+
+    def __init__(self, home_dir, rig, person):
+        super().__init__(home_dir, rig, person)
+        self.p2p_manager = SimpleNamespace(get_display_name=lambda: "Owner", node_id=THIS_NODE)
+        self._groups = {
+            FRIENDS_GROUP: SimpleNamespace(
+                group_id=FRIENDS_GROUP, name="Friends",
+                members=[THIS_NODE, FRIEND_NODE], is_discord_bridge=False,
+            ),
+            SOLO_GROUP: SimpleNamespace(
+                group_id=SOLO_GROUP, name="AI Studio",
+                members=[THIS_NODE], is_discord_bridge=False,
+            ),
+        }
+        self.group_manager = SimpleNamespace(
+            node_id=THIS_NODE,
+            get_group=lambda gid: self._groups.get(gid),
+        )
+        self.sent = []
+
+    def _get_agent_telegram_bridge(self, agent_id):
+        return None
+
+    def _conversation_display_name(self, cid: str) -> str:
+        if cid in self._groups:
+            return self._groups[cid].name
+        if cid == ONE_TO_ONE:
+            return "OwnerAgent (1:1)"
+        return cid
+
+    async def send_group_agent_file(self, group_id, agent_name, file_path, text="", music=None,
+                                    expected_sha256=None, expected_size=None):
+        copy = Path(file_path)
+        self.sent.append({
+            "group_id": group_id, "agent_name": agent_name, "name": copy.name,
+            "bytes": copy.read_bytes(), "text": text, "music": music,
+        })
+        return {
+            "status": "success", "saved_locally": True, "file_path": f"/group/files/{copy.name}",
+            "message_id": f"msg-{len(self.sent)}", "msg_index": len(self.sent),
+            "size_bytes": copy.stat().st_size, "mime_type": "audio/flac",
+            "sender_name": "OwnerAgent", "transfer_ids": ["t1"], "offline_members": [],
+        }
+
+
+def _multi_ctx(dpc_home, service, conversation, *, asker=OWNER_ASKER, turn_class=OWNER_TURN,
+               source=None):
+    root = dpc_home / "agents" / ONE_AGENT
+    (root / "logs").mkdir(parents=True, exist_ok=True)
+    if source is None:
+        source = "group" if conversation.startswith("group-") else "ui"
+    ctx = ToolContext(
+        agent_root=root,
+        turn_class=turn_class,
+        open_layers=frozenset({"L5", "L6", "EXT"}) if turn_class == OWNER_TURN else frozenset(),
+        message_source=source,
+        asker=asker,
+        conversation_id=conversation,
+        conversation_title=service._conversation_display_name(conversation) if service else None,
+        dpc_service=service,
+    )
+    ctx.agent_event_loop = asyncio.get_running_loop()
+    ctx._event_loop = asyncio.get_running_loop()
+    ctx._agent = QueueAgent(root)
+    return ctx
+
+
+async def _exec(reg, ctx, name, turn="turn-1", **args):
+    tc = {"id": f"c-{name}", "type": "function",
+          "function": {"name": name, "arguments": json.dumps(args)}}
+    out = await asyncio.wait_for(_execute_with_timeout(
+        reg, tc, ctx.agent_root / "logs", reg.get_timeout(name), ctx=ctx,
+        agent_id=ctx.agent_root.name, session_id=ctx.conversation_id or "", turn_id=turn), BOUND)
+    return out["result"]
+
+
+async def _seed_world(tmp_path, monkeypatch, *, start_runner=True):
+    """Build one Rig + _MultiChatService with:
+    - a 1:1 generated job/take/track/lyrics (`job_dm`, `take_dm`, `trk_dm`)
+    - a personal folder track (`trk_folder`) with lyrics
+    - a user playlist (`pl_private`) containing both private tracks
+    - a multi-node group job/take/track/lyrics (`job_group`, `take_group`, `trk_group`)
+    """
+    user_home = tmp_path / "u"
+    dpc_home = user_home / ".dpc"
+    from tests._acestep_helpers import install_fake_engine
+    install_fake_engine(dpc_home)
+    free_env(monkeypatch)
+    monkeypatch.setattr(music_tools, "POLL_INTERVAL_S", 0.05)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+    monkeypatch.setenv("DPC_HOME", str(dpc_home))
+    monkeypatch.setattr(service_mod, "DPC_HOME_DIR", dpc_home)
+    monkeypatch.setattr(core_tools, "_SCHEDULE_APPROVAL_TTL_SECONDS", 0.3)
+    owner_approval._reset_for_tests()
+    return user_home, dpc_home
+
+
+async def _populate_world(rig, dpc_home, service):
+    # 1. Propose and finish a 1:1 job in ONE_TO_ONE (seed=1)
+    ctx_dm = _multi_ctx(dpc_home, service, ONE_TO_ONE, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+    out_dm = await _exec(registry_for(ctx_dm), ctx_dm, "music_propose_job", turn="turn-dm",
+                         params=from_text(style="private 1to1 ballad", variants=1, seed=1))
+    assert out_dm.startswith("Proposed (approved by the person)."), out_dm
+    job_dm = rig.store.list_jobs()[-1]
+    job_dm = await rig.wait_for(job_dm["id"], DONE_STATES)
+    assert job_dm["state"] == js.REVIEW, job_dm.get("state_reason")
+    [take_dm] = rig.store.list_takes(job_dm["id"])
+    trk_dm = take_dm["library_track_id"]
+    await (await service._music_lyrics()).save_manual(trk_dm, "[00:01.00]SECRET 1TO1 VERSE")
+
+    # 2. Add a personal folder track + lyrics
+    folder = dpc_home.parent / "MyMusic"
+    folder.mkdir(parents=True, exist_ok=True)
+    personal_wav = folder / "Personal Song.wav"
+    import wave as _wave
+    import numpy as _np
+    pcm = (0.25 * _np.sin(2 * _np.pi * 330 * _np.arange(48000) / 48000) * 32767).astype("<i2")
+    with _wave.open(str(personal_wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(48000)
+        w.writeframes(pcm.tobytes())
+    added_folder = await rig.library.add_folder(str(folder), watch=False)
+    await rig.library.rescan_folder(added_folder["id"])
+    entries = rig.library.list_entries()
+    folder_entry = next(e for e in entries if e.get("origin") == "folder")
+    trk_folder = folder_entry["id"]
+    await (await service._music_lyrics()).save_manual(trk_folder, "[00:02.00]SECRET FOLDER LYRICS")
+
+    # 3. Create a private playlist
+    pl_private = await rig.library.create_playlist("Secret Private Mix", [trk_dm, trk_folder])
+
+    # 4. Propose and finish a group job inside FRIENDS_GROUP (seed=2)
+    ctx_grp = _multi_ctx(dpc_home, service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OTHER_NODE_TURN)
+    out_grp = await _exec(registry_for(ctx_grp), ctx_grp, "music_propose_job", turn="turn-grp",
+                          params=from_text(style="public group anthem", variants=1, seed=2))
+    assert out_grp.startswith("Proposed (approved by the person)."), out_grp
+    job_group = next(j for j in rig.store.list_jobs() if j["id"] != job_dm["id"])
+    job_group = await rig.wait_for(job_group["id"], DONE_STATES)
+    assert job_group["state"] == js.REVIEW, job_group.get("state_reason")
+    [take_group] = rig.store.list_takes(job_group["id"])
+    trk_group = take_group["library_track_id"]
+    await (await service._music_lyrics()).save_manual(trk_group, "[00:01.00]PUBLIC GROUP CHORUS")
+
+    service.person.asked.clear()
+    return {
+        "job_dm": job_dm, "take_dm": take_dm, "trk_dm": trk_dm,
+        "trk_folder": trk_folder, "pl_private": pl_private,
+        "job_group": job_group, "take_group": take_group, "trk_group": trk_group,
+    }
+
+
+@pytest.mark.asyncio
+async def test_multi_node_group_blocks_1to1_and_private_library_even_when_owner_asked(tmp_path, monkeypatch):
+    _user_home, dpc_home = await _seed_world(tmp_path, monkeypatch)
+    async with Rig(dpc_home) as rig:
+        person = Person(True)
+        service = _MultiChatService(dpc_home, rig, person)
+        data = await _populate_world(rig, dpc_home, service)
+
+        ctx = _multi_ctx(dpc_home, service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OTHER_NODE_TURN)
+        reg = registry_for(ctx)
+        job_dm, take_dm, trk_dm = data["job_dm"], data["take_dm"], data["trk_dm"]
+        trk_folder, pl = data["trk_folder"], data["pl_private"]
+        job_group, take_group, trk_group = data["job_group"], data["take_group"], data["trk_group"]
+
+        # 1. Job-reading tools refuse 1:1 job neutrally (no status, no .flac path, no take id)
+        for tool_name, args in (
+            ("music_check", {"job_id": job_dm["id"]}),
+            ("music_wait", {"job_id": job_dm["id"], "timeout": 1}),
+            ("music_list_takes", {"job_id": job_dm["id"]}),
+        ):
+            out = await _exec(reg, ctx, tool_name, **args)
+            assert "not_your_job" in out, (tool_name, out)
+            assert "review" not in out and ".flac" not in out and take_dm["id"] not in out
+
+        # Non-existent job id gives the exact same neutral refusal (no existence oracle)
+        fake_check = await _exec(reg, ctx, "music_check", job_id="job_0000000000000000")
+        assert "not_your_job" in fake_check and "not_found" not in fake_check
+
+        # 2. Lyrics refuse 1:1 track, personal folder track, and unknown track identically
+        for bad_trk in (trk_dm, trk_folder, "trk_0000000000000000"):
+            out = await _exec(reg, ctx, "music_get_lyrics", track_id=bad_trk)
+            assert "not_your_job" in out, (bad_trk, out)
+            assert "SECRET" not in out and "not_found" not in out
+
+        # 3. Library lists ONLY tracks created in this group, and NO private playlists
+        lib = json.loads(await _exec(reg, ctx, "music_list_library"))
+        assert [t["id"] for t in lib["tracks"]] == [trk_group]
+        assert lib["tracks_total"] == 1
+        assert lib["playlists"] == []
+
+        # 4. Playlist add refuses 1:1 track, folder track, and 1:1 take before touching playlist
+        before_pl = [p for p in rig.library.list_playlists() if p.get("kind") == "user"]
+        for kwargs in (
+            {"playlist_id": pl["id"], "track_ids": [trk_dm]},
+            {"playlist_id": pl["id"], "track_ids": [trk_folder]},
+            {"playlist_id": pl["id"], "track_ids": [trk_group, trk_dm]},
+            {"playlist_id": pl["id"], "take_id": take_dm["id"]},
+        ):
+            out = await _exec(reg, ctx, "music_playlist_add", **kwargs)
+            assert "not_your_job" in out, (kwargs, out)
+            assert "Secret Private Mix" not in out and "already has" not in out
+        assert [p for p in rig.library.list_playlists() if p.get("kind") == "user"] == before_pl
+
+        # 5. chat_post_file(take_id=...) refuses 1:1 take without sending or leaking state
+        post_out = await _exec(reg, ctx, "chat_post_file", take_id=take_dm["id"])
+        assert "not_your_job" in post_out, post_out
+        assert "review" not in post_out and ".flac" not in post_out
+        assert service.sent == []
+
+        # Zero approval cards for any owner-asked read/post
+        assert person.asked == []
+
+        # 6. Legitimate multi-node group job/take/track STILL works!
+        assert "review" in await _exec(reg, ctx, "music_check", job_id=job_group["id"])
+        assert take_group["id"] in await _exec(reg, ctx, "music_wait", job_id=job_group["id"], timeout=1)
+        assert take_group["id"] in await _exec(reg, ctx, "music_list_takes", job_id=job_group["id"])
+        assert "PUBLIC GROUP CHORUS" in await _exec(reg, ctx, "music_get_lyrics", track_id=trk_group)
+        posted_grp = await _exec(reg, ctx, "chat_post_file", take_id=take_group["id"])
+        assert "Posted " in posted_grp and len(service.sent) == 1
+        assert service.sent[0]["music"]["take_id"] == take_group["id"]
+
+        pl2 = await rig.library.create_playlist("Group Mix", [])
+        added_out = await _exec(reg, ctx, "music_playlist_add", playlist_id=pl2["id"],
+                                take_id=take_group["id"])
+        assert "added 1 track(s)" in added_out
+
+
+@pytest.mark.asyncio
+async def test_multi_node_group_on_foreign_asker_refuses_1to1_without_card_and_cards_name_chat_for_group_job(
+        tmp_path, monkeypatch):
+    _user_home, dpc_home = await _seed_world(tmp_path, monkeypatch)
+    async with Rig(dpc_home) as rig:
+        person = Person(True)
+        service = _MultiChatService(dpc_home, rig, person)
+        data = await _populate_world(rig, dpc_home, service)
+
+        ctx = _multi_ctx(dpc_home, service, FRIENDS_GROUP, asker=FRIEND, turn_class=OTHER_NODE_TURN)
+        reg = registry_for(ctx)
+        job_dm, take_dm, trk_dm = data["job_dm"], data["take_dm"], data["trk_dm"]
+        trk_folder, pl = data["trk_folder"], data["pl_private"]
+        job_group, take_group, trk_group = data["job_group"], data["take_group"], data["trk_group"]
+
+        # 1:1 / folder items are refused BEFORE any approval card is raised
+        assert "not_your_job" in await _exec(reg, ctx, "music_check", job_id=job_dm["id"])
+        assert "not_your_job" in await _exec(reg, ctx, "music_wait", job_id=job_dm["id"], timeout=1)
+        assert "not_your_job" in await _exec(reg, ctx, "music_list_takes", job_id=job_dm["id"])
+        assert "not_your_job" in await _exec(reg, ctx, "music_get_lyrics", track_id=trk_dm)
+        assert "not_your_job" in await _exec(reg, ctx, "music_get_lyrics", track_id=trk_folder)
+        assert "not_your_job" in await _exec(reg, ctx, "music_playlist_add", playlist_id=pl["id"], track_ids=[trk_dm])
+        assert "not_your_job" in await _exec(reg, ctx, "music_playlist_add", playlist_id=pl["id"], take_id=take_dm["id"])
+        assert "not_your_job" in await _exec(reg, ctx, "chat_post_file", take_id=take_dm["id"])
+        assert person.asked == [], "refused cross-chat requests must not raise an approval card"
+        assert service.sent == []
+
+        # music_list_library asks on a card naming the chat, and when approved shows only group tracks
+        lib = json.loads(await _exec(reg, ctx, "music_list_library"))
+        assert len(person.asked) == 1
+        assert FRIENDS_GROUP in person.asked[-1]["details"]
+        assert [t["id"] for t in lib["tracks"]] == [trk_group]
+        assert lib["playlists"] == []
+
+        # Group's own job/take/track raises cards naming the chat and succeeds when approved
+        assert "review" in await _exec(reg, ctx, "music_check", job_id=job_group["id"])
+        assert FRIENDS_GROUP in person.asked[-1]["details"]
+        assert take_group["id"] in await _exec(reg, ctx, "music_wait", job_id=job_group["id"], timeout=1)
+        assert FRIENDS_GROUP in person.asked[-1]["details"]
+        assert take_group["id"] in await _exec(reg, ctx, "music_list_takes", job_id=job_group["id"])
+        assert FRIENDS_GROUP in person.asked[-1]["details"]
+        assert "PUBLIC GROUP CHORUS" in await _exec(reg, ctx, "music_get_lyrics", track_id=trk_group)
+        assert FRIENDS_GROUP in person.asked[-1]["details"]
+        assert "Posted " in await _exec(reg, ctx, "chat_post_file", take_id=take_group["id"])
+        assert FRIENDS_GROUP in person.asked[-1]["details"]
+        assert len(service.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_one_node_group_and_1to1_allow_owner_1to1_reads_but_block_foreign_asker(tmp_path, monkeypatch):
+    _user_home, dpc_home = await _seed_world(tmp_path, monkeypatch)
+    async with Rig(dpc_home) as rig:
+        person = Person(True)
+        service = _MultiChatService(dpc_home, rig, person)
+        data = await _populate_world(rig, dpc_home, service)
+
+        job_dm, take_dm, trk_dm = data["job_dm"], data["take_dm"], data["trk_dm"]
+        trk_folder, pl = data["trk_folder"], data["pl_private"]
+
+        # One-node group (AI Studio) with Owner asking -> MAY read Owner's 1:1 jobs, library, lyrics, takes
+        ctx_solo = _multi_ctx(dpc_home, service, SOLO_GROUP, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+        reg_solo = registry_for(ctx_solo)
+        assert "review" in await _exec(reg_solo, ctx_solo, "music_check", job_id=job_dm["id"])
+        assert take_dm["id"] in await _exec(reg_solo, ctx_solo, "music_wait", job_id=job_dm["id"], timeout=1)
+        assert take_dm["id"] in await _exec(reg_solo, ctx_solo, "music_list_takes", job_id=job_dm["id"])
+        assert "SECRET 1TO1 VERSE" in await _exec(reg_solo, ctx_solo, "music_get_lyrics", track_id=trk_dm)
+        assert "SECRET FOLDER LYRICS" in await _exec(reg_solo, ctx_solo, "music_get_lyrics", track_id=trk_folder)
+
+        lib_solo = json.loads(await _exec(reg_solo, ctx_solo, "music_list_library"))
+        assert {trk_dm, trk_folder, data["trk_group"]} <= {t["id"] for t in lib_solo["tracks"]}
+        assert any(p["id"] == pl["id"] for p in lib_solo["playlists"])
+
+        pl_solo = await rig.library.create_playlist("Solo Mix", [])
+        assert "added 1 track(s)" in await _exec(
+            reg_solo, ctx_solo, "music_playlist_add", playlist_id=pl_solo["id"], take_id=take_dm["id"])
+        assert "Posted " in await _exec(reg_solo, ctx_solo, "chat_post_file", take_id=take_dm["id"])
+        assert len(service.sent) == 1 and service.sent[0]["group_id"] == SOLO_GROUP
+        assert person.asked == []
+
+        # One-node group with non-owner asker -> per-chat opacity still blocks 1:1 items
+        ctx_solo_foreign = _multi_ctx(dpc_home, service, SOLO_GROUP, asker=FRIEND, turn_class=OWNER_TURN)
+        assert "not_your_job" in await _exec(registry_for(ctx_solo_foreign), ctx_solo_foreign,
+                                             "music_check", job_id=job_dm["id"])
+        assert person.asked == []
+
+        # 1:1 owner chat still works as before
+        ctx_dm = _multi_ctx(dpc_home, service, ONE_TO_ONE, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+        reg_dm = registry_for(ctx_dm)
+        assert "review" in await _exec(reg_dm, ctx_dm, "music_check", job_id=job_dm["id"])
+        assert "SECRET 1TO1 VERSE" in await _exec(reg_dm, ctx_dm, "music_get_lyrics", track_id=trk_dm)
+        assert "Posted " in await _exec(reg_dm, ctx_dm, "chat_post_file", take_id=take_dm["id"])
+        assert person.asked == []
+
+
+@pytest.mark.asyncio
+async def test_multi_node_detection_checks_group_roster_and_discord_bridge_and_fails_closed(tmp_path, monkeypatch):
+    _user_home, dpc_home = await _seed_world(tmp_path, monkeypatch)
+    async with Rig(dpc_home) as rig:
+        person = Person(True)
+        service = _MultiChatService(dpc_home, rig, person)
+        data = await _populate_world(rig, dpc_home, service)
+        job_dm = data["job_dm"]
+
+        # Unclassified turn_class=None on multi-node group -> detected from group_manager, blocked!
+        ctx_unclassified_multi = _multi_ctx(
+            dpc_home, service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=None)
+        assert "not_your_job" in await _exec(
+            registry_for(ctx_unclassified_multi), ctx_unclassified_multi,
+            "music_check", job_id=job_dm["id"])
+
+        # Mis-set turn_class=OWNER_TURN on multi-node group -> group_manager roster catches it!
+        ctx_wrong_cls = _multi_ctx(
+            dpc_home, service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+        assert "not_your_job" in await _exec(
+            registry_for(ctx_wrong_cls), ctx_wrong_cls, "music_check", job_id=job_dm["id"])
+
+        # Discord bridge with 1 member -> treated as multi-node (blocked)!
+        service._groups["group-bridge"] = SimpleNamespace(
+            group_id="group-bridge", name="Discord", members=[THIS_NODE], is_discord_bridge=True)
+        ctx_bridge = _multi_ctx(dpc_home, service, "group-bridge", asker=OWNER_ASKER, turn_class=None)
+        assert "not_your_job" in await _exec(
+            registry_for(ctx_bridge), ctx_bridge, "music_check", job_id=job_dm["id"])
+
+        # Unknown group (not in group_manager) -> fails closed!
+        ctx_unknown = _multi_ctx(dpc_home, service, "group-missing", asker=OWNER_ASKER, turn_class=None)
+        assert "not_your_job" in await _exec(
+            registry_for(ctx_unknown), ctx_unknown, "music_check", job_id=job_dm["id"])
+
+        # Unclassified turn_class=None on verified 1-node group -> recognized as 1-node, allowed!
+        ctx_unclassified_solo = _multi_ctx(
+            dpc_home, service, SOLO_GROUP, asker=OWNER_ASKER, turn_class=None)
+        assert "review" in await _exec(
+            registry_for(ctx_unclassified_solo), ctx_unclassified_solo,
+            "music_check", job_id=job_dm["id"])
+

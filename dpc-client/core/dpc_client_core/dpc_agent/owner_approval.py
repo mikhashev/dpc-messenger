@@ -123,6 +123,62 @@ def asker_is_owner(ctx: Any) -> bool:
     return bool(turn_asker(ctx).is_owner)
 
 
+def _ctx_conversation_id(ctx: Any) -> str:
+    """The chat id on `ctx`, falling back to SPAWN_ORIGIN; empty when neither."""
+    from ..process_registry import SPAWN_ORIGIN
+    origin = SPAWN_ORIGIN.get()
+    return (getattr(ctx, "conversation_id", None) or (origin.conversation_id if origin else "") or "")
+
+
+def is_multi_node_group(ctx: Any) -> bool:
+    """Whether `ctx` runs in a group chat where the owner's node is not the only node
+    (Mike #19: in a multi-node group, nothing from 1:1 or other chats may enter, even on
+    the owner's own request; a one-node group with only the owner's node and its agents
+    may read the owner's 1:1 jobs/library). Fails closed for an unclassified or unknown group.
+    """
+    if ctx is None:
+        return False
+    conv = _ctx_conversation_id(ctx)
+    source = getattr(ctx, "message_source", None)
+    if not (conv.startswith("group-") or source == "group"):
+        return False
+    from .agent import OWNER_TURN, turn_class
+    cls = getattr(ctx, "turn_class", None)
+    if cls is not None and cls != OWNER_TURN:
+        return True
+    service = getattr(ctx, "dpc_service", None)
+    gm = getattr(service, "group_manager", None) if service is not None else None
+    group = None
+    if gm is not None and conv:
+        try:
+            group = gm.get_group(conv)
+        except Exception:
+            group = None
+    if group is not None:
+        if getattr(group, "is_discord_bridge", False):
+            return True
+        if hasattr(group, "members"):
+            members = set(getattr(group, "members", None) or ())
+            if not members:
+                return True
+            this_node = (getattr(gm, "node_id", None)
+                         or getattr(getattr(service, "p2p_manager", None), "node_id", None))
+            agent = getattr(ctx, "_agent", None)
+            own_nodes = frozenset()
+            own_fn = getattr(agent, "_own_nodes", None)
+            if callable(own_fn):
+                try:
+                    own_nodes = frozenset(own_fn()[1] or ())
+                except Exception:
+                    own_nodes = frozenset()
+            if this_node:
+                return turn_class("group", group, this_node, own_nodes) != OWNER_TURN
+            if cls == OWNER_TURN:
+                return len(members) > 1
+            return True
+    return cls != OWNER_TURN
+
+
 def asker_card_fields(ctx: Any) -> Optional[Dict[str, Any]]:
     """The asker's fields for a card, or None when the owner asked (nothing to name)."""
     if asker_is_owner(ctx):

@@ -307,10 +307,18 @@ async def test_a_take_posted_into_a_group_carries_its_music_block_to_the_send(re
     take = _in_root(ctx, "../../music/generated/take_1.flac")
 
     def fake_service_call(c, method, **kwargs):
-        assert method == "get_music_take" and kwargs == {"take_id": "take-1"}
-        return {"status": "ok", "take": {"take_id": "take-1", "job_id": "job-1", "job_state": "review",
-                                         "state": "review", "library_track_id": "trk-1",
-                                         "library_hidden": False, "path": str(take), "file_exists": True}}
+        if method == "get_music_take":
+            assert kwargs == {"take_id": "take-1"}
+            return {"status": "ok", "take": {"take_id": "take-1", "job_id": "job-1", "job_state": "review",
+                                             "state": "review", "library_track_id": "trk-1",
+                                             "library_hidden": False, "path": str(take), "file_exists": True}}
+        if method == "get_music_job":
+            assert kwargs == {"job_id": "job-1"}
+            return {"status": "ok", "job": {
+                "id": "job-1", "state": "review",
+                "requested_by": {"kind": "agent", "agent_id": AGENT_ID, "conversation_id": "group-studio"},
+            }}
+        raise AssertionError(f"unexpected service call: {method} {kwargs}")
 
     monkeypatch.setattr(music_tools, "_service_call", fake_service_call)
     out = await _run(registry, {"take_id": "take-1"}, ctx)

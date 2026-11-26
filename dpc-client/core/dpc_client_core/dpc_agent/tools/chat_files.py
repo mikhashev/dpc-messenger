@@ -691,8 +691,14 @@ def _card_mismatch(ctx: ToolContext, card: Optional[Dict[str, Any]], name: str, 
 
 def _take_source(ctx: ToolContext, take_id: str) -> Union[str, Tuple[Path, Dict[str, Any]]]:
     """(the take's own file, its music block), or the refusal: core resolves the id through
-    `get_music_take` (D44), and only a finished take the person has not discarded is posted."""
-    from .music import SERVICE_CALL_TIMEOUT_S, _service_call, _Unavailable
+    `get_music_take` (D44), and only a finished take the person has not discarded is posted.
+    When `_chat_scoped_music(ctx)` is True (foreign asker or multi-node group even on owner
+    request), the take must belong to a job proposed by this agent in this chat."""
+    from .music import (
+        SERVICE_CALL_TIMEOUT_S, _Unavailable, _chat_scoped_music,
+        _ours_in_this_chat, _service_call,
+    )
+    scoped = _chat_scoped_music(ctx)
     try:
         answer = _service_call(ctx, "get_music_take", take_id=take_id)
     except _Unavailable as e:
@@ -701,8 +707,23 @@ def _take_source(ctx: ToolContext, take_id: str) -> Union[str, Tuple[Path, Dict[
         return _refusal(f"the music service did not answer within {int(SERVICE_CALL_TIMEOUT_S)} s.")
     if not isinstance(answer, dict) or answer.get("status") != "ok":
         code = answer.get("code", "error") if isinstance(answer, dict) else "error"
+        if scoped and code == "not_found":
+            return _refusal(f"take '{take_id}' was not produced by a job of this agent in this chat (not_your_job).")
         return _refusal(f"take '{take_id}' could not be read ({code}).")
     take = answer.get("take") or {}
+    if scoped:
+        job_id = take.get("job_id")
+        if not isinstance(job_id, str) or not job_id:
+            return _refusal(f"take '{take_id}' was not produced by a job of this agent in this chat (not_your_job).")
+        try:
+            job_answer = _service_call(ctx, "get_music_job", job_id=job_id)
+        except _Unavailable as e:
+            return _refusal(f"{e}.")
+        except TimeoutError:
+            return _refusal(f"the music service did not answer within {int(SERVICE_CALL_TIMEOUT_S)} s.")
+        if (not isinstance(job_answer, dict) or job_answer.get("status") != "ok"
+                or not _ours_in_this_chat(ctx, job_answer.get("job") or {})):
+            return _refusal(f"take '{take_id}' was not produced by a job of this agent in this chat (not_your_job).")
     # Only a finished take the person has not discarded (follow-up 12, Zcode #68 P2): its job is
     # done, the take is not rejected, and its library entry, when it has one, is not hidden.
     job_state = take.get("job_state")
@@ -821,8 +842,15 @@ def _chat_post_file_approval(ctx: ToolContext, args: Dict[str, Any]):
         if described.startswith("⚠️"):
             return Refuse(described)
         return Ask(clip(described + (f", with the caption: {caption}" if caption else "")))
-    what = (f"take {args['take_id']}" if args.get("take_id")
-            else f"the file {args.get('path') or '(none named)'}")
+    take_id = args.get("take_id").strip() if isinstance(args.get("take_id"), str) else args.get("take_id")
+    if take_id and not args.get("path"):
+        found = _take_source(ctx, take_id)
+        if isinstance(found, str):
+            return Refuse(found)
+        what = f"take {take_id}, the file {found[0].name}"
+    else:
+        what = (f"take {args['take_id']}" if args.get("take_id")
+                else f"the file {args.get('path') or '(none named)'}")
     return Ask(clip(f"post {what} into the chat" + (f", with the caption: {caption}" if caption else "")))
 
 

@@ -69,7 +69,11 @@ def music_calls(monkeypatch):
                                             "params": kwargs.get("params"),
                                             "requested_by": kwargs.get("requested_by")}}
         if method == "get_music_job":
-            return {"status": "ok", "job": {"id": kwargs.get("job_id"), "state": "running"}}
+            return {"status": "ok", "job": {
+                "id": kwargs.get("job_id"), "state": "running",
+                "requested_by": {"kind": "agent", "agent_id": "agent_ark",
+                                 "conversation_id": "group-friends"},
+            }}
         return {"status": "ok"}
 
     monkeypatch.setattr(music_tools, "_service_call", fake_service_call)
