@@ -6,8 +6,10 @@
  * - macOS and Linux give asset://localhost/...;
  * - the track stream is http://127.0.0.1:9996 (musicPlayer.ts), the voice player's file server
  *   is http://localhost:9998 (VoicePlayer.svelte).
- * The backend WebSocket is ws://127.0.0.1:9999 (coreService.ts), and there is no connect-src, so
- * default-src must name it: the host source ws://localhost:* does not cover 127.0.0.1.
+ * The backend WebSocket is ws://127.0.0.1:9999 (coreService.ts), and Telegram pasted
+ * screenshots in ChatPanel.svelte convert their data URL via fetch(dataUrl), so
+ * connect-src must explicitly allow both (the host source ws://localhost:* does not
+ * cover 127.0.0.1, and data: must never be placed in default-src).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -24,6 +26,8 @@ function directive(name: string): string[] {
 describe('tauri.conf.json CSP', () => {
     const media = directive('media-src');
     const img = directive('img-src');
+    const connect = directive('connect-src');
+    const def = directive('default-src');
 
     it.each([
         'asset:',
@@ -47,9 +51,20 @@ describe('tauri.conf.json CSP', () => {
         expect(img).not.toContain('http://localhost:*');
     });
 
-    it('default-src (the fallback for connect-src) allows the backend socket ws://127.0.0.1:9999', () => {
-        // coreService.ts API_URL; a CSP host source "localhost" does not match 127.0.0.1.
-        expect(directive('default-src')).toContain('ws://127.0.0.1:9999');
+    it.each([
+        "'self'",
+        'data:',
+        'http://localhost:*',
+        'ws://localhost:*',
+        'ws://127.0.0.1:9999',
+    ])('connect-src allows %s', (origin) => {
+        // data: is required for fetch(imageData.dataUrl) on Telegram pasted screenshots;
+        // ws://127.0.0.1:9999 is coreService.ts API_URL (localhost does not match 127.0.0.1).
+        expect(connect).toContain(origin);
+    });
+
+    it('default-src does not allow data: (data: scripts must remain blocked)', () => {
+        expect(def).not.toContain('data:');
     });
 
     it('keeps the webview origin: no useHttpsScheme on the main window', () => {
