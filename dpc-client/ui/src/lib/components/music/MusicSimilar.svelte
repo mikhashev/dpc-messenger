@@ -3,11 +3,13 @@
   Opened from "Same style…" / "Cover…" in the track header and "Similar…" in the mini-player, on the
   current track. One dialog with a mode switch:
 
-  - Same style (`generate_similar`, acestep.cpp text2music): Keep checkboxes with the values the person
-    types (there is no auto-caption yet), the style description built from them until edited, lyrics
-    none / new (the engine's LM writes them, an optional theme) / reuse (the track's stored lyrics, the
-    core fills them), and description or the source's audio as a reference (a timbre reference, marked
-    unverified);
+  - Same style (`generate_similar`): the engine (yue2.cpp by default, Mike 2026-11-26; acestep.cpp the second,
+    following the capability report until the person picks one), Keep checkboxes with the values the person
+    types, the style description built from them until edited, lyrics none / new / reuse (the track's stored
+    lyrics, the core fills them). On yue2 the opening section of the track (the first 30 s, or the waveform
+    selection) is the song's prompt and is cut off each take, a checked Keep box left empty and an empty style
+    are filled by the describer, and "Describe source" fills the fields first for the person to edit; on
+    acestep, description or the source's audio as a reference (a timbre reference, marked unverified);
   - Cover (`cover`): "kept from the source: melody and lyrics", a required target style, the engine
     (yue2.cpp's score chain by default, after Ruach Studio, with its caveats, the score choice and Ruach's
     attribution; acestep.cpp cover, the fallback the report names when yue2 cannot run), the cover strength
@@ -21,18 +23,25 @@
 
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { musicJobs, proposeSong, refreshCapabilities } from '$lib/services/musicJobs';
+  import { describeSource, musicJobs, proposeSong, refreshCapabilities } from '$lib/services/musicJobs';
   import {
     ACESTEP_COVER_OFFER,
+    DESCRIBE_NOTE,
+    KEEP_FROM_SOURCE,
     KEEP_KEYS,
     KEEP_LABELS,
     REFERENCE_NOTE,
     RUACH_ATTRIBUTION,
+    SECTION,
     YUE2_COVER_CAVEATS,
+    YUE2_SAME_STYLE_NOTE,
+    applyDescription,
     captionFromKeep,
-    defaultCoverEngine,
+    defaultEngine,
+    describerOf,
     emptySimilarForm,
     offersAcestepCover,
+    sectionFromRegion,
     similarFieldOf,
     songSupport,
     useAcestepCover,
@@ -43,9 +52,11 @@
     type SongSource,
   } from '$lib/utils/musicSimilar';
 
-  let { source, mode = 'same_style', onclose, oncreate }: {
+  let { source, mode = 'same_style', region = null, onclose, oncreate }: {
     source: SongSource;
     mode?: SongMode;
+    /** The waveform selection, if any: it can become the opening section of a same-style song on yue2. */
+    region?: { start: number; end: number } | null;
     onclose: () => void;
     oncreate?: () => void;
   } = $props();
@@ -58,13 +69,18 @@
   let caps = $derived($musicJobs.capabilities);
   let support = $derived(songSupport(caps, form));
   let shownCaption = $derived(form.captionEdited || form.mode === 'cover' ? form.caption : captionFromKeep(form));
+  let yue2Same = $derived(form.mode === 'same_style' && form.engine === 'yue2');
+  let describer = $derived(describerOf(caps));
+  let selection = $derived(sectionFromRegion(region));
+  let describing = $state(false);
+  let described = $state('');
 
   onMount(() => { void refreshCapabilities(); });
 
-  // The cover engine follows the report (yue2, or acestep when yue2 cannot run) until the person picks one.
+  // The engine follows the report (yue2, or acestep when yue2 cannot run) until the person picks one, per mode.
   $effect(() => {
     if (caps && !form.engineChosen) {
-      const engine = defaultCoverEngine(caps);
+      const engine = defaultEngine(caps, form.mode);
       if (untrack(() => form.engine) !== engine) form.engine = engine;
     }
   });
@@ -100,8 +116,36 @@
     form.mode = m;
     form.caption = '';
     form.captionEdited = false;
+    form.engineChosen = false;          // each mode starts on the engine the report gives it
+    if (caps) form.engine = defaultEngine(caps, m);
     errors = {};
     done = '';
+    described = '';
+  }
+
+  function useSelection() {
+    if (!selection) return;
+    form.sectionStart = selection.start;
+    form.sectionEnd = selection.end;
+    errors = { ...errors, form: undefined };
+  }
+
+  async function describe() {
+    if (describing) return;
+    describing = true;
+    described = '';
+    try {
+      const a = await describeSource(source.id);
+      if (!a.ok) {
+        described = `Not described: ${a.message}`;
+        return;
+      }
+      form = applyDescription(form, a.data.suggestion);
+      const by = a.data.description.model ?? a.data.description.alias ?? 'the describer';
+      described = `Filled from ${by}${a.data.description.cached ? ' (kept description)' : ''}; edit before Create.`;
+    } finally {
+      describing = false;
+    }
   }
 
   function onCaption(e: Event) {
@@ -161,8 +205,38 @@
   </div>
 
   {#if form.mode === 'same_style'}
+    <div class="form-row">
+      <label class="field">
+        <span class="field-label">Engine</span>
+        <select class="list-select" value={form.engine} onchange={pickEngine}>
+          <option value="yue2">yue2.cpp · continues the track's opening</option>
+          <option value="acestep">acestep.cpp · text2music</option>
+        </select>
+      </label>
+      {#if yue2Same}
+        <label class="field">
+          <span class="field-label">Opening from (s)</span>
+          <input class="text-input num" type="text" inputmode="decimal" bind:value={form.sectionStart} />
+        </label>
+        <label class="field">
+          <span class="field-label">to (s)</span>
+          <input class="text-input num" type="text" inputmode="decimal" bind:value={form.sectionEnd} />
+        </label>
+        <button type="button" class="small-btn" onclick={useSelection} disabled={!selection}
+          title={selection ? `Use the waveform selection ${selection.start}–${selection.end} s`
+                           : `Select ${SECTION.min}–${SECTION.max} s on the waveform to use it`}>Use selection</button>
+      {/if}
+    </div>
+    {#if yue2Same}<p class="muted tiny">{YUE2_SAME_STYLE_NOTE}</p>{/if}
+    <div class="form-row">
+      <button type="button" class="small-btn" onclick={describe} disabled={describing || !describer.ok}
+        title={describer.ok ? `Ask ${describer.alias} to describe this track and fill the fields` : describer.reason}>
+        {describing ? 'Describing…' : 'Describe source'}</button>
+      <span class="muted tiny" role="status">{described
+        || (!describer.ok ? `No describer: ${describer.reason}` : yue2Same ? DESCRIBE_NOTE : 'Fills the empty fields from the track; edit before Create.')}</span>
+    </div>
     <fieldset class="keep">
-      <legend class="field-label">Keep (type the value to keep)</legend>
+      <legend class="field-label">Keep (type the value to keep{yue2Same && describer.ok ? ', or leave it empty for the describer' : ''})</legend>
       {#each KEEP_KEYS as k (k)}
         <label class="keep-row">
           <input type="checkbox" bind:checked={form.keep[k]} />
@@ -175,7 +249,8 @@
             </select>
           {:else}
             <input class="text-input" type="text" bind:value={form.keepValues[k]} disabled={!form.keep[k]}
-              aria-label="{KEEP_LABELS[k]} value" placeholder={k === 'bpm' ? 'e.g. 96' : ''} />
+              aria-label="{KEEP_LABELS[k]} value"
+              placeholder={yue2Same && describer.ok && KEEP_FROM_SOURCE.includes(k) ? 'from the description' : k === 'bpm' ? 'e.g. 96' : ''} />
           {/if}
         </label>
       {/each}
@@ -187,11 +262,12 @@
 
   <label class="field-label" for="similar-caption">{form.mode === 'cover' ? 'Target style' : 'Style description'}</label>
   <input id="similar-caption" class="text-input" type="text" value={shownCaption} oninput={onCaption}
-    placeholder={form.mode === 'cover' ? 'e.g. bossa nova, nylon guitar, soft female vocal' : 'built from the kept values; edit freely'}
+    placeholder={form.mode === 'cover' ? 'e.g. bossa nova, nylon guitar, soft female vocal'
+      : yue2Same && describer.ok ? 'empty: the describer writes it' : 'built from the kept values; edit freely'}
     aria-invalid={!!errors.caption} aria-describedby="similar-caption-error" />
   <p id="similar-caption-error" class="field-error" role="alert">{errors.caption ?? ''}</p>
   {#if form.mode === 'same_style' && !form.captionEdited}
-    <p class="muted tiny">Built from the kept values (there is no auto-caption yet); once edited, Keep no longer rewrites it.</p>
+    <p class="muted tiny">Built from the kept values; once edited, Keep no longer rewrites it.</p>
   {/if}
 
   {#if form.mode === 'same_style'}
@@ -210,16 +286,17 @@
           <input class="text-input" type="text" bind:value={form.lyricsTheme} placeholder="e.g. night roads" />
         </label>
       {/if}
-      <label class="field">
-        <span class="field-label">Reference</span>
-        <select class="list-select" bind:value={form.reference}>
-          <option value="description">Description only</option>
-          <option value="audio">Use audio as reference (unverified)</option>
-        </select>
-      </label>
+      {#if form.engine === 'acestep'}
+        <label class="field">
+          <span class="field-label">Reference</span>
+          <select class="list-select" bind:value={form.reference}>
+            <option value="description">Description only</option>
+            <option value="audio">Use audio as reference (unverified)</option>
+          </select>
+        </label>
+      {/if}
     </div>
-    {#if form.reference === 'audio'}<p class="muted tiny">{REFERENCE_NOTE}</p>{/if}
-    <p class="muted tiny">Engine: acestep.cpp · text2music.</p>
+    {#if form.engine === 'acestep' && form.reference === 'audio'}<p class="muted tiny">{REFERENCE_NOTE}</p>{/if}
   {:else}
     <div class="form-row">
       <label class="field">
@@ -268,7 +345,7 @@
     </label>
     {#if form.mode !== 'cover'}
       <label class="field">
-        <span class="field-label">Duration (s)</span>
+        <span class="field-label">{yue2Same ? 'New part (s)' : 'Duration (s)'}</span>
         <input class="text-input num" type="text" inputmode="decimal" bind:value={form.durationS} aria-invalid={!!errors.duration} />
       </label>
     {/if}

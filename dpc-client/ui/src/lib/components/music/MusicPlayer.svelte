@@ -1066,7 +1066,7 @@
             </section>
 
             {#if similarMode && similarSource}
-              <MusicSimilar source={similarSource} mode={similarMode} onclose={() => (similarMode = null)} />
+              <MusicSimilar source={similarSource} mode={similarMode} region={draftRegion} onclose={() => (similarMode = null)} />
             {/if}
 
             <MusicLyrics entry={cur} currentTime={loaded ? p.currentTime : 0} duration={shownDuration} {loaded} />

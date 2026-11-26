@@ -1531,9 +1531,10 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     // its adapters and stop the other engine), a stop drains a running generation,
                     // and ebur128 reads a whole take (up to 10 minutes of audio).
                     timeout = 180000;
-                } else if (command === 'judge_music_take' || command === 'backfill_music_qa') {
-                    // 600s: the judge waits for the card a running engine holds and starts the audio model;
-                    // a backfill runs ffmpeg over each take in turn.
+                } else if (command === 'judge_music_take' || command === 'backfill_music_qa'
+                    || command === 'describe_music_track') {
+                    // 600s: the judge and the describer wait for the card a running engine holds and start the
+                    // audio model; a backfill runs ffmpeg over each take in turn.
                     timeout = 600000;
                 } else if (command === 'export_music_track') {
                     // 600s: an MP3 or Opus encode of a long track, its ebur128 check and, when it overshoots
@@ -2241,6 +2242,19 @@ export function proposeMusicEdit(args: {
     params: Record<string, unknown>; comment_id?: string; idempotency_key?: string;
 }): Promise<MusicAnswer<{ job: MusicJob }>> {
     return callMusic(sendCommand, 'propose_music_job', { type: 'edit', ...args });
+}
+
+/** The describer's answer for a library track (core music/describe.py, the Same style form's "Describe source"):
+ *  the description (kept by the audio's hash; `refresh` asks again) and the style line and Keep values to fill. */
+export interface TrackDescription {
+    answer: { genre: string; tags: string[]; instruments: string[]; vocals: string; bpm: number; key: string;
+              time_signature: string; mood: string; style: string } | null;
+    alias?: string; model?: string; cached?: boolean; whole?: boolean; windows?: { start_s: number; end_s: number }[];
+    caveat?: string;
+}
+export function describeMusicTrack(trackId: string, refresh = false): Promise<MusicAnswer<{
+        track_id: string; description: TrackDescription; suggestion: { caption: string; keep: Record<string, string | number> } }>> {
+    return callMusic(sendCommand, 'describe_music_track', refresh ? { track_id: trackId, refresh: true } : { track_id: trackId });
 }
 
 /** Propose a song from a library track (`generate_similar`, `cover`, `generate_from_lyrics`; ADR-051 row B5, music/similar.py):

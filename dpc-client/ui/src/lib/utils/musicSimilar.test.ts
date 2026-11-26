@@ -2,10 +2,16 @@ import { describe, expect, it } from 'vitest';
 import {
     MISSING_LYRICS,
     RUACH_ATTRIBUTION,
+    applyDescription,
     captionFromKeep,
     defaultCoverEngine,
+    defaultEngine,
+    defaultSameStyleEngine,
+    describerOf,
     emptySimilarForm,
+    keepFromSource,
     keptValues,
+    sectionFromRegion,
     offersAcestepCover,
     similarFieldOf,
     songSupport,
@@ -41,7 +47,7 @@ describe('the generate-similar dialog', () => {
         f.lyricsMode = 'new';
         f.lyricsTheme = ' rainy mornings ';
         f.reference = 'audio';
-        f.engine = 'yue2';                          // ignored: a same-style song runs on acestep only
+        f.engine = 'acestep';                       // the second engine, picked (yue2 is the default since 2026-11-26)
         const v = validateSimilarForm(f);
         expect(v.ok).toBe(true);
         if (!v.ok) return;
@@ -100,6 +106,8 @@ describe('the generate-similar dialog', () => {
         expect(sourceAudioProblem(f, caps)).toBe('Listening comes with the integration.');
         expect(songSupport(caps, f)).toEqual({ ok: false, reason: 'Listening comes with the integration.' });
         const s = emptySimilarForm({ ...local, kind: 'web' });
+        expect(sourceAudioProblem(s)).toMatch(/integration/);               // yue2 opens on the track's own codes
+        s.engine = 'acestep';
         expect(sourceAudioProblem(s)).toBe('');
         s.reference = 'audio';
         expect(sourceAudioProblem(s)).toMatch(/integration/);
@@ -116,6 +124,8 @@ describe('the generate-similar dialog', () => {
             },
         };
         const f = emptySimilarForm(local);
+        expect(songSupport(caps, f)).toEqual({ ok: false, reason: 'This core runs same style on acestep only.' });
+        f.engine = 'acestep';
         expect(songSupport(caps, f).ok).toBe(true);
         f.reference = 'audio';
         expect(songSupport(caps, f)).toEqual({ ok: false, reason: 'ffmpeg is not on PATH' });
@@ -124,6 +134,71 @@ describe('the generate-similar dialog', () => {
         c.engine = 'acestep';
         expect(songSupport(caps, c).ok).toBe(true);
         expect(songSupport(null, c).ok).toBe(false);
+    });
+
+    it('sends a same-style request on yue2 by default: the opening section, the new part, the boxes left to the describer', () => {
+        const f = emptySimilarForm(local);
+        expect(f.engine).toBe('yue2');
+        expect([f.sectionStart, f.sectionEnd]).toEqual(['0', '30']);
+        expect(keepFromSource(f)).toEqual(['genre', 'bpm', 'mood', 'vocals']);   // checked by default, no value typed
+        f.keepValues.bpm = '96';
+        f.durationS = '60';
+        const v = validateSimilarForm(f);
+        expect(v).toEqual({ ok: true, type: 'generate_similar', trackId: 'trk_1', params: {
+            caption: '96 BPM', variants: 2, engine: 'yue2', source_section: { start_s: 0, end_s: 30 }, duration_s: 60,
+            keep: { bpm: 96 }, lyrics_mode: 'none', keep_from_source: ['genre', 'mood', 'vocals'] } });
+        const empty = { ...emptySimilarForm(local), keep: { genre: false, bpm: false, key: false, timesig: false, mood: false,
+                                                            structure: true, vocals: false } };
+        const e = validateSimilarForm(empty);                // an empty style is the describer's on yue2
+        expect(e.ok && e.params.caption).toBe('');
+        expect(e.ok && 'keep_from_source' in e.params).toBe(false);          // structure is not the describer's
+        expect(validateSimilarForm({ ...empty, engine: 'acestep' }).ok).toBe(false);
+    });
+
+    it('holds the opening section to 10-60 s of the track and the new part under 360 s with it', () => {
+        const f = { ...emptySimilarForm(local), caption: 'folk', captionEdited: true };
+        for (const [a, b] of [['0', '9'], ['0', '61'], ['200', '230'], ['-1', '20'], ['x', '20']]) {
+            const v = validateSimilarForm({ ...f, sectionStart: a, sectionEnd: b });
+            expect(!v.ok && v.errors.form).toMatch(/Opening section/);
+        }
+        const over = validateSimilarForm({ ...f, sectionEnd: '60', durationS: '301' });
+        expect(!over.ok && over.errors.duration).toMatch(/new part.*300/);
+        expect(validateSimilarForm({ ...f, sectionEnd: '60', durationS: '300' }).ok).toBe(true);
+        expect(emptySimilarForm({ ...local, durationS: 20.01 }).sectionEnd).toBe('20');
+    });
+
+    it('takes the waveform selection as the opening section when it is long enough', () => {
+        expect(sectionFromRegion({ start: 70.013, end: 100.03 })).toEqual({ start: '70', end: '100.04' });
+        expect(sectionFromRegion({ start: 10, end: 95 })).toEqual({ start: '10', end: '70' });   // held to 60 s
+        expect(sectionFromRegion({ start: 10, end: 15 })).toBeNull();
+        expect(sectionFromRegion(null)).toBeNull();
+    });
+
+    it('fills the empty fields from a description and leaves what was typed', () => {
+        const f = emptySimilarForm(local);
+        f.keepValues.genre = 'my folk';
+        const d = applyDescription(f, { caption: 'kazakh folk ballad, dombra', keep: { genre: 'kazakh folk', bpm: 96, vocals: 'vocals' } });
+        expect(d.keepValues.genre).toBe('my folk');
+        expect(d.keepValues.bpm).toBe('96');
+        expect(d.keepValues.vocals).toBe('vocals');
+        expect(d.caption).toBe('kazakh folk ballad, dombra');
+        expect(d.captionEdited).toBe(true);
+        const typed = applyDescription({ ...f, caption: 'mine', captionEdited: true }, { caption: 'theirs', keep: {} });
+        expect(typed.caption).toBe('mine');
+    });
+
+    it('starts same style on the engine the report says runs, and reads the describer', () => {
+        const same = (yue2: string, fallback: string | null) => ({ features: { same_style: { default_engine: 'yue2',
+            fallback_engine: fallback, same_style_engines: { yue2: { status: yue2, reason: 'r' }, acestep: { status: 'supported' } } },
+            describe: { status: 'supported', alias: 'music_flamingo', reason: 'ok' } } });
+        expect(defaultSameStyleEngine(same('supported', null))).toBe('yue2');
+        expect(defaultSameStyleEngine(same('unsupported', 'acestep'))).toBe('acestep');
+        expect(defaultSameStyleEngine({ features: {} })).toBe('acestep');     // an older core: acestep only
+        expect(defaultEngine(same('unsupported', 'acestep'), 'cover')).toBe('yue2');
+        expect(describerOf(same('supported', null))).toEqual({ ok: true, alias: 'music_flamingo', reason: 'ok' });
+        expect(describerOf(null).ok).toBe(false);
+        const caps = { job_types: { generate_similar: { status: 'supported' } }, ...same('unsupported', 'acestep') };
+        expect(songSupport(caps, emptySimilarForm(local))).toEqual({ ok: false, reason: 'r' });
     });
 
     it('maps a core refusal to its field', () => {

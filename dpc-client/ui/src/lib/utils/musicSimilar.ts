@@ -1,7 +1,9 @@
 // The pure parts of the "Generate similar" dialog (SPEC flows 10 and 17; ADR-051 row B5; core
 // music/similar.py and job_schemas.normalize_params_song): one dialog with a mode switch, Same style
-// (`generate_similar`: kept attributes, a style description, lyrics none / new / reuse, a description or
-// the source's audio as a reference) or Cover (`cover`: the melody and, when the track has them, the
+// (`generate_similar`: kept attributes, a style description, lyrics none / new / reuse; on yue2.cpp, the default
+// since Mike 2026-11-26, a section of the source's own codes opens the song and is cut off each take, and the
+// describer fills an empty style and each checked Keep box left empty; on acestep.cpp a description or the source's
+// audio as a timbre reference) or Cover (`cover`: the melody and, when the track has them, the
 // lyrics kept, a target style required, yue2.cpp by default (Mike 2026-11-26) or acestep.cpp, as long as
 // the source on both). The core checks everything again and
 // fills the source's facts and the reused lyrics; this module only shapes the request and says what the
@@ -43,6 +45,18 @@ export const WEB_PENDING =
     "a web track's audio cannot go to the engine. A same-style song from its description works now.";
 export const REFERENCE_NOTE =
     "The source's audio goes to acestep.cpp as a timbre reference; whether it steers the style beyond timbre is not verified.";
+/** Same style on yue2.cpp (core similar.py `_same_style_on_yue2`): what goes in and what is not known. */
+export const YUE2_SAME_STYLE_NOTE =
+    "YuE2 opens on the chosen section of this track's own audio codes and writes on from it; the section is cut off " +
+    "each take, so Duration is the new part. Whether the track's sound carries into the new part is not verified " +
+    "(unverified).";
+export const DESCRIBE_NOTE =
+    'Leave the style empty, or a checked Keep value empty, and the describer fills it from the track; what you type wins.';
+/** The Keep attributes the describer can fill (core job_schemas.KEEP_FROM_SOURCE_KEYS); it does not hear structure. */
+export const KEEP_FROM_SOURCE: KeepKey[] = ['genre', 'bpm', 'key', 'timesig', 'mood', 'vocals'];
+/** The opening section's bounds (core job_schemas.SIMILAR_SECTION_*) and the cap of section + new part. */
+export const SECTION = { min: 10, max: 60, default: 30 } as const;
+export const SAME_STYLE_MAX_TOTAL_S = 360;
 
 export interface SongSource {
     id: string;
@@ -63,8 +77,11 @@ export interface SimilarForm {
     lyricsTheme: string;
     reference: 'description' | 'audio';
     engine: SongEngine;
-    /** The person picked the cover engine: the capability report no longer moves it. */
+    /** The person picked the engine of this mode: the capability report no longer moves it. */
     engineChosen: boolean;
+    /** Same style on yue2: the opening section of the source, in seconds (text fields). */
+    sectionStart: string;
+    sectionEnd: string;
     coverScore: CoverScore;
     coverLyrics: 'reuse' | 'none';
     coverStrength: number;
@@ -79,12 +96,46 @@ const DURATION = { acestep: { min: 10, max: 600 }, yue2: { min: 30, max: 360 } }
 export function emptySimilarForm(source: SongSource, mode: SongMode = 'same_style'): SimilarForm {
     const keepValues = Object.fromEntries(KEEP_KEYS.map(k => [k, ''])) as Record<KeepKey, string>;
     const d = source.durationS ? Math.round(source.durationS) : 120;
+    const end = source.durationS ? Math.min(SECTION.default, Math.floor(source.durationS * 25) / 25) : SECTION.default;
     return {
         mode, source, keep: { ...KEEP_DEFAULT }, keepValues, caption: '', captionEdited: false, lyricsMode: 'none',
         lyricsTheme: '', reference: 'description', engine: 'yue2', engineChosen: false, coverScore: 'melody',
-        coverLyrics: 'reuse', coverStrength: 1,
+        coverLyrics: 'reuse', coverStrength: 1, sectionStart: '0', sectionEnd: String(end),
         variants: 2, durationS: String(Math.min(Math.max(d, DURATION.acestep.min), DURATION.acestep.max)),
     };
+}
+
+/** The checked Keep boxes left empty that the describer fills (same style on yue2): `keep_from_source`. */
+export function keepFromSource(form: SimilarForm): KeepKey[] {
+    return KEEP_FROM_SOURCE.filter(k => form.keep[k] && !form.keepValues[k].trim());
+}
+
+/** The section the waveform selection gives, when it is long enough to open a same-style song: its bounds rounded
+ *  to frames (25 a second) and held to `SECTION.max`, or null. */
+export function sectionFromRegion(region: { start: number; end: number } | null | undefined): { start: string; end: string } | null {
+    if (!region || !(region.end > region.start)) return null;
+    const start = Math.round(region.start * 25) / 25;
+    const end = Math.round(Math.min(region.end, region.start + SECTION.max) * 25) / 25;
+    if (end - start < SECTION.min) return null;
+    return { start: String(start), end: String(end) };
+}
+
+/** A description (core `describe_music_track` `suggestion`) put into the form for the person to edit: every Keep
+ *  value left empty takes the description's, and an unedited style becomes its style line. Typed values stay. */
+export function applyDescription(form: SimilarForm, suggestion: { caption?: string; keep?: Record<string, unknown> }): SimilarForm {
+    const keepValues = { ...form.keepValues };
+    for (const k of KEEP_FROM_SOURCE) {
+        const v = suggestion.keep?.[k];
+        if (v === undefined || v === null || keepValues[k].trim()) continue;
+        keepValues[k] = String(v);
+    }
+    const out: SimilarForm = { ...form, keepValues };
+    const line = (suggestion.caption ?? '').trim();
+    if (line && !form.captionEdited) {
+        out.caption = line;
+        out.captionEdited = true;
+    }
+    return out;
 }
 
 /** The kept attributes that have a value, as the core's `keep` object (bpm a whole number). */
@@ -129,10 +180,31 @@ export function defaultCoverEngine(caps: any): SongEngine {
     return cover?.fallback_engine === 'acestep' || cover?.fallback_engine === 'yue2' ? cover.fallback_engine : d;
 }
 
+/** The same-style engine to start with, read like the cover's (`features.same_style`): yue2 when it runs, else
+ *  the fallback (acestep when the audio tokenizer is missing). A core that does not report it runs acestep only. */
+export function defaultSameStyleEngine(caps: any): SongEngine {
+    const same = caps?.features?.same_style;
+    if (!same) return caps ? 'acestep' : 'yue2';
+    const d: SongEngine = same.default_engine === 'acestep' ? 'acestep' : 'yue2';
+    if (same.same_style_engines?.[d]?.status === 'supported') return d;
+    return same.fallback_engine === 'acestep' || same.fallback_engine === 'yue2' ? same.fallback_engine : d;
+}
+
+/** The engine a mode starts with (`defaultCoverEngine`, `defaultSameStyleEngine`). */
+export function defaultEngine(caps: any, mode: SongMode): SongEngine {
+    return mode === 'cover' ? defaultCoverEngine(caps) : defaultSameStyleEngine(caps);
+}
+
+/** Whether the report says a describer is set up (`features.describe`), and its alias. */
+export function describerOf(caps: any): { ok: boolean; alias: string | null; reason: string } {
+    const d = caps?.features?.describe;
+    return { ok: d?.status === 'supported', alias: d?.alias ?? null, reason: d?.reason ?? 'This core has no describer.' };
+}
+
 /** Why the source's audio cannot go to the engine now (a cover, a reference), or ''. A web track's waits for
  *  the streaming integration, in the capability report's words when it has them. */
 export function sourceAudioProblem(form: SimilarForm, caps?: any): string {
-    const needs = form.mode === 'cover' || form.reference === 'audio';
+    const needs = form.mode === 'cover' || form.reference === 'audio' || form.engine === 'yue2';
     if (!needs) return '';
     if (form.source.kind === 'web') {
         const reason = caps?.features?.web_source_audio?.reason;
@@ -155,6 +227,14 @@ export function songSupport(caps: any, form: SimilarForm): { ok: boolean; reason
     }
     const st = caps.job_types?.generate_similar;
     if (!st) return { ok: false, reason: 'This core does not report same-style songs.' };
+    const per = caps.features?.same_style?.same_style_engines?.[form.engine];
+    if (form.engine === 'yue2') {
+        const problem = sourceAudioProblem(form, caps);
+        if (problem) return { ok: false, reason: problem };
+        if (!per) return { ok: false, reason: 'This core runs same style on acestep only.' };
+        return { ok: per.status === 'supported', reason: per.reason ?? '' };
+    }
+    if (per && per.status !== 'supported') return { ok: false, reason: per.reason ?? '' };
     if (form.reference === 'audio') {
         const problem = sourceAudioProblem(form, caps);
         if (problem) return { ok: false, reason: problem };
@@ -172,7 +252,10 @@ export type SimilarValidation =
 export function validateSimilarForm(form: SimilarForm): SimilarValidation {
     const errors: SimilarErrors = {};
     const caption = (form.captionEdited ? form.caption : form.caption || captionFromKeep(form)).trim();
-    if (!caption) errors.caption = form.mode === 'cover' ? 'A target style is required.' : 'Describe the style, or keep an attribute with a value.';
+    // Same style on yue2 may leave the style to the describer (core describe.py): an empty caption is its request.
+    const describerStyle = form.mode === 'same_style' && form.engine === 'yue2';
+    if (!caption && !describerStyle)
+        errors.caption = form.mode === 'cover' ? 'A target style is required.' : 'Describe the style, or keep an attribute with a value.';
     if (!Number.isInteger(form.variants) || form.variants < VARIANTS_MIN || form.variants > VARIANTS_MAX)
         errors.variants = `Variants: ${VARIANTS_MIN} to ${VARIANTS_MAX}.`;
     const bpm = form.keepValues.bpm.trim();
@@ -180,14 +263,28 @@ export function validateSimilarForm(form: SimilarForm): SimilarValidation {
         errors.keep = 'Tempo must be a whole number of BPM.';
     const problem = sourceAudioProblem(form);
     if (problem) errors.source = problem;
-    // A same-style song runs on acestep.cpp only (the core's SONG_ENGINES).
-    const engine: SongEngine = form.mode === 'same_style' ? 'acestep' : form.engine;
+    // Both modes run on yue2.cpp (the default) or acestep.cpp (Mike 2026-11-26; the core's SONG_ENGINES).
+    const engine: SongEngine = form.engine;
     const params: Record<string, unknown> = { caption, variants: form.variants, engine };
-    // A cover is as long as its source on both engines: it sends no duration.
+    let sectionS = 0;
+    if (form.mode === 'same_style' && engine === 'yue2') {
+        const a = Number(form.sectionStart), b = Number(form.sectionEnd);
+        const max = form.source.durationS ?? Infinity;
+        if (!Number.isFinite(a) || !Number.isFinite(b) || a < 0 || b > max + 0.04 || b - a < SECTION.min - 1e-9 || b - a > SECTION.max + 1e-9)
+            errors.form = `Opening section: ${SECTION.min} to ${SECTION.max} s of the track.`;
+        else {
+            params.source_section = { start_s: a, end_s: b };
+            sectionS = b - a;
+        }
+    }
+    // A cover is as long as its source on both engines: it sends no duration. Same style on yue2: the new part.
     if (form.mode !== 'cover') {
-        const lim = DURATION[engine];
+        const lim: { min: number; max: number } = { ...DURATION[engine] };
+        if (form.mode === 'same_style' && engine === 'yue2') lim.max = Math.floor((SAME_STYLE_MAX_TOTAL_S - sectionS) * 1000) / 1000;
         const d = Number(form.durationS);
-        if (!Number.isFinite(d) || d < lim.min || d > lim.max) errors.duration = `Duration: ${lim.min} to ${lim.max} s on ${engine}.`;
+        if (!Number.isFinite(d) || d < lim.min || d > lim.max)
+            errors.duration = sectionS ? `Duration (the new part): ${lim.min} to ${lim.max} s after the ${sectionS} s section.`
+                                       : `Duration: ${lim.min} to ${lim.max} s on ${engine}.`;
         else params.duration_s = d;
     }
     if (form.mode === 'cover') {
@@ -202,7 +299,12 @@ export function validateSimilarForm(form: SimilarForm): SimilarValidation {
         params.keep = keptValues(form);
         params.lyrics_mode = form.lyricsMode;
         if (form.lyricsMode === 'new' && form.lyricsTheme.trim()) params.lyrics_theme = form.lyricsTheme.trim();
-        params.reference = form.reference;
+        if (engine === 'yue2') {
+            const asked = keepFromSource(form);
+            if (asked.length) params.keep_from_source = asked;
+        } else {
+            params.reference = form.reference;
+        }
     }
     if (Object.keys(errors).length) return { ok: false, errors };
     return { ok: true, type: SONG_TYPE[form.mode], trackId: form.source.id, params };

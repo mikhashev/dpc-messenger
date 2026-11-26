@@ -32,6 +32,7 @@ import {
     proposeMusicEdit,
     proposeMusicJob,
     proposeMusicSong,
+    describeMusicTrack,
     rejectAllMusicTakes,
     startMusicEngine,
     stopLocalEngine,
@@ -237,6 +238,11 @@ export async function proposeFromText(params: Record<string, any>, idempotencyKe
     const a = await proposeMusicJob(FROM_TEXT, params, idempotencyKey);
     if (a.ok) putJob(a.data.job);
     return a;
+}
+
+/** "Describe source" in the Same style form: the describer's answer and what it fills (core describe_music_track). */
+export function describeSource(trackId: string, refresh = false): ReturnType<typeof describeMusicTrack> {
+    return describeMusicTrack(trackId, refresh);
 }
 
 /** A song from a library track (Same style, Cover; SPEC flows 10, 17): the job joins the list like any other,
