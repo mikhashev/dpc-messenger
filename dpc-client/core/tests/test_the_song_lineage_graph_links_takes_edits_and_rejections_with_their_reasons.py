@@ -104,10 +104,11 @@ def test_a_node_carries_engine_params_qa_and_the_decision_with_its_reason():
     assert drop["qa"]["verdict"] == "failed" and drop["qa"]["failed"] == ["clipping"] and drop["on_kept_path"] is False
     assert nodes[E1]["decision"] == "pending" and nodes[E1]["on_kept_path"] is False
     assert nodes[E1]["params"]["action"] == "regenerate_region" and nodes[E1]["take_kind"] == "edit"
-    # The intent says what was asked, never the lyrics themselves.
+    # Live intent carries both the lyrics shape and the full lyrics text, plus resolved seed.
     assert intent["params"]["style"] == "indie rock, warm guitars"
     assert intent["params"]["lyrics"] == {"instrumental": False, "lines": 2}
-    assert "line one" not in json.dumps(intent)
+    assert intent["params"]["lyrics_text"] == "[verse]\nline one\nline two\n"
+    assert intent["params"]["seed"] == "random (42 on v1, v2)"
 
 
 def test_a_rejected_edge_names_the_reason_and_a_kept_or_pending_edge_names_none():
@@ -469,3 +470,192 @@ def test_a_real_store_keep_and_discard_in_the_same_millisecond_come_out_in_one_o
         jobs = real.list_jobs()
         doc = lineage.build_lineage(jobs, [t for x in jobs for t in real.list_takes(x["id"])], job_id=j["id"])
         assert [e["take_id"] for e in doc["events"]] == [takes[0]["id"], takes[1]["id"]]
+
+
+def test_live_lineage_carries_full_lyrics_resolved_random_seed_adapter_strengths_and_who_asked(tmp_path):
+    """Card 8: live lineage carries full lyrics text, random seed resolved from takes, adapter
+    strengths, resolved requested_by (agent in group and person in player), and forward-compatible
+    request block."""
+    home = tmp_path / "dpc_home"
+    agent_id = "agent_studio_01"
+    conv_id = "group-a1b2c3d4e5f6"
+    (home / "agents" / agent_id).mkdir(parents=True)
+    (home / "agents" / agent_id / "config.json").write_text(
+        json.dumps({"agent_id": agent_id, "name": "StudioBot"}), encoding="utf-8"
+    )
+    (home / "conversations" / conv_id).mkdir(parents=True)
+    (home / "conversations" / conv_id / "metadata.json").write_text(
+        json.dumps({"group_id": conv_id, "name": "Music Room"}), encoding="utf-8"
+    )
+
+    J_AGENT = "job_" + "1" * 16
+    T_AGENT = "tak_" + "a" * 16
+    J_MULTI = "job_" + "2" * 16
+    T_M1, T_M2 = "tak_" + "b" * 15 + "1", "tak_" + "b" * 15 + "2"
+    J_PLAYER = "job_" + "3" * 16
+    T_PLAYER = "tak_" + "c" * 16
+
+    lyrics_body = "[verse]\nNeon rain on empty streets\nEchoes under silver lights\n"
+    adapters = [{"name": "voice-demo-bass", "music": 0.45, "sound": 0.35}]
+    request_block = {
+        "message_id": "msg-abc-123",
+        "title": "Neon Rain",
+        "text": "Please generate a synthwave track for tonight's demo.",
+        "asked": {"duration_s": 180, "style": "synthwave"},
+        "changes": ["duration_s: 180 -> 240"],
+    }
+
+    j_agent = job(
+        J_AGENT,
+        takes=[T_AGENT],
+        params={
+            "lyrics": lyrics_body,
+            "style": "synthwave",
+            "variants": 1,
+            "duration_s": 240,
+            "seed": None,
+            "engine": "yue2",
+            "backbone": "stock",
+            "cot": "full",
+            "adapters": adapters,
+        },
+    )
+    j_agent["requested_by"] = {
+        "kind": "agent",
+        "agent_id": agent_id,
+        "conversation_id": conv_id,
+        "turn_id": "turn-42",
+    }
+    j_agent["request"] = request_block
+    t_agent = take(T_AGENT, J_AGENT, 1, lib="trk_agent")
+    t_agent["seed"] = 3555429983
+
+    j_multi = job(
+        J_MULTI,
+        takes=[T_M1, T_M2],
+        params={"lyrics": None, "style": "ambient", "variants": 2, "duration_s": 60, "seed": None, "engine": "yue2"},
+    )
+    t_m1 = take(T_M1, J_MULTI, 1, lib="trk_m1")
+    t_m1["seed"] = 101
+    t_m2 = take(T_M2, J_MULTI, 2, lib="trk_m2")
+    t_m2["seed"] = 202
+
+    j_player = job(
+        J_PLAYER,
+        takes=[T_PLAYER],
+        params={"lyrics": None, "style": "piano solo", "variants": 1, "duration_s": 60, "seed": 0, "engine": "acestep"},
+    )
+    t_player = take(T_PLAYER, J_PLAYER, 1, lib="trk_p1", engine="acestep.cpp")
+    t_player["seed"] = 0
+
+    doc = lineage.build_lineage(
+        [j_agent, j_multi, j_player],
+        [t_agent, t_m1, t_m2, t_player],
+        job_id=J_AGENT,
+        dpc_home_dir=home,
+    )
+    lineage.validate_lineage(doc)
+    nodes = by_id(doc)
+    intent = nodes[f"intent:{J_AGENT}"]
+    assert intent["params"]["lyrics"] == {"instrumental": False, "lines": 2}
+    assert intent["params"]["lyrics_text"] == lyrics_body
+    assert intent["params"]["seed"] == "random (3555429983 on v1)"
+    assert intent["params"]["adapters"] == adapters
+    assert nodes[T_AGENT]["params"]["adapters"] == adapters
+    assert intent["requested_by"]["label"] == "asked by StudioBot in Music Room"
+    assert intent["requested_by"]["agent_name"] == "StudioBot"
+    assert intent["requested_by"]["conversation_name"] == "Music Room"
+    assert intent["request"] == request_block
+
+    jobs_by_id = by_id(doc, "jobs")
+    assert jobs_by_id[J_AGENT]["requested_by"]["label"] == "asked by StudioBot in Music Room"
+    assert jobs_by_id[J_AGENT]["request"] == request_block
+
+    # Fallback when disk has no agent/group metadata
+    empty_home = tmp_path / "empty_home"
+    fallback_doc = lineage.build_lineage([j_agent], [t_agent], job_id=J_AGENT, dpc_home_dir=empty_home)
+    assert by_id(fallback_doc, "jobs")[J_AGENT]["requested_by"]["label"] == f"asked by {agent_id} in {conv_id}"
+
+    # Multi-take distinct random seeds
+    multi_doc = lineage.build_lineage([j_multi], [t_m1, t_m2], job_id=J_MULTI, dpc_home_dir=home)
+    assert by_id(multi_doc)[f"intent:{J_MULTI}"]["params"]["seed"] == "random (v1: 101, v2: 202)"
+
+    # Explicit zero seed and person player requester
+    player_doc = lineage.build_lineage([j_player], [t_player], job_id=J_PLAYER, dpc_home_dir=home)
+    assert by_id(player_doc)[f"intent:{J_PLAYER}"]["params"]["seed"] == 0
+    assert by_id(player_doc, "jobs")[J_PLAYER]["requested_by"] == {
+        "kind": "person",
+        "surface": "player",
+        "label": "asked by you in Player",
+    }
+
+
+def test_shareable_lineage_html_keeps_shape_only_lyrics_and_omits_private_chat_and_lyrics_text(tmp_path):
+    """Card 8 privacy invariant: lineage.html must NEVER expose full lyrics text, conversation_id,
+    conversation_name, turn_id, message_id, or request.text, while keeping shape-only lyrics and
+    resolved seed / adapters."""
+    home = tmp_path / "dpc_home"
+    agent_id = "agent_studio_01"
+    conv_id = "group-f1e2d3c4b5a6"
+    (home / "agents" / agent_id).mkdir(parents=True)
+    (home / "agents" / agent_id / "config.json").write_text(
+        json.dumps({"agent_id": agent_id, "name": "StudioBot"}), encoding="utf-8"
+    )
+    (home / "conversations" / conv_id).mkdir(parents=True)
+    (home / "conversations" / conv_id / "metadata.json").write_text(
+        json.dumps({"group_id": conv_id, "name": "Private Group Title"}), encoding="utf-8"
+    )
+
+    J = "job_" + "5" * 16
+    T = "tak_" + "5" * 16
+    j = job(
+        J,
+        takes=[T],
+        params={
+            "lyrics": "[verse]\nSecret private stanza one\nSecret private stanza two\n",
+            "style": "acoustic folk",
+            "variants": 1,
+            "duration_s": 120,
+            "seed": None,
+            "engine": "yue2",
+            "adapters": [{"name": "voice-demo-bass", "music": 0.45, "sound": 0.35}],
+        },
+    )
+    j["requested_by"] = {
+        "kind": "agent",
+        "agent_id": agent_id,
+        "conversation_id": conv_id,
+        "turn_id": "turn-secret-99",
+    }
+    j["request"] = {
+        "message_id": "msg-secret-77",
+        "title": "Acoustic Demo",
+        "text": "Private personal request message that must stay local",
+        "asked": {"duration_s": 90},
+        "changes": ["duration_s: 90 -> 120"],
+    }
+    t = take(T, J, 1, lib="trk_priv")
+    t["seed"] = 3555429983
+
+    doc = lineage.build_lineage([j], [t], job_id=J, dpc_home_dir=home)
+    out = lineage.write_lineage_files(doc, tmp_path / "out")
+    page = (tmp_path / "out" / "lineage.html").read_text(encoding="utf-8")
+    assert out["html"].endswith("lineage.html")
+
+    # Shape-only lyrics, resolved seed, adapters, and safe requester/title/changes are present
+    assert "2 lines" in page
+    assert "random (3555429983 on v1)" in page
+    assert "voice-demo-bass (music 0.45, sound 0.35)" in page
+    assert "asked by StudioBot" in page
+    assert "Acoustic Demo" in page
+
+    # Private fields must never leak into shareable lineage.html
+    for forbidden in (
+        "Secret private stanza",
+        conv_id,
+        "Private Group Title",
+        "turn-secret-99",
+        "msg-secret-77",
+        "Private personal request message",
+    ):
+        assert forbidden not in page

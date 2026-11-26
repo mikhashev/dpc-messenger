@@ -14,11 +14,13 @@ writes two files beside a job's generated folder.
 - an optional `entry_of(library_track_id)` that answers the library entry (title, the `provenance`
   summary with `genome_sha256` / `intent_sha256` / `render_sha256`), or None.
 
-**Nodes.** `intent`: the request of a `generate_from_text` job (generation zero of that branch; style
-and the shape of the lyrics, never their text), or of a song job from a source track (`generate_similar`,
-`cover`, `generate_from_lyrics`: its caption, relation and what it kept). `take`: one file a job made (a
+**Nodes.** `intent`: the request of a `generate_from_text` job (generation zero of that branch; style,
+lyrics shape + full text for live view, resolved seed, adapters with strengths, requester, and
+optional request block), or of a song job from a source track (`generate_similar`, `cover`,
+`generate_from_lyrics`: its caption, relation and what it kept). `take`: one file a job made (a
 new song variant, or an edit sibling). `source`: a library track an edit or a song job started from that
-no stored take explains (an imported file). **Edges** are derived-from: `generate` (intent to take),
+no stored take explains (an imported file). Note that `render_html` (`lineage.html` shareable export)
+keeps shape-only lyrics and omits private chat ids / `conversation_id` / personal message text. **Edges** are derived-from: `generate` (intent to take),
 `edit` (parent to take, `op` the edit action, `region` its span; the takes of one edit job are siblings
 and share `group`) and `derive` (the source track, a take or a `source` node, to a song job's intent;
 `op` the lineage relation, "cover of", "same style as" or "new song from the lyrics of"). An edge into a
@@ -80,6 +82,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from .. import conversation_paths
 from . import job_schemas as js
 from .qa import qa_summary
 from .schemas import SchemaError
@@ -149,46 +152,119 @@ def _clip(text: Any, limit: int) -> str:
     return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
 
 
-def _adapter_names(params: Mapping[str, Any]) -> List[str]:
-    out = []
+def _adapters(params: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
     for a in params.get("adapters") or []:
-        if isinstance(a, Mapping) and isinstance(a.get("name"), str):
-            out.append(a["name"])
+        if isinstance(a, Mapping) and isinstance(a.get("name"), str) and a["name"]:
+            entry: Dict[str, Any] = {"name": a["name"]}
+            for k in ("music", "sound", "strength", "scale"):
+                v = a.get(k)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    entry[k] = v
+            out.append(entry)
+        elif isinstance(a, str) and a:
+            out.append({"name": a})
     return out
+
+
+def _adapter_names(params: Mapping[str, Any]) -> List[str]:
+    return [a["name"] for a in _adapters(params)]
+
+
+def _format_adapter(a: Any) -> str:
+    if isinstance(a, str):
+        return a
+    if not isinstance(a, Mapping) or not isinstance(a.get("name"), str) or not a["name"]:
+        return ""
+    parts = [f"{k} {a[k]:g}" for k in ("music", "sound", "strength", "scale")
+             if isinstance(a.get(k), (int, float)) and not isinstance(a[k], bool)]
+    return f"{a['name']} ({', '.join(parts)})" if parts else a["name"]
 
 
 def _lyrics_shape(params: Mapping[str, Any]) -> Dict[str, Any]:
     lyrics = params.get("lyrics")
+    if isinstance(lyrics, list):
+        lines = [str(ln) for ln in lyrics]
+        if not any(ln.strip() for ln in lines):
+            return {"instrumental": True, "lines": 0}
+        return {"instrumental": False, "lines": sum(1 for ln in lines if ln.strip() and not ln.strip().startswith("["))}
     if not isinstance(lyrics, str) or not lyrics.strip():
         return {"instrumental": True, "lines": 0}
     return {"instrumental": False, "lines": sum(1 for ln in lyrics.splitlines() if ln.strip() and not ln.strip().startswith("["))}
+
+
+def _lyrics_text(params: Mapping[str, Any]) -> Optional[str]:
+    lyrics = params.get("lyrics")
+    if isinstance(lyrics, list):
+        lines = [str(ln) for ln in lyrics]
+        return "\n".join(lines) if any(ln.strip() for ln in lines) else None
+    if isinstance(lyrics, str) and lyrics.strip():
+        return lyrics
+    return None
+
+
+def _format_lyrics_shape(shape: Any) -> str:
+    if not isinstance(shape, Mapping):
+        return ""
+    if shape.get("instrumental"):
+        return "instrumental"
+    lines = shape.get("lines")
+    if isinstance(lines, int) and not isinstance(lines, bool):
+        return f"{lines} line" if lines == 1 else f"{lines} lines"
+    return "lyrics"
+
+
+def _resolved_seed(params: Mapping[str, Any], takes: Sequence[Mapping[str, Any]] = ()) -> Any:
+    raw = params.get("seed")
+    if raw is not None:
+        return raw
+    seeded = [
+        (t.get("variant"), t.get("seed"))
+        for t in takes
+        if isinstance(t.get("seed"), int) and not isinstance(t.get("seed"), bool)
+    ]
+    if not seeded:
+        return "random" if "seed" in params else None
+    unique = {s for _, s in seeded}
+    if len(seeded) == 1:
+        v, s = seeded[0]
+        return f"random ({s} on v{v})" if v is not None else f"random ({s})"
+    if len(unique) == 1:
+        s = seeded[0][1]
+        labels = [f"v{v}" for v, _ in seeded if v is not None]
+        return f"random ({s} on {', '.join(labels)})" if len(labels) == len(seeded) else f"random ({s})"
+    parts = [f"v{v}: {s}" if v is not None else str(s) for v, s in seeded]
+    return f"random ({', '.join(parts)})"
 
 
 def _drop_none(d: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None and v != [] and v != {}}
 
 
-def _intent_params(job: Mapping[str, Any]) -> Dict[str, Any]:
+def _intent_params(job: Mapping[str, Any], takes: Sequence[Mapping[str, Any]] = ()) -> Dict[str, Any]:
     p = job.get("params") or {}
     return _drop_none({
         "style": _clip(p.get("style"), STYLE_MAX) or None,
         "lyrics": _lyrics_shape(p),
-        "variants": p.get("variants"), "duration_s": p.get("duration_s"), "seed": p.get("seed"),
-        "backbone": p.get("backbone"), "cot": p.get("cot"), "adapters": _adapter_names(p),
+        "lyrics_text": _lyrics_text(p),
+        "variants": p.get("variants"), "duration_s": p.get("duration_s"),
+        "seed": _resolved_seed(p, takes),
+        "backbone": p.get("backbone"), "cot": p.get("cot"), "adapters": _adapters(p),
     })
 
 
-def _song_intent_params(job: Mapping[str, Any]) -> Dict[str, Any]:
+def _song_intent_params(job: Mapping[str, Any], takes: Sequence[Mapping[str, Any]] = ()) -> Dict[str, Any]:
     p = job.get("params") or {}
-    lines = p.get("lyrics") if isinstance(p.get("lyrics"), list) else []
     return _drop_none({
         "caption": _clip(p.get("caption"), STYLE_MAX) or None, "relation": js.SONG_RELATIONS.get(job.get("type")),
         "keep": copy.deepcopy(p.get("keep")) or None, "lyrics_mode": p.get("lyrics_mode"),
-        "lyrics": {"instrumental": not lines, "lines": sum(1 for ln in lines if str(ln).strip()
-                                                           and not str(ln).strip().startswith("["))},
+        "lyrics": _lyrics_shape(p),
+        "lyrics_text": _lyrics_text(p),
         "reference": p.get("reference"), "kept": p.get("kept"), "melody_source": p.get("melody_source"),
-        "variants": p.get("variants"), "duration_s": p.get("duration_s"), "seed": p.get("seed"),
+        "variants": p.get("variants"), "duration_s": p.get("duration_s"),
+        "seed": _resolved_seed(p, takes),
         "backbone": p.get("backbone"), "cot": p.get("cot"), "cover_strength": p.get("cover_strength"),
+        "adapters": _adapters(p),
     })
 
 
@@ -204,7 +280,7 @@ def _take_params(take: Mapping[str, Any], job: Mapping[str, Any]) -> Dict[str, A
                     "crossfade_ms": p.get("crossfade_ms"), "cut_with_shift": p.get("cut_with_shift"),
                     "takes": p.get("takes")})
     else:
-        out.update({"backbone": p.get("backbone"), "cot": p.get("cot"), "adapters": _adapter_names(p)})
+        out.update({"backbone": p.get("backbone"), "cot": p.get("cot"), "adapters": _adapters(p)})
     return _drop_none(out)
 
 
@@ -364,9 +440,71 @@ def _component(idx: _Index, seeds: Sequence[str]) -> List[str]:
     return seen
 
 
+def _default_dpc_home() -> Path:
+    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+
+
+def _read_json_mapping(path: Path) -> Optional[Mapping[str, Any]]:
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, Mapping):
+                return data
+    except Exception:
+        logger.debug("lineage: could not read %s", path, exc_info=True)
+    return None
+
+
+def _disk_agent_name(home: Path, agent_id: str) -> Optional[str]:
+    if not conversation_paths.is_safe_conversation_id(agent_id):
+        return None
+    cfg = _read_json_mapping(home / "agents" / agent_id / "config.json")
+    if cfg and isinstance(cfg.get("name"), str) and cfg["name"].strip():
+        return cfg["name"].strip()
+    reg = _read_json_mapping(home / "agents" / "_registry.json")
+    agents = reg.get("agents") if isinstance(reg, Mapping) else None
+    entry = agents.get(agent_id) if isinstance(agents, Mapping) else None
+    if isinstance(entry, Mapping) and isinstance(entry.get("name"), str) and entry["name"].strip():
+        return entry["name"].strip()
+    return None
+
+
+def _disk_conversation_name(
+    home: Path,
+    conversation_id: str,
+    resolve_agent: Callable[[str], Optional[str]],
+) -> Optional[str]:
+    if not conversation_paths.is_safe_conversation_id(conversation_id):
+        return None
+    if conversation_id.startswith("group-"):
+        for d in conversation_paths.existing_store_dirs(home / "conversations", conversation_id):
+            meta = _read_json_mapping(d / "metadata.json")
+            if meta and isinstance(meta.get("name"), str) and meta["name"].strip():
+                return meta["name"].strip()
+        legacy = _read_json_mapping(home / "groups" / f"{conversation_id}.json")
+        if legacy and isinstance(legacy.get("name"), str) and legacy["name"].strip():
+            return legacy["name"].strip()
+    if conversation_id.startswith("agent_"):
+        aname = resolve_agent(conversation_id)
+        if aname and aname != conversation_id:
+            return f"{aname} (1:1)"
+    return None
+
+
+def _job_request(job: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    req = job.get("request")
+    if not isinstance(req, Mapping):
+        return None
+    cleaned = _drop_none(copy.deepcopy(dict(req)))
+    return cleaned or None
+
+
 def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str, Any]], *,
                   track_id: Optional[str] = None, job_id: Optional[str] = None,
                   entry_of: Optional[Callable[[str], Optional[Mapping[str, Any]]]] = None,
+                  agent_name_of: Optional[Callable[[str], Optional[str]]] = None,
+                  conversation_name_of: Optional[Callable[[str], Optional[str]]] = None,
+                  dpc_home_dir: Optional[Path] = None,
                   generated_at: Optional[str] = None) -> Dict[str, Any]:
     """The `mp.lineage/1` document of the job chain that holds `track_id` (a library track id) or
     `job_id`; `LineageError("invalid_params")` when neither is given, `("not_found")` for a `job_id`
@@ -376,6 +514,7 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
         raise LineageError("invalid_params", "a lineage needs a track_id or a job_id")
     idx = _Index(jobs, takes)
     lookup = entry_of or (lambda _id: None)
+    home = Path(dpc_home_dir) if dpc_home_dir is not None else _default_dpc_home()
 
     def entry(lib_id: Optional[str]) -> Optional[Mapping[str, Any]]:
         if not lib_id:
@@ -385,6 +524,57 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
         except Exception:
             logger.debug("lineage: no library entry for %s", lib_id, exc_info=True)
             return None
+
+    def resolve_agent(agent_id: str) -> Optional[str]:
+        if agent_name_of is not None:
+            try:
+                hit = agent_name_of(agent_id)
+                if isinstance(hit, str) and hit.strip():
+                    return hit.strip()
+            except Exception:
+                logger.debug("lineage: agent_name_of failed for %s", agent_id, exc_info=True)
+        return _disk_agent_name(home, agent_id)
+
+    def resolve_conversation(conversation_id: str) -> Optional[str]:
+        if conversation_name_of is not None:
+            try:
+                hit = conversation_name_of(conversation_id)
+                if isinstance(hit, str) and hit.strip():
+                    return hit.strip()
+            except Exception:
+                logger.debug("lineage: conversation_name_of failed for %s", conversation_id, exc_info=True)
+        return _disk_conversation_name(home, conversation_id, resolve_agent)
+
+    def resolve_requested_by(job: Mapping[str, Any]) -> Dict[str, Any]:
+        raw = job.get("requested_by")
+        rb = dict(raw) if isinstance(raw, Mapping) else {}
+        kind = rb.get("kind") if rb.get("kind") in ("person", "agent") else "person"
+        req = job.get("request") if isinstance(job.get("request"), Mapping) else None
+        if kind == "agent":
+            agent_id = rb.get("agent_id") if isinstance(rb.get("agent_id"), str) and rb.get("agent_id") else None
+            conv_id = rb.get("conversation_id") if isinstance(rb.get("conversation_id"), str) and rb.get("conversation_id") else None
+            turn_id = rb.get("turn_id") if isinstance(rb.get("turn_id"), str) and rb.get("turn_id") else None
+            agent_name = resolve_agent(agent_id) if agent_id else None
+            conv_name = resolve_conversation(conv_id) if conv_id else None
+            who = agent_name or agent_id or "agent"
+            where = conv_name or conv_id
+            label = f"asked by {who} in {where}" if where else f"asked by {who}"
+            return _drop_none({
+                "kind": "agent",
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "conversation_id": conv_id,
+                "conversation_name": conv_name,
+                "turn_id": turn_id,
+                "label": label,
+            })
+        surface = req.get("surface") if req and isinstance(req.get("surface"), str) and req.get("surface").strip() else "player"
+        surface_label = "Player" if surface.lower() == "player" else surface
+        return {
+            "kind": "person",
+            "surface": surface,
+            "label": f"asked by you in {surface_label}",
+        }
 
     seeds: List[str] = []
     if job_id:
@@ -422,24 +612,38 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
     for jid in members:
         job = idx.jobs[jid]
         jtakes = idx.takes_of.get(jid, [])
+        req_by = resolve_requested_by(job)
+        req_block = _job_request(job)
         if job["type"] == GENERATE_TYPE:
             parent_id = f"intent:{jid}"
             style = _clip((job.get("params") or {}).get("style"), 60)
-            add_node({"id": parent_id, "kind": "intent", "label": style or "generate from text",
-                      "generation": 0, "created_at": job.get("created_at"), "job_id": jid,
-                      "engine": _engine_of(None, job), "params": _intent_params(job),
-                      "job_state": job.get("state"), "state_reason": job.get("state_reason")})
+            intent_node: Dict[str, Any] = {
+                "id": parent_id, "kind": "intent", "label": style or "generate from text",
+                "generation": 0, "created_at": job.get("created_at"), "job_id": jid,
+                "engine": _engine_of(None, job), "params": _intent_params(job, jtakes),
+                "job_state": job.get("state"), "state_reason": job.get("state_reason"),
+                "requested_by": copy.deepcopy(req_by),
+            }
+            if req_block is not None:
+                intent_node["request"] = copy.deepcopy(req_block)
+            add_node(intent_node)
             edge_kind, op = "generate", GENERATE_TYPE
         elif job["type"] in SONG_TYPES:
             parent = parent_in_graph(job)
             from_id = parent[1] if parent[0] == "take" else source_node(parent[1])
             parent_id = f"intent:{jid}"
             relation = js.SONG_RELATIONS[job["type"]]
-            add_node({"id": parent_id, "kind": "intent",
-                      "label": _clip((job.get("params") or {}).get("caption"), 60) or relation,
-                      "generation": 0, "created_at": job.get("created_at"), "job_id": jid,
-                      "engine": _engine_of(None, job), "params": _song_intent_params(job), "relation": relation,
-                      "job_state": job.get("state"), "state_reason": job.get("state_reason")})
+            intent_node = {
+                "id": parent_id, "kind": "intent",
+                "label": _clip((job.get("params") or {}).get("caption"), 60) or relation,
+                "generation": 0, "created_at": job.get("created_at"), "job_id": jid,
+                "engine": _engine_of(None, job), "params": _song_intent_params(job, jtakes), "relation": relation,
+                "job_state": job.get("state"), "state_reason": job.get("state_reason"),
+                "requested_by": copy.deepcopy(req_by),
+            }
+            if req_block is not None:
+                intent_node["request"] = copy.deepcopy(req_block)
+            add_node(intent_node)
             edges.append({"id": f"{from_id}>{parent_id}", "from": from_id, "to": parent_id, "kind": "derive",
                           "op": relation, "job_id": jid, "group": jid, "region": None, "rejected": False,
                           "reason": None})
@@ -481,6 +685,19 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
         _set_generations(nodes, edges)
     take_nodes = [n for n in nodes.values() if n["kind"] == "take"]
     has_out = {e["from"] for e in edges}
+    def job_summary(jid: str) -> Dict[str, Any]:
+        j = idx.jobs[jid]
+        out: Dict[str, Any] = {
+            "id": jid, "type": j["type"], "action": j.get("action"),
+            "state": j.get("state"), "created_at": j.get("created_at"),
+            "requested_by": resolve_requested_by(j),
+            "take_ids": list(j.get("take_ids") or []),
+        }
+        req_block = _job_request(j)
+        if req_block is not None:
+            out["request"] = req_block
+        return out
+
     doc = {
         "schema": SCHEMA,
         "generated_at": generated_at or _now(),
@@ -488,10 +705,7 @@ def build_lineage(jobs: Iterable[Mapping[str, Any]], takes: Iterable[Mapping[str
         "nodes": sorted(nodes.values(), key=lambda n: (n["generation"], n.get("created_at") or "", n["id"])),
         "edges": edges,
         "events": events,
-        "jobs": [{"id": jid, "type": idx.jobs[jid]["type"], "action": idx.jobs[jid].get("action"),
-                  "state": idx.jobs[jid].get("state"), "created_at": idx.jobs[jid].get("created_at"),
-                  "requested_by": (idx.jobs[jid].get("requested_by") or {}).get("kind") or "person",
-                  "take_ids": list(idx.jobs[jid].get("take_ids") or [])} for jid in members],
+        "jobs": [job_summary(jid) for jid in members],
         "stats": {
             "jobs": len(members), "takes": len(take_nodes),
             "kept": sum(1 for n in take_nodes if n["decision"] == "keep"),
@@ -784,9 +998,71 @@ def _reason_text(reason: Optional[Mapping[str, Any]]) -> str:
     return " / ".join(str(x) for x in (reason.get("text"), reason.get("class")) if x)
 
 
+def _safe_requester_label(rb: Any) -> str:
+    """Shareable requester summary for `lineage.html`: never includes conversation_id,
+    conversation_name, or turn_id."""
+    if isinstance(rb, str):
+        return "asked by you" if rb == "person" else f"asked by {rb}"
+    if not isinstance(rb, Mapping):
+        return ""
+    if rb.get("kind") == "agent":
+        who = rb.get("agent_name") or rb.get("agent_id") or "agent"
+        return f"asked by {who}"
+    return "asked by you"
+
+
+def _format_safe_request_value(val: Any) -> str:
+    if isinstance(val, Mapping):
+        return ", ".join(f"{k}: {_format_safe_request_value(v)}" for k, v in val.items() if v is not None)
+    if isinstance(val, list):
+        return "; ".join(_format_safe_request_value(v) for v in val if v is not None)
+    return str(val)
+
+
+def _intent_html_items(doc: Mapping[str, Any], esc: Callable[[Any], str]) -> List[str]:
+    """Shareable intent summary rows for `lineage.html`: shape-only lyrics, resolved seed,
+    adapters with strengths, and redacted requester/request metadata (no lyrics_text,
+    conversation_id, conversation_name, turn_id, message_id, or request.text)."""
+    jobs_by_id = {j.get("id"): j for j in doc.get("jobs") or [] if isinstance(j, Mapping) and j.get("id")}
+    items: List[str] = []
+    for n in doc.get("nodes") or []:
+        if not isinstance(n, Mapping) or n.get("kind") != "intent":
+            continue
+        params = n.get("params") if isinstance(n.get("params"), Mapping) else {}
+        job = jobs_by_id.get(n.get("job_id")) or {}
+        parts: List[str] = []
+        style = params.get("style") or params.get("caption")
+        if style:
+            parts.append(str(style))
+        shape = _format_lyrics_shape(params.get("lyrics"))
+        if shape:
+            parts.append(f"lyrics: {shape}")
+        if params.get("seed") is not None:
+            parts.append(f"seed: {params['seed']}")
+        adapters = [_format_adapter(a) for a in params.get("adapters") or []]
+        adapters = [a for a in adapters if a]
+        if adapters:
+            parts.append("adapters: " + ", ".join(adapters))
+        who = _safe_requester_label(n.get("requested_by") or job.get("requested_by"))
+        if who:
+            parts.append(who)
+        req = n.get("request") if isinstance(n.get("request"), Mapping) else job.get("request")
+        if isinstance(req, Mapping):
+            if req.get("title"):
+                parts.append(f"title: {req['title']}")
+            if req.get("asked") is not None:
+                parts.append(f"asked: {_format_safe_request_value(req['asked'])}")
+            if req.get("changes") is not None:
+                parts.append(f"changes: {_format_safe_request_value(req['changes'])}")
+        items.append(f"<li><b>{esc(n.get('label') or 'intent')}</b>"
+                     + (f" — {esc(' · '.join(parts))}" if parts else "") + "</li>")
+    return items
+
+
 def render_html(doc: Mapping[str, Any]) -> str:
     """A self-contained static page for the graph: inline SVG, inline CSS, no script and no network.
-    Everything from the document is escaped."""
+    Everything from the document is escaped. Keeps shape-only lyrics and omits private chat ids and
+    personal message text."""
     pos = layout(doc)
     esc = lambda s: html.escape(str(s), quote=True)  # noqa: E731
     width = max((x for x, _ in pos.values()), default=0) + NODE_W + PAD
@@ -821,6 +1097,7 @@ def render_html(doc: Mapping[str, Any]) -> str:
                    f'<rect x="{x:.1f}" y="{y:.1f}" width="{NODE_W}" height="{NODE_H}" rx="6"/>'
                    + "".join(f'<text x="{x + 8:.1f}" y="{y + 18 + i * 16:.1f}">{esc(_clip(t, 30))}</text>' for i, t in enumerate(lines))
                    + "</g>")
+    intent_rows = _intent_html_items(doc, esc)
     rows = []
     for ev in doc["events"]:
         why = _reason_text(ev["reason"])
@@ -828,6 +1105,7 @@ def render_html(doc: Mapping[str, Any]) -> str:
         rows.append(f"<li><b>{esc(ev['kind'])}</b> {esc(ev['take_id'])}{esc(over)}"
                     + (f" - {esc(why)}" if why else "") + f' <span class="muted">{esc(ev["at"] or "")}</span></li>')
     s = doc["stats"]
+    intent_html = f"<h2>Intent</h2>\n<ul>{''.join(intent_rows)}</ul>\n" if intent_rows else ""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Song lineage</title>
@@ -846,7 +1124,7 @@ body{{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.4 s
 <svg viewBox="0 0 {width:.0f} {height:.0f}" width="{width:.0f}" height="{height:.0f}" role="img" aria-label="Lineage graph">
 {chr(10).join(svg)}
 </svg>
-<h2>Selections</h2>
+{intent_html}<h2>Selections</h2>
 <ul>{''.join(rows) or '<li class="muted">No Keep or Discard yet.</li>'}</ul>
 <p class="muted">{esc(' '.join(doc['notes']))}</p>
 </body></html>

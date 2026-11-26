@@ -30,18 +30,24 @@
     edgePath,
     eventLine,
     focusNode,
+    formatRequestedBy,
     hasEvolution,
     layoutLineage,
+    lyricsSummary,
     nodeLines,
+    nodeLyricsText,
     nodeTitle,
     nodeTone,
+    paramRows,
     playableNode,
     qaBadge,
     reasonText,
+    requestRows,
     splitNotes,
     type LineageNode,
     type MusicLineage,
   } from '$lib/utils/musicLineage';
+  import { agentsList, groupChats, nodeStatus } from '$lib/coreService';
   import { fetchMusicLineage, writeMusicLineageFiles } from '$lib/services/musicLineage';
   import {
     endReview,
@@ -67,6 +73,16 @@
   let layout = $derived(doc ? layoutLineage(doc) : null);
   let notes = $derived(doc ? splitNotes(doc) : { warnings: [], other: [] });
   let selected = $derived<LineageNode | null>(doc ? (doc.nodes.find(n => n.id === selectedId) ?? null) : null);
+  let chatNames = $derived({
+    agents: $agentsList ?? [],
+    groups: $groupChats,
+    peers: ($nodeStatus as { peer_info?: Array<{ node_id: string; name?: string }> } | null)?.peer_info ?? [],
+  });
+  let selectedAskedBy = $derived(selected && doc ? formatRequestedBy(selected, doc, chatNames) : '');
+  let selectedParams = $derived(selected ? paramRows(selected, doc) : []);
+  let selectedRequest = $derived(selected && doc && (selected.kind === 'intent' || selected.take_kind === 'edit') ? requestRows(selected, doc) : []);
+  let selectedLyricsText = $derived(selected ? nodeLyricsText(selected) : null);
+  let selectedLyricsSummary = $derived(selected ? lyricsSummary(selected) : null);
   let rv = $derived($musicReview);
   // A discarded take's library entry is hidden (Discard hides it); the card still plays it and can restore it.
   let selectedLib = $derived(selected ? playableNode(selected) : null);
@@ -173,15 +189,6 @@
     return !!lib && rv.active && rv.trackId === lib && rv.playing;
   }
 
-  function paramRows(node: LineageNode): Array<[string, string]> {
-    const rows: Array<[string, string]> = [];
-    for (const [k, v] of Object.entries(node.params ?? {})) {
-      if (v === null || v === undefined) continue;
-      rows.push([k.replace(/_/g, ' '), typeof v === 'object' ? JSON.stringify(v) : String(v)]);
-    }
-    return rows;
-  }
-
   onDestroy(() => {
     ticket++;
     void stopOwnPlayback();
@@ -257,10 +264,26 @@
           {:else if selected.kind === 'intent' && selected.state_reason}
             <p class="muted small">{selected.state_reason}</p>
           {/if}
-          {#if paramRows(selected).length}
+          {#if selectedAskedBy}
+            <p class="muted small asked-by">{selectedAskedBy}</p>
+          {/if}
+          {#if selectedRequest.length}
             <dl class="params">
-              {#each paramRows(selected) as [k, v] (k)}<dt>{k}</dt><dd>{v}</dd>{/each}
+              {#each selectedRequest as [k, v] (k)}<dt>{k}</dt><dd>{v}</dd>{/each}
             </dl>
+          {/if}
+          {#if selectedParams.length}
+            <dl class="params">
+              {#each selectedParams as [k, v] (k)}<dt>{k}</dt><dd>{v}</dd>{/each}
+            </dl>
+          {/if}
+          {#if selectedLyricsText}
+            {#key selected.id}
+              <details class="lyrics-expander">
+                <summary class="small">Lyrics ({selectedLyricsSummary ?? 'full text'})</summary>
+                <pre class="lyrics-body">{selectedLyricsText}</pre>
+              </details>
+            {/key}
           {/if}
           <div class="form-row">
             {#if playableNode(selected)}
@@ -337,6 +360,23 @@
   .params { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; font-size: 12px; }
   .params dt { color: var(--text-secondary, #a9b0bb); }
   .params dd { margin: 0; overflow-wrap: anywhere; }
+  .asked-by { font-style: italic; }
+  .lyrics-expander { border-top: 1px solid var(--border-color, #2c3036); padding-top: 4px; }
+  .lyrics-expander summary { cursor: pointer; color: var(--text-secondary, #a9b0bb); user-select: none; }
+  .lyrics-body {
+    margin: 6px 0 0;
+    padding: 8px;
+    border-radius: 6px;
+    background: var(--bg-secondary, #1d2025);
+    border: 1px solid var(--border-color, #2c3036);
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 260px;
+    overflow-y: auto;
+  }
   .events { margin: 0; padding-left: 18px; font-size: 13px; display: flex; flex-direction: column; gap: 2px; }
   .form-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .small-btn {

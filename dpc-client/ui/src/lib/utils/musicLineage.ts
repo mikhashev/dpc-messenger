@@ -29,6 +29,52 @@ export interface LineageQa {
 export type LineageNodeKind = 'intent' | 'source' | 'take';
 export type LineageDecision = 'pending' | 'keep' | 'discard';
 
+export interface LineageRequestedBy {
+    kind: 'person' | 'agent' | string;
+    agent_id?: string;
+    agent_name?: string;
+    conversation_id?: string;
+    conversation_name?: string;
+    turn_id?: string;
+    surface?: string;
+    label?: string;
+}
+
+export interface LineageRequestBlock {
+    title?: string;
+    text?: string;
+    asked?: unknown;
+    changes?: unknown;
+    surface?: string;
+    message_id?: string;
+    [key: string]: unknown;
+}
+
+export interface LineageAdapter {
+    name: string;
+    music?: number;
+    sound?: number;
+    strength?: number;
+    scale?: number;
+}
+
+export interface LineageJob {
+    id: string;
+    type: string;
+    action: string | null;
+    state: string;
+    created_at: string;
+    requested_by: string | LineageRequestedBy;
+    request?: LineageRequestBlock | null;
+    take_ids: string[];
+}
+
+export interface LineageChatNames {
+    groups?: Map<string, { name?: string }> | null;
+    agents?: Array<{ agent_id: string; name?: string }> | null;
+    peers?: Array<{ node_id: string; name?: string }> | null;
+}
+
 export interface LineageNode {
     id: string;
     kind: LineageNodeKind;
@@ -41,6 +87,8 @@ export interface LineageNode {
     // intent
     job_state?: string | null;
     state_reason?: string | null;
+    requested_by?: string | LineageRequestedBy;
+    request?: LineageRequestBlock | null;
     // source
     library_track_id?: string | null;
     title?: string;
@@ -92,7 +140,7 @@ export interface MusicLineage {
     nodes: LineageNode[];
     edges: LineageEdge[];
     events: LineageEvent[];
-    jobs: Array<{ id: string; type: string; action: string | null; state: string; created_at: string; requested_by: string; take_ids: string[] }>;
+    jobs: LineageJob[];
     stats: { jobs: number; takes: number; kept: number; discarded: number; pending: number; edits: number; branches: number; max_generation: number };
     notes: string[];
 }
@@ -257,7 +305,9 @@ export function nodeTitle(node: LineageNode): string {
     const parts = [node.label];
     if (node.engine) parts.push(`engine ${node.engine}`);
     const p = node.params ?? {};
-    for (const k of ['seed', 'lm_seed', 'backbone', 'cot', 'action']) if (p[k] !== undefined) parts.push(`${k} ${String(p[k])}`);
+    for (const k of ['seed', 'lm_seed', 'backbone', 'cot', 'action']) {
+        if (p[k] !== undefined && p[k] !== null) parts.push(`${k} ${String(p[k])}`);
+    }
     if (node.kind === 'take') {
         parts.push(qaBadge(node.qa).label, decisionWord(node.decision));
         const why = reasonText(node.reason);
@@ -265,6 +315,204 @@ export function nodeTitle(node: LineageNode): string {
         if (typeof node.lufs_i === 'number') parts.push(`${node.lufs_i.toFixed(1)} LUFS`);
     }
     return parts.join(' · ');
+}
+
+function countSungLines(text: string): number {
+    return text.split(/\r?\n/).filter(ln => {
+        const s = ln.trim();
+        return s.length > 0 && !s.startsWith('[');
+    }).length;
+}
+
+/** Extract the full multiline lyrics text for the live view's expander, or null for an instrumental. */
+export function nodeLyricsText(node: Pick<LineageNode, 'params'>): string | null {
+    const p = node.params;
+    if (!p) return null;
+    if (typeof p.lyrics_text === 'string' && p.lyrics_text.trim()) return p.lyrics_text;
+    if (typeof p.lyrics === 'string' && p.lyrics.trim()) return p.lyrics;
+    return null;
+}
+
+/** Short human summary of a node's lyrics: "instrumental", "34 lines", or null when absent. */
+export function lyricsSummary(node: Pick<LineageNode, 'params'>): string | null {
+    const p = node.params;
+    if (!p) return null;
+    const raw = p.lyrics;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        const shape = raw as { instrumental?: unknown; lines?: unknown };
+        if (shape.instrumental === true) return 'instrumental';
+        if (typeof shape.lines === 'number' && Number.isFinite(shape.lines)) {
+            return `${shape.lines} ${shape.lines === 1 ? 'line' : 'lines'}`;
+        }
+    }
+    const text = nodeLyricsText(node);
+    if (text !== null) {
+        const count = countSungLines(text);
+        return `${count} ${count === 1 ? 'line' : 'lines'}`;
+    }
+    if (raw === null) return 'instrumental';
+    return null;
+}
+
+/** Format one adapter entry with its strengths, e.g. "voice-ru-m-bass-82 (music 0.45, sound 0.35)". */
+export function formatAdapter(adapter: unknown): string {
+    if (typeof adapter === 'string') return adapter;
+    if (!adapter || typeof adapter !== 'object') return '';
+    const a = adapter as Record<string, unknown>;
+    if (typeof a.name !== 'string' || !a.name) return '';
+    const strengths: string[] = [];
+    for (const k of ['music', 'sound', 'strength', 'scale']) {
+        const v = a[k];
+        if (typeof v === 'number' && Number.isFinite(v)) strengths.push(`${k} ${v}`);
+    }
+    return strengths.length ? `${a.name} (${strengths.join(', ')})` : a.name;
+}
+
+/** Format an adapters array (strings or {name, music, sound, strength, scale}) cleanly. */
+export function formatAdapters(adapters: unknown): string {
+    if (Array.isArray(adapters)) {
+        return adapters.map(formatAdapter).filter(Boolean).join(', ');
+    }
+    return formatAdapter(adapters);
+}
+
+/** Format an arbitrary parameter value cleanly without dumping raw JSON. */
+function formatParamValue(value: unknown): string {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (Array.isArray(value)) return value.map(formatParamValue).filter(Boolean).join(', ');
+    if (typeof value === 'object') {
+        return Object.entries(value as Record<string, unknown>)
+            .filter(([, v]) => v !== null && v !== undefined && v !== '')
+            .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${formatParamValue(v)}`)
+            .join(', ');
+    }
+    return String(value);
+}
+
+/** Resolve the seed string for an intent node, falling back to its takes when seed is null/omitted. */
+export function formatSeed(node: LineageNode, doc?: Pick<MusicLineage, 'nodes'> | null): string | null {
+    const raw = node.params?.seed;
+    if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw);
+    if (typeof raw === 'string' && raw && raw !== 'random') return raw;
+    if (node.kind === 'intent' && node.job_id && doc?.nodes) {
+        const seeded = doc.nodes
+            .filter(n => n.kind === 'take' && n.job_id === node.job_id && typeof n.params?.seed === 'number' && Number.isFinite(n.params.seed))
+            .map(n => ({ variant: n.variant, seed: n.params!.seed as number }));
+        if (seeded.length === 1) {
+            const { variant, seed } = seeded[0];
+            return variant != null ? `random (${seed} on v${variant})` : `random (${seed})`;
+        }
+        if (seeded.length > 1) {
+            const unique = new Set(seeded.map(s => s.seed));
+            if (unique.size === 1) {
+                const labels = seeded.map(s => (s.variant != null ? `v${s.variant}` : '')).filter(Boolean);
+                return labels.length === seeded.length
+                    ? `random (${seeded[0].seed} on ${labels.join(', ')})`
+                    : `random (${seeded[0].seed})`;
+            }
+            return `random (${seeded.map(s => (s.variant != null ? `v${s.variant}: ${s.seed}` : String(s.seed))).join(', ')})`;
+        }
+    }
+    if (raw === null || raw === 'random') return 'random';
+    return null;
+}
+
+/** Label/value rows for a node's parameters; never JSON-stringifies objects or dumps raw lyrics_text. */
+export function paramRows(node: LineageNode, doc?: Pick<MusicLineage, 'nodes'> | null): Array<[string, string]> {
+    const rows: Array<[string, string]> = [];
+    const params = node.params ?? {};
+    let sawSeed = false;
+    for (const [k, v] of Object.entries(params)) {
+        if (k === 'lyrics_text') continue;
+        if (k === 'seed') {
+            sawSeed = true;
+            const formatted = formatSeed(node, doc);
+            if (formatted) rows.push(['seed', formatted]);
+            continue;
+        }
+        if (v === null || v === undefined) continue;
+        if (k === 'lyrics') {
+            const summary = lyricsSummary(node);
+            if (summary) rows.push(['lyrics', summary]);
+            continue;
+        }
+        if (k === 'adapters') {
+            const text = formatAdapters(v);
+            if (text) rows.push(['adapters', text]);
+            continue;
+        }
+        const formatted = formatParamValue(v);
+        if (formatted) rows.push([k.replace(/_/g, ' '), formatted]);
+    }
+    if (!sawSeed && node.kind === 'intent') {
+        const resolved = formatSeed(node, doc);
+        if (resolved) rows.push(['seed', resolved]);
+    }
+    return rows;
+}
+
+function resolveConversationDisplay(id: string | undefined, fallback: string | undefined, names?: LineageChatNames): string | undefined {
+    if (!id) return fallback;
+    const group = names?.groups?.get(id);
+    if (group?.name) return group.name;
+    if (id.startsWith('agent_')) {
+        const agent = names?.agents?.find(a => a.agent_id === id);
+        if (agent?.name && agent.name !== id) return `${agent.name} (1:1)`;
+    }
+    const peer = names?.peers?.find(p => p.node_id === id);
+    if (peer?.name) return peer.name;
+    return fallback || id;
+}
+
+/** Resolve "asked by Forge in AI Studio" or "asked by you in Player" for a node or job. */
+export function formatRequestedBy(
+    node: Pick<LineageNode, 'kind' | 'job_id' | 'requested_by' | 'request'>,
+    doc?: Pick<MusicLineage, 'jobs'> | null,
+    names?: LineageChatNames,
+): string {
+    if (node.kind === 'source' || !node.job_id) return '';
+    const job = doc?.jobs?.find(j => j.id === node.job_id);
+    const rb = node.requested_by ?? job?.requested_by;
+    const req = node.request ?? job?.request;
+    if (!rb || typeof rb === 'string') {
+        if (rb === 'agent') return 'asked by agent';
+        const surface = req?.surface?.trim() || 'player';
+        return `asked by you in ${surface.toLowerCase() === 'player' ? 'Player' : surface}`;
+    }
+    if (rb.kind === 'agent') {
+        const agentMatch = rb.agent_id ? names?.agents?.find(a => a.agent_id === rb.agent_id) : undefined;
+        const who = agentMatch?.name || rb.agent_name || rb.agent_id || 'agent';
+        const where = resolveConversationDisplay(rb.conversation_id, rb.conversation_name, names);
+        return where ? `asked by ${who} in ${where}` : `asked by ${who}`;
+    }
+    const surface = rb.surface?.trim() || req?.surface?.trim() || 'player';
+    return `asked by you in ${surface.toLowerCase() === 'player' ? 'Player' : surface}`;
+}
+
+/** Forward-compatible rows for a job's `request` block (Card 7: title, asked, changes, text). */
+export function requestRows(
+    node: Pick<LineageNode, 'job_id' | 'request'>,
+    doc?: Pick<MusicLineage, 'jobs'> | null,
+): Array<[string, string]> {
+    const job = node.job_id ? doc?.jobs?.find(j => j.id === node.job_id) : undefined;
+    const req = node.request ?? job?.request;
+    if (!req || typeof req !== 'object') return [];
+    const rows: Array<[string, string]> = [];
+    const pushIf = (label: string, val: unknown, sep = ', ') => {
+        if (val === null || val === undefined || val === '') return;
+        const text = Array.isArray(val) ? val.map(formatParamValue).filter(Boolean).join(sep) : formatParamValue(val);
+        if (text) rows.push([label, text]);
+    };
+    pushIf('title', req.title);
+    pushIf('asked', req.asked);
+    pushIf('changes', req.changes, '; ');
+    pushIf('request', req.text);
+    const handled = new Set(['title', 'asked', 'changes', 'text', 'surface', 'message_id']);
+    for (const [k, v] of Object.entries(req)) {
+        if (!handled.has(k)) pushIf(k.replace(/_/g, ' '), v);
+    }
+    return rows;
 }
 
 /** The node that can be played: a take with its library entry. */

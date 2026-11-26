@@ -6,14 +6,20 @@ import {
     edgePath,
     eventLine,
     focusNode,
+    formatAdapters,
+    formatRequestedBy,
     hasEvolution,
     isLineage,
     layoutLineage,
+    lyricsSummary,
     nodeLines,
+    nodeLyricsText,
     nodeTone,
+    paramRows,
     playableNode,
     qaBadge,
     reasonText,
+    requestRows,
     splitNotes,
     type LineageEdge,
     type LineageNode,
@@ -165,5 +171,103 @@ describe('the document', () => {
     it('lists the selections in a line each', () => {
         expect(eventLine(DOC, DOC.events[0])).toBe('Kept song t1 over 1 other take');
         expect(eventLine(DOC, DOC.events[1])).toBe('Discarded song t2: vocals sound robotic / opt');
+    });
+});
+
+describe('intent formatting, lyrics expander, seed, adapters and who asked', () => {
+    it('formats lyrics shape without dumping JSON and extracts full multiline lyrics for the expander', () => {
+        const fullLyrics = '[verse]\nNeon rain on glass\nCity sleeps below';
+        const intent: LineageNode = {
+            id: 'intent:job_1', kind: 'intent', label: 'synthwave', generation: 0, job_id: 'job_1', engine: 'yue2.cpp',
+            params: {
+                style: 'synthwave',
+                lyrics: { instrumental: false, lines: 2 },
+                lyrics_text: fullLyrics,
+                seed: 'random (3555429983 on v1)',
+                adapters: [{ name: 'voice-demo-bass', music: 0.45, sound: 0.35 }],
+            },
+        };
+        const rows = paramRows(intent);
+        const byKey = new Map(rows);
+        expect(rows.some(([, v]) => v.includes('"instrumental"'))).toBe(false);
+        expect(byKey.get('lyrics')).toBe('2 lines');
+        expect(byKey.has('lyrics text')).toBe(false);
+        expect(byKey.get('seed')).toBe('random (3555429983 on v1)');
+        expect(byKey.get('adapters')).toBe('voice-demo-bass (music 0.45, sound 0.35)');
+        expect(lyricsSummary(intent)).toBe('2 lines');
+        expect(nodeLyricsText(intent)).toBe(fullLyrics);
+
+        const instrumental: LineageNode = {
+            id: 'intent:job_inst', kind: 'intent', label: 'ambient', generation: 0, job_id: 'job_inst',
+            params: { style: 'ambient', lyrics: { instrumental: true, lines: 0 }, seed: 0 },
+        };
+        const instRows = new Map(paramRows(instrumental));
+        expect(instRows.get('lyrics')).toBe('instrumental');
+        expect(instRows.get('seed')).toBe('0');
+        expect(lyricsSummary(instrumental)).toBe('instrumental');
+        expect(nodeLyricsText(instrumental)).toBeNull();
+    });
+
+    it('formats adapter strengths for objects (including zero) and legacy string lists', () => {
+        expect(formatAdapters([{ name: 'voice-demo-bass', music: 0.45, sound: 0.35 }]))
+            .toBe('voice-demo-bass (music 0.45, sound 0.35)');
+        expect(formatAdapters([{ name: 'style-a', strength: 0.7 }, { name: 'voice-b', music: 0, sound: 0.5 }]))
+            .toBe('style-a (strength 0.7), voice-b (music 0, sound 0.5)');
+        expect(formatAdapters(['legacy-adapter'])).toBe('legacy-adapter');
+    });
+
+    it('resolves random seed from take nodes if intent seed is null/omitted', () => {
+        const docWithSeededTake: MusicLineage = {
+            ...DOC,
+            nodes: [
+                { id: 'intent:job_a', kind: 'intent', label: 'indie rock', generation: 0, job_id: 'job_a', params: { style: 'indie rock', seed: null } },
+                take('tak_1', 1, { job_id: 'job_a', variant: 1, params: { variant: 1, seed: 3555429983 } }),
+            ],
+            edges: [],
+        };
+        const rows = new Map(paramRows(docWithSeededTake.nodes[0], docWithSeededTake));
+        expect(rows.get('seed')).toBe('random (3555429983 on v1)');
+    });
+
+    it('resolves who asked for agent jobs (store names, core names, and fallback) and player jobs, plus request block', () => {
+        const docWithJobs: MusicLineage = {
+            ...DOC,
+            nodes: [
+                { id: 'intent:job_agent', kind: 'intent', label: 'rock', generation: 0, job_id: 'job_agent' },
+                { id: 'intent:job_player', kind: 'intent', label: 'jazz', generation: 0, job_id: 'job_player' },
+            ],
+            jobs: [
+                {
+                    id: 'job_agent', type: 'generate_from_text', action: null, state: 'accepted', created_at: '2026-11-26T10:00:00Z',
+                    requested_by: { kind: 'agent', agent_id: 'agent_studio_01', conversation_id: 'group-123456abcdef' },
+                    request: {
+                        title: 'Midnight Drive',
+                        asked: { duration_s: 180 },
+                        changes: ['duration_s: 180 -> 240'],
+                        text: 'Make a synthwave track',
+                    },
+                    take_ids: [],
+                },
+                {
+                    id: 'job_player', type: 'generate_from_text', action: null, state: 'accepted', created_at: '2026-11-26T11:00:00Z',
+                    requested_by: { kind: 'person' },
+                    take_ids: [],
+                },
+            ],
+        };
+        const names = {
+            agents: [{ agent_id: 'agent_studio_01', name: 'StudioBot' }],
+            groups: new Map([['group-123456abcdef', { name: 'Music Room' }]]),
+            peers: [],
+        };
+        expect(formatRequestedBy(docWithJobs.nodes[0], docWithJobs, names)).toBe('asked by StudioBot in Music Room');
+        expect(formatRequestedBy(docWithJobs.nodes[0], docWithJobs)).toBe('asked by agent_studio_01 in group-123456abcdef');
+        expect(formatRequestedBy(docWithJobs.nodes[1], docWithJobs, names)).toBe('asked by you in Player');
+
+        const req = new Map(requestRows(docWithJobs.nodes[0], docWithJobs));
+        expect(req.get('title')).toBe('Midnight Drive');
+        expect(req.get('asked')).toBe('duration s: 180');
+        expect(req.get('changes')).toBe('duration_s: 180 -> 240');
+        expect(req.get('request')).toBe('Make a synthwave track');
     });
 });
