@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import ts from 'typescript';
 import defaultCapText from '../../../src-tauri/capabilities/default.json?raw';
 import chatPanelSrc from '../panels/ChatPanel.svelte?raw';
 import voiceRecorderSrc from '../components/VoiceRecorder.svelte?raw';
@@ -163,6 +164,83 @@ describe('VoiceRecorder.svelte cancel during recording', () => {
     const cancelledPos = cleanupBlock.indexOf('recordingCancelled = true');
     const ifPos = cleanupBlock.indexOf('if (isRecording');
     expect(ifPos).toBeGreaterThan(cancelledPos);
+  });
+
+  it('startRecordingBrowser stops the acquired stream in catch if new MediaRecorder throws', async () => {
+    const voiceCleanup = await import('./voiceCleanup');
+    const scriptMatch = voiceRecorderSrc.match(/<script lang="ts">([\s\S]*?)<\/script>/);
+    expect(scriptMatch).not.toBeNull();
+
+    const cleanedScript = scriptMatch![1]
+      .replace(/import\s+[\s\S]*?from\s+['"][^'"]+['"];\s*/g, '')
+      .replace(/=\s*\$props\(\);/, '= { disabled: false, maxDuration: 300, onRecordingComplete: () => {} };')
+      .replace(/\$state(?:<[^>]+>)?\(([^)]*)\)/g, '$1');
+
+    const jsCode = ts.transpileModule(cleanedScript, {
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.None,
+      },
+    }).outputText;
+
+    const trackStop = vi.fn();
+    const fakeStream = { getTracks: () => [{ stop: trackStop }] };
+    const getUserMedia = vi.fn().mockResolvedValue(fakeStream);
+    const alertMock = vi.fn();
+    const errorMock = vi.fn();
+
+    class ThrowingMediaRecorder {
+      static isTypeSupported = vi.fn().mockReturnValue(true);
+      constructor() {
+        throw new Error('MediaRecorder initialization failed');
+      }
+    }
+
+    const factory = new Function(
+      'onMount',
+      'voiceCleanup',
+      'navigator',
+      'MediaRecorder',
+      'alert',
+      'console',
+      `
+      const {
+        cancelBrowserRecordingSession,
+        cancelTauriRecording,
+        createBrowserRecordingSession,
+        finalizeBrowserRecordingSession,
+        isTauriEnvironment,
+        removeVoiceTempFile,
+        stopStreamTracks,
+      } = voiceCleanup;
+      ${jsCode}
+      return {
+        startRecordingBrowser,
+        getState: () => ({ mediaStream, mediaRecorder, activeBrowserSession, isRecording }),
+      };
+      `,
+    );
+
+    const instance = factory(
+      () => {},
+      voiceCleanup,
+      { mediaDevices: { getUserMedia } },
+      ThrowingMediaRecorder,
+      alertMock,
+      { log: vi.fn(), error: errorMock, warn: vi.fn() },
+    );
+
+    await instance.startRecordingBrowser(0);
+
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true });
+    expect(trackStop).toHaveBeenCalledTimes(1);
+    expect(instance.getState()).toEqual({
+      mediaStream: null,
+      mediaRecorder: null,
+      activeBrowserSession: null,
+      isRecording: false,
+    });
+    expect(alertMock).toHaveBeenCalledWith('Failed to start recording: MediaRecorder initialization failed');
   });
 });
 

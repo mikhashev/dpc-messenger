@@ -141,8 +141,10 @@
   // Browser getUserMedia recording (original implementation)
   async function startRecordingBrowser(attemptId: number) {
     let session: BrowserRecordingSession<MediaRecorder, MediaStream> | null = null;
+    let acquiredStream: MediaStream | null = null;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      acquiredStream = stream;
       if (recordingCancelled || attemptId !== activeAttemptId) {
         stopStreamTracks(stream);
         return;
@@ -197,8 +199,11 @@
       if (session) {
         clearBrowserSessionRefs(session);
         stopStreamTracks(session.stream);
-      } else if (attemptId === activeAttemptId) {
-        cleanup();
+      } else {
+        stopStreamTracks(acquiredStream);
+        if (attemptId === activeAttemptId) {
+          cleanup();
+        }
       }
       console.error('[VoiceRecorder] Error starting recording (Browser):', error);
       if (!recordingCancelled && attemptId === activeAttemptId && error instanceof Error) {
