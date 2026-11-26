@@ -199,10 +199,11 @@ def _find_group_dir(group_id: str) -> Path:
     the group's identity and exists from the join; history.json only after a message.
     """
     base = DPC_HOME / "conversations"
-    for d in sorted(base.iterdir()):
-        if d.is_dir() and d.name.startswith(group_id + "-") and (
-                (d / "metadata.json").exists() or (d / "history.json").exists()):
-            return d
+    if base.is_dir():
+        for d in sorted(base.iterdir()):
+            if d.is_dir() and d.name.startswith(group_id + "-") and (
+                    (d / "metadata.json").exists() or (d / "history.json").exists()):
+                return d
     return base / group_id
 
 
@@ -825,7 +826,8 @@ def listen_sync(group_id: str, names: list, all_tags: bool = False,
         return 0
 
 
-def format_message(i: int, msg: dict, node_id: str = None) -> str:
+def format_message(i: int, msg: dict, node_id: str = None,
+                   group_dir: Path = None, allowed_dir: Path = None) -> str:
     """Format a message for display. Full content, no truncation. An agent post
     shows the --mention-depth a reply to it must carry, when above 0."""
     sender = msg.get("sender_name", msg.get("sender", "?"))
@@ -839,29 +841,88 @@ def format_message(i: int, msg: dict, node_id: str = None) -> str:
     # reader can cite the same message a human cites. [i] is only the window slot.
     num = msg.get("msg_index")
     num = f"#{num} " if isinstance(num, int) and not isinstance(num, bool) and num > 0 else ""
-    files = "".join(f"\n       {line}" for line in attachment_lines(msg))
+    files = "".join(
+        f"\n       {line}"
+        for line in attachment_lines(msg, group_dir=group_dir, allowed_dir=allowed_dir)
+    )
     return f"  [{i + 1}] {num}{ts} {sender}{hint}: {preview}{files}"
 
 
 # The attachment types a history line names, and the word each is named with.
 _ATTACHMENT_KINDS = {"file": "file", "voice": "voice message", "image": "image"}
 
+# Matches context.py `_PATH_UNSAFE`: control characters (C0, DEL, C1, among them
+# every line break `str.splitlines` knows) and brackets that could close `[kind: ...]`.
+_PATH_UNSAFE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\[\]]")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
 
 def _attachment_text(value) -> str:
-    """A name or a type as one line that cannot close its bracket."""
-    return " ".join(str(value).replace("[", "(").replace("]", ")").split())
+    """A name or a type as one line that cannot close its bracket or carry control chars."""
+    cleaned = _CONTROL_CHARS.sub(" ", str(value).replace("[", "(").replace("]", ")"))
+    return " ".join(cleaned.split())
 
 
-def attachment_lines(msg: dict) -> list:
+def _allowed_files_dirs(group_dir: Path = None, allowed_dir: Path = None) -> list:
+    """Directories whose regular files `attachment_lines` may print as kept on this node."""
+    if allowed_dir is not None:
+        return [Path(allowed_dir)]
+    if group_dir is not None:
+        return [Path(group_dir) / "files"]
+    base = DPC_HOME / "conversations"
+    if not base.is_dir():
+        return []
+    return [d / "files" for d in sorted(base.iterdir()) if d.is_dir()]
+
+
+def _kept_attachment_path(where, allowed_dirs: list):
+    """Sanitized local path when `where` is an existing regular file inside `allowed_dirs`, else None."""
+    if not isinstance(where, (str, os.PathLike)):
+        return None
+    try:
+        raw = os.fspath(where)
+    except TypeError:
+        return None
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        return None
+    # Reject UNC / device / mixed-slash network prefixes across Windows, Linux, and macOS.
+    if raw.startswith(("\\\\", "//", "\\/", "/\\")):
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        return None
+    try:
+        target = candidate.resolve(strict=True)
+        if not target.is_file():
+            return None
+    except (OSError, ValueError, RuntimeError):
+        return None
+    parents = {os.path.normcase(str(p)) for p in target.parents}
+    for folder in allowed_dirs:
+        try:
+            resolved_dir = Path(folder).resolve(strict=True)
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if not resolved_dir.is_dir():
+            continue
+        if os.path.normcase(str(resolved_dir)) in parents:
+            printable = str(target) if ".." in candidate.parts else raw
+            return _PATH_UNSAFE.sub("?", printable)
+    return None
+
+
+def attachment_lines(msg: dict, group_dir: Path = None, allowed_dir: Path = None) -> list:
     """One line per file, voice message or image attached to a history record.
 
     A recording sent as audio in a group of one node (Mike 2026-11-26), an mp3 or
     a PDF reached the bridge as the record's text alone ("Sent file: x.wav (0.5
     MB)" or the words typed with it), with nothing saying where the bytes are.
     The line names the file, its type, its size and length in brackets, then the
-    path it is kept at on this node (where this bridge reads history.json too),
-    so the external agent can open it with its own tools. A record from a peer
-    whose file never arrived says it is not kept here."""
+    path it is kept at on this node (only when the file actually exists inside
+    this group's `files/` directory), so the external agent can open it with its
+    own tools. A record from a peer whose file never arrived, or any path
+    outside `files/`, says it is not kept on this node."""
+    allowed_dirs = _allowed_files_dirs(group_dir=group_dir, allowed_dir=allowed_dir)
     out = []
     for att in msg.get("attachments") or []:
         if not isinstance(att, dict):
@@ -880,10 +941,9 @@ def attachment_lines(msg: dict) -> list:
         if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
             details.append(f"{seconds:g} s")
         described = f"{_attachment_text(att.get('filename') or kind)}, {', '.join(details)}"
-        where = att.get("file_path")
-        # The path as it is (it is the rest of the line), only kept on one line.
-        out.append(f"[{kind}: {described}] at {str(where).replace(chr(13), ' ').replace(chr(10), ' ')}"
-                   if where else f"[{kind}: {described}] not kept on this node")
+        kept = _kept_attachment_path(att.get("file_path"), allowed_dirs)
+        out.append(f"[{kind}: {described}] at {kept}"
+                   if kept else f"[{kind}: {described}] not kept on this node")
     return out
 
 
@@ -1186,8 +1246,9 @@ def main(argv=None):
         shown = mentions
     else:
         shown = list(enumerate(messages))
+    group_dir = _find_group_dir(args.group)
     for i, msg in shown:
-        print(format_message(i, msg, node_id))
+        print(format_message(i, msg, node_id, group_dir=group_dir))
         _remember_history_line(canonical, msg, names, node_id)
 
 
