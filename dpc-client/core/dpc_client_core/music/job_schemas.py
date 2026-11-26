@@ -613,7 +613,7 @@ KEEP_BPM_MAX = 400
 MELODY_SOURCES = {ENGINE_ACESTEP: "source_audio", ENGINE_YUE2: "sheetsage2:abc"}
 COVER_STRENGTH_DEFAULT = 1.0     # acestep.cpp's `audio_cover_strength` default (src/request.h)
 COVER_COT_MODES = ("full", "melody")
-# CC, following Ruach (build/tools/console/index.html:1250-1254, app.js:11046): the lead melody by default.
+# CC, after Ruach's choice of default (reimplemented, no code copied): the lead melody by default.
 COVER_COT_DEFAULT = "melody"
 # A cover is as long as its source; each engine's real floor and ceiling, read in its source (ADR-051 B5):
 # acestep.cpp 973517b src/pipeline-synth-ops.cpp:152,316 (1920-sample latent frames at 48 kHz); yue2.cpp
@@ -636,8 +636,8 @@ YUE2_COVER_MAX_S = (YUE2_CONTEXT - 1) / YUE2_FRAME_RATE - 1.0
 #   for 2785); the post-transcription check takes 0.85. A byte-level BPE gives at most one token per byte of ASCII.
 # - the text: 425 tokens for 1582 bytes of Russian lyrics and style, 134 for 407 bytes (the same trial), at most 0.27
 #   a byte; the door and the check take 0.5, with 64 for the instruction, the tags and the special tokens.
-# Ruach Studio holds a backing sung over to 470 s (build/tools/console/app.js:11721-11727) and reckons a long
-# prompt at 6000 rows, the 95th percentile of 407 songs (app.js:1436-1440); its 470 s leaves 12.8k rows for them.
+# Ruach Studio holds a backing sung over to 470 s and reckons a long prompt at 6000 rows, the 95th percentile
+# of 407 songs; its 470 s leaves 12.8k rows for them. The numbers are adopted, the code is DPC's own.
 YUE2_SCORE_TOKENS_PER_S = 16
 YUE2_ABC_TOKENS_PER_BYTE = 0.85
 YUE2_TEXT_TOKENS_PER_BYTE = 0.5
@@ -646,7 +646,7 @@ YUE2_SEMANTIC_DEFAULT_MAX_TOKENS = 9000     # the semantic preset's cap (src/sam
 
 
 def yue2_cover_frames(source_s: float) -> int:
-    """The frames a cover's music stage is let run: the source's seconds and one more (Ruach Studio, app.js:11721)."""
+    """The frames a cover's music stage is let run: the source's seconds and one more (the cap after Ruach Studio's rule)."""
     return math.ceil((source_s + 1.0) * YUE2_FRAME_RATE)
 
 

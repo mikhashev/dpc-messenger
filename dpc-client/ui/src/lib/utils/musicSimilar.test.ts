@@ -86,7 +86,9 @@ describe('the generate-similar dialog', () => {
         expect(offersAcestepCover({ ...f, coverLyrics: 'reuse' }, 'the track has none stored', 'missing_lyrics')).toBe(true);
         expect(offersAcestepCover(useAcestepCover(f), MISSING_LYRICS)).toBe(false);
         expect(validateSimilarForm(useAcestepCover(f)).ok).toBe(true);
-        expect(RUACH_ATTRIBUTION).toContain('Based on Ruach Studio by Viktor Zhuromskyy');
+        expect(RUACH_ATTRIBUTION).toContain('Cover chain after the approach of Ruach Studio by Viktor Zhuromskyy');
+        expect(RUACH_ATTRIBUTION).toContain('reimplemented in DPC, no code copied');
+        expect(RUACH_ATTRIBUTION).not.toContain('Based on');
     });
 
     it('starts the cover on the engine the report says runs: yue2, or acestep when yue2 cannot', () => {

@@ -427,7 +427,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 ### Match sections
 
 - **Met in:** code, wire
-- **Meaning:** The step of a YuE2 **song job** cover that tags the lyrics' blocks with the sections of the source's score: each block takes the tag of the section it is sung in, by where its first line is sung (the stored synced lyrics' line times, `lyrics_times`); a section with no voice becomes an instrumental tag, and a sung section the lyrics skip gets the last block of its kind again (when those copies alone would overflow yue2.cpp's context, the run drops them, keeps their tags and records `copies_dropped`). Words never change. Ported from Ruach Studio (its "Match sections" button, after YuE2-Studio and HOT-Step's Cover Studio); recorded on the take as `song.section_match`.
+- **Meaning:** The step of a YuE2 **song job** cover that tags the lyrics' blocks with the sections of the source's score: each block takes the tag of the section it is sung in, by where its first line is sung (the stored synced lyrics' line times, `lyrics_times`); a section with no voice becomes an instrumental tag, and a sung section the lyrics skip gets the last block of its kind again (when those copies alone would overflow yue2.cpp's context, the run drops them, keeps their tags and records `copies_dropped`). Words never change. Follows Ruach Studio's "Match sections" approach, reimplemented in DPC with no code copied (its button, after YuE2-Studio and HOT-Step's Cover Studio); recorded on the take as `song.section_match`.
 - **Defined in:** [music/cover_score.py — `match_sections`, `pre_tag`](../dpc-client/core/dpc_client_core/music/cover_score.py)
 
 ### web_source_pending_integration

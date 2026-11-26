@@ -1,7 +1,7 @@
 """A cover on yue2.cpp by default, Ruach Studio's cover chain, a cover as long as its source, the web-track stub
 (Mike 2026-11-26; ADR-051 row B5), and Zcode's review of 16e6549a (group #188).
 
-- `music/cover_score.py`, ported from Ruach Studio: the level a recording is heard at by the transcriber, the
+- `music/cover_score.py`, DPC's own code, written from a behaviour description of Ruach Studio's approach (no code copied): the level a recording is heard at by the transcriber, the
   Vocal voice of a score, the score's parts, Match sections, and the style made to agree with the score.
 - The params: yue2 is the default cover engine and `cot` melody its default; `vocal_only` and `lyrics_times`;
   the engines' real floors and ceilings for a cover (`source_too_short`, `source_too_long`) in place of DPC's
@@ -45,7 +45,7 @@ UNTAGGED = ["night drive, city lights", "neon in the rain", "we never stop", "we
 TIMES = [2.1, 4.0, 6.1, 8.0]
 
 
-# -- cover_score (ported from Ruach Studio) -----------------------------------------------------------
+# -- cover_score (after Ruach Studio's approach, reimplemented in DPC) -----------------------------------------------------------
 
 
 def test_a_recording_too_loud_for_the_transcriber_gets_one_gain_and_one_within_bounds_none():

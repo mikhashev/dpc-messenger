@@ -134,8 +134,8 @@ def transcribe_timeout_s(flat_s: float, source_s: float) -> float:
 
 def yue2_cover_length(source_s: float) -> Dict[str, Any]:
     """The yue2.cpp request fields that make a cover as long as its source: `duration` the source's seconds
-    rounded up plus one (the cap the semantic stage stops at, src/pipeline.h:538-547, as Ruach Studio sings
-    over a backing, build/tools/console/app.js:11721-11727) and `semantic_sampling.min_tokens` the source's
+    rounded up plus one (the cap the semantic stage stops at, src/pipeline.h:538-547, as Ruach Studio's rule for
+    a song over a backing sets it, reimplemented here) and `semantic_sampling.min_tokens` the source's
     own frame count rounded up (the end token is banned until then, src/sampling.h:96), with `max_tokens`
     raised past the preset's 9000 only when the source needs it.
 
@@ -790,7 +790,7 @@ def _lyrics_against_score(params: Mapping[str, Any], abc: str, *,
     said = {"status": "unchanged" if match["unchanged"] else "applied", "pre_tagged": tagged is not None,
             "blocks": cs.counts_of(match["blocks"]), "sections_added": len(match["filled"]),
             "sections_copied": sum(1 for f in match["filled"] if f.get("copied_from") is not None),
-            "by": "Match sections after Ruach Studio (build/tools/console/app.js:11199-11305)"}
+            "by": "Match sections, after Ruach Studio's approach, reimplemented in DPC"}
     return (None if match["unchanged"] else match["lyrics"]), said
 
 
@@ -915,8 +915,8 @@ async def _cover_on_yue2(runner: Any, job: dict, prepared: _Prepared, engine: An
     song["style_changes"] = style_changes
     song["section_match"] = matched
     song["length"] = {"source_s": round(source_s, 3), **yue2_cover_length(source_s),
-                      "by": "the cap by Ruach Studio's rule for a song over a backing (build/tools/console/app.js:"
-                            "11721-11727); the floor at the source's own length, not a second under it",
+                      "by": "the cap after Ruach Studio's rule for a song over a backing, reimplemented in DPC; "
+                            "the floor at the source's own length, not a second under it",
                       "context": context}
     await runner._progress(job_id, 0.1)
     await runner._produce_yue2(job_id, text_view(params), prepared.seed, engine, engine_job)

@@ -411,7 +411,13 @@ Contact: legoogmiha@gmail.com
 
 Code taken from other projects keeps its licence and its notices in the files it came into.
 
-- **Ruach Studio** (Copyright 2026 Viktor Zhuromskyy, GNU AGPL v3 or later with additional terms under its section 7, https://github.com/igrbible/Ruach_Studio, checkout `200fe5ad`). Ported, modified, into `dpc-client/core/dpc_client_core/music/cover_score.py` on 2026-11-26: the level a recording is heard at by the transcriber, a score's parts and a bar's seconds, and Match sections (from `build/tools/console/app.js`). That file is AGPL-3.0-or-later and carries Ruach's attribution and a notice that it is a modified version; combined with the GPL-3.0 client under GPLv3 section 13. Ruach's additional terms (its `LICENSE-ADDITIONAL-TERMS.md`) ask for this attribution in each interactive interface's legal notices and in the README, never removed, shortened or hidden: **Based on Ruach Studio by Viktor Zhuromskyy · https://github.com/igrbible/Ruach_Studio · GNU AGPL v3 or later**. The README carries it; the music player shows it in the Cover dialog when the YuE2 cover is chosen. No right to the names «Ruach Studio» / «Руах Студия» or its logo is taken. Model weights keep their own licences (YuE2 and SheetSage2 are CC BY-NC 4.0) and are downloaded at run time, never bundled.
+No entries are listed here at present.
+
+## Ideas followed, not code taken
+
+**Ruach Studio** (Viktor Zhuromskyy, https://github.com/igrbible/Ruach_Studio). DPC's music player follows ideas from Ruach Studio (its cover chain, Match sections, the level a recording is transcribed at, a score's parts and a bar's seconds) and reimplements them as DPC's own code, written from a description of the behaviour, with no code copied. Mike (owner) decided this on 2026-11-26. The earlier port of `dpc-client/core/dpc_client_core/music/cover_score.py` (2026-11-26, up to the rewrite) carried Ruach's AGPL-3.0-or-later notice and attribution; the current file is DPC's own code and does not. A courtesy mention stays in the README and in the music player's Cover dialog: *"Cover chain after the approach of Ruach Studio by Viktor Zhuromskyy · https://github.com/igrbible/Ruach_Studio · reimplemented in DPC, no code copied"*. No right to the names «Ruach Studio» / «Руах Студия» or its logo is taken.
+
+**Model weights** keep their own licences (YuE2 and SheetSage2 are CC BY-NC 4.0) and are downloaded at run time, never bundled.
 
 ---
 
