@@ -24,8 +24,10 @@ existing transcription the way a voice message does, with the same provider choi
 - a `local_whisper` provider is called as `provider.transcribe(path, release_if_loaded_here=True)`, the call
   `service.transcribe_audio` and the agent's `transcribe_audio_file` make: the provider
   loads its own model under its own lock, and its result carries Whisper's segment
-  timestamps (`return_timestamps=True`, a9e2c8c3). The file must be within
-  `[local_transcription] max_file_size_mb` (default 25), as for a voice message. A model
+  timestamps (`return_timestamps=True`, a9e2c8c3). When `[local_transcription] max_duration_seconds`
+  is set (> 0), tracks are checked by probed duration instead of file size (0 = unlimited);
+  when empty/unset, the legacy `[local_transcription] max_file_size_mb` (default 25) cap
+  applies. A model
   that is not downloaded yet raises the same download-consent dialog
   (`model_download_service.maybe_emit_required`) and the click answers
   `model_not_downloaded`. A local failure is reported, not retried elsewhere: the
@@ -121,7 +123,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
+import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -155,6 +159,177 @@ from .yue2 import Yue2Server, read_config as read_yue2_config
 
 LOCAL_WHISPER_TYPE = "local_whisper"
 DEFAULT_LOCAL_TRANSCRIPTION_MAX_MB = 25
+
+
+def _positive_finite_seconds(value: Any) -> Optional[float]:
+    """Return `value` as a finite float > 0 (never bool), else None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _non_negative_finite_number(value: Any) -> Optional[float]:
+    """Return `value` as a finite float >= 0 (never bool), else None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return (0.0 if number == 0 else number) if math.isfinite(number) and number >= 0 else None
+
+
+def read_local_transcription_max_duration_seconds(settings: Any) -> Optional[float]:
+    """Read `[local_transcription] max_duration_seconds` from `settings`, returning None when
+    unset, missing, mocked with a non-numeric return value, or invalid."""
+    getter = getattr(settings, "get_local_transcription_max_duration_seconds", None)
+    if not callable(getter):
+        return None
+    try:
+        raw = getter()
+    except Exception:
+        logger.warning("transcription: reading max_duration_seconds failed; falling back to max_file_size_mb")
+        return None
+    if raw is None or not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        return None
+    return _non_negative_finite_number(raw)
+
+
+def read_local_transcription_max_file_size_mb(
+    settings: Any, default: int = DEFAULT_LOCAL_TRANSCRIPTION_MAX_MB
+) -> float:
+    """Read the deprecated `[local_transcription] max_file_size_mb` cap from `settings`."""
+    getter = getattr(settings, "get_local_transcription_max_file_size_mb", None)
+    if callable(getter):
+        try:
+            raw = getter()
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                parsed = _non_negative_finite_number(raw)
+                if parsed is not None:
+                    return parsed
+        except Exception:
+            logger.warning("transcription: reading max_file_size_mb failed; using %s", default)
+    return float(default)
+
+
+def probe_audio_duration_seconds(path: Path) -> Optional[float]:
+    """Probe audio duration in seconds without touching `whisper_provider.audio_seconds` more than
+    once, falling back to pure-Python FLAC STREAMINFO / WAV headers when ffprobe and soundfile
+    cannot read the file."""
+    from ..providers import whisper_provider as wp
+    from .identity import read_flac_streaminfo
+
+    duration = _positive_finite_seconds(wp.audio_seconds(str(path)))
+    if duration is not None:
+        return duration
+    try:
+        flac = read_flac_streaminfo(path)
+        if flac is not None:
+            duration = _positive_finite_seconds(flac.duration_s)
+            if duration is not None:
+                return duration
+    except Exception:
+        pass
+    if path.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(path), "rb") as wf:
+                rate = wf.getframerate()
+                frames = wf.getnframes()
+                if rate > 0 and frames > 0:
+                    return _positive_finite_seconds(frames / rate)
+        except Exception:
+            pass
+    return None
+
+
+def evaluate_local_transcription_limit(
+    settings: Any, path: Path, size_mb: float, *, declared_s: Any = None
+) -> Dict[str, Any]:
+    """Decide whether `path` fits the local Whisper limit configured on `settings`.
+
+    When `[local_transcription] max_duration_seconds` is set:
+    - `0`: unlimited (no file-size or duration gate).
+    - `> 0`: compares probed duration (falling back to `declared_s` if unprobeable) against the
+      duration cap; falls back to legacy `max_file_size_mb` only if duration cannot be determined.
+    When unset/empty/invalid: applies the legacy `max_file_size_mb` (default 25 MB) check."""
+    max_duration_s = read_local_transcription_max_duration_seconds(settings)
+    probed_once = False
+    probed_s: Optional[float] = None
+
+    if max_duration_s is not None:
+        if max_duration_s == 0:
+            return {
+                "allowed": True,
+                "mode": "unlimited",
+                "probed_once": False,
+                "probed_s": None,
+                "duration_s": None,
+                "limit": 0.0,
+                "code": None,
+                "message": None,
+            }
+        probed_once = True
+        probed_s = probe_audio_duration_seconds(path)
+        effective_s = probed_s if probed_s is not None else _positive_finite_seconds(declared_s)
+        if effective_s is not None:
+            if effective_s > max_duration_s:
+                return {
+                    "allowed": False,
+                    "mode": "duration",
+                    "probed_once": True,
+                    "probed_s": probed_s,
+                    "duration_s": effective_s,
+                    "limit": max_duration_s,
+                    "code": "too_long",
+                    "message": (
+                        f"the track is {round(effective_s, 1):g} s, over the local transcription "
+                        f"limit of {max_duration_s:g} s ([local_transcription] max_duration_seconds)"
+                    ),
+                }
+            return {
+                "allowed": True,
+                "mode": "duration",
+                "probed_once": True,
+                "probed_s": probed_s,
+                "duration_s": effective_s,
+                "limit": max_duration_s,
+                "code": None,
+                "message": None,
+            }
+        logger.warning(
+            "Could not probe audio duration for %s; falling back to [local_transcription] max_file_size_mb",
+            path,
+        )
+
+    limit_mb = read_local_transcription_max_file_size_mb(settings)
+    if size_mb > limit_mb:
+        return {
+            "allowed": False,
+            "mode": "file_size",
+            "probed_once": probed_once,
+            "probed_s": probed_s,
+            "duration_s": None,
+            "limit": limit_mb,
+            "code": "too_large",
+            "message": (
+                f"the file is {size_mb:.1f} MB, over the local transcription limit of {limit_mb:g} MB "
+                f"([local_transcription] max_file_size_mb)"
+            ),
+        }
+    return {
+        "allowed": True,
+        "mode": "file_size",
+        "probed_once": probed_once,
+        "probed_s": probed_s,
+        "duration_s": None,
+        "limit": limit_mb,
+        "code": None,
+        "message": None,
+    }
 
 logger = logging.getLogger(__name__)
 
@@ -372,25 +547,23 @@ class MusicCommandsMixin:
 
     async def _music_transcribe_with_whisper(self, provider: Any, path: Path) -> Dict[str, Any]:
         alias = getattr(provider, "alias", None) or LOCAL_WHISPER_TYPE
-        limit_mb = self._music_settings_value("get_local_transcription_max_file_size_mb",
-                                              DEFAULT_LOCAL_TRANSCRIPTION_MAX_MB)
-        try:
-            limit = float(limit_mb)
-        except (TypeError, ValueError):
-            limit = float(DEFAULT_LOCAL_TRANSCRIPTION_MAX_MB)
         try:
             size_mb = path.stat().st_size / (1024 * 1024)
         except OSError as exc:
             raise MusicLibraryError("no_file", f"the track's file cannot be read: {exc}") from exc
-        if size_mb > limit:
-            raise MusicLibraryError(
-                "too_large",
-                f"the file is {size_mb:.1f} MB, over the local transcription limit of {limit:g} MB "
-                f"([local_transcription] max_file_size_mb)")
+        decision = await asyncio.to_thread(evaluate_local_transcription_limit, self.settings, path, size_mb)
+        if not decision["allowed"]:
+            raise MusicLibraryError(decision["code"], decision["message"])
         from ..providers.whisper_provider import card_ask, card_wait_words, transcribe_with_route
         from .lyrics import show_card_wait
         # ADR-052 L4: a person's click with no bound of its own; it waits until cancelled.
-        ask = await asyncio.to_thread(card_ask, provider, "music Transcribe", str(path))
+        # Reuse the probe from `evaluate_local_transcription_limit` so `audio_seconds` runs at most once.
+        ask_audio_s = (
+            (decision["probed_s"] if decision["probed_s"] is not None else 0.0)
+            if decision["probed_once"]
+            else None
+        )
+        ask = await asyncio.to_thread(card_ask, provider, "music Transcribe", str(path), audio_s=ask_audio_s)
         ask["on_wait"] = lambda estimate: show_card_wait({
             "text": card_wait_words(estimate), "behind": list(estimate.get("behind") or []),
             "wait_s": estimate.get("wait_s"), "known": bool(estimate.get("known"))})

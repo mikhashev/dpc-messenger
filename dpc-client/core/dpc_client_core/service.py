@@ -52,7 +52,10 @@ from .providers.base import (
 from .local_api import ENV_VAR_NAME_RE as _ENV_VAR_NAME, LocalApiServer, sends_own_response, slow_command
 from .file_server import FileServer
 from .card_lease_commands import CardLeaseCommandsMixin
-from .music.commands import MusicCommandsMixin
+from .music.commands import (
+    MusicCommandsMixin,
+    evaluate_local_transcription_limit,
+)
 from .music.qc_commands import MusicQcCommandsMixin
 from .gateway import (
     GATEWAY_HOST,
@@ -4837,6 +4840,15 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 
+    def _check_voice_local_transcription_limit(
+        self, audio_path: str, size_mb: float, duration_seconds: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Evaluate whether a voice recording should stay on local Whisper or fall back to cloud."""
+        from pathlib import Path
+        return evaluate_local_transcription_limit(
+            self.settings, Path(audio_path), size_mb, declared_s=duration_seconds
+        )
+
     @slow_command
     async def transcribe_audio(
         self,
@@ -4947,8 +4959,6 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             if not resolved.exists():
                 raise ValueError(f"Audio file not found: {file_path}")
             size_mb = resolved.stat().st_size / (1024 * 1024)
-            if size_mb > max_size_mb:
-                raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
             temp_path = str(resolved)
         else:
             # Decode base64 payload
@@ -4960,8 +4970,6 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 raise ValueError(f"Failed to decode base64 audio data: {e}")
 
             size_mb = len(audio_data) / (1024 * 1024)
-            if size_mb > max_size_mb:
-                raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
 
             with tempfile.NamedTemporaryFile(
                 delete=False,
@@ -4976,6 +4984,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             transcription_method = None
             provider_config = None
             provider_obj = None
+            limit_decision = None
 
             if provider_alias and provider_alias in self.llm_manager.providers:
                 # Use selected provider
@@ -4999,19 +5008,34 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                     # Check for LocalWhisperProvider in providers
                     for provider in self.llm_manager.providers.values():
                         if provider.config.get("type") == "local_whisper":
-                            provider_obj = provider
-                            provider_config = provider.config
-                            transcription_method = "local_whisper"
-
-                            # Check file size limit for local transcription
-                            local_max_mb = self.settings.get_local_transcription_max_file_size_mb()
-                            if size_mb > local_max_mb:
-                                logger.warning(f"Audio file ({size_mb:.2f} MB) exceeds local transcription limit ({local_max_mb} MB), skipping to cloud")
+                            if limit_decision is None:
+                                limit_decision = await asyncio.to_thread(
+                                    self._check_voice_local_transcription_limit,
+                                    temp_path,
+                                    size_mb,
+                                    duration_seconds,
+                                )
+                            if not limit_decision["allowed"]:
+                                if limit_decision["mode"] == "duration":
+                                    logger.warning(
+                                        "Audio duration (%.1fs) exceeds local transcription limit (%gs), skipping to cloud",
+                                        limit_decision["duration_s"],
+                                        limit_decision["limit"],
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"Audio file ({size_mb:.2f} MB) exceeds local transcription limit ({limit_decision['limit']:g} MB), skipping to cloud"
+                                    )
                                 transcription_method = None
+                                provider_obj = None
+                                provider_config = None
                             else:
+                                provider_obj = provider
+                                provider_config = provider.config
+                                transcription_method = "local_whisper"
                                 break
 
-                # Fallback to OpenAI if local not available or file too large
+                # Fallback to OpenAI if local not available or exceeds local threshold
                 if not transcription_method:
                     for provider in self.llm_manager.providers.values():
                         if provider.config.get("type") == "openai" or provider.config.get("type") == "openai_compatible":
@@ -5026,6 +5050,9 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                     "Recommended: Add a local_whisper provider for privacy, with OpenAI as fallback."
                 )
 
+            if transcription_method == "openai" and size_mb > max_size_mb:
+                raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+
             logger.info(f"Transcribing audio using {transcription_method}: {temp_path}, mime_type={mime_type}")
 
             # 5. Perform transcription
@@ -5035,9 +5062,13 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 # ADR-052 L4: the owner's dictation (and both Telegram paths, which come here) waits
                 # for the card at most the dictation bound.
                 from .providers.whisper_provider import card_ask
+                ask_audio_s = None
+                if limit_decision and limit_decision["probed_once"]:
+                    ask_audio_s = limit_decision["probed_s"] if limit_decision["probed_s"] is not None else 0.0
                 ask = await asyncio.to_thread(
                     card_ask, provider_obj, "dictation", temp_path,
                     bound_s=self.settings.get_local_transcription_queue_wait_s(),
+                    audio_s=ask_audio_s,
                     declared_s=duration_seconds)
                 ask["on_wait"] = lambda estimate: self._tell_the_card_wait("dictation", estimate)
                 # The received-voice check is the card's (queueing condition 3): it is handed only to
@@ -5107,6 +5138,8 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                         if fallback_provider:
                             _fallback_providers_asked.append(getattr(fallback_provider, "alias", None))
                             try:
+                                if size_mb > max_size_mb:
+                                    raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
                                 # Use OpenAI API
                                 result = await self._transcribe_with_openai(temp_path, fallback_provider.config)
                                 result["fallback_reason"] = str(local_error)

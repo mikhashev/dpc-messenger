@@ -84,6 +84,8 @@ _SEEDED_KEYS: Dict[tuple, tuple] = {
     ('local_transcription', 'cpu_contention_factor'): (
         '1.0', "The CPU's estimate is multiplied by this while the CPU computes something else "
                "(a busy Strata or llama-server, another CPU transcription)"),
+    ('local_transcription', 'max_duration_seconds'): (
+        '', 'Max audio duration in seconds for local Whisper; 0 = unlimited, empty = legacy max_file_size_mb'),
 }
 
 
@@ -457,7 +459,8 @@ class Settings:
             'language': 'auto',  # Language: 'auto' (detect) or ISO 639-1 code (e.g., 'en', 'es')
             'task': 'transcribe',  # Task: 'transcribe' or 'translate' (to English)
             'fallback_to_openai': 'true',  # Fallback to OpenAI API if local fails
-            'max_file_size_mb': '25',  # Max audio file size for local transcription (VRAM limit)
+            'max_file_size_mb': '25',  # Deprecated fallback when max_duration_seconds is empty: max audio file size in MB for local transcription
+            'max_duration_seconds': _SEEDED_KEYS[('local_transcription', 'max_duration_seconds')][0],  # Max audio duration in seconds for local Whisper; 0 = unlimited, empty = legacy max_file_size_mb
             'lazy_loading': 'true',  # Load model on first use (faster startup)
             'idle_unload_s': _SEEDED_KEYS[('local_transcription', 'idle_unload_s')][0],  # Unload the model (frees VRAM) after this many idle seconds; 0 = never
             'queue_wait_s': _SEEDED_KEYS[('local_transcription', 'queue_wait_s')][0],  # How long a person's transcription may wait in line for the GPU; 0 = do not wait
@@ -1371,8 +1374,42 @@ class Settings:
         return value.lower() in ('true', '1', 'yes')
 
     def get_local_transcription_max_file_size_mb(self) -> int:
-        """Get max file size for local transcription in MB."""
-        return int(self.get('local_transcription', 'max_file_size_mb', '25'))
+        """Get deprecated max file size fallback for local transcription in MB."""
+        raw = self.get('local_transcription', 'max_file_size_mb', '25')
+        try:
+            value = int(str(raw).strip())
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+        logger.warning("[local_transcription] max_file_size_mb %r is invalid; using 25", raw)
+        return 25
+
+    def get_local_transcription_max_duration_seconds(self) -> Optional[float]:
+        """`[local_transcription] max_duration_seconds`: max audio duration in seconds for local
+        Whisper (`0` = unlimited; empty/unset = fall back to legacy `max_file_size_mb`). Invalid or
+        negative values log a warning and return None (legacy fallback)."""
+        default = _SEEDED_KEYS[('local_transcription', 'max_duration_seconds')][0]
+        try:
+            raw = self.get('local_transcription', 'max_duration_seconds', default)
+        except configparser.Error as e:
+            logger.warning("[local_transcription] max_duration_seconds is unreadable (%s); "
+                           "falling back to legacy max_file_size_mb", e)
+            return None
+        text = str(raw).strip() if raw is not None else ""
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            logger.warning("[local_transcription] max_duration_seconds %r is invalid; "
+                           "falling back to legacy max_file_size_mb", raw)
+            return None
+        if not math.isfinite(value) or value < 0:
+            logger.warning("[local_transcription] max_duration_seconds %r must be >= 0; "
+                           "falling back to legacy max_file_size_mb", raw)
+            return None
+        return 0.0 if value == 0 else value
 
     def get_local_transcription_lazy_loading(self) -> bool:
         """Check if lazy model loading is enabled (load on first use)."""
