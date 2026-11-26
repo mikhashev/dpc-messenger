@@ -11,11 +11,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import confText from '../../../src-tauri/tauri.conf.json?raw';
 
-const confPath = fileURLToPath(new URL('../../../src-tauri/tauri.conf.json', import.meta.url));
-const conf = JSON.parse(readFileSync(confPath, 'utf8'));
+const conf = JSON.parse(confText);
 const csp: string = conf.app.security.csp;
 
 function directive(name: string): string[] {
