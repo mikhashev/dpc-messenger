@@ -28,14 +28,16 @@ import json
 import pytest
 
 from dpc_client_core.dpc_agent.agent import ASKER_HUMAN, Asker
+from dpc_client_core.dpc_agent.loop import _execute_with_timeout
 from dpc_client_core.dpc_agent.owner_approval import Exempt, ToolAsks
 from dpc_client_core.dpc_agent.tools import core as core_tools
 from dpc_client_core.dpc_agent.tools import music as music_tools
 from dpc_client_core.dpc_agent.tools.registry import ToolContext
 from dpc_client_core.music import job_schemas as js
-from tests._acestep_helpers import Rig, from_text
+from tests._acestep_helpers import Rig, free_env, from_text
+from tests._yue2_helpers import DualRig, install_both
 from tests.test_the_owners_agent_makes_music_through_the_music_tools_with_approval_limits_and_the_self_wait_rule import (  # noqa: E501
-    AGENT, CHAT, MusicService, Person, QueueAgent, _clean, call, home, registry_for,
+    AGENT, BOUND, CHAT, MusicService, Person, QueueAgent, _clean, call, home, registry_for,
 )
 from tests.test_the_owners_agent_proposes_a_region_edit_and_the_card_names_the_region import base_track
 
@@ -168,10 +170,12 @@ async def test_a_key_used_in_another_chat_is_refused_without_a_word_of_that_job(
         ctx_a, job = await one_job_in_the_owners_chat(home, rig, person, key="song-1")
         for asker in (None, FRIEND):
             ctx_b = chat_ctx(home, ctx_a.dpc_service, GROUP, asker=asker)
+            expected = (music_tools.KEY_NOT_YOURS_REFUSAL if asker is None
+                        else music_tools.PRE_CARD_REFUSAL_FOR_OTHERS)
             for params in (from_text(), from_text(style="other")):
                 out = await call(registry_for(ctx_b), ctx_b, "music_propose_job", turn="turn-g",
                                  params=params, idempotency_key="song-1")
-                assert out == music_tools.KEY_NOT_YOURS_REFUSAL, out
+                assert out == expected, out
                 assert job["id"] not in out
         assert len(person.asked) == 1 and len(rig.store.list_jobs()) == 1
 
@@ -179,6 +183,228 @@ async def test_a_key_used_in_another_chat_is_refused_without_a_word_of_that_job(
         out = await call(registry_for(ctx_a), ctx_a, "music_propose_job", turn="turn-2",
                          params=from_text(), idempotency_key="song-1")
         assert out.startswith("This idempotency_key already names a job") and job["id"] in out, out
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_turn_gets_the_same_pre_card_refusal_for_a_taken_key_and_an_invalid_request(home):
+    async with Rig(home, start_runner=False) as rig:
+        person = Person(True)
+        ctx_a, _job = await one_job_in_the_owners_chat(home, rig, person, key="song-1")
+        foreign = chat_ctx(home, ctx_a.dpc_service, GROUP, asker=FRIEND)
+        reg = registry_for(foreign)
+        bad_edit = {"track_id": "trk_" + "f" * 16, "action": "remove_region",
+                    "region": {"t_start": 0.0, "t_end": 1.0}, "text": "probe"}
+        probes = [
+            ("edit", bad_edit, "song-1"),
+            ("edit", bad_edit, "unused-key"),
+            (js.GENERATE_FROM_TEXT, from_text(variants=99), "song-1"),
+            (js.GENERATE_FROM_TEXT, from_text(variants=99), "unused-key"),
+        ]
+        for i, (job_type, params, key) in enumerate(probes):
+            out = await call(reg, foreign, "music_propose_job", turn=f"turn-p{i}",
+                             type=job_type, params=params, idempotency_key=key)
+            assert out == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS, out
+        assert len(person.asked) == 1 and len(rig.store.list_jobs()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_turn_sees_no_queue_count_when_the_agents_queue_is_full(home, monkeypatch):
+    async with Rig(home, start_runner=False) as rig:
+        person = Person(True)
+        service = MusicService(home, rig, person)
+        owner = chat_ctx(home, service, CHAT)
+        reg_owner = registry_for(owner)
+        for i in (1, 2):
+            out = await call(reg_owner, owner, "music_propose_job", turn=f"turn-o{i}",
+                             params=from_text(style=f"song {i}"))
+            assert out.startswith("Proposed (approved by the person)."), out
+        assert len(person.asked) == 2
+
+        foreign = chat_ctx(home, service, GROUP, asker=FRIEND)
+        reg_foreign = registry_for(foreign)
+        for i, (job_type, params) in enumerate((
+            (js.GENERATE_FROM_TEXT, from_text(style="foreign")),
+            ("edit", {"track_id": "trk_" + "f" * 16, "action": "remove_region",
+                      "region": {"t_start": 0.0, "t_end": 1.0}, "text": "x"}),
+        )):
+            out = await call(reg_foreign, foreign, "music_propose_job", turn=f"turn-f{i}",
+                             type=job_type, params=params)
+            assert out == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS, out
+            assert "queued or running" not in out and "requester_queue_full" not in out and "2 of" not in out
+        assert len(person.asked) == 2
+
+        # The owner still gets the queue count.
+        out = await call(reg_owner, owner, "music_propose_job", turn="turn-o3", params=from_text(style="three"))
+        assert out.startswith("⚠️ music_propose_job refused: requester_queue_full: 2 of this agent's music"), out
+
+    # Fallback if core returns requester_queue_full (e.g. service without _music_agent_queue_max).
+    _fake(monkeypatch, {"status": "error", "code": "requester_queue_full",
+                        "message": "2 music job(s) of this agent are queued or running; at most 2 at once"})
+    foreign = chat_ctx(home, None, GROUP, asker=FRIEND)
+    out = music_tools.music_propose_job.__wrapped__(foreign, params=from_text())
+    assert out == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_turn_cannot_probe_stored_lyrics_when_lyrics_mode_is_omitted(home):
+    async with Rig(home, start_runner=False) as rig:
+        entry = await base_track(rig, home, seconds=12.0)
+        person = Person(True)
+        service = MusicService(home, rig, person)
+        await (await service._music_lyrics()).save_manual(entry["id"], "[00:01.00]secret verse\n[00:05.00]secret chorus")
+        owner = chat_ctx(home, service, CHAT)
+        out = await call(registry_for(owner), owner, "music_propose_job", turn="turn-o1",
+                         params=from_text(), idempotency_key="taken-key")
+        assert out.startswith("Proposed (approved by the person)."), out
+        asked_before = len(person.asked)
+
+        foreign = chat_ctx(home, service, GROUP, asker=FRIEND)
+        reg = registry_for(foreign)
+        for i, (job_type, params, key) in enumerate((
+            (js.COVER, {"track_id": entry["id"], "caption": "rock", "lyrics": "wrong guess"}, None),
+            (js.COVER, {"track_id": entry["id"], "caption": "rock", "lyrics": "secret verse\nsecret chorus"}, None),
+            (js.GENERATE_FROM_LYRICS, {"track_id": entry["id"], "caption": "rock", "lyrics": "wrong guess"}, None),
+            (js.GENERATE_FROM_LYRICS, {"track_id": entry["id"], "caption": "rock",
+                                       "lyrics": "secret verse\nsecret chorus"}, None),
+            (js.COVER, {"track_id": entry["id"], "caption": "rock", "lyrics_mode": None,
+                        "lyrics": "secret verse\nsecret chorus"}, None),
+            (js.COVER, {"track_id": entry["id"], "caption": "rock", "lyrics_mode": "",
+                        "lyrics": "secret verse\nsecret chorus"}, None),
+            (js.COVER, {"track_id": entry["id"], "caption": "rock", "lyrics": "wrong guess"}, "taken-key"),
+            (js.COVER, {"track_id": entry["id"], "caption": "rock", "lyrics": "wrong guess"}, "free-key"),
+        )):
+            out = await call(reg, foreign, "music_propose_job", turn=f"turn-l{i}",
+                             type=job_type, params=params, idempotency_key=key)
+            assert out.startswith("⚠️ music_propose_job: with lyrics_mode reuse") and "leave lyrics out" in out, out
+            assert "reuse_lyrics_differ" not in out
+        assert len(person.asked) == asked_before
+        assert len(rig.store.list_jobs()) == 1
+
+        # Explicit non-reuse modes are not caught by the reuse+lyrics guard.
+        new_out = await call(reg, foreign, "music_propose_job", turn="turn-new", type=js.GENERATE_SIMILAR,
+                             params={"track_id": entry["id"], "caption": "synthwave", "engine": "acestep",
+                                     "lyrics_mode": "new", "lyrics": "fresh line"})
+        assert new_out.startswith("Proposed (approved by the person)."), new_out
+        assert len(person.asked) == asked_before + 1
+
+        rewrite_out = await call(reg, foreign, "music_propose_job", turn="turn-rewrite", type=js.GENERATE_SIMILAR,
+                                 params={"track_id": entry["id"], "caption": "synthwave", "engine": "acestep",
+                                         "lyrics_mode": "rewrite", "lyrics": "fresh line"})
+        assert rewrite_out == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS, rewrite_out
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_turn_sees_no_paths_or_adapter_presence_from_generate_from_text(tmp_path, monkeypatch):
+    home_both = tmp_path / "dual"
+    install_both(home_both)
+    free_env(monkeypatch)
+    monkeypatch.setattr(music_tools, "POLL_INTERVAL_S", 0.05)
+
+    async with DualRig(home_both, start_runner=False) as rig:
+        person = Person(True)
+        service = MusicService(home_both, rig, person)
+        foreign = chat_ctx(home_both, service, GROUP, asker=FRIEND)
+        reg = registry_for(foreign)
+        bad_requests = [
+            {"engine": "yue2", "style": "rock", "lyrics": "la", "adapters": [{"name": "no-such-lora"}]},
+            {"engine": "yue2", "style": "rock", "lyrics": "la", "backbone": "cot"},
+            from_text(variants=99),
+        ]
+        for i, params in enumerate(bad_requests):
+            out = await call(reg, foreign, "music_propose_job", turn=f"turn-g{i}",
+                             type=js.GENERATE_FROM_TEXT, params=params)
+            assert out == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS, out
+            assert str(home_both) not in out
+            assert "loras" not in out and "does not exist" not in out and "no-such-lora" not in out
+        assert person.asked == [] and rig.store.list_jobs() == []
+
+        # The owner still gets the full validation error.
+        owner = chat_ctx(home_both, service, CHAT)
+        out = await call(registry_for(owner), owner, "music_propose_job", turn="turn-o1",
+                         type=js.GENERATE_FROM_TEXT, params=bad_requests[0])
+        assert "invalid_params" in out and "no-such-lora" in out, out
+
+    # Unsupported engine/model errors on generate_from_text are also masked for foreign turns.
+    _fake(monkeypatch, {"status": "error", "code": "unsupported", "message": "yue2.cpp binary is missing"})
+    foreign_mock = chat_ctx(home_both, None, GROUP, asker=FRIEND)
+    assert music_tools.music_propose_job.__wrapped__(foreign_mock, params=from_text()) == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
+
+
+@pytest.mark.asyncio
+async def test_a_context_without_a_conversation_id_matches_only_its_own_turn_key_and_fails_closed_across_turns(home):
+    async def call_chatless(reg, ctx, turn, **args):
+        tc = {"id": "c1", "type": "function",
+              "function": {"name": "music_propose_job", "arguments": json.dumps(args)}}
+        out = await asyncio.wait_for(_execute_with_timeout(
+            reg, tc, ctx.agent_root / "logs", reg.get_timeout("music_propose_job"), ctx=ctx,
+            agent_id=ctx.agent_root.name, session_id="", turn_id=turn), BOUND)
+        return out["result"]
+
+    async with Rig(home, start_runner=False) as rig:
+        person = Person(True)
+        service = MusicService(home, rig, person)
+        ctx_chat = chat_ctx(home, service, CHAT)
+        out_chat = await call(registry_for(ctx_chat), ctx_chat, "music_propose_job", turn="turn-c",
+                              params=from_text(), idempotency_key="chat-key")
+        assert out_chat.startswith("Proposed (approved by the person)."), out_chat
+
+        chatless = chat_ctx(home, service, None)
+        reg = registry_for(chatless)
+        out1 = await call_chatless(reg, chatless, "turn-1", params=from_text(), idempotency_key="chatless-1")
+        assert out1.startswith("Proposed (approved by the person)."), out1
+        chatless_job = [j for j in rig.store.list_jobs() if j.get("idempotency_key") == "chatless-1"][0]
+        assert "conversation_id" not in chatless_job["requested_by"]
+
+        # Same chatless turn repeating its own idempotency_key gets its own job back.
+        out2 = await call_chatless(reg, chatless, "turn-1", params=from_text(), idempotency_key="chatless-1")
+        assert out2.startswith("This idempotency_key already names a job") and chatless_job["id"] in out2, out2
+        assert len(person.asked) == 2
+
+        # Different turn without conversation_id fails closed on both chatless and chatted keys.
+        out3 = await call_chatless(reg, chatless, "turn-2", params=from_text(), idempotency_key="chatless-1")
+        assert out3 == music_tools.KEY_NOT_YOURS_REFUSAL and chatless_job["id"] not in out3, out3
+
+        out4 = await call_chatless(reg, chatless, "turn-2", params=from_text(), idempotency_key="chat-key")
+        assert out4 == music_tools.KEY_NOT_YOURS_REFUSAL, out4
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_job_without_conversation_id_fails_closed_on_key_and_repeat_from_a_chat(home, monkeypatch):
+    async with Rig(home, start_runner=False) as rig:
+        person = Person(True)
+        service = MusicService(home, rig, person)
+        legacy = rig.store.create_job(
+            "generate_from_text", from_text(style="legacy secret"), idempotency_key="legacy-1",
+            requested_by={"kind": js.REQUESTER_AGENT, "agent_id": AGENT, "turn_id": "turn-0"})
+        assert "conversation_id" not in legacy["requested_by"]
+
+        owner = chat_ctx(home, service, CHAT)
+        out_owner = await call(registry_for(owner), owner, "music_propose_job", turn="turn-0",
+                               params=from_text(style="legacy secret"), idempotency_key="legacy-1")
+        assert out_owner == music_tools.KEY_NOT_YOURS_REFUSAL and legacy["id"] not in out_owner, out_owner
+
+        foreign = chat_ctx(home, service, GROUP, asker=FRIEND)
+        out_foreign = await call(registry_for(foreign), foreign, "music_propose_job", turn="turn-0",
+                                 params=from_text(style="legacy secret"), idempotency_key="legacy-1")
+        assert out_foreign == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS and legacy["id"] not in out_foreign, out_foreign
+
+        # Dropping the key creates a new conversation-scoped job in this chat.
+        fresh = await call(registry_for(owner), owner, "music_propose_job", turn="turn-1",
+                           params=from_text(style="fresh"))
+        assert fresh.startswith("Proposed (approved by the person)."), fresh
+        assert len(rig.store.list_jobs()) == 2
+
+    # Core returning a legacy repeat (no conversation_id) also fails closed even if turn_id matches.
+    legacy_job = {"id": "job_legacy0123456789", "state": js.RUNNING, "result_text": "legacy secret",
+                  "requested_by": {"kind": js.REQUESTER_AGENT, "agent_id": AGENT, "turn_id": "turn-1"}}
+    _fake(monkeypatch, {"status": "ok", "repeat": legacy_job, "params": None})
+    owner_ctx = chat_ctx(home, None, CHAT)
+    out_rep_owner = music_tools.music_propose_job.__wrapped__(owner_ctx, params=from_text(), idempotency_key="k")
+    assert out_rep_owner == music_tools.REPEAT_NOT_YOURS_REFUSAL and "legacy" not in out_rep_owner
+
+    foreign_ctx = chat_ctx(home, None, GROUP, asker=FRIEND)
+    out_rep_foreign = music_tools.music_propose_job.__wrapped__(foreign_ctx, params=from_text(), idempotency_key="k")
+    assert out_rep_foreign == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS and "legacy" not in out_rep_foreign
 
 
 @pytest.mark.asyncio
@@ -248,6 +474,11 @@ async def test_a_repeat_core_answers_with_from_another_chat_is_a_neutral_refusal
     assert out == music_tools.REPEAT_NOT_YOURS_REFUSAL
     assert "propose_music_job" not in calls
 
+    foreign = chat_ctx(home, None, GROUP, asker=FRIEND)
+    out_foreign = music_tools.music_propose_job.__wrapped__(foreign, params=from_text(), idempotency_key="k")
+    assert out_foreign == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
+    assert "propose_music_job" not in calls
+
 
 @pytest.mark.asyncio
 async def test_an_idempotency_conflict_does_not_name_the_other_job(home, monkeypatch):
@@ -256,6 +487,10 @@ async def test_an_idempotency_conflict_does_not_name_the_other_job(home, monkeyp
     ctx = chat_ctx(home, None, GROUP)
     out = music_tools.music_propose_job.__wrapped__(ctx, params=from_text(), idempotency_key="k")
     assert out == music_tools.KEY_NOT_YOURS_REFUSAL
+
+    foreign = chat_ctx(home, None, GROUP, asker=FRIEND)
+    out_foreign = music_tools.music_propose_job.__wrapped__(foreign, params=from_text(), idempotency_key="k")
+    assert out_foreign == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
 
 
 @pytest.mark.asyncio

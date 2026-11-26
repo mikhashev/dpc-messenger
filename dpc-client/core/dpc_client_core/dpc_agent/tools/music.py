@@ -195,8 +195,6 @@ KEY_NOT_YOURS_REFUSAL = ("⚠️ music_propose_job: this idempotency_key cannot 
                          "one or leave it out. No job was made and nothing was asked.")
 REPEAT_NOT_YOURS_REFUSAL = ("⚠️ music_propose_job: this request cannot be proposed here as it is; change "
                             "it or leave out the idempotency_key. No job was made and nothing was asked.")
-# Core's refusals that are about the job list, not the request's own params.
-_JOB_LIST_CODES = frozenset({"idempotency_conflict", "requester_queue_full", "turn_job_limit"})
 
 
 def _mine(ctx: ToolContext, job: Dict[str, Any], who: Dict[str, Any]) -> bool:
@@ -206,8 +204,8 @@ def _mine(ctx: ToolContext, job: Dict[str, Any], who: Dict[str, Any]) -> bool:
 
 
 # Core's pre-card refusal as a turn someone other than the owner asked for sees it (P2-6): what
-# core found in the owner's library (a track, its length, its stored lyrics) or in the job list
-# stays behind the job card, which the owner sees.
+# core found in the owner's library (a track, its length, its stored lyrics), engines/adapters,
+# or job list stays behind the job card, which the owner sees.
 PRE_CARD_REFUSAL_FOR_OTHERS = ("⚠️ music_propose_job: core refused this request before the owner was "
                                "asked; the reason concerns the owner's library or music jobs and is not "
                                "shown to a request from someone other than the owner. Nothing was asked "
@@ -617,6 +615,17 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     if not who.get("agent_id") or not turn_id:
         return "⚠️ music_propose_job runs only inside an agent turn; nothing was proposed."
 
+    owner_asked = _owner_asked(ctx)
+    effective_lyrics_mode = params.get("lyrics_mode") or js.SONG_DEFAULT_LYRICS_MODE.get(type)
+    if (type in js.SONG_TYPES and not owner_asked and effective_lyrics_mode == "reuse"
+            and params.get("lyrics") is not None):
+        # Lines given under `reuse` are compared with the track's stored lyrics (core's
+        # `reuse_lyrics_differ`): an answer either way would tell someone other than the owner
+        # what the owner's lyrics say (P2-6). Check before idempotency_key so a guessed key
+        # paired with lyrics cannot distinguish a taken key from a free one.
+        return ("⚠️ music_propose_job: with lyrics_mode reuse on a request from someone other than the "
+                "owner, leave lyrics out: the track's stored lyrics are used. Nothing was asked or proposed.")
+
     # A repeat in this turn, or a cap already reached, is answered before anyone is asked:
     # a question whose "yes" cannot make a job is not put to the person (D45, D47).
     listed = _service_call(ctx, "list_music_jobs")
@@ -624,26 +633,20 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     if refused:
         return refused
     jobs = listed.get("jobs") or []
-    owner_asked = _owner_asked(ctx)
     if idempotency_key:
-        # The key is looked up in this agent's jobs of this chat only (P2-6). Core's key space is
-        # one for all chats, so a key another chat (or another agent, or the person) already used
-        # is refused in words that say nothing of that job.
+        # The key is looked up in jobs that belong to this agent in this chat (or this exact
+        # chatless turn) only (P2-6). Core's key space is one for all chats, so a key another
+        # chat, another agent, the person, or a legacy job without conversation_id already used
+        # is refused without leaking that job; a foreign turn gets the same pre-card refusal
+        # as any other refusal so a guessed key cannot probe other chats with 0 cards.
         keyed = [j for j in jobs if j.get("idempotency_key") == idempotency_key]
-        same = [j for j in keyed if _ours_in_this_chat(ctx, j)]
+        same = [j for j in keyed if _mine(ctx, j, who)]
         if same:
             return ("This idempotency_key already names a job; no new job was made and nothing was asked.\n"
                     + "\n".join(_job_lines(same[0])))
         if keyed:
-            return KEY_NOT_YOURS_REFUSAL
-    if (type in js.SONG_TYPES and not owner_asked and params.get("lyrics_mode") == "reuse"
-            and params.get("lyrics") is not None):
-        # Lines given under `reuse` are compared with the track's stored lyrics (core's
-        # `reuse_lyrics_differ`): an answer either way would tell someone other than the owner
-        # what the owner's lyrics say (P2-6). Such a request reuses the stored lines unseen.
-        return ("⚠️ music_propose_job: with lyrics_mode reuse on a request from someone other than the "
-                "owner, leave lyrics out: the track's stored lyrics are used. Nothing was asked or proposed.")
-    in_turn = _turn_jobs(jobs, who["agent_id"], turn_id)
+            return KEY_NOT_YOURS_REFUSAL if owner_asked else PRE_CARD_REFUSAL_FOR_OTHERS
+    in_turn = [j for j in _turn_jobs(jobs, who["agent_id"], turn_id) if _mine(ctx, j, who)]
     turn_max = _limit_of(ctx, "_music_turn_jobs_max")
     if turn_max is not None and len(in_turn) >= turn_max:
         latest = in_turn[-1]
@@ -653,6 +656,8 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     queue_max = _limit_of(ctx, "_music_agent_queue_max")
     active = _active_jobs(jobs, who["agent_id"])
     if queue_max is not None and len(active) >= queue_max:
+        if not owner_asked:
+            return PRE_CARD_REFUSAL_FOR_OTHERS
         return (f"⚠️ music_propose_job refused: requester_queue_full: {len(active)} of this agent's music "
                 f"job(s) are queued or running, at most {queue_max} at once. Nothing was asked or proposed.")
 
@@ -662,19 +667,19 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
                             idempotency_key=idempotency_key or None, requested_by=who, **edit_args)
     refused = _error_text(checked, "music_propose_job")
     if refused:
+        if not owner_asked:
+            # Before the job card nothing of the owner's library, engines, adapters/paths, or
+            # job list reaches a turn someone else asked for (P2-6).
+            return PRE_CARD_REFUSAL_FOR_OTHERS
         code = checked.get("code") if isinstance(checked, dict) else None
         if code == "idempotency_conflict":
             # The key names a job made elsewhere with other params; its id is not this chat's to see.
             return KEY_NOT_YOURS_REFUSAL
-        if not owner_asked and (type != js.GENERATE_FROM_TEXT or code in _JOB_LIST_CODES):
-            # Before the job card nothing of the owner's library or job list reaches a turn
-            # someone else asked for (P2-6): which track exists, its length, its lyrics.
-            return PRE_CARD_REFUSAL_FOR_OTHERS
         return refused + " Nothing was asked or proposed."
     if checked.get("repeat"):
         repeat = checked["repeat"]
         if not _mine(ctx, repeat, who):
-            return REPEAT_NOT_YOURS_REFUSAL
+            return REPEAT_NOT_YOURS_REFUSAL if owner_asked else PRE_CARD_REFUSAL_FOR_OTHERS
         return ("This request repeats a job already made; no new job was made and nothing was asked.\n"
                 + "\n".join(_job_lines(repeat)))
     final = checked.get("params") if isinstance(checked.get("params"), dict) else params
