@@ -753,11 +753,12 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
         # The key is looked up in jobs that belong to this agent in this chat (or this exact
         # chatless turn) only (P2-6). Core's key space is one for all chats, so a key another
         # chat, another agent, the person, or a legacy job without conversation_id already used
-        # is refused without leaking that job; a foreign turn gets the same pre-card refusal
-        # as any other refusal so a guessed key cannot probe other chats with 0 cards.
+        # is refused without leaking that job; a chat-scoped turn (foreign or multi-node group)
+        # gets the same pre-card refusal as any other refusal so a guessed key cannot probe
+        # other chats with 0 cards.
         # Checked after `turn_max` so a turn that already proposed its limit cannot distinguish
         # a taken other-chat key from a free key with 0 cards.
-        return KEY_NOT_YOURS_REFUSAL if owner_asked else PRE_CARD_REFUSAL_FOR_OTHERS
+        return KEY_NOT_YOURS_REFUSAL if not scoped else PRE_CARD_REFUSAL_FOR_OTHERS
     queue_max = _limit_of(ctx, "_music_agent_queue_max")
     active = _active_jobs(jobs, who["agent_id"])
     if queue_max is not None and len(active) >= queue_max:
@@ -779,14 +780,14 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
         code = checked.get("code") if isinstance(checked, dict) else None
         if code == "idempotency_conflict":
             # The key names a job made elsewhere with other params; its id is not this chat's to see.
-            return KEY_NOT_YOURS_REFUSAL
+            return KEY_NOT_YOURS_REFUSAL if not scoped else PRE_CARD_REFUSAL_FOR_OTHERS
         if scoped and code == "requester_queue_full":
             return PRE_CARD_REFUSAL_FOR_OTHERS
         return refused + " Nothing was asked or proposed."
     if checked.get("repeat"):
         repeat = checked["repeat"]
         if not _mine(ctx, repeat, who):
-            return REPEAT_NOT_YOURS_REFUSAL if owner_asked else PRE_CARD_REFUSAL_FOR_OTHERS
+            return REPEAT_NOT_YOURS_REFUSAL if not scoped else PRE_CARD_REFUSAL_FOR_OTHERS
         return ("This request repeats a job already made; no new job was made and nothing was asked.\n"
                 + "\n".join(_job_lines(repeat)))
     final = checked.get("params") if isinstance(checked.get("params"), dict) else params
@@ -823,7 +824,7 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
         if isinstance(answer, dict):
             code = answer.get("code")
             if code == "idempotency_conflict":
-                return KEY_NOT_YOURS_REFUSAL
+                return KEY_NOT_YOURS_REFUSAL if not scoped else PRE_CARD_REFUSAL_FOR_OTHERS
             if scoped and code == "requester_queue_full":
                 return ("⚠️ music_propose_job refused: requester_queue_full: "
                         "this agent's music queue is full. No job was made.")
@@ -1399,32 +1400,16 @@ def _lyrics_approval(ctx: ToolContext, args: Dict[str, Any]):
 
 
 def _playlist_add_approval(ctx: ToolContext, args: Dict[str, Any]):
-    from ..owner_approval import Ask, Refuse
+    from ..owner_approval import Refuse
     track_ids = [t for t in (args.get("track_ids") or []) if isinstance(t, str) and t]
     take_id = args.get("take_id")
     take_id = take_id.strip() if isinstance(take_id, str) else take_id
     if not track_ids and not take_id:
         return Refuse("⚠️ music_playlist_add: give track_ids or take_id; nothing was added.")
     pid = str(args.get("playlist_id") or "").strip() or "(unknown)"
-    doing = f"adding to playlist {pid}"
-    if _chat_scoped_music(ctx):
-        return Refuse(_not_your_playlist_refusal(doing, pid))
-    try:
-        for tid in track_ids:
-            refused = _verify_track_in_this_chat(ctx, tid, doing)
-            if refused:
-                return Refuse(refused)
-        if take_id:
-            _take, refused = _verify_take_in_this_chat(ctx, take_id, doing)
-            if refused:
-                return Refuse(refused)
-    except _Unavailable as exc:
-        return Refuse(f"⚠️ music_playlist_add: {exc}.")
-    except TimeoutError:
-        return Refuse(f"⚠️ music_playlist_add: the music service did not answer within "
-                      f"{int(SERVICE_CALL_TIMEOUT_S)} s.")
-    what = f"take {take_id}" if take_id else f"{len(track_ids)} track(s)"
-    return Ask(f"add {what} from chat {_chat_label(ctx)} to playlist {pid}")
+    # open_gate only invokes approval checks when not owner_asked, so _chat_scoped_music(ctx)
+    # is always True here and personal playlists are inaccessible from this turn.
+    return Refuse(_not_your_playlist_refusal(f"adding to playlist {pid}", pid))
 
 
 _get_music_tools_unflagged = get_tools
@@ -1443,12 +1428,14 @@ def get_tools() -> List[ToolEntry]:  # noqa: F811
         "music_get_lyrics": _lyrics_approval,
         "music_playlist_add": _playlist_add_approval,
     }
-    assert set(checks) == MUSIC_TOOL_NAMES, (
-        f"music approval checks mismatch MUSIC_TOOL_NAMES: {sorted(set(checks) ^ MUSIC_TOOL_NAMES)}"
-    )
+    if set(checks) != MUSIC_TOOL_NAMES:
+        raise ValueError(
+            f"music approval checks mismatch MUSIC_TOOL_NAMES: {sorted(set(checks) ^ MUSIC_TOOL_NAMES)}"
+        )
     entries = _get_music_tools_unflagged()
-    assert {e.name for e in entries} == MUSIC_TOOL_NAMES, (
-        f"music tools mismatch MUSIC_TOOL_NAMES: {sorted({e.name for e in entries} ^ MUSIC_TOOL_NAMES)}"
-    )
+    if {e.name for e in entries} != MUSIC_TOOL_NAMES:
+        raise ValueError(
+            f"music tools mismatch MUSIC_TOOL_NAMES: {sorted({e.name for e in entries} ^ MUSIC_TOOL_NAMES)}"
+        )
     return mark_owner_approval(entries, checks,
                                budget_holds_approval=("music_propose_job",))

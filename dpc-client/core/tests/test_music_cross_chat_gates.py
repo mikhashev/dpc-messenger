@@ -173,10 +173,12 @@ async def test_a_key_used_in_another_chat_is_refused_without_a_word_of_that_job(
     async with Rig(home, start_runner=False) as rig:
         person = Person(True)
         ctx_a, job = await one_job_in_the_owners_chat(home, rig, person, key="song-1")
-        for asker in (None, FRIEND):
-            ctx_b = chat_ctx(home, ctx_a.dpc_service, GROUP, asker=asker)
-            expected = (music_tools.KEY_NOT_YOURS_REFUSAL if asker is None
-                        else music_tools.PRE_CARD_REFUSAL_FOR_OTHERS)
+        for conv, asker, expected in (
+            ("dm-other", None, music_tools.KEY_NOT_YOURS_REFUSAL),
+            (GROUP, None, music_tools.PRE_CARD_REFUSAL_FOR_OTHERS),
+            (GROUP, FRIEND, music_tools.PRE_CARD_REFUSAL_FOR_OTHERS),
+        ):
+            ctx_b = chat_ctx(home, ctx_a.dpc_service, conv, asker=asker)
             for params in (from_text(), from_text(style="other")):
                 out = await call(registry_for(ctx_b), ctx_b, "music_propose_job", turn="turn-g",
                                  params=params, idempotency_key="song-1")
@@ -474,9 +476,14 @@ OTHER_CHATS_JOB = {"id": "job_0123456789abcdef", "state": js.RUNNING, "result_te
 @pytest.mark.asyncio
 async def test_a_repeat_core_answers_with_from_another_chat_is_a_neutral_refusal(home, monkeypatch):
     calls = _fake(monkeypatch, {"status": "ok", "repeat": OTHER_CHATS_JOB, "params": None})
-    ctx = chat_ctx(home, None, GROUP)
+    ctx = chat_ctx(home, None, "dm-other")
     out = music_tools.music_propose_job.__wrapped__(ctx, params=from_text(), idempotency_key="k")
     assert out == music_tools.REPEAT_NOT_YOURS_REFUSAL
+    assert "propose_music_job" not in calls
+
+    ctx_group = chat_ctx(home, None, GROUP)
+    out_group = music_tools.music_propose_job.__wrapped__(ctx_group, params=from_text(), idempotency_key="k")
+    assert out_group == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
     assert "propose_music_job" not in calls
 
     foreign = chat_ctx(home, None, GROUP, asker=FRIEND)
@@ -489,9 +496,13 @@ async def test_a_repeat_core_answers_with_from_another_chat_is_a_neutral_refusal
 async def test_an_idempotency_conflict_does_not_name_the_other_job(home, monkeypatch):
     _fake(monkeypatch, {"status": "error", "code": "idempotency_conflict",
                         "message": "idempotency_key 'k' belongs to job job_0123456789abcdef with other params"})
-    ctx = chat_ctx(home, None, GROUP)
+    ctx = chat_ctx(home, None, "dm-other")
     out = music_tools.music_propose_job.__wrapped__(ctx, params=from_text(), idempotency_key="k")
     assert out == music_tools.KEY_NOT_YOURS_REFUSAL
+
+    ctx_group = chat_ctx(home, None, GROUP)
+    out_group = music_tools.music_propose_job.__wrapped__(ctx_group, params=from_text(), idempotency_key="k")
+    assert out_group == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
 
     foreign = chat_ctx(home, None, GROUP, asker=FRIEND)
     out_foreign = music_tools.music_propose_job.__wrapped__(foreign, params=from_text(), idempotency_key="k")
@@ -1127,7 +1138,7 @@ def test_music_get_tools_asserts_approval_checks_cover_music_tool_names(monkeypa
     entries = music_tools.get_tools()
     assert {e.name for e in entries} == music_tools.MUSIC_TOOL_NAMES
     monkeypatch.setattr(music_tools, "MUSIC_TOOL_NAMES", music_tools.MUSIC_TOOL_NAMES | {"music_unapproved_fake"})
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         music_tools.get_tools()
 
 
@@ -1239,5 +1250,77 @@ async def test_a_foreign_turn_after_its_turn_job_gets_identical_output_for_taken
                                    params=from_text(style="next"), idempotency_key="dm-secret-key")
         assert out_next_turn == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
         assert len(person.asked) == asked_before
+
+
+@pytest.mark.asyncio
+async def test_owner_turn_in_multi_node_group_masks_taken_1to1_key_repeat_and_idempotency_conflict(
+        tmp_path, monkeypatch):
+    _user_home, dpc_home = await _seed_world(tmp_path, monkeypatch)
+    async with Rig(dpc_home, start_runner=False) as rig:
+        person = Person(True)
+        service = _MultiChatService(dpc_home, rig, person)
+        owner_dm = _multi_ctx(dpc_home, service, ONE_TO_ONE, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+        out_dm = await _exec(registry_for(owner_dm), owner_dm, "music_propose_job", turn="turn-dm1",
+                             params=from_text(style="private 1to1 song"), idempotency_key="dm-key-1")
+        assert out_dm.startswith("Proposed (approved by the person)."), out_dm
+        person.asked.clear()
+
+        # Owner turn in a multi-node group (or fail-closed missing roster) gets PRE_CARD_REFUSAL_FOR_OTHERS
+        # on a taken 1:1 idempotency_key instead of leaking KEY_NOT_YOURS_REFUSAL with 0 cards.
+        for conv, cls in ((FRIENDS_GROUP, OTHER_NODE_TURN), (FRIENDS_GROUP, OWNER_TURN), ("group-missing", OWNER_TURN)):
+            ctx_multi = _multi_ctx(dpc_home, service, conv, asker=OWNER_ASKER, turn_class=cls)
+            out_multi = await _exec(registry_for(ctx_multi), ctx_multi, "music_propose_job", turn=f"turn-{conv}-{cls}",
+                                    params=from_text(style="probe"), idempotency_key="dm-key-1")
+            assert out_multi == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS, (conv, cls, out_multi)
+
+        # Verified 1-node group on owner turn is not chat-scoped, so it still gets KEY_NOT_YOURS_REFUSAL.
+        ctx_solo = _multi_ctx(dpc_home, service, SOLO_GROUP, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+        out_solo = await _exec(registry_for(ctx_solo), ctx_solo, "music_propose_job", turn="turn-solo",
+                               params=from_text(style="probe"), idempotency_key="dm-key-1")
+        assert out_solo == music_tools.KEY_NOT_YOURS_REFUSAL, out_solo
+        assert person.asked == [] and len(rig.store.list_jobs()) == 1
+
+    # Mocked check_music_job (repeat, idempotency_conflict) and propose_music_job (idempotency_conflict).
+    svc_mock = SimpleNamespace(
+        _conversation_display_name=lambda cid: cid,
+        p2p_manager=SimpleNamespace(get_display_name=lambda: "Owner", node_id=THIS_NODE),
+        group_manager=SimpleNamespace(
+            node_id=THIS_NODE,
+            get_group=lambda gid: SimpleNamespace(
+                group_id=gid, name="Friends", members=[THIS_NODE, FRIEND_NODE], is_discord_bridge=False
+            ) if gid == FRIENDS_GROUP else SimpleNamespace(
+                group_id=gid, name="Solo", members=[THIS_NODE], is_discord_bridge=False
+            ),
+        ),
+    )
+    multi_contexts = [
+        _multi_ctx(dpc_home, svc_mock, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OWNER_TURN),
+        _multi_ctx(dpc_home, svc_mock, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OTHER_NODE_TURN),
+    ]
+    solo_ctx = _multi_ctx(dpc_home, svc_mock, SOLO_GROUP, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+
+    _fake(monkeypatch, {"status": "ok", "repeat": OTHER_CHATS_JOB, "params": None})
+    for ctx_m in multi_contexts:
+        assert music_tools.music_propose_job.__wrapped__(
+            ctx_m, params=from_text(), idempotency_key="k") == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
+    assert music_tools.music_propose_job.__wrapped__(
+        solo_ctx, params=from_text(), idempotency_key="k") == music_tools.REPEAT_NOT_YOURS_REFUSAL
+
+    conflict = {"status": "error", "code": "idempotency_conflict",
+                "message": "idempotency_key 'k' belongs to job job_0123456789abcdef with other params"}
+    _fake(monkeypatch, conflict)
+    for ctx_m in multi_contexts:
+        assert music_tools.music_propose_job.__wrapped__(
+            ctx_m, params=from_text(), idempotency_key="k") == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
+    assert music_tools.music_propose_job.__wrapped__(
+        solo_ctx, params=from_text(), idempotency_key="k") == music_tools.KEY_NOT_YOURS_REFUSAL
+
+    _fake(monkeypatch, {"status": "ok", "repeat": None, "params": from_text()}, propose_answer=conflict)
+    monkeypatch.setattr(core_tools, "_await_schedule_approval", lambda ctx, **kw: (True, ""))
+    for ctx_m in multi_contexts:
+        assert music_tools.music_propose_job.__wrapped__(
+            ctx_m, params=from_text(), idempotency_key="k") == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
+    assert music_tools.music_propose_job.__wrapped__(
+        solo_ctx, params=from_text(), idempotency_key="k") == music_tools.KEY_NOT_YOURS_REFUSAL
 
 
