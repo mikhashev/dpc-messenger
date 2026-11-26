@@ -395,12 +395,12 @@ def test_a_partly_failed_run_prunes_nothing_and_a_clean_run_after_it_does(tmp_pa
     c = _source(tmp_path, "c.flac", content_hash="md5:cccc", title="Third")
     answer = exporter.export_playlist("pl_1", "Mix", [a, c])
     assert [t["status"] for t in answer["tracks"]] == ["ok", "error"]
-    assert answer["removed"] == [] and answer["kept"] == []
+    assert answer["removed"] == [] and answer["kept"] == ["02 - Band - Second.mp3"] and answer["missing"] == []
     assert sorted(p.name for p in folder.iterdir()) == ["01 - Band - First.mp3", "02 - Band - Second.mp3"]
     # the clean run prunes b, which is no longer in the playlist
     exporter, _ = _exporter(root)
     clean = exporter.export_playlist("pl_1", "Mix", [a, c])
-    assert clean["removed"] == ["02 - Band - Second.mp3"]
+    assert clean["removed"] == ["02 - Band - Second.mp3"] and clean["kept"] == [] and clean["missing"] == []
     assert sorted(p.name for p in folder.iterdir()) == ["01 - Band - First.mp3", "02 - Band - Third.mp3"]
 
 
@@ -464,6 +464,55 @@ def test_a_playlist_rename_with_blocked_prune_updates_surviving_file_paths(tmp_p
     clean = exporter.export_playlist("pl_1", "Evening mix", [a])
     assert clean["removed"] == ["02 - Band - Second.mp3"]
     assert not surviving.exists()
+
+
+def test_a_blocked_run_reports_kept_sorted_and_surfaces_externally_deleted_files(tmp_path):
+    root = tmp_path / "out"
+    exporter, _ = _exporter(root)
+    a = _source(tmp_path, "a.flac", content_hash="md5:aaaa", title="First")
+    b = _source(tmp_path, "b.flac", content_hash="md5:bbbb", title="Second")
+    c = _source(tmp_path, "c.flac", content_hash="md5:cccc", title="Third")
+    d = _source(tmp_path, "d.flac", content_hash="md5:dddd", title="Fourth")
+    exporter.export_playlist("pl_1", "Mix", [a, b, c])
+    folder = root / "Mix"
+
+    # Reverse the stored file order in the index to confirm `kept` and `missing` are sorted,
+    # and delete the middle file externally before a blocked run.
+    index_path = root / ".dpc-exports.json"
+    index_data = json.loads(index_path.read_text(encoding="utf-8"))
+    index_data["playlists"][0]["files"].reverse()
+    index_path.write_text(json.dumps(index_data), encoding="utf-8")
+    (folder / "02 - Band - Second.mp3").unlink()
+
+    fresh, _ = _exporter(root)
+    answer = fresh.export_playlist(
+        "pl_1", "Mix",
+        [d, SkippedTrack("trk_x", "Gone", "not in the library", "unknown_track")],
+    )
+    assert answer["removed"] == []
+    assert answer["kept"] == ["01 - Band - First.mp3", "03 - Band - Third.mp3"]
+    assert answer["missing"] == ["02 - Band - Second.mp3"]
+    assert sorted(p.name for p in folder.iterdir()) == [
+        "01 - Band - First.mp3",
+        "01 - Band - Fourth.mp3",
+        "03 - Band - Third.mp3",
+    ]
+
+    updated = json.loads(index_path.read_text(encoding="utf-8"))
+    [pl_record] = updated["playlists"]
+    assert sorted(f["path"] for f in pl_record["files"]) == [
+        "Mix/01 - Band - First.mp3",
+        "Mix/01 - Band - Fourth.mp3",
+        "Mix/03 - Band - Third.mp3",
+    ]
+    assert fresh.is_export_path(folder / "02 - Band - Second.mp3") is None
+    assert fresh.exports_for({"md5:bbbb": ["trk_b"]})["trk_b"][0]["playlists"] == []
+
+    # A subsequent clean run prunes the surviving stale files cleanly.
+    clean = fresh.export_playlist("pl_1", "Mix", [d])
+    assert sorted(clean["removed"]) == ["01 - Band - First.mp3", "03 - Band - Third.mp3"]
+    assert clean["kept"] == [] and clean["missing"] == []
+    assert [p.name for p in folder.iterdir()] == ["01 - Band - Fourth.mp3"]
 
 
 def test_where_a_hard_link_is_refused_the_playlist_file_is_copied(tmp_path, monkeypatch):

@@ -1180,7 +1180,7 @@ class MusicExporter:
         docstring). `items` are `ExportSource`s and `SkippedTrack`s in playlist order; the
         skipped ones get no number. `on_track` is called with each single track's answer.
         A playlist run is one per (playlist, preset, true-peak limit on or off).
-        Returns `{folder, tracks: [...], removed, kept}`."""
+        Returns `{folder, tracks: [...], removed, kept, missing}`."""
         preset = self.check_preset(preset)
         limit = bool(limit_true_peak)
         sources = [i for i in items if isinstance(i, ExportSource)]
@@ -1238,12 +1238,28 @@ class MusicExporter:
             # is stale.
             if any(r["status"] == "error" or (r["status"] == "skipped" and r.get("code") != "hidden")
                    for r in results):
-                removed, kept = [], []
-                files = planned + [{**f, "path": self._rel(folder / Path(f["path"]).name)}
-                                   for key, f in owned.items()
-                                   if key not in keep_keys and (folder / Path(f["path"]).name).exists()]
+                removed = []
+                kept_files: List[Dict[str, Any]] = []
+                kept: List[str] = []
+                missing: List[str] = []
+                for key, f in owned.items():
+                    if key in keep_keys:
+                        continue
+                    fname = Path(f["path"]).name
+                    candidate = folder / fname
+                    if candidate.exists():
+                        kept_files.append({**f, "path": self._rel(candidate)})
+                        kept.append(fname)
+                    else:
+                        # Externally deleted earlier file: drop from record["files"] so it does
+                        # not stay as a ghost path in the index, and surface it in `missing`.
+                        missing.append(fname)
+                kept.sort()
+                missing.sort()
+                files = planned + kept_files
             else:
                 removed, kept = self._prune(folder, owned, keep_keys)
+                missing = []
             record = {"playlist_id": playlist_id, "name": name, "preset": preset, "folder": self._rel(folder),
                       "exported_at": _now(), "files": files}
             if not limit:
@@ -1253,7 +1269,7 @@ class MusicExporter:
             index.playlists.append(record)
             self._save()
             return {"folder": str(folder), "folder_name": folder.name, "preset": preset, "tracks": results,
-                    "removed": removed, "kept": kept, "export_root": str(self.root)}
+                    "removed": removed, "kept": kept, "missing": missing, "export_root": str(self.root)}
 
     def _playlist_folder(self, playlist_id: str, name: str, preset: str,
                          previous: Optional[Dict[str, Any]], limit: bool = True) -> Path:
