@@ -869,34 +869,32 @@ def _allowed_files_dirs(group_dir: Path = None, allowed_dir: Path = None) -> lis
         return [Path(allowed_dir)]
     if group_dir is not None:
         return [Path(group_dir) / "files"]
-    base = DPC_HOME / "conversations"
-    if not base.is_dir():
-        return []
-    return [d / "files" for d in sorted(base.iterdir()) if d.is_dir()]
+    # Fail closed when no directory scope is given so callers cannot leak paths across groups.
+    return []
 
 
 def _kept_attachment_path(where, allowed_dirs: list):
-    """Sanitized local path when `where` is an existing regular file inside `allowed_dirs`, else None."""
-    if not isinstance(where, (str, os.PathLike)):
-        return None
+    """Return `(sanitized_path, was_sanitized)` for an existing regular file in `allowed_dirs`, else `(None, False)`."""
+    if not allowed_dirs or not isinstance(where, (str, os.PathLike)):
+        return None, False
     try:
         raw = os.fspath(where)
     except TypeError:
-        return None
+        return None, False
     if not isinstance(raw, str) or not raw or "\x00" in raw:
-        return None
+        return None, False
     # Reject UNC / device / mixed-slash network prefixes across Windows, Linux, and macOS.
     if raw.startswith(("\\\\", "//", "\\/", "/\\")):
-        return None
+        return None, False
     candidate = Path(raw)
     if not candidate.is_absolute():
-        return None
+        return None, False
     try:
         target = candidate.resolve(strict=True)
         if not target.is_file():
-            return None
+            return None, False
     except (OSError, ValueError, RuntimeError):
-        return None
+        return None, False
     parents = {os.path.normcase(str(p)) for p in target.parents}
     for folder in allowed_dirs:
         try:
@@ -907,8 +905,9 @@ def _kept_attachment_path(where, allowed_dirs: list):
             continue
         if os.path.normcase(str(resolved_dir)) in parents:
             printable = str(target) if ".." in candidate.parts else raw
-            return _PATH_UNSAFE.sub("?", printable)
-    return None
+            sanitized = _PATH_UNSAFE.sub("?", printable)
+            return sanitized, sanitized != printable
+    return None, False
 
 
 def attachment_lines(msg: dict, group_dir: Path = None, allowed_dir: Path = None) -> list:
@@ -941,9 +940,12 @@ def attachment_lines(msg: dict, group_dir: Path = None, allowed_dir: Path = None
         if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
             details.append(f"{seconds:g} s")
         described = f"{_attachment_text(att.get('filename') or kind)}, {', '.join(details)}"
-        kept = _kept_attachment_path(att.get("file_path"), allowed_dirs)
-        out.append(f"[{kind}: {described}] at {kept}"
-                   if kept else f"[{kind}: {described}] not kept on this node")
+        kept, was_sanitized = _kept_attachment_path(att.get("file_path"), allowed_dirs)
+        if kept:
+            suffix = " (name sanitized)" if was_sanitized else ""
+            out.append(f"[{kind}: {described}] at {kept}{suffix}")
+        else:
+            out.append(f"[{kind}: {described}] not kept on this node")
     return out
 
 

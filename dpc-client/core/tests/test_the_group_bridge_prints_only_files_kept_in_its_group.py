@@ -152,9 +152,23 @@ def test_path_unsafe_cleans_printed_path_when_kept_path_contains_brackets(bridge
     files_dir.mkdir(parents=True, exist_ok=True)
     bracketed = files_dir / "take[1].wav"
     bracketed.write_bytes(b"RIFF")
+    song = files_dir / "Song [live].mp3"
+    song.write_bytes(b"ID3")
+    normal = files_dir / "clip.wav"
+    normal.write_bytes(b"RIFF")
 
-    (line,) = bridge.attachment_lines(_msg([_att(str(bracketed), filename="take[1].wav")]), group_dir=gdir)
-    assert line.endswith(" at " + str(files_dir / "take?1?.wav"))
+    (line_take,) = bridge.attachment_lines(_msg([_att(str(bracketed), filename="take[1].wav")]), group_dir=gdir)
+    assert line_take.endswith(f" at {files_dir / 'take?1?.wav'} (name sanitized)")
+
+    (line_song,) = bridge.attachment_lines(
+        _msg([_att(str(song), filename="Song [live].mp3", mime_type="audio/mpeg")]),
+        group_dir=gdir,
+    )
+    assert line_song.endswith(f" at {files_dir / 'Song ?live?.mp3'} (name sanitized)")
+
+    (line_normal,) = bridge.attachment_lines(_msg([_att(str(normal))]), group_dir=gdir)
+    assert line_normal == f"[file: clip.wav, audio/wav, 0.25 MB] at {normal}"
+    assert "(name sanitized)" not in line_normal
 
 
 def test_cli_main_wires_group_dir_and_rejects_other_groups_files(bridge, monkeypatch, capsys):  # noqa: F811
@@ -186,7 +200,7 @@ def test_cli_main_wires_group_dir_and_rejects_other_groups_files(bridge, monkeyp
     assert "[file: missing.wav, audio/wav, 0.25 MB] not kept on this node" in out
 
 
-def test_backwards_compatible_signatures_and_allowed_dir(bridge, tmp_path):  # noqa: F811
+def test_no_group_dir_fails_closed_and_explicit_dirs_work(bridge, tmp_path):  # noqa: F811
     gdir = bridge._find_group_dir(GROUP)
     kept = gdir / "files" / "clip.wav"
     kept.parent.mkdir(parents=True, exist_ok=True)
@@ -195,15 +209,23 @@ def test_backwards_compatible_signatures_and_allowed_dir(bridge, tmp_path):  # n
     outside = tmp_path / "outside.wav"
     outside.write_bytes(b"RIFF")
 
-    # 1-arg attachment_lines(msg) and 3-arg format_message(i, msg, node_id)
+    # Calling attachment_lines(msg) or format_message(i, msg, node_id) without
+    # group_dir or allowed_dir must fail closed even when the file exists in DPC_HOME.
     assert bridge.attachment_lines(_msg([_att(str(kept))])) == [
-        f"[file: clip.wav, audio/wav, 0.25 MB] at {kept}",
+        "[file: clip.wav, audio/wav, 0.25 MB] not kept on this node",
     ]
     assert bridge.attachment_lines(_msg([_att(str(outside))])) == [
         "[file: clip.wav, audio/wav, 0.25 MB] not kept on this node",
     ]
-    formatted = bridge.format_message(0, _msg([_att(str(outside))]), NODE)
-    assert formatted.endswith("[file: clip.wav, audio/wav, 0.25 MB] not kept on this node")
+    formatted_no_dir = bridge.format_message(0, _msg([_att(str(kept))]), NODE)
+    assert formatted_no_dir.endswith("[file: clip.wav, audio/wav, 0.25 MB] not kept on this node")
+
+    # Passing group_dir prints the kept file path (without sanitization suffix for normal names).
+    assert bridge.attachment_lines(_msg([_att(str(kept))]), group_dir=gdir) == [
+        f"[file: clip.wav, audio/wav, 0.25 MB] at {kept}",
+    ]
+    formatted_with_dir = bridge.format_message(0, _msg([_att(str(kept))]), NODE, group_dir=gdir)
+    assert formatted_with_dir.endswith(f"[file: clip.wav, audio/wav, 0.25 MB] at {kept}")
 
     # explicit allowed_dir
     custom = tmp_path / "custom_files"
