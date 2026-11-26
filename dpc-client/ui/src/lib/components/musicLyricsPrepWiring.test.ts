@@ -14,9 +14,9 @@ describe('Prepare lyrics in the Create panel', () => {
         expect(create.indexOf('id="mc-lyrics"')).toBeLessThan(create.indexOf('>Prepare lyrics</button>'));
     });
 
-    it('keeps the check in the draft and offers Undo only while the marked text is still in the box', () => {
+    it('keeps the check in the draft and offers Undo while the marks it added are still in the box (follow-up 15)', () => {
         expect(create).toContain('lyricsPrep: state');
-        expect(create).toContain('usedMarks.marked === $musicCreateDraft.lyrics');
+        expect(create).toContain('undoInsertedMarks(usedMarks.lyrics, usedMarks.marked, $musicCreateDraft.lyrics) !== $musicCreateDraft.lyrics');
         expect(create).toContain('onclick={undoMarks}');
     });
 
