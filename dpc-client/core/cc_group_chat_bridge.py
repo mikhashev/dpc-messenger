@@ -2,7 +2,9 @@
 Group chat bridge — an external agent (Claude Code or any harness) reads a DPC
 group chat and posts under the tag it registered. File name is historical.
 
-- READ: history.json from ~/.dpc/conversations/{group_id}/history.json
+- READ: history.json from ~/.dpc/conversations/{group_id}/history.json; a history
+  line names each attached file (a recording sent as audio, an mp3, a PDF) and the
+  path it is kept at on this node (`attachment_lines`)
 - WRITE: WebSocket to localhost:9999 (send_group_agent_message command)
 
 Usage:
@@ -837,7 +839,52 @@ def format_message(i: int, msg: dict, node_id: str = None) -> str:
     # reader can cite the same message a human cites. [i] is only the window slot.
     num = msg.get("msg_index")
     num = f"#{num} " if isinstance(num, int) and not isinstance(num, bool) and num > 0 else ""
-    return f"  [{i + 1}] {num}{ts} {sender}{hint}: {preview}"
+    files = "".join(f"\n       {line}" for line in attachment_lines(msg))
+    return f"  [{i + 1}] {num}{ts} {sender}{hint}: {preview}{files}"
+
+
+# The attachment types a history line names, and the word each is named with.
+_ATTACHMENT_KINDS = {"file": "file", "voice": "voice message", "image": "image"}
+
+
+def _attachment_text(value) -> str:
+    """A name or a type as one line that cannot close its bracket."""
+    return " ".join(str(value).replace("[", "(").replace("]", ")").split())
+
+
+def attachment_lines(msg: dict) -> list:
+    """One line per file, voice message or image attached to a history record.
+
+    A recording sent as audio in a group of one node (Mike 2026-11-26), an mp3 or
+    a PDF reached the bridge as the record's text alone ("Sent file: x.wav (0.5
+    MB)" or the words typed with it), with nothing saying where the bytes are.
+    The line names the file, its type, its size and length in brackets, then the
+    path it is kept at on this node (where this bridge reads history.json too),
+    so the external agent can open it with its own tools. A record from a peer
+    whose file never arrived says it is not kept here."""
+    out = []
+    for att in msg.get("attachments") or []:
+        if not isinstance(att, dict):
+            continue
+        kind = _ATTACHMENT_KINDS.get(att.get("type"))
+        if not kind:
+            continue
+        details = [_attachment_text(att.get("mime_type") or "application/octet-stream")]
+        size_mb = att.get("size_mb")
+        if isinstance(size_mb, (int, float)) and not isinstance(size_mb, bool):
+            details.append(f"{size_mb} MB")
+        meta = att.get("voice_metadata")
+        seconds = meta.get("duration_seconds") if isinstance(meta, dict) else None
+        if seconds is None:
+            seconds = att.get("duration_seconds") or None
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+            details.append(f"{seconds:g} s")
+        described = f"{_attachment_text(att.get('filename') or kind)}, {', '.join(details)}"
+        where = att.get("file_path")
+        # The path as it is (it is the rest of the line), only kept on one line.
+        out.append(f"[{kind}: {described}] at {str(where).replace(chr(13), ' ').replace(chr(10), ' ')}"
+                   if where else f"[{kind}: {described}] not kept on this node")
+    return out
 
 
 # --- the GPU card's queue (--card): read from the file the backend keeps, never from the backend ---

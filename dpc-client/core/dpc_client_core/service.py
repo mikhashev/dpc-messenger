@@ -9104,12 +9104,18 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             # The words written with the file reach the group's agents as a
             # screenshot's caption does (send_group_image): its @mentions decide
             # who answers. The record is already stored, so the woken agent reads
-            # the file's marker beside the words. An agent's words wake nobody: its
-            # answer, posted after the turn, routes its mentions under the depth bound.
+            # the file's marker beside the words. The record is named as the turn's
+            # trigger, as a text post names its own: the agent waits on the group's
+            # lock, and a message landing meanwhile would otherwise be taken for the
+            # trigger and the file's marker would fall out of this very turn (a
+            # recording sent as audio in a group of one, Mike 2026-11-26). An agent's
+            # words wake nobody: its answer, posted after the turn, routes its
+            # mentions under the depth bound.
             if caption and agent_name is None:
                 try:
                     sender_display = self.p2p_manager.get_display_name() or "User"
-                    await self._handle_group_agent_mentions(group_id, caption, sender_display)
+                    await self._handle_group_agent_mentions(group_id, caption, sender_display,
+                                                            trigger_message_id=message_id)
                 except Exception as e:
                     logger.warning("routing group file text to group agents failed: %s", e)
 
