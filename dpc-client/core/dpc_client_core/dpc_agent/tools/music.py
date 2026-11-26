@@ -719,6 +719,7 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
         return "⚠️ music_propose_job runs only inside an agent turn; nothing was proposed."
 
     owner_asked = _owner_asked(ctx)
+    scoped = _chat_scoped_music(ctx)
     effective_lyrics_mode = params.get("lyrics_mode") or js.SONG_DEFAULT_LYRICS_MODE.get(type)
     if (type in js.SONG_TYPES and not owner_asked and effective_lyrics_mode == "reuse"
             and params.get("lyrics") is not None):
@@ -736,19 +737,11 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     if refused:
         return refused
     jobs = listed.get("jobs") or []
-    if idempotency_key:
-        # The key is looked up in jobs that belong to this agent in this chat (or this exact
-        # chatless turn) only (P2-6). Core's key space is one for all chats, so a key another
-        # chat, another agent, the person, or a legacy job without conversation_id already used
-        # is refused without leaking that job; a foreign turn gets the same pre-card refusal
-        # as any other refusal so a guessed key cannot probe other chats with 0 cards.
-        keyed = [j for j in jobs if j.get("idempotency_key") == idempotency_key]
-        same = [j for j in keyed if _mine(ctx, j, who)]
-        if same:
-            return ("This idempotency_key already names a job; no new job was made and nothing was asked.\n"
-                    + "\n".join(_job_lines(same[0])))
-        if keyed:
-            return KEY_NOT_YOURS_REFUSAL if owner_asked else PRE_CARD_REFUSAL_FOR_OTHERS
+    keyed = [j for j in jobs if j.get("idempotency_key") == idempotency_key] if idempotency_key else []
+    same = [j for j in keyed if _mine(ctx, j, who)]
+    if same:
+        return ("This idempotency_key already names a job; no new job was made and nothing was asked.\n"
+                + "\n".join(_job_lines(same[0])))
     in_turn = [j for j in _turn_jobs(jobs, who["agent_id"], turn_id) if _mine(ctx, j, who)]
     turn_max = _limit_of(ctx, "_music_turn_jobs_max")
     if turn_max is not None and len(in_turn) >= turn_max:
@@ -756,10 +749,19 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
         return (f"This turn already proposed {len(in_turn)} music job(s), at most {turn_max} per turn; "
                 f"no new job was made and nothing was asked. The turn's job:\n"
                 + "\n".join(_job_lines(latest)) + "\n" + _after_propose_hint(latest)).rstrip()
+    if keyed:
+        # The key is looked up in jobs that belong to this agent in this chat (or this exact
+        # chatless turn) only (P2-6). Core's key space is one for all chats, so a key another
+        # chat, another agent, the person, or a legacy job without conversation_id already used
+        # is refused without leaking that job; a foreign turn gets the same pre-card refusal
+        # as any other refusal so a guessed key cannot probe other chats with 0 cards.
+        # Checked after `turn_max` so a turn that already proposed its limit cannot distinguish
+        # a taken other-chat key from a free key with 0 cards.
+        return KEY_NOT_YOURS_REFUSAL if owner_asked else PRE_CARD_REFUSAL_FOR_OTHERS
     queue_max = _limit_of(ctx, "_music_agent_queue_max")
     active = _active_jobs(jobs, who["agent_id"])
     if queue_max is not None and len(active) >= queue_max:
-        if not owner_asked:
+        if scoped:
             return PRE_CARD_REFUSAL_FOR_OTHERS
         return (f"⚠️ music_propose_job refused: requester_queue_full: {len(active)} of this agent's music "
                 f"job(s) are queued or running, at most {queue_max} at once. Nothing was asked or proposed.")
@@ -778,6 +780,8 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
         if code == "idempotency_conflict":
             # The key names a job made elsewhere with other params; its id is not this chat's to see.
             return KEY_NOT_YOURS_REFUSAL
+        if scoped and code == "requester_queue_full":
+            return PRE_CARD_REFUSAL_FOR_OTHERS
         return refused + " Nothing was asked or proposed."
     if checked.get("repeat"):
         repeat = checked["repeat"]
@@ -816,8 +820,13 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
                            idempotency_key=idempotency_key or None, requested_by=who, **edit_args)
     refused = _error_text(answer, "music_propose_job")
     if refused:
-        if isinstance(answer, dict) and answer.get("code") == "idempotency_conflict":
-            return KEY_NOT_YOURS_REFUSAL
+        if isinstance(answer, dict):
+            code = answer.get("code")
+            if code == "idempotency_conflict":
+                return KEY_NOT_YOURS_REFUSAL
+            if scoped and code == "requester_queue_full":
+                return ("⚠️ music_propose_job refused: requester_queue_full: "
+                        "this agent's music queue is full. No job was made.")
         return refused + " No job was made."
     job = answer["job"]
     if not _mine(ctx, job, who):

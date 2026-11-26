@@ -1130,3 +1130,114 @@ def test_music_get_tools_asserts_approval_checks_cover_music_tool_names(monkeypa
     with pytest.raises(AssertionError):
         music_tools.get_tools()
 
+
+@pytest.mark.asyncio
+async def test_owner_turn_in_multi_node_group_sees_no_queue_count_when_1to1_queue_is_full(tmp_path, monkeypatch):
+    _user_home, dpc_home = await _seed_world(tmp_path, monkeypatch)
+    async with Rig(dpc_home, start_runner=False) as rig:
+        person = Person(True)
+        service = _MultiChatService(dpc_home, rig, person)
+        owner_dm = _multi_ctx(dpc_home, service, ONE_TO_ONE, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+        reg_dm = registry_for(owner_dm)
+        for i in (1, 2):
+            out = await _exec(reg_dm, owner_dm, "music_propose_job", turn=f"turn-dm{i}",
+                              params=from_text(style=f"dm track {i}"))
+            assert out.startswith("Proposed (approved by the person)."), out
+        person.asked.clear()
+
+        # Multi-node group on an owner turn (_chat_scoped_music=True) must not leak the 1:1 queue count.
+        for cls in (OTHER_NODE_TURN, OWNER_TURN):
+            ctx_multi = _multi_ctx(dpc_home, service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=cls)
+            out = await _exec(registry_for(ctx_multi), ctx_multi, "music_propose_job", turn=f"turn-m-{cls}",
+                              params=from_text(style="group song"))
+            assert out == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS, out
+            assert "queued or running" not in out and "requester_queue_full" not in out and "2 of" not in out
+
+        ctx_missing = _multi_ctx(dpc_home, service, "group-missing", asker=OWNER_ASKER, turn_class=OWNER_TURN)
+        out_missing = await _exec(registry_for(ctx_missing), ctx_missing, "music_propose_job", turn="turn-miss",
+                                  params=from_text(style="missing group song"))
+        assert out_missing == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS, out_missing
+        assert person.asked == []
+
+        # 1:1 and verified one-node group on owner turn still see the detailed queue count.
+        out_dm = await _exec(reg_dm, owner_dm, "music_propose_job", turn="turn-dm3",
+                             params=from_text(style="dm track 3"))
+        assert out_dm.startswith("⚠️ music_propose_job refused: requester_queue_full: 2 of this agent's music"), out_dm
+
+        ctx_solo = _multi_ctx(dpc_home, service, SOLO_GROUP, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+        out_solo = await _exec(registry_for(ctx_solo), ctx_solo, "music_propose_job", turn="turn-solo",
+                               params=from_text(style="solo group track"))
+        assert out_solo.startswith("⚠️ music_propose_job refused: requester_queue_full: 2 of this agent's music"), out_solo
+        assert person.asked == []
+
+    # Fallback if core's check_music_job returns requester_queue_full on an owner turn in a multi-node group.
+    service_no_limit = SimpleNamespace(
+        _conversation_display_name=lambda cid: cid,
+        p2p_manager=SimpleNamespace(get_display_name=lambda: "Owner", node_id=THIS_NODE),
+        group_manager=SimpleNamespace(
+            node_id=THIS_NODE,
+            get_group=lambda gid: SimpleNamespace(
+                group_id=gid, name="Friends", members=[THIS_NODE, FRIEND_NODE], is_discord_bridge=False
+            ) if gid == FRIENDS_GROUP else SimpleNamespace(
+                group_id=gid, name="Solo", members=[THIS_NODE], is_discord_bridge=False
+            ),
+        ),
+    )
+    _fake(monkeypatch, {"status": "error", "code": "requester_queue_full",
+                        "message": "2 music job(s) of this agent are queued or running; at most 2 at once"})
+    ctx_multi_fb = _multi_ctx(dpc_home, service_no_limit, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OTHER_NODE_TURN)
+    out_multi_fb = music_tools.music_propose_job.__wrapped__(ctx_multi_fb, params=from_text())
+    assert out_multi_fb == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
+
+    ctx_dm_fb = _multi_ctx(dpc_home, service_no_limit, ONE_TO_ONE, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+    out_dm_fb = music_tools.music_propose_job.__wrapped__(ctx_dm_fb, params=from_text())
+    assert "requester_queue_full: 2 music job(s)" in out_dm_fb
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_turn_after_its_turn_job_gets_identical_output_for_taken_and_free_keys(home):
+    async with Rig(home, start_runner=False) as rig:
+        person = Person(True)
+        service = MusicService(home, rig, person)
+        ctx_dm, dm_job = await one_job_in_the_owners_chat(home, rig, person, key="dm-secret-key")
+        assert ctx_dm.dpc_service is not None
+
+        foreign = chat_ctx(home, service, GROUP, asker=FRIEND)
+        reg = registry_for(foreign)
+        first = await call(reg, foreign, "music_propose_job", turn="turn-f1",
+                           params=from_text(style="group song"), idempotency_key="group-turn-key")
+        assert first.startswith("Proposed (approved by the person)."), first
+        group_job = next(j for j in rig.store.list_jobs() if j["id"] != dm_job["id"])
+        asked_before = len(person.asked)
+        jobs_before = len(rig.store.list_jobs())
+
+        # In the same turn after hitting turn_max, taken 1:1 key and free key must return identical output, 0 cards.
+        out_taken = await call(reg, foreign, "music_propose_job", turn="turn-f1",
+                               params=from_text(style="probe"), idempotency_key="dm-secret-key")
+        out_free = await call(reg, foreign, "music_propose_job", turn="turn-f1",
+                              params=from_text(style="probe"), idempotency_key="unused-probe-key")
+        out_none = await call(reg, foreign, "music_propose_job", turn="turn-f1",
+                              params=from_text(style="probe"))
+        out_taken_bad = await call(reg, foreign, "music_propose_job", turn="turn-f1",
+                                   params=from_text(variants=99), idempotency_key="dm-secret-key")
+        out_free_bad = await call(reg, foreign, "music_propose_job", turn="turn-f1",
+                                  params=from_text(variants=99), idempotency_key="unused-probe-key")
+
+        assert out_taken == out_free == out_none == out_taken_bad == out_free_bad
+        assert "This turn already proposed 1 music job(s)" in out_taken
+        assert group_job["id"] in out_taken and dm_job["id"] not in out_taken
+        assert out_taken != music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
+        assert len(person.asked) == asked_before
+        assert len(rig.store.list_jobs()) == jobs_before
+
+        # Repeating this turn's own key still returns this chat/turn's own job; a new turn fails closed on dm key.
+        out_own = await call(reg, foreign, "music_propose_job", turn="turn-f1",
+                             params=from_text(style="group song"), idempotency_key="group-turn-key")
+        assert out_own.startswith("This idempotency_key already names a job") and group_job["id"] in out_own
+
+        out_next_turn = await call(reg, foreign, "music_propose_job", turn="turn-f2",
+                                   params=from_text(style="next"), idempotency_key="dm-secret-key")
+        assert out_next_turn == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
+        assert len(person.asked) == asked_before
+
+
