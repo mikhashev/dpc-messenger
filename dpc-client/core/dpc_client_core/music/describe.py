@@ -390,9 +390,13 @@ Decoder = Callable[[Path, Path, Optional[float], Optional[float]], None]
 
 def ffmpeg_window_decoder(ffmpeg: Optional[str] = None) -> Decoder:
     """Decode `src` (or `[start, start + length)` of it) to a 16 kHz mono 16-bit WAV at `dest` with ffmpeg: what the
-    audio encoder hears, a small upload. Blocking; `DescribeError("decode_failed")` on a failure."""
+    audio encoder hears, a small upload. Blocking; `DescribeError("decode_failed")` on a failure. The child goes
+    through `run_probe`, so the process registry sees it (ADR-046 point 5) and it gets the console, ceiling and
+    bounded waits every child gets."""
     import shutil
     import subprocess
+
+    from ..dpc_agent.tools.process import run_probe
 
     def decode(src: Path, dest: Path, start: Optional[float], length: Optional[float]) -> None:
         exe = ffmpeg or shutil.which("ffmpeg")
@@ -407,11 +411,8 @@ def ffmpeg_window_decoder(ffmpeg: Optional[str] = None) -> Decoder:
             cmd += ["-t", f"{length:.3f}"]
         cmd += ["-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(DECODE_RATE), "-c:a", "pcm_s16le", "-f", "wav",
                 str(dest)]
-        kwargs: Dict[str, Any] = {}
-        if os.name == "nt":
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
-            result = subprocess.run(cmd, capture_output=True, timeout=DECODE_TIMEOUT_S, **kwargs)
+            result = run_probe(cmd, launcher="device_probe", timeout=DECODE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             raise DescribeError("decode_failed", f"decoding the source took longer than {DECODE_TIMEOUT_S:g} s")
         except OSError as exc:
