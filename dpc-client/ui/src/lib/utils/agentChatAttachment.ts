@@ -5,8 +5,10 @@
 // person picks Dictate (the words go to the input box, as before) or Send as
 // audio, and the paperclip attaches a file. Both travel as `execute_ai_query`'s
 // `attachment`; core keeps the file in the chat's files/ folder and the agent
-// reads where it is kept. A group is not one of these chats: with one node and
-// its agents it still dictates (ADR-032 Part B), and that rule is Mike's to change.
+// reads where it is kept. A group is not one of these chats: a group whose only
+// node is this one, with agents, sends a recording as its own audio file through
+// `send_group_file` instead (groupRecording.ts, ADR-032 Part B amended by Mike
+// 2026-11-26), and without agents it still dictates.
 
 import type { MessageAttachment } from '$lib/types.js';
 import { fileNameOf, mimeTypeFromName } from './pendingAttachment';

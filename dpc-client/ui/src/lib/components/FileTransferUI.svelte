@@ -8,6 +8,7 @@
   import { speedAndTimeLeft } from '$lib/utils/transferSpeed';
   import { transferRowLabel } from '$lib/utils/transferRowLabel';
   import { formatMegabytes, pendingFileTypeLabel, type PendingFile } from '$lib/utils/pendingAttachment';
+  import { voiceSendButton } from '$lib/utils/groupRecording';
 
   // Props (Svelte 5 runes mode)
   let {
@@ -26,6 +27,9 @@
     isLocalAIChat = false,
     // A 1:1 agent chat: the recording is either dictated or sent to the agent as audio
     isAgentChat = false,
+    // A group whose only node is this one, with agents: the recording is sent as
+    // the group's audio file for them, or dictated (Mike 2026-11-26)
+    sendsAudioToGroup = false,
     canSendAudio = true,
 
     // File offer dialog state
@@ -65,6 +69,7 @@
     isTranscribing?: boolean;
     isLocalAIChat?: boolean;
     isAgentChat?: boolean;
+    sendsAudioToGroup?: boolean;
     canSendAudio?: boolean;
     showFileOfferDialog?: boolean;
     currentFileOffer?: any;
@@ -306,12 +311,10 @@
       <button
         class="voice-send-button"
         onclick={onSendVoiceMessage}
-        disabled={isAgentChat && isTranscribing}
-        title={isAgentChat
-          ? "Send the recording to the agent as an audio file, with the words typed"
-          : "Send voice message"}
+        disabled={(isAgentChat || sendsAudioToGroup) && isTranscribing}
+        title={voiceSendButton({ isAgentChat, sendsAudioToGroup }).title}
       >
-        {#if isAgentChat}🎵 Send as audio{:else}Send{/if}
+        {voiceSendButton({ isAgentChat, sendsAudioToGroup }).label}
       </button>
     {/if}
     <button

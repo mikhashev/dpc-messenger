@@ -63,6 +63,7 @@
     takesAgentAttachments, unconfirmedNoticeFor,
     type AgentChatAttachment, type HeldAgentSend, type UnconfirmedRestore,
   } from '$lib/utils/agentChatAttachment';
+  import { groupRecordingRoute, groupRecordingSentNotice } from '$lib/utils/groupRecording';
 
   type AIChatMeta = {
     name: string;
@@ -166,14 +167,16 @@
   } = $props();
 
   // Where a recording can actually go. An AI or agent chat has no node to
-  // send audio to, and a group of one routes to dictation (ADR-032 Part B) —
-  // in both the "Send" button would quietly do the other thing.
+  // send audio to, and a group of one with no agent routes to dictation
+  // (ADR-032 Part B) — in both the "Send" button would quietly do the other
+  // thing. A group of one with agents keeps the recording as its audio file
+  // for them (groupRecordingRoute, Mike 2026-11-26).
   function voiceAudioSinkExists(chatId: string): boolean {
     if (!chatId || chatId === 'local_ai' || chatId.startsWith('ai_') || chatId.startsWith('agent_')) {
       return false;
     }
     if (chatId.startsWith('group-')) {
-      return (get(groupChats).get(chatId)?.members?.length ?? 1) > 1;
+      return groupRecordingRoute($groupChats.get(chatId)) !== 'dictation';
     }
     return true;
   }
@@ -244,8 +247,14 @@
     (agentChatToAgentId.get(activeChatId) ?? activeChatId).startsWith('agent_')
   );
   // A 1:1 agent chat: a recording can go to the agent as audio and the paperclip
-  // attaches a file for it (ADR-051 Phase 0). Never a group (ADR-032 Part B stands).
+  // attaches a file for it (ADR-051 Phase 0). Never a group: a group of one with
+  // agents takes a recording as its own audio file (sendsAudioToGroup below).
   let agentTakesAttachments = $derived(takesAgentAttachments(activeChatId, isAgentChat));
+  // A group whose only node is this one, with agents: "Send as audio" keeps the
+  // recording in the group as an audio file for them, beside dictation (Mike 2026-11-26).
+  let sendsAudioToGroup = $derived(
+    activeChatId.startsWith('group-') && groupRecordingRoute($groupChats.get(activeChatId)) === 'audio_file'
+  );
   // The agent's own Voice model (Agent Configuration); '' = the node's automatic choice.
   let agentVoiceAlias = $derived(
     (($agentsList || []).find((a: any) => a.agent_id === (agentChatToAgentId.get(activeChatId) ?? activeChatId)) as any)
@@ -1216,14 +1225,51 @@
           return m;
         });
       } else if (activeChatId.startsWith('group-')) {
-        // ≤1 node (agents are node-less) → dictation into input, not a voice message (ADR-032 Part B)
-        const group = get(groupChats).get(activeChatId);
-        if ((group?.members?.length ?? 1) <= 1) {
+        const route = groupRecordingRoute(get(groupChats).get(activeChatId));
+        if (route === 'dictation') {
+          // ≤1 node (agents are node-less) and no agent → dictation into input (ADR-032 Part B)
           await handleTranscribeVoiceMessage();
           return;
         }
-        const base64Audio = await _blobToBase64(blob);
-        reportNotOffered(activeChatId, await sendGroupVoiceMessage(activeChatId, base64Audio, duration, blob.type || 'audio/webm'));
+        if (route === 'audio_file' && voicePreview.filePath) {
+          // Send as audio (Mike 2026-11-26): this node alone with its agents. The
+          // recorder's WAV is kept in the group's files/ as an audio file, with the
+          // words typed as its text, through the paperclip's command; its @mentions
+          // wake the agents, which read the file's marker. Core copies it, so the
+          // temp file is removed here once core has answered. The chip goes at
+          // once (a second press would send it twice) and comes back on a failure.
+          const preview = voicePreview;
+          const recorded = voicePreview.filePath;
+          const chatId = activeChatId;
+          const text = currentInput.trim();
+          voicePreview = null;
+          let result: any;
+          try {
+            result = await sendGroupFile(chatId, recorded, text);
+            if (result?.status === 'error') throw new Error(result.message || 'the group send failed');
+          } catch (error) {
+            if (activeChatId === chatId && !voicePreview) voicePreview = preview;
+            // A recording that could not go back has nowhere to be sent from: drop its temp file.
+            else import('@tauri-apps/plugin-fs').then(({ remove }) => remove(recorded)).catch(() => {});
+            throw error;
+          }
+          chatDraftInputs = new Map(chatDraftInputs).set(chatId, '');
+          if (activeChatId === chatId && currentInput.trim() === text) currentInput = '';
+          try {
+            const { remove } = await import('@tauri-apps/plugin-fs');
+            await remove(recorded);
+          } catch { /* ignore */ }
+          fileOfferToastMessage = groupRecordingSentNotice(text);
+          showFileOfferToast = true;
+          setTimeout(() => (showFileOfferToast = false), 6000);
+          return;
+        } else {
+          // More than one node: a voice message to the members, as before. A browser
+          // recorder (no file, only the bytes) in a group of one with agents goes the
+          // same way: core keeps it in the group's history, where the agents see it.
+          const base64Audio = await _blobToBase64(blob);
+          reportNotOffered(activeChatId, await sendGroupVoiceMessage(activeChatId, base64Audio, duration, blob.type || 'audio/webm'));
+        }
       } else if (agentTakesAttachments) {
         // Send as audio: the recording goes to the agent as a file, with the words
         // typed. Core moves the recorder's temp file into the chat's files/, so it
@@ -1443,6 +1489,7 @@
     isLocalAIChat={!agentTakesAttachments && (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')
       || activeChatId.startsWith('agent_'))}
     isAgentChat={agentTakesAttachments}
+    {sendsAudioToGroup}
     canSendAudio={agentTakesAttachments || voiceAudioSinkExists(activeChatId)}
     showFileOfferDialog={showFileOfferDialog}
     currentFileOffer={currentFileOffer}
