@@ -834,6 +834,17 @@ invented. The letters A-L are the plan's questions; each is placed under one dec
   #68 P3):* an agent's cancel compares the agent **and** the conversation, so the same agent's
   turn in another chat does not cancel the job (`not_your_job`). **Built at `98ceed3a`, not
   observed live.**
+  *Amendment (Mike 2026-11-26):* `mp.job/1` gains an optional bounded `request` block
+  (`{message_id?, text?, title?, asked?, changes?, surface?, form?}`): agent turns record the
+  triggering message id (`SpawnOrigin.message_id`), a clipped prompt excerpt (`text`), the song
+  `title`, what was `asked`, and what the agent changed (`changes[]`), while the player records
+  `{surface: "player", title?, form}`. When `request.title` is non-empty, takes and generated
+  library entries take that title (and a safe cross-platform slug of it) instead of a clipped style
+  string. `requested_by` and `request` are copied into `mp.provenance/1` outside the
+  genotype/intent/substrate hashes; exports leaving the node (`withhold_for_export`) redact
+  `requested_by.conversation_id`, `requested_by.turn_id`, `request.message_id`, and `request.text`
+  to `withheld_on_export` alongside `node_id`, while keeping `request.title`, `asked`, `changes`,
+  `surface`, and `requested_by.agent_id`.
 - **D47. `music_propose_job` asks the owner's approval, as `schedule_task` does** (letter J,
   Mike #53-#57; Zcode #51 correction 7). A GPU job needs the person's consent, and the plan,
   copying `comfyui_submit`, would have inherited "no question". The approval machinery of

@@ -9,6 +9,8 @@
 // fills the source's facts and the reused lyrics; this module only shapes the request and says what the
 // capability report already says.
 
+import type { MusicRequest } from './musicCreate';
+
 export type SongMode = 'same_style' | 'cover';
 export type SongEngine = 'acestep' | 'yue2';
 /** Ruach Studio's three ways to write a cover's score (index.html:1250-1254): the lead melody (the default),
@@ -65,6 +67,7 @@ export interface SongSource {
 
 export interface SimilarForm {
     mode: SongMode;
+    title?: string;
     source: SongSource;
     keep: Record<KeepKey, boolean>;
     keepValues: Record<KeepKey, string>;
@@ -95,7 +98,7 @@ export function emptySimilarForm(source: SongSource, mode: SongMode = 'same_styl
     const d = source.durationS ? Math.round(source.durationS) : 120;
     const end = source.durationS ? Math.min(SECTION.default, Math.floor(source.durationS * 25) / 25) : SECTION.default;
     return {
-        mode, source, keep: { ...KEEP_DEFAULT }, keepValues, caption: '', captionEdited: false, lyricsMode: 'none',
+        mode, title: '', source, keep: { ...KEEP_DEFAULT }, keepValues, caption: '', captionEdited: false, lyricsMode: 'none',
         lyricsTheme: '', reference: 'description', engine: 'yue2', engineChosen: false, coverScore: 'melody',
         coverLyrics: 'reuse', coverStrength: 1, sectionStart: '0', sectionEnd: String(end),
         variants: 2, durationS: String(Math.min(Math.max(d, DURATION.acestep.min), DURATION.acestep.max)),
@@ -305,6 +308,34 @@ export function validateSimilarForm(form: SimilarForm): SimilarValidation {
     }
     if (Object.keys(errors).length) return { ok: false, errors };
     return { ok: true, type: SONG_TYPE[form.mode], trackId: form.source.id, params };
+}
+
+/** Player request metadata attached to a Same-style or Cover job (`job.request`). */
+export function buildSimilarRequest(form: SimilarForm, params: Record<string, unknown>): MusicRequest {
+    const cleanTitle = (form.title ?? '').replace(/\s+/g, ' ').trim();
+    const payloadForm: Record<string, unknown> = {
+        mode: form.mode,
+        source_track_id: form.source.id,
+        source_title: form.source.title,
+        engine: form.engine,
+    };
+    if (typeof params.caption === 'string') payloadForm.caption = params.caption;
+    if (params.lyrics_mode !== undefined) payloadForm.lyrics_mode = params.lyrics_mode;
+    if (typeof params.lyrics_theme === 'string' && params.lyrics_theme) payloadForm.lyrics_theme = params.lyrics_theme;
+    if (params.keep !== undefined) payloadForm.keep = params.keep;
+    if (params.keep_from_source !== undefined) payloadForm.keep_from_source = params.keep_from_source;
+    if (params.source_section !== undefined) payloadForm.source_section = params.source_section;
+    if (params.reference !== undefined) payloadForm.reference = params.reference;
+    if (params.cot !== undefined) payloadForm.cot = params.cot;
+    if (params.vocal_only !== undefined) payloadForm.vocal_only = params.vocal_only;
+    if (params.cover_strength !== undefined) payloadForm.cover_strength = params.cover_strength;
+    if (params.variants !== undefined) payloadForm.variants = params.variants;
+    if (params.duration_s !== undefined) payloadForm.duration_s = params.duration_s;
+    return {
+        surface: 'player',
+        ...(cleanTitle ? { title: cleanTitle } : {}),
+        form: payloadForm,
+    };
 }
 
 /** Whether a refusal (the form's, or the core's `missing_lyrics`) should offer an acestep cover instead. */

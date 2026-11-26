@@ -105,6 +105,28 @@ export function editProposal(v: EditFormValues, duration: number | null | undefi
     };
 }
 
+export function buildEditRequest(
+    trackId: string,
+    proposal: EditProposal,
+    title?: string,
+): { surface: 'player'; title?: string; form: Record<string, unknown> } {
+    const cleanTitle = (title ?? '').replace(/\s+/g, ' ').trim();
+    const form: Record<string, unknown> = {
+        track_id: trackId,
+        action: proposal.action,
+        region: { ...proposal.region },
+    };
+    if (typeof proposal.params?.caption === 'string' && proposal.params.caption.trim()) {
+        form.caption = proposal.params.caption.trim();
+    }
+    if (proposal.params?.cut_with_shift) form.cut_with_shift = true;
+    return {
+        surface: 'player',
+        ...(cleanTitle ? { title: cleanTitle } : {}),
+        form,
+    };
+}
+
 /** The meta line of an edit job's row: what, where, how many takes. */
 export function editJobLine(job: { action?: string | null; region?: { t_start: number; t_end: number } | null;
                                     params?: Record<string, any> }): string {

@@ -151,7 +151,7 @@ import type { MusicComment } from './utils/musicComments';
 import type { PrepReport } from './utils/musicLyricsPrep';
 import type { RawTranscriptAnswer } from './utils/musicLyricsFilter';
 import { callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
-import type { DiscardReason, MusicCapabilities, MusicEngine, MusicJob, MusicTake } from './utils/musicCreate';
+import type { DiscardReason, MusicCapabilities, MusicEngine, MusicJob, MusicRequest, MusicTake } from './utils/musicCreate';
 import type { JobQc, TakeQc } from './utils/musicQc';
 import type { DeleteExportAnswer, MusicExportInfo, PlaylistExportAnswer, TrackExportAnswer } from './utils/musicExport';
 
@@ -2231,15 +2231,19 @@ export function getMusicCapabilities(): Promise<MusicAnswer<{ capabilities: Musi
 }
 
 /** Queue a job (`queued`), or get it back `unsupported` with the reason. */
-export function proposeMusicJob(type: string, params: Record<string, any>, idempotencyKey?: string): Promise<MusicAnswer<{ job: MusicJob }>> {
-    return callMusic(sendCommand, 'propose_music_job', idempotencyKey ? { type, params, idempotency_key: idempotencyKey } : { type, params });
+export function proposeMusicJob(type: string, params: Record<string, any>, idempotencyKey?: string, request?: MusicRequest):
+        Promise<MusicAnswer<{ job: MusicJob }>> {
+    const args: Record<string, unknown> = { type, params };
+    if (idempotencyKey) args.idempotency_key = idempotencyKey;
+    if (request) args.request = request;
+    return callMusic(sendCommand, 'propose_music_job', args);
 }
 
 /** Propose a region edit of a library track (`type: "edit"`, ADR-051 row B4). Without `comment_id` the
  *  core makes the region comment from `region`, `action` and `prompt`. */
 export function proposeMusicEdit(args: {
     track_id: string; action: string; region: { t_start: number; t_end: number }; prompt: string;
-    params: Record<string, unknown>; comment_id?: string; idempotency_key?: string;
+    params: Record<string, unknown>; comment_id?: string; idempotency_key?: string; request?: MusicRequest;
 }): Promise<MusicAnswer<{ job: MusicJob }>> {
     return callMusic(sendCommand, 'propose_music_job', { type: 'edit', ...args });
 }
@@ -2259,10 +2263,12 @@ export function describeMusicTrack(trackId: string, refresh = false): Promise<Mu
 
 /** Propose a song from a library track (`generate_similar`, `cover`, `generate_from_lyrics`; ADR-051 row B5, music/similar.py):
  *  the core fills the source's facts and, where they are reused, the stored lyrics. */
-export function proposeMusicSong(type: string, trackId: string, params: Record<string, unknown>, idempotencyKey?: string):
+export function proposeMusicSong(type: string, trackId: string, params: Record<string, unknown>, idempotencyKey?: string,
+                                 request?: MusicRequest):
         Promise<MusicAnswer<{ job: MusicJob }>> {
     const args: Record<string, unknown> = { type, track_id: trackId, params };
     if (idempotencyKey) args.idempotency_key = idempotencyKey;
+    if (request) args.request = request;
     return callMusic(sendCommand, 'propose_music_job', args);
 }
 

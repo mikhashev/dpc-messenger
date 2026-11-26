@@ -227,12 +227,21 @@ _JOB_KEYS = set(_JOB_REQUIRED) | {
     "prompt", "state_reason", "progress", "take_ids", "result_text", "result", "backend",
     "history", "updated_at",
     # extensions, see the module docstring
-    "idempotency_key", "payloads", "card_wait", "engine_choice", "requested_by",
+    "idempotency_key", "payloads", "card_wait", "engine_choice", "requested_by", "request",
 }
 REQUESTER_PERSON, REQUESTER_AGENT = "person", "agent"
 REQUESTER_KINDS = (REQUESTER_PERSON, REQUESTER_AGENT)
 _REQUESTED_BY_KEYS = {"kind", "agent_id", "conversation_id", "turn_id"}
 MAX_REQUESTER_ID_LEN = 200
+REQUEST_KEYS = frozenset({"message_id", "text", "title", "asked", "changes", "surface", "form"})
+MAX_REQUEST_TITLE = 200
+MAX_REQUEST_TEXT = 2000
+MAX_REQUEST_ID_LEN = 200
+MAX_REQUEST_SURFACE_LEN = 64
+MAX_REQUEST_CHANGES = 64
+MAX_REQUEST_CHANGE_LEN = 500
+MAX_REQUEST_MAPPING_KEYS = 64
+MAX_REQUEST_MAPPING_BYTES = 8192
 ENGINE_CHOICE_RULES = ("instrumental",)
 _ENGINE_CHOICE_KEYS = {"rule", "engine", "adapters", "fallback", "reason", "at", "fell_back"}
 _FELL_BACK_KEYS = {"from", "adapters", "why", "at"}
@@ -346,6 +355,87 @@ def requested_by_of(job: Mapping[str, Any]) -> dict:
     field existed."""
     rb = job.get("requested_by")
     return dict(rb) if isinstance(rb, Mapping) else {"kind": REQUESTER_PERSON}
+
+
+def _clip_request_text(text: str, limit: int, *, collapse_ws: bool = False) -> str:
+    s = " ".join(text.split()) if collapse_ws else text.strip()
+    if len(s) <= limit:
+        return s
+    return s[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _check_request_mapping(value: Any, field_name: str) -> dict:
+    if not isinstance(value, Mapping):
+        raise ParamsError("request", f"request.{field_name} must be an object")
+    try:
+        clean = json.loads(json.dumps(dict(value), ensure_ascii=False, allow_nan=False))
+    except (TypeError, ValueError) as exc:
+        raise ParamsError("request", f"request.{field_name} must be plain JSON: {exc}")
+    if not isinstance(clean, dict):
+        raise ParamsError("request", f"request.{field_name} must be an object")
+    if len(clean) > MAX_REQUEST_MAPPING_KEYS:
+        raise ParamsError("request", f"request.{field_name} has too many keys (at most {MAX_REQUEST_MAPPING_KEYS})")
+    encoded = json.dumps(clean, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > MAX_REQUEST_MAPPING_BYTES:
+        raise ParamsError("request", f"request.{field_name} is {len(encoded)} bytes, over the "
+                                     f"{MAX_REQUEST_MAPPING_BYTES}-byte limit")
+    return clean
+
+
+def check_request(value: Any) -> Optional[dict]:
+    """Optional `request` block on `mp.job/1`: bounded canonical dict, or None when empty."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ParamsError("request", "request must be an object")
+    extra = sorted(set(value) - REQUEST_KEYS)
+    if extra:
+        raise ParamsError("request", f"request has undeclared key(s): {', '.join(extra)}")
+    out: Dict[str, Any] = {}
+    for key, limit in (("message_id", MAX_REQUEST_ID_LEN), ("surface", MAX_REQUEST_SURFACE_LEN)):
+        item = value.get(key)
+        if item is None:
+            continue
+        if not _is_str(item) or not item.strip() or len(item.strip()) > limit:
+            raise ParamsError("request", f"request.{key} must be a non-empty string of at most {limit} characters")
+        out[key] = item.strip()
+    title = value.get("title")
+    if title is not None:
+        if not _is_str(title):
+            raise ParamsError("request", "request.title must be text")
+        cleaned_title = _clip_request_text(title, MAX_REQUEST_TITLE, collapse_ws=True)
+        if cleaned_title:
+            out["title"] = cleaned_title
+    text = value.get("text")
+    if text is not None:
+        if not _is_str(text):
+            raise ParamsError("request", "request.text must be text")
+        cleaned_text = _clip_request_text(text, MAX_REQUEST_TEXT, collapse_ws=False)
+        if cleaned_text:
+            out["text"] = cleaned_text
+    for mkey in ("asked", "form"):
+        mval = value.get(mkey)
+        if mval is not None:
+            out[mkey] = _check_request_mapping(mval, mkey)
+    changes = value.get("changes")
+    if changes is not None:
+        if not isinstance(changes, (list, tuple)):
+            raise ParamsError("request", "request.changes must be a list")
+        if len(changes) > MAX_REQUEST_CHANGES:
+            raise ParamsError("request", f"request.changes has too many entries (at most {MAX_REQUEST_CHANGES})")
+        cleaned_changes: List[Any] = []
+        for idx, entry in enumerate(changes):
+            if _is_str(entry):
+                item = _clip_request_text(entry, MAX_REQUEST_CHANGE_LEN, collapse_ws=True)
+                if not item:
+                    raise ParamsError("request", f"request.changes[{idx}] must not be blank")
+                cleaned_changes.append(item)
+            elif isinstance(entry, Mapping):
+                cleaned_changes.append(_check_request_mapping(entry, f"changes[{idx}]"))
+            else:
+                raise ParamsError("request", f"request.changes[{idx}] must be a string or an object")
+        out["changes"] = cleaned_changes
+    return out or None
 
 
 def _check_keys(schema: str, record: Any, required: Iterable[str], allowed: set) -> None:
@@ -1323,6 +1413,13 @@ def validate_job(job: Any) -> None:
         except ParamsError as exc:
             _fail(s, exc.message)
         _expect(s, clean == dict(job["requested_by"]), "'requested_by' must not carry null or extra keys")
+    if "request" in job and job["request"] is not None:
+        try:
+            clean_req = check_request(job["request"])
+        except ParamsError as exc:
+            _fail(s, exc.message)
+        _expect(s, clean_req is not None and clean_req == dict(job["request"]),
+                "'request' must carry valid canonical request fields")
 
 
 def check_reason(reason_text: Any, reason_class: Any) -> tuple:

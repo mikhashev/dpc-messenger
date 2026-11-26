@@ -309,13 +309,15 @@ class SpawnOrigin:
 
     `conversation_id` is the code's word; the screen says "chat". `turn_id` is
     the loop's id of the turn the call belongs to (`loop._new_turn_id`): what
-    the user's Kill ends is the turn, every round and tool of it."""
+    the user's Kill ends is the turn, every round and tool of it. `message_id`
+    names the triggering chat message when known."""
 
     agent_id: str = ""
     conversation_id: str = ""
     tool: str = ""
     round: int = 0
     turn_id: str = ""
+    message_id: str = ""
 
 
 SPAWN_ORIGIN: "contextvars.ContextVar[Optional[SpawnOrigin]]" = contextvars.ContextVar(

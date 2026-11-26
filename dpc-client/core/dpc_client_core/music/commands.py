@@ -1209,7 +1209,8 @@ class MusicCommandsMixin:
     async def propose_music_job(self, type: Any = None, params: Any = None, track_id: Any = None,
                                 base_version_id: Any = None, comment_id: Any = None, action: Any = None,
                                 region: Any = None, prompt: Any = None,
-                                idempotency_key: Any = None, requested_by: Any = None) -> Dict[str, Any]:
+                                idempotency_key: Any = None, requested_by: Any = None,
+                                request: Any = None) -> Dict[str, Any]:
         """Propose a job. `requested_by` (`{kind: "person"|"agent", agent_id?, conversation_id?,
         turn_id?}`) says who asks; without it the person does (the UI door sends none). An
         agent's request is limited (`requester_queue_full`, `turn_job_limit`: `[music]
@@ -1232,6 +1233,8 @@ class MusicCommandsMixin:
                 ("action", action), ("prompt", prompt), ("idempotency_key", idempotency_key))}
             if requested_by is not None and not isinstance(requested_by, dict):
                 raise _bad("invalid_params", "requested_by", "an object or null")
+            if request is not None and not isinstance(request, dict):
+                raise _bad("invalid_params", "request", "an object or null")
             store = await self._music_jobs()
             queue_max, turn_max = self._music_agent_queue_max(), self._music_turn_jobs_max()
             source = None
@@ -1242,8 +1245,8 @@ class MusicCommandsMixin:
                     probe = dict(strs, comment_id="cmt_" + "0" * 16,
                                  base_version_id=strs.get("base_version_id") or ORIGINAL_VERSION_ID)
                     checked = await asyncio.to_thread(lambda: store.check_job(
-                        job_type, params, region=region, requested_by=requested_by, source=source,
-                        agent_queue_max=queue_max, turn_jobs_max=turn_max, **probe))
+                        job_type, params, region=region, requested_by=requested_by, request=request,
+                        source=source, agent_queue_max=queue_max, turn_jobs_max=turn_max, **probe))
                     if checked.get("repeat"):
                         return {"status": "ok", "job": checked["repeat"]}
                 await self._music_edit_comment(strs, region, requested_by)
@@ -1252,7 +1255,7 @@ class MusicCommandsMixin:
                 strs["base_version_id"] = strs.get("base_version_id") or ORIGINAL_VERSION_ID
                 params = await self._music_song_params(job_type, params, strs.get("track_id"))
             job = await asyncio.to_thread(lambda: store.create_job(
-                job_type, params, region=region, requested_by=requested_by, source=source,
+                job_type, params, region=region, requested_by=requested_by, request=request, source=source,
                 agent_queue_max=queue_max, turn_jobs_max=turn_max, **strs))
             if job.get("state") == "queued":
                 self._music_wake_runner()
@@ -1264,7 +1267,8 @@ class MusicCommandsMixin:
     @slow_command
     async def check_music_job(self, type: Any = None, params: Any = None,
                               idempotency_key: Any = None, requested_by: Any = None, track_id: Any = None,
-                              action: Any = None, region: Any = None, prompt: Any = None) -> Dict[str, Any]:
+                              action: Any = None, region: Any = None, prompt: Any = None,
+                              request: Any = None) -> Dict[str, Any]:
         """What `propose_music_job` with these arguments would answer, without making a job, for
         the agent runtime (music tools follow-up 12): `{repeat: job|null, params}`, or the error
         `propose_music_job` would give, and `unsupported` (with the reason) where it would make
@@ -1277,6 +1281,8 @@ class MusicCommandsMixin:
             key = _opt_str(idempotency_key, "idempotency_key", "invalid_params")
             if requested_by is not None and not isinstance(requested_by, dict):
                 raise _bad("invalid_params", "requested_by", "an object or null")
+            if request is not None and not isinstance(request, dict):
+                raise _bad("invalid_params", "request", "an object or null")
             if region is not None and not isinstance(region, dict):
                 raise _bad("invalid_params", "region", "an object or null")
             store = await self._music_jobs()
@@ -1294,7 +1300,7 @@ class MusicCommandsMixin:
                         "source": await self._music_edit_source(tid)}
                 params = await self._music_song_params(job_type, params, tid)
             answer = await asyncio.to_thread(lambda: store.check_job(
-                job_type, params, idempotency_key=key, requested_by=requested_by,
+                job_type, params, idempotency_key=key, requested_by=requested_by, request=request,
                 agent_queue_max=queue_max, turn_jobs_max=turn_max, **edit))
             return {"status": "ok", **answer}
         except Exception as exc:

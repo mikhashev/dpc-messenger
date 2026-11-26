@@ -54,6 +54,7 @@ import {
     type MusicCapabilities,
     type MusicEngine,
     type MusicJob,
+    type MusicRequest,
     type MusicTake,
 } from '$lib/utils/musicCreate';
 import { loadMusicLibrary, noteTracksHidden } from '$lib/services/music';
@@ -234,8 +235,9 @@ export async function proposeEdit(args: Parameters<typeof proposeMusicEdit>[0]):
 
 /** Generate: `propose_music_job {type: generate_from_text}`. The job comes back `queued`,
  *  or `unsupported` with the reason; either way it is in the list. */
-export async function proposeFromText(params: Record<string, any>, idempotencyKey: string): Promise<MusicAnswer<{ job: MusicJob }>> {
-    const a = await proposeMusicJob(FROM_TEXT, params, idempotencyKey);
+export async function proposeFromText(params: Record<string, any>, idempotencyKey: string, request?: MusicRequest):
+        Promise<MusicAnswer<{ job: MusicJob }>> {
+    const a = await proposeMusicJob(FROM_TEXT, params, idempotencyKey, request);
     if (a.ok) putJob(a.data.job);
     return a;
 }
@@ -247,9 +249,10 @@ export function describeSource(trackId: string, refresh = false): ReturnType<typ
 
 /** A song from a library track (Same style, Cover; SPEC flows 10, 17): the job joins the list like any other,
  *  and its takes are reviewed in the Create panel. */
-export async function proposeSong(type: string, trackId: string, params: Record<string, unknown>, idempotencyKey: string):
+export async function proposeSong(type: string, trackId: string, params: Record<string, unknown>, idempotencyKey: string,
+                                  request?: MusicRequest):
         Promise<MusicAnswer<{ job: MusicJob }>> {
-    const a = await proposeMusicSong(type, trackId, params, idempotencyKey);
+    const a = await proposeMusicSong(type, trackId, params, idempotencyKey, request);
     if (a.ok) putJob(a.data.job);
     return a;
 }

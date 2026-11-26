@@ -1438,7 +1438,8 @@ class MusicLibrary:
         self._entries[entry["id"]] = entry
         return entry
 
-    async def register_generated(self, path: str, *, job_id: str, lineage: Optional[dict] = None) -> dict:
+    async def register_generated(self, path: str, *, job_id: str, lineage: Optional[dict] = None,
+                                 title: Optional[str] = None) -> dict:
         """Put a generated take's file into the library, once (ADR-051 D21), and return
         its entry. This is the only way a take enters the library: `origin: "generated"`
         is set here and nowhere else, and the "Generated" smart list is derived from it.
@@ -1482,6 +1483,8 @@ class MusicLibrary:
         other = present[0] if present else (missing[0] if missing else None)
         self._resolve(e, ident, stat)
         if other is None:
+            if isinstance(title, str) and title.strip():
+                e["title"] = title.strip()
             result = e
             if self.on_added is not None:
                 try:

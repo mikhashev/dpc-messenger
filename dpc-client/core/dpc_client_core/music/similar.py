@@ -276,12 +276,16 @@ class SongDress:
     # The style the engine got when it is not the caption (a same-style song's merged style): the take's title,
     # lineage and file tags follow it.
     style_sent: Optional[str] = None
+    request_title: Optional[str] = None
+    variants: int = 1
 
     @property
     def relation(self) -> str:
         return js.SONG_RELATIONS[self.job_type]
 
     def title(self, variant: int) -> str:
+        if self.request_title:
+            return self.request_title if self.variants <= 1 else f"{self.request_title} (v{variant})"
         return f"{TITLE_PREFIX[self.job_type]} {self.params['source_title'][:60]} (v{variant})"
 
     def lineage(self, variant: int) -> Dict[str, Any]:
@@ -410,8 +414,8 @@ async def run_song_job(runner: Any, job: dict) -> None:
 
 async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _Prepared:
     """The source, the decoded audio and the payloads, while the job is still `queued`."""
-    from .runner import LM_PAYLOAD, SYNTH_PAYLOAD, _JobFailure, _file_sha256, read_wav_info, variant_seed, \
-        yue2_request_name
+    from .runner import LM_PAYLOAD, SYNTH_PAYLOAD, _JobFailure, _file_sha256, job_request_title, read_wav_info, \
+        variant_seed, yue2_request_name
     job_id, job_type, params = job["id"], job["type"], job["params"]
     track_id = job["track_id"]
     library = await runner._library()
@@ -539,7 +543,9 @@ async def _prepare(runner: Any, job: dict, out_dir: Path, source_wav: Path) -> _
     # The source's licence follows its audio, or its own stored lyrics; lines the caller typed under
     # `reuse` are not the source's (Zcode #188, finding 1).
     dress = SongDress(job_type, params, parent, song, song_payload_sha=song_sha,
-                      inherit_licence=audio is not None or params.get("lyrics_source") == "stored")
+                      inherit_licence=audio is not None or params.get("lyrics_source") == "stored",
+                      request_title=job_request_title(job),
+                      variants=int(params.get("variants") or 1))
     if style is not None:
         dress.style_sent = style
         dress.prompt_cut_s = section_s_of(params)
@@ -600,7 +606,7 @@ async def _on_the_card(runner: Any, job: dict, prepared: _Prepared, engine: Any)
 async def _cover_on_acestep(runner: Any, job: dict, prepared: _Prepared, engine: Any,
                             engine_job: List[Optional[str]]) -> None:
     """One multipart `/synth` (task cover, the source as `audio`) with every variant in its batch."""
-    from .runner import SYNTH_PAYLOAD, _JobFailure, _range_sha256, multipart_boundary, slug_of, \
+    from .runner import SYNTH_PAYLOAD, _JobFailure, _range_sha256, job_request_title, multipart_boundary, slug_of, \
         split_multipart_file
     job_id, params = job["id"], job["params"]
     variants = int(params["variants"])
@@ -623,10 +629,12 @@ async def _cover_on_acestep(runner: Any, job: dict, prepared: _Prepared, engine:
     identity = await asyncio.to_thread(engine.identity)
     request = json.loads(synth_body.decode("utf-8"))
     now = await runner._get(job_id)
-    payloads = {p["name"]: p["sha256"] for p in (now or {}).get("payloads") or []
+    source_job = now or job
+    payloads = {p["name"]: p["sha256"] for p in source_job.get("payloads") or []
                 if p["name"] in (SONG_PAYLOAD, SYNTH_PAYLOAD)}
     seed = prepared.seed
-    slug = slug_of(f"{params['source_title']}-cover")
+    req_title = job_request_title(source_job)
+    slug = slug_of(req_title or f"{params['source_title']}-cover")
     version = identity.get("version") or ""
     for index, (_h, a, b) in enumerate(audio):
         await runner._check(job_id)
@@ -639,7 +647,8 @@ async def _cover_on_acestep(runner: Any, job: dict, prepared: _Prepared, engine:
             return prov.build_acestep_record(
                 job_id=job_id, variant=variant, params=view, identity=identity, lm_request=request, lm_result={},
                 synth_request=request, seed=seed, batch_size=variants, batch_index=index, window_s=None,
-                payloads=payloads, **facts)
+                payloads=payloads, requested_by=source_job.get("requested_by"),
+                job_request=source_job.get("request"), **facts)
 
         await runner._store_take(
             job_id, view, out_dir, slug, variant, multipart, a, b, latent_sha=latent_sha, provenance=make_record,

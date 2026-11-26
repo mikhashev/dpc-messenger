@@ -35,6 +35,7 @@
     YUE2_COVER_CAVEATS,
     YUE2_SAME_STYLE_NOTE,
     applyDescription,
+    buildSimilarRequest,
     captionFromKeep,
     defaultEngine,
     describerOf,
@@ -173,7 +174,7 @@
     errors = {};
     busy = true;
     try {
-      const a = await proposeSong(v.type, v.trackId, v.params, newKey());
+      const a = await proposeSong(v.type, v.trackId, v.params, newKey(), buildSimilarRequest(form, v.params));
       if (!a.ok) {
         errors = { [similarFieldOf(a.field)]: a.message };
         refusalCode = a.code;
@@ -258,6 +259,10 @@
   {:else}
     <p class="small">Kept from the source: melody{form.coverLyrics === 'reuse' ? ' and lyrics (the stored ones)' : ''}.</p>
   {/if}
+
+  <label class="field-label" for="similar-title">Title (optional)</label>
+  <input id="similar-title" class="text-input" type="text" bind:value={form.title}
+    placeholder="e.g. {source.title} rework (used for the take and library track)" />
 
   <label class="field-label" for="similar-caption">{form.mode === 'cover' ? 'Target style' : 'Style description'}</label>
   <input id="similar-caption" class="text-input" type="text" value={shownCaption} oninput={onCaption}

@@ -36,6 +36,7 @@
     ENGINE_CHOICES,
     VOICE_NOTE,
     backbonePresent,
+    buildCreateRequest,
     cardHolders,
     defaultEngineOf,
     engineCanStart,
@@ -168,7 +169,7 @@
     errors = {};
     generating = true;
     try {
-      const a = await proposeFromText(v.params, newKey());
+      const a = await proposeFromText(v.params, newKey(), buildCreateRequest($musicCreateDraft));
       if (!a.ok) {
         errors = { [formFieldOf(a.field)]: a.message };
         return;
@@ -337,6 +338,15 @@
       {/if}
       <p id="mc-voice-note" class="muted tiny">{caps?.engines?.yue2?.adapter_note ?? VOICE_NOTE}{adapters.length ? '' : ' No adapters were found in the adapters folder.'}</p>
     {/if}
+
+    <label class="field-label" for="mc-title">Title (optional)</label>
+    <input
+      id="mc-title"
+      class="text-input"
+      type="text"
+      placeholder="e.g. Neon Rain (used for the take and library track)"
+      bind:value={$musicCreateDraft.title}
+    />
 
     <label class="field-label" for="mc-lyrics">Lyrics</label>
     <textarea

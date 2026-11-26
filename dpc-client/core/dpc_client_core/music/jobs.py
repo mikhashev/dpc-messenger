@@ -438,9 +438,9 @@ class MusicJobStore:
             job["card_wait"] = None
 
     def _new_job(self, job_type: str, params: dict, *, track_id, base_version_id, comment_id, action, region,
-                 prompt, idempotency_key, requested_by) -> dict:
+                 prompt, idempotency_key, requested_by, request=None) -> dict:
         at = self._now()
-        return {
+        job = {
             "schema": js.JOB,
             "id": _new_id("job_"),
             "type": job_type,
@@ -465,6 +465,9 @@ class MusicJobStore:
             "engine_choice": None,
             "requested_by": requested_by,
         }
+        if request is not None:
+            job["request"] = request
+        return job
 
     @staticmethod
     def _derived_key(requested_by: dict, job_type: str, params: Any, track_id: Optional[str]) -> str:
@@ -508,6 +511,7 @@ class MusicJobStore:
         prompt: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         requested_by: Optional[Mapping[str, Any]] = None,
+        request: Optional[Mapping[str, Any]] = None,
         agent_queue_max: Optional[int] = None,
         turn_jobs_max: Optional[int] = None,
         source: Optional[Mapping[str, Any]] = None,
@@ -541,6 +545,7 @@ class MusicJobStore:
             try:
                 requester = js.check_requested_by(requested_by if requested_by is not None
                                                   else {"kind": js.REQUESTER_PERSON})
+                req = js.check_request(request)
             except js.ParamsError as exc:
                 raise MusicJobError("invalid_params", exc.message, field=exc.field)
             is_agent = requester["kind"] == js.REQUESTER_AGENT
@@ -596,7 +601,7 @@ class MusicJobStore:
                 return {"repeat": None, "params": copy.deepcopy(params)}
             job = self._new_job(job_type, params, track_id=track_id, base_version_id=base_version_id,
                                 comment_id=comment_id, action=action, region=region, prompt=prompt,
-                                idempotency_key=idempotency_key, requested_by=requester)
+                                idempotency_key=idempotency_key, requested_by=requester, request=req)
             job["engine_choice"] = engine_choice
             reason = self.capabilities.unsupported_reason(
                 job_type, params if job_type in _PARAMS_CHECKED else None, action=action)

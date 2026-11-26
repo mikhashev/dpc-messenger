@@ -1121,6 +1121,7 @@ class DpcAgent:
                     context_window=_ctx_window,
                     context_reserve=_reserve,
                     after_first_answer=_consume_brief if _brief_sent else None,
+                    message_id=current_message_id or "",
                 )
             except BaseException:
                 from .tools.chat_files import remove_posted_copies

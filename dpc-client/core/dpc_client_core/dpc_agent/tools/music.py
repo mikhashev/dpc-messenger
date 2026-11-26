@@ -150,6 +150,11 @@ def _turn_id() -> str:
     return (origin.turn_id if origin is not None else "") or ""
 
 
+def _message_id() -> str:
+    origin = SPAWN_ORIGIN.get()
+    return (getattr(origin, "message_id", "") if origin is not None else "") or ""
+
+
 def _conversation_id(ctx: ToolContext) -> str:
     """The chat this call runs in: the context's, else the spawn origin's; empty when neither."""
     origin = SPAWN_ORIGIN.get()
@@ -692,7 +697,8 @@ def _after_propose_hint(job: Dict[str, Any]) -> str:
 
 @_guarded("music_propose_job")
 def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, params: Any = None,
-                      idempotency_key: Optional[str] = None) -> str:
+                      idempotency_key: Optional[str] = None, request: Any = None,
+                      title: Optional[str] = None) -> str:
     """Propose one music job, after the person approves it."""
     if type not in (js.GENERATE_FROM_TEXT, EDIT) + js.SONG_TYPES:
         return (f"⚠️ music_propose_job: type must be one of {', '.join((js.GENERATE_FROM_TEXT, EDIT) + js.SONG_TYPES)}; "
@@ -704,6 +710,34 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
             return "⚠️ music_propose_job: params must be an object; nothing was proposed."
     if not isinstance(params, dict):
         return "⚠️ music_propose_job: params must be an object; nothing was proposed."
+    owner_asked = _owner_asked(ctx)
+    req_data: Optional[Dict[str, Any]] = None
+    if request is not None:
+        if isinstance(request, str):
+            try:
+                request = json.loads(request)
+            except ValueError:
+                return (PRE_CARD_REFUSAL_FOR_OTHERS if not owner_asked else
+                        "⚠️ music_propose_job: request must be an object; nothing was proposed.")
+        if not isinstance(request, dict):
+            return (PRE_CARD_REFUSAL_FOR_OTHERS if not owner_asked else
+                    "⚠️ music_propose_job: request must be an object; nothing was proposed.")
+        req_data = dict(request)
+    if isinstance(title, str) and title.strip():
+        req_data = dict(req_data or {})
+        req_data.setdefault("title", title)
+    msg_id = _message_id()
+    if msg_id:
+        req_data = dict(req_data or {})
+        if not req_data.get("message_id"):
+            req_data["message_id"] = msg_id
+    if req_data is not None:
+        try:
+            req_data = js.check_request(req_data)
+        except js.ParamsError as exc:
+            if not owner_asked:
+                return PRE_CARD_REFUSAL_FOR_OTHERS
+            return f"⚠️ music_propose_job: {exc.message}; nothing was proposed."
     edit_args: Dict[str, Any] = {}
     if type == EDIT:
         edit_args, params, problem = _split_edit(params)
@@ -717,8 +751,6 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     turn_id = who.get("turn_id")
     if not who.get("agent_id") or not turn_id:
         return "⚠️ music_propose_job runs only inside an agent turn; nothing was proposed."
-
-    owner_asked = _owner_asked(ctx)
     scoped = _chat_scoped_music(ctx)
     effective_lyrics_mode = params.get("lyrics_mode") or js.SONG_DEFAULT_LYRICS_MODE.get(type)
     if (type in js.SONG_TYPES and not owner_asked and effective_lyrics_mode == "reuse"
@@ -770,7 +802,8 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     # Everything core would refuse, and a job core would make `unsupported`, is answered before
     # anyone is asked (follow-up 12, Zcode #68 P2): core's own checks, with no job made.
     checked = _service_call(ctx, "check_music_job", type=type, params=params,
-                            idempotency_key=idempotency_key or None, requested_by=who, **edit_args)
+                            idempotency_key=idempotency_key or None, requested_by=who,
+                            request=req_data, **edit_args)
     refused = _error_text(checked, "music_propose_job")
     if refused:
         if not owner_asked:
@@ -818,7 +851,8 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
     # the call below still finds the job it made.
     _ctx_dict(ctx, "_music_turns")[turn_id] = who["agent_id"]
     answer = _service_call(ctx, "propose_music_job", type=type, params=params,
-                           idempotency_key=idempotency_key or None, requested_by=who, **edit_args)
+                           idempotency_key=idempotency_key or None, requested_by=who,
+                           request=req_data, **edit_args)
     refused = _error_text(answer, "music_propose_job")
     if refused:
         if isinstance(answer, dict):
@@ -1291,7 +1325,22 @@ def get_tools() -> List[ToolEntry]:
                                           "cot (melody, the default, or full) and vocal_only (yue2). "
                                           "Params core would refuse are refused before the person is asked."},
                 "idempotency_key": {"type": "string",
-                                    "description": "Optional; the default comes from the turn."}},
+                                    "description": "Optional; the default comes from the turn."},
+                "request": {
+                    "type": "object",
+                    "description": "Optional trace of the request this job came from: title (short song title "
+                                   "for the take and library entry), text (clipped excerpt from the requester's "
+                                   "message), asked (object summarizing what was requested), changes (list of "
+                                   "strings or objects describing what you changed from the request), and "
+                                   "message_id (auto-populated from the triggering message when omitted).",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "text": {"type": "string"},
+                        "asked": {"type": "object"},
+                        "changes": {"type": "array"},
+                        "message_id": {"type": "string"},
+                    },
+                }},
                ["params"], music_propose_job, timeout_sec=PROPOSE_TOOL_TIMEOUT_S),
         _entry("music_check",
                "One look at a music job: its state, what holds the GPU it waits for, and its takes "

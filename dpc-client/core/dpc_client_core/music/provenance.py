@@ -91,6 +91,7 @@ them.
 
 from __future__ import annotations
 
+import copy
 import getpass
 import hashlib
 import json
@@ -429,15 +430,34 @@ def node_identity() -> str:
     return value if isinstance(value, str) and NODE_ID_RE.match(value) else NOT_STORED
 
 
-def withhold_node_id(rec: Mapping[str, Any]) -> Dict[str, Any]:
-    """A copy of `rec` for a file that is shared on purpose (the lossy export): the `node_id` a
-    record holds is replaced by `withheld_on_export` (Zcode and Ark, PROVENANCE review: the node id is a
-    tracking identifier, so off in exports, on in the library copy). The record in the library is not
-    touched."""
+def withhold_for_export(rec: Mapping[str, Any]) -> Dict[str, Any]:
+    """Copy of `rec` safe for export outside the node: redacts `node_id`,
+    `requested_by.conversation_id`, `requested_by.turn_id`, `request.message_id`, and
+    `request.text` to `NODE_ID_WITHHELD` while keeping title, asked, changes, surface, form,
+    and non-private requester fields (`kind`, `agent_id`)."""
     out = dict(rec)
     if isinstance(out.get("node_id"), str) and out["node_id"] != NOT_STORED:
         out["node_id"] = NODE_ID_WITHHELD
+    rb = out.get("requested_by")
+    if isinstance(rb, Mapping):
+        rb_copy = copy.deepcopy(dict(rb))
+        for key in ("conversation_id", "turn_id"):
+            if isinstance(rb_copy.get(key), str) and rb_copy[key] != NOT_STORED:
+                rb_copy[key] = NODE_ID_WITHHELD
+        out["requested_by"] = rb_copy
+    req = out.get("request")
+    if isinstance(req, Mapping):
+        req_copy = copy.deepcopy(dict(req))
+        for key in ("message_id", "text"):
+            if isinstance(req_copy.get(key), str) and req_copy[key] != NOT_STORED:
+                req_copy[key] = NODE_ID_WITHHELD
+        out["request"] = req_copy
     return out
+
+
+def withhold_node_id(rec: Mapping[str, Any]) -> Dict[str, Any]:
+    """Alias for `withhold_for_export` kept for backwards compatibility."""
+    return withhold_for_export(rec)
 
 
 # -- the builders -------------------------------------------------------------------------------
@@ -503,6 +523,16 @@ def _add_engine_choice(rec: Dict[str, Any], choice: Optional[Mapping[str, Any]])
     rec["engine_choice"] = out
 
 
+def _add_request_provenance(rec: Dict[str, Any], requested_by: Optional[Mapping[str, Any]],
+                            job_request: Optional[Mapping[str, Any]]) -> None:
+    """Copy the job's `requested_by` and `request` onto the take's `mp.provenance/1` record when
+    present. Kept outside genotype/intent/substrate hashes so take ids never change."""
+    if isinstance(requested_by, Mapping):
+        rec["requested_by"] = copy.deepcopy(dict(requested_by))
+    if isinstance(job_request, Mapping) and job_request:
+        rec["request"] = copy.deepcopy(dict(job_request))
+
+
 def build_acestep_record(*, job_id: str, variant: int, created_at: str, params: Mapping[str, Any],
                          identity: Mapping[str, Any], lm_request: Mapping[str, Any], lm_result: Mapping[str, Any],
                          synth_request: Mapping[str, Any], seed: int, batch_size: int, batch_index: int,
@@ -511,13 +541,16 @@ def build_acestep_record(*, job_id: str, variant: int, created_at: str, params: 
                          postprocess: Mapping[str, Any], output: Mapping[str, Any],
                          payloads: Optional[Mapping[str, str]] = None,
                          device: Optional[Mapping[str, Any]] = None,
-                         engine_choice: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+                         engine_choice: Optional[Mapping[str, Any]] = None,
+                         requested_by: Optional[Mapping[str, Any]] = None,
+                         job_request: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """The `mp.provenance/1` record of one acestep.cpp take, from what the runner holds: the
     `/lm` request as sent, the LM's answer, the `/synth` body as sent, the engine identity, and
     the job's engine choice when a rule made one."""
     rec = _base(engine="acestep.cpp", job_id=job_id, variant=variant, created_at=created_at, identity=identity,
                 device=device, payloads=payloads)
     _add_engine_choice(rec, engine_choice)
+    _add_request_provenance(rec, requested_by, job_request)
     rec["licence"] = licence_record("acestep.cpp")
     codes = str(lm_result.get("audio_codes") or "")
     lyrics = lm_request.get("lyrics")
@@ -568,13 +601,16 @@ def build_yue2_record(*, job_id: str, variant: int, created_at: str, params: Map
                       postprocess: Mapping[str, Any], output: Mapping[str, Any],
                       payloads: Optional[Mapping[str, str]] = None,
                       device: Optional[Mapping[str, Any]] = None,
-                      engine_choice: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+                      engine_choice: Optional[Mapping[str, Any]] = None,
+                      requested_by: Optional[Mapping[str, Any]] = None,
+                      job_request: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """The record of one yue2.cpp take: the `/synth` body as sent and the engine's replay request
     (the score as ABC and the semantic tokens), which is what makes the song repeatable; the
     job's engine choice when a rule made one."""
     rec = _base(engine="yue2.cpp", job_id=job_id, variant=variant, created_at=created_at, identity=identity,
                 device=device, payloads=payloads)
     _add_engine_choice(rec, engine_choice)
+    _add_request_provenance(rec, requested_by, job_request)
     rec["licence"] = licence_record("yue2.cpp", backbone=backbone, adapters=identity.get("adapters"))
     tokens = str(replay.get("semantic_tokens") or "")
     abc = str(replay.get("abc") or "")
@@ -662,7 +698,9 @@ def build_edit_record(*, job_id: str, variant: int, created_at: str, action: str
                       request: Optional[Mapping[str, Any]] = None, seed: Optional[int] = None,
                       batch_size: Optional[int] = None, batch_index: Optional[int] = None,
                       payloads: Optional[Mapping[str, str]] = None,
-                      device: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+                      device: Optional[Mapping[str, Any]] = None,
+                      requested_by: Optional[Mapping[str, Any]] = None,
+                      job_request: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """The `mp.provenance/1` record of one region-edit take (`region_edit`): what was edited (`parents`:
     the base track's library id, audio hash, version and the take it came from when it is one), how
     (`edit`: the action, the three zones, the engine window, the seams and their shapes), the repaint
@@ -671,6 +709,7 @@ def build_edit_record(*, job_id: str, variant: int, created_at: str, action: str
     engine = str(identity.get("engine") or EDIT_ENGINE_LOCAL)
     rec = _base(engine=engine, job_id=job_id, variant=variant, created_at=created_at, identity=identity,
                 device=device, payloads=payloads)
+    _add_request_provenance(rec, requested_by, job_request)
     rec["licence"] = _with_parent_licence(licence_record(engine), parent.get("licence_key"))
     req = dict(request or {})
     rec.update({
@@ -851,6 +890,24 @@ def validate_embedded(rec: Any) -> None:
         v = rec.get(key)
         if v is not None and not isinstance(v, dict):
             raise ValueError(f"{key} is not an object")
+    rb = rec.get("requested_by")
+    if rb is not None:
+        if not isinstance(rb, dict):
+            raise ValueError("requested_by is not an object")
+        from .job_schemas import ParamsError, check_requested_by
+        try:
+            check_requested_by(rb)
+        except ParamsError as exc:
+            raise ValueError(f"requested_by: {exc.message}")
+    req = rec.get("request")
+    if req is not None:
+        if not isinstance(req, dict):
+            raise ValueError("request is not an object")
+        from .job_schemas import ParamsError, check_request
+        try:
+            check_request(req)
+        except ParamsError as exc:
+            raise ValueError(f"request: {exc.message}")
 
 
 def summarize(rec: Mapping[str, Any]) -> Dict[str, Any]:

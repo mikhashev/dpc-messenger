@@ -34,7 +34,7 @@
   import { seekTo } from '$lib/services/music';
   import { ensureComments, loadComments, musicComments, musicCommentsError, removeComment, saveComment } from '$lib/services/musicComments';
   import { musicJobs, proposeEdit } from '$lib/services/musicJobs';
-  import { canCutWithShift, editActionState, editLimits, editProposal, isEditAction, REPAINT_ACTIONS } from '$lib/utils/musicEdit';
+  import { buildEditRequest, canCutWithShift, editActionState, editLimits, editProposal, isEditAction, REPAINT_ACTIONS } from '$lib/utils/musicEdit';
 
   let {
     trackId = null,
@@ -202,7 +202,12 @@
           return;
         }
       }
-      const a = await proposeEdit({ track_id: trackId, ...p.value, ...(form.id ? { comment_id: form.id } : {}) });
+      const a = await proposeEdit({
+        track_id: trackId,
+        ...p.value,
+        request: buildEditRequest(trackId, p.value),
+        ...(form.id ? { comment_id: form.id } : {}),
+      });
       if (!a.ok) {
         formError = a.message;
         return;

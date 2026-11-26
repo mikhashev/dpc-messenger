@@ -32,6 +32,16 @@ export interface CardHolder {
     engine: string | null;
 }
 
+export interface MusicRequest {
+    message_id?: string;
+    text?: string;
+    title?: string;
+    asked?: Record<string, unknown>;
+    changes?: (string | Record<string, unknown>)[];
+    surface?: string;
+    form?: Record<string, unknown>;
+}
+
 export interface MusicJob {
     id: string;
     type: string;
@@ -41,6 +51,7 @@ export interface MusicJob {
     take_ids?: string[];
     params: Record<string, any>;
     prompt?: string | null;
+    request?: MusicRequest | null;
     created_at: string;
     updated_at?: string;
     history?: { state: string; at: string; reason: string | null }[];
@@ -239,8 +250,14 @@ export function jobStateText(job: MusicJob): string {
     }
 }
 
-/** The style the job was made with, cut for a row. */
+/** The job's request title, else the style it was made with, cut for a row. */
 export function jobTitle(job: MusicJob, limit = 70): string {
+    const reqTitle = typeof job.request?.title === 'string'
+        ? job.request.title.replace(/\s+/g, ' ').trim()
+        : '';
+    if (reqTitle) {
+        return reqTitle.length > limit ? `${reqTitle.slice(0, limit - 1)}…` : reqTitle;
+    }
     const style = String((job.type === 'edit' ? job.prompt : null) ?? job.params?.style ?? job.prompt ?? '')
         .replace(/\s+/g, ' ').trim();
     if (!style) return job.id;
@@ -491,6 +508,7 @@ export function limitsFrom(caps: MusicCapabilities | null | undefined, engine?: 
 }
 
 export interface FromTextForm {
+    title?: string;
     lyrics: string;
     instrumental: boolean;
     style: string;
@@ -516,8 +534,43 @@ export type FormErrors = Partial<Record<FormField, string>>;
 
 export function emptyFromTextForm(limits: FromTextLimits = DEFAULT_FROM_TEXT_LIMITS, engine: EngineKey = DEFAULT_ENGINE): FromTextForm {
     return {
-        lyrics: '', instrumental: false, style: '', variants: limits.variants.default, duration: limits.duration_s.default, seed: '',
+        title: '', lyrics: '', instrumental: false, style: '', variants: limits.variants.default, duration: limits.duration_s.default, seed: '',
         engine, backbone: 'stock', voice: '', voiceMusic: ADAPTER_MUSIC_DEFAULT, voiceSound: ADAPTER_SOUND_DEFAULT,
+    };
+}
+
+/** Player request metadata attached to a Create job (`job.request`). */
+export function buildCreateRequest(form: FromTextForm): MusicRequest {
+    const engine: EngineKey = form.engine ?? DEFAULT_ENGINE;
+    const cleanTitle = (form.title ?? '').replace(/\s+/g, ' ').trim();
+    const payloadForm: Record<string, unknown> = {
+        engine,
+        style: form.style.trim(),
+        instrumental: !!form.instrumental,
+    };
+    if (engine === 'yue2') {
+        payloadForm.backbone = form.backbone || 'stock';
+        if (form.voice) {
+            payloadForm.voice = form.voice;
+            const vm = asNumber(form.voiceMusic);
+            const vs = asNumber(form.voiceSound);
+            if (Number.isFinite(vm)) payloadForm.voice_music = vm;
+            if (Number.isFinite(vs)) payloadForm.voice_sound = vs;
+        }
+    }
+    const variants = asNumber(form.variants);
+    if (Number.isInteger(variants)) payloadForm.variants = variants;
+    const duration = asNumber(form.duration);
+    if (Number.isFinite(duration)) payloadForm.duration_s = duration;
+    const seedText = form.seed == null ? '' : typeof form.seed === 'number' ? String(form.seed) : form.seed.trim();
+    if (seedText !== '' && /^\d+$/.test(seedText)) {
+        const seed = Number(seedText);
+        if (Number.isSafeInteger(seed)) payloadForm.seed = seed;
+    }
+    return {
+        surface: 'player',
+        ...(cleanTitle ? { title: cleanTitle } : {}),
+        form: payloadForm,
     };
 }
 

@@ -1717,6 +1717,7 @@ async def _execute_with_timeout(
     ctx: "Optional[ToolContext]" = None,
     agent_id: str = "",
     turn_id: str = "",
+    message_id: str = "",
 ) -> Dict[str, Any]:
     """Execute a tool call with a hard timeout using shared executor.
 
@@ -1734,6 +1735,7 @@ async def _execute_with_timeout(
         tool=fn_name,
         round=round_number,
         turn_id=turn_id,
+        message_id=message_id,
     )
 
     try:
@@ -2457,6 +2459,7 @@ async def run_llm_loop(
     context_reserve: Optional[int] = None,
     kill_event: Optional[asyncio.Event] = None,
     after_first_answer: Optional[Callable[[], None]] = None,
+    message_id: str = "",
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -2680,6 +2683,7 @@ async def run_llm_loop(
                 ctx=_loop_ctx,
                 agent_id=_divergence_agent,
                 turn_id=turn_id,
+                message_id=message_id,
             ), kill_event)
 
             truncated_result = _truncate_tool_result(exec_result["result"])
@@ -3472,7 +3476,7 @@ async def run_llm_loop(
         if llm_trace.get("turn_end") == "killed":
             _end_killed_turn(SpawnOrigin(
                 agent_id=_divergence_agent, conversation_id=conversation_id or "",
-                turn_id=turn_id,
+                turn_id=turn_id, message_id=message_id,
             ))
         else:
             # A turn the owner did not ask for leaves no window under his login (Zcode #154).
