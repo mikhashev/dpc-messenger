@@ -127,7 +127,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from . import provenance as mp_provenance
 from .audio_tags import (WAV_INFO_PROVENANCE_KEY, WAV_RECORD_READ_MAX, _build_vorbis, _parse_vorbis,
-                         flac_read_comments, wav_read_provenance)
+                         flac_read_comments, wav_read_id3, wav_read_provenance)
 from .id3 import (ID3_PADDING, ID3_READ_MAX_BYTES, _clean, _frame, _syncsafe, _unsyncsafe,  # noqa: F401 (re-exported)
                   build_id3v24, comm_frame, read_id3_txxx, text_frame, txxx_frame, uslt_frame)
 from .identity import MediaTools, file_sha256, read_flac_streaminfo
@@ -144,6 +144,22 @@ MARKER_TAG = "DPC_EXPORT_OF"
 PRESET_TAG = "DPC_EXPORT_PRESET"
 LIMIT_TAG = "DPC_EXPORT_TP_LIMIT"          # written only as "off": no tag means the limit was on
 PROVENANCE_TAG = "DPC_PROVENANCE"
+_EXPORT_OWN_TAGS = frozenset({MARKER_TAG, PRESET_TAG, LIMIT_TAG, PROVENANCE_TAG})
+_DPC_TAG_KEY_RE = re.compile(r"^DPC_[A-Z0-9_.-]+$")
+_DPC_TAG_MAX_BYTES = 4096
+_PRIVATE_DPC_TAGS = frozenset({
+    "DPC_NODE_ID", "DPC_CONVERSATION_ID", "DPC_TURN_ID", "DPC_AGENT_ID",
+    "DPC_MESSAGE_ID", "DPC_MESSAGE_TEXT", "DPC_REQUESTED_BY", "DPC_REQUEST",
+    "DPC_USER", "DPC_USERNAME", "DPC_HOME", "DPC_HOME_DIR", "DPC_RAW_DIR",
+    "DPC_PATH", "DPC_FILE_PATH",
+})
+_PRIVATE_DPC_MARKERS = (
+    "NODE_ID", "CONVERSATION_ID", "TURN_ID", "AGENT_ID",
+    "MESSAGE_ID", "MESSAGE_TEXT", "REQUESTED_BY",
+    "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE",
+    "API_KEY", "AUTH_KEY", "ACCESS_KEY", "SIGNING_KEY",
+    "_TOKEN", "TOKEN_", "RAW_DIR", "HOME_DIR",
+)
 DEFAULT_EXPORT_SUBDIR = ("exports", "music")
 
 FORMAT_MP3 = "mp3"
@@ -499,6 +515,50 @@ def _tag_value(tags: Dict[str, str], name: str) -> Optional[str]:
     return None
 
 
+def _raw_tag_value(tags: Dict[str, str], name: str) -> Optional[str]:
+    """First non-blank value for `name` (case-insensitive) without stripping line breaks."""
+    for key, value in tags.items():
+        if key.casefold() == name.casefold() and isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _nonempty_lyrics_lines(text: str) -> List[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _blank_lyrics_line_count(text: str) -> int:
+    return sum(1 for line in text.splitlines() if not line.strip())
+
+
+def _preserves_richer_breaks(candidate: str, current: str) -> bool:
+    """Whether `candidate` matches `current` line-for-line on non-empty lines while keeping blank
+    lines between sections (or a trailing line break) that `current` dropped."""
+    if _nonempty_lyrics_lines(candidate) != _nonempty_lyrics_lines(current):
+        return False
+    if _blank_lyrics_line_count(candidate) > _blank_lyrics_line_count(current):
+        return True
+    return candidate.strip() == current.strip() and len(candidate) > len(current)
+
+
+def _direct_source_tags(path: Path) -> Dict[str, str]:
+    """Embedded Vorbis / ID3 / Opus tags read straight from `path`, for when ffprobe is absent
+    or does not surface every source comment."""
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".flac":
+            return flac_read_comments(path, max_block_bytes=PROVENANCE_MAX_BYTES * 4)
+        if suffix == ".wav":
+            return wav_read_id3(path)
+        if suffix == ".mp3":
+            return read_id3_txxx(path)
+        if suffix in (".opus", ".ogg"):
+            return read_opus_comments(path)
+    except Exception:
+        logger.info("music export: could not read embedded tags of %s", path.name, exc_info=True)
+    return {}
+
+
 def read_export_tags(path: Path) -> Optional[Dict[str, Any]]:
     """`{source, preset, limit}` when `path` is a file DPC exported, by its `DPC_EXPORT_OF` (an MP3's
     `TXXX`, an Ogg Opus file's Vorbis comment); None otherwise. `preset` is None for a file written
@@ -654,8 +714,8 @@ class MusicExporter:
         self._encoders_checked.add(encoder)
 
     def _probe(self, path: Path) -> Tuple[Dict[str, str], Optional[int], Optional[int]]:
-        """`(tags, sample rate, channels)` of the source from ffprobe; FLAC STREAMINFO
-        gives the rate and channels without it."""
+        """`(tags, sample rate, channels)` of the source from ffprobe plus direct embedded tag
+        reading; FLAC STREAMINFO gives the rate and channels without ffprobe."""
         tags: Dict[str, str] = {}
         rate = channels = None
         tools = self.tools
@@ -679,6 +739,13 @@ class MusicExporter:
                 channels = int(stream.get("channels")) if stream.get("channels") else None
             except (TypeError, ValueError):
                 rate = channels = None
+        direct = _direct_source_tags(path)
+        if direct:
+            have = {k.casefold() for k in tags}
+            for k, v in direct.items():
+                if isinstance(k, str) and isinstance(v, str) and k.casefold() not in have:
+                    tags[k] = v
+                    have.add(k.casefold())
         if rate is None and path.suffix.lower() == ".flac":
             try:
                 info = read_flac_streaminfo(path)
@@ -1083,20 +1150,117 @@ class MusicExporter:
 
     @staticmethod
     def _lyrics_for_tag(source: ExportSource, tags: Dict[str, str], record: Dict[str, Any]) -> Optional[str]:
-        """The text of the USLT frame: the library's lyrics, else the source file's own lyrics tag, else
-        the lyrics inside its provenance record (an instrumental has none)."""
-        if source.lyrics and source.lyrics.strip():
-            return source.lyrics
+        """The text of the USLT frame / Opus LYRICS tag: the library's lyrics (restoring blank lines
+        between sections from the provenance record or file tag when the library cache stripped them
+        without changing any non-empty line), else the source file's own lyrics tag, else the lyrics
+        inside its provenance record (an instrumental has none)."""
+        rec_lyrics: Optional[str] = None
+        for rec in (record.get("source_record"), source.take_record):
+            if not isinstance(rec, dict) or "omitted" in rec:
+                continue
+            if rec.get("instrumental"):
+                rec_lyrics = None
+                break
+            candidate = rec.get("lyrics")
+            if isinstance(candidate, str) and candidate.strip() and candidate != mp_provenance.NOT_STORED:
+                rec_lyrics = candidate
+                break
+
+        tag_lyrics: Optional[str] = None
         for name in ("unsyncedlyrics", "lyrics"):
-            text = _tag_value(tags, name)
+            text = _raw_tag_value(tags, name)
             if text:
-                return text
-        src = record.get("source_record")
-        if isinstance(src, dict) and not src.get("instrumental"):
-            lyrics = src.get("lyrics")
-            if isinstance(lyrics, str) and lyrics.strip() and lyrics != mp_provenance.NOT_STORED:
-                return lyrics
-        return None
+                tag_lyrics = text
+                break
+
+        if source.lyrics and source.lyrics.strip():
+            for exact in (rec_lyrics, tag_lyrics):
+                if exact and _preserves_richer_breaks(exact, source.lyrics):
+                    return exact
+            return source.lyrics
+
+        if tag_lyrics:
+            if rec_lyrics and _preserves_richer_breaks(rec_lyrics, tag_lyrics):
+                return rec_lyrics
+            return tag_lyrics
+
+        return rec_lyrics
+
+    @staticmethod
+    def _is_safe_dpc_key(key: str) -> bool:
+        if not _DPC_TAG_KEY_RE.match(key):
+            return False
+        if key in _EXPORT_OWN_TAGS or key.startswith("DPC_EXPORT_"):
+            return False
+        if key in _PRIVATE_DPC_TAGS:
+            return False
+        return not any(marker in key for marker in _PRIVATE_DPC_MARKERS)
+
+    @staticmethod
+    def _safe_dpc_value(key: str, value: Any) -> Optional[str]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            text = str(value)
+        elif isinstance(value, str):
+            text = value.strip()
+        else:
+            return None
+        if not text or text in (mp_provenance.NOT_STORED, mp_provenance.ENGINE_DEFAULT):
+            return None
+        if len(text.encode("utf-8")) > _DPC_TAG_MAX_BYTES:
+            return None
+        if mp_provenance.NODE_ID_RE.match(text):
+            logger.info("music export: omitting %s from export tags (node id)", key)
+            return None
+        try:
+            mp_provenance.check_privacy(f"{key}={text}")
+        except mp_provenance.PrivacyError:
+            logger.info("music export: omitting %s from export tags by privacy rule", key)
+            return None
+        return text
+
+    @classmethod
+    def _source_dpc_tags(cls, source: ExportSource, tags: Dict[str, str],
+                         record: Dict[str, Any]) -> List[Tuple[str, str]]:
+        """Safe `DPC_*` metadata tags from the source file's own tags and provenance record,
+        excluding export-owned tags, node-private identifiers, and values blocked by privacy rules."""
+        collected: Dict[str, str] = {}
+        for raw_key, raw_val in tags.items():
+            key = str(raw_key).strip().upper()
+            if key in collected or not cls._is_safe_dpc_key(key):
+                continue
+            val = cls._safe_dpc_value(key, raw_val)
+            if val is not None:
+                collected[key] = val
+
+        for rec in (record.get("source_record"), source.take_record):
+            if not isinstance(rec, dict) or "omitted" in rec:
+                continue
+            engine_obj = rec.get("engine")
+            engine_name = engine_obj.get("engine") if isinstance(engine_obj, dict) else engine_obj
+            engine_ver = rec.get("engine_version") or (
+                engine_obj.get("version") if isinstance(engine_obj, dict) else None
+            )
+            fields = (
+                ("DPC_ENGINE", engine_name),
+                ("DPC_ENGINE_VERSION", engine_ver),
+                ("DPC_JOB_ID", rec.get("job_id")),
+                ("DPC_VARIANT", rec.get("variant")),
+                ("DPC_SEED", rec.get("seed")),
+                ("DPC_LM_SEED", rec.get("lm_seed")),
+                ("DPC_BACKBONE", rec.get("backbone")),
+                ("DPC_SYNTH_BATCH_SIZE", rec.get("synth_batch_size")),
+                ("DPC_SYNTH_BATCH_INDEX", rec.get("synth_batch_index")),
+                ("DPC_EDIT_ACTION", rec.get("edit_action")),
+            )
+            for key, raw_val in fields:
+                if key in collected:
+                    continue
+                val = cls._safe_dpc_value(key, raw_val)
+                if val is not None:
+                    collected[key] = val
+        return list(collected.items())
 
     def _frames(self, source: ExportSource, preset: str, tags: Dict[str, str], record: Dict[str, Any],
                 limit: bool = True) -> List[bytes]:
@@ -1124,6 +1288,8 @@ class MusicExporter:
         frames.append(txxx_frame(PRESET_TAG, preset))
         if not limit:
             frames.append(txxx_frame(LIMIT_TAG, "off"))
+        for key, value in self._source_dpc_tags(source, tags, record):
+            frames.append(txxx_frame(key, value))
         frames.append(txxx_frame(PROVENANCE_TAG, json.dumps(record, ensure_ascii=False, separators=(",", ":"))))
         return frames
 
@@ -1153,6 +1319,7 @@ class MusicExporter:
         out.append((PRESET_TAG, preset))
         if not limit:
             out.append((LIMIT_TAG, "off"))
+        out.extend(self._source_dpc_tags(source, tags, record))
         out.append((PROVENANCE_TAG, json.dumps(record, ensure_ascii=False, separators=(",", ":"))))
         return out
 
