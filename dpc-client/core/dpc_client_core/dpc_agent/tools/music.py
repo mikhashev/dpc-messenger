@@ -217,6 +217,13 @@ def _not_your_take_refusal(doing: str, take_id: str) -> str:
             f"of this agent in this chat.")
 
 
+def _not_your_playlist_refusal(doing: str, playlist_id: str) -> str:
+    """Neutral refusal when a playlist is outside this chat's scope: user playlists belong
+    to the owner's personal library and carry no chat scope."""
+    return (f"⚠️ {doing} failed: not_your_job: playlist {playlist_id} is not accessible from "
+            f"this chat.")
+
+
 def _entry_job_id(entry: Dict[str, Any]) -> Optional[str]:
     """The originating job id of a generated library entry, or None for local/folder/web tracks."""
     if not isinstance(entry, dict) or entry.get("origin") != "generated":
@@ -944,10 +951,18 @@ def music_wait(ctx: ToolContext, job_id: str, timeout: int = WAIT_DEFAULT_S) -> 
 @_guarded("music_cancel_job")
 def music_cancel_job(ctx: ToolContext, job_id: str, reason: Optional[str] = None) -> str:
     """Cancel a job this agent proposed; another's is refused (D46)."""
+    doing = f"cancelling job {job_id}"
+    scoped = _chat_scoped_music(ctx)
+    if scoped:
+        _job, refused = _get_job(ctx, job_id, doing=doing)
+        if refused:
+            return refused
     answer = _service_call(ctx, "cancel_music_job", job_id=job_id, reason=reason or None,
                            requested_by=_requested_by(ctx))
-    refused = _error_text(answer, f"cancelling job {job_id}")
+    refused = _error_text(answer, doing)
     if refused:
+        if scoped and isinstance(answer, dict) and answer.get("code") in ("not_found", "not_your_job"):
+            return _not_your_job_refusal(doing, job_id)
         return refused
     return "\n".join(_job_lines(answer["job"]))
 
@@ -1036,44 +1051,40 @@ def music_playlist_add(ctx: ToolContext, playlist_id: str, track_ids: Optional[L
     """Add library tracks, or a take's library track, to the end of one of the person's playlists."""
     scoped = _chat_scoped_music(ctx)
     wanted = [t for t in (track_ids or []) if isinstance(t, str) and t]
+    take_id = take_id.strip() if isinstance(take_id, str) else take_id
+    if not wanted and not take_id:
+        return "⚠️ music_playlist_add: give track_ids or take_id; nothing was added."
+    pid = str(playlist_id or "").strip() or "(unknown)"
     if scoped:
-        for tid in wanted:
-            refused = _verify_track_in_this_chat(ctx, tid, f"adding to playlist {playlist_id}")
-            if refused:
-                return refused
+        # User playlists belong to the owner's personal library (no conversation_id field),
+        # so chat-scoped turns cannot read, probe, or mutate any playlist.
+        return _not_your_playlist_refusal(f"adding to playlist {pid}", pid)
     if take_id:
-        if scoped:
-            take, refused = _verify_take_in_this_chat(ctx, take_id, f"adding to playlist {playlist_id}")
-            if refused:
-                return refused
-        else:
-            answer = _service_call(ctx, "get_music_take", take_id=take_id)
-            refused = _error_text(answer, f"reading take {take_id}")
-            if refused:
-                return refused
-            take = answer["take"]
+        answer = _service_call(ctx, "get_music_take", take_id=take_id)
+        refused = _error_text(answer, f"reading take {take_id}")
+        if refused:
+            return refused
+        take = answer["take"]
         lib_id = take.get("library_track_id")
         if not lib_id:
             return f"⚠️ take {take_id} is not in the library yet; nothing was added."
         wanted.append(lib_id)
-    if not wanted:
-        return "⚠️ music_playlist_add: give track_ids or take_id; nothing was added."
     listed = _service_call(ctx, "list_music_playlists")
     refused = _error_text(listed, "reading the playlists")
     if refused:
         return refused
-    playlist = next((p for p in listed.get("playlists") or [] if p.get("id") == playlist_id), None)
+    playlist = next((p for p in listed.get("playlists") or [] if p.get("id") == pid), None)
     if playlist is None or playlist.get("kind") != "user":
-        return f"⚠️ {playlist_id} is not one of the person's playlists; nothing was added."
+        return f"⚠️ {pid} is not one of the person's playlists; nothing was added."
     current = list(playlist.get("track_ids") or [])
     added = [t for t in dict.fromkeys(wanted) if t not in current]
     if not added:
-        return f"playlist {playlist_id} already has those tracks."
-    answer = _service_call(ctx, "update_music_playlist", playlist_id=playlist_id, track_ids=current + added)
-    refused = _error_text(answer, f"adding to playlist {playlist_id}")
+        return f"playlist {pid} already has those tracks."
+    answer = _service_call(ctx, "update_music_playlist", playlist_id=pid, track_ids=current + added)
+    refused = _error_text(answer, f"adding to playlist {pid}")
     if refused:
         return refused
-    return f"added {len(added)} track(s) to playlist '{answer['playlist'].get('name')}' ({playlist_id})."
+    return f"added {len(added)} track(s) to playlist '{answer['playlist'].get('name')}' ({pid})."
 
 
 # ---------------------------------------------------------------------------
@@ -1387,6 +1398,8 @@ def _playlist_add_approval(ctx: ToolContext, args: Dict[str, Any]):
         return Refuse("⚠️ music_playlist_add: give track_ids or take_id; nothing was added.")
     pid = str(args.get("playlist_id") or "").strip() or "(unknown)"
     doing = f"adding to playlist {pid}"
+    if _chat_scoped_music(ctx):
+        return Refuse(_not_your_playlist_refusal(doing, pid))
     try:
         for tid in track_ids:
             refused = _verify_track_in_this_chat(ctx, tid, doing)
@@ -1421,5 +1434,12 @@ def get_tools() -> List[ToolEntry]:  # noqa: F811
         "music_get_lyrics": _lyrics_approval,
         "music_playlist_add": _playlist_add_approval,
     }
-    return mark_owner_approval(_get_music_tools_unflagged(), checks,
+    assert set(checks) == MUSIC_TOOL_NAMES, (
+        f"music approval checks mismatch MUSIC_TOOL_NAMES: {sorted(set(checks) ^ MUSIC_TOOL_NAMES)}"
+    )
+    entries = _get_music_tools_unflagged()
+    assert {e.name for e in entries} == MUSIC_TOOL_NAMES, (
+        f"music tools mismatch MUSIC_TOOL_NAMES: {sorted({e.name for e in entries} ^ MUSIC_TOOL_NAMES)}"
+    )
+    return mark_owner_approval(entries, checks,
                                budget_holds_approval=("music_propose_job",))

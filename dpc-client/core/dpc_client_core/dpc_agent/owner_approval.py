@@ -134,7 +134,11 @@ def is_multi_node_group(ctx: Any) -> bool:
     """Whether `ctx` runs in a group chat where the owner's node is not the only node
     (Mike #19: in a multi-node group, nothing from 1:1 or other chats may enter, even on
     the owner's own request; a one-node group with only the owner's node and its agents
-    may read the owner's 1:1 jobs/library). Fails closed for an unclassified or unknown group.
+    may read the owner's 1:1 jobs/library).
+
+    Fails closed (`True`) whenever a group conversation cannot be positively verified as a
+    single-node non-Discord group (missing or unreadable roster, missing node identity,
+    empty members, or Discord bridge), even when `ctx.turn_class == OWNER_TURN`.
     """
     if ctx is None:
         return False
@@ -148,35 +152,33 @@ def is_multi_node_group(ctx: Any) -> bool:
         return True
     service = getattr(ctx, "dpc_service", None)
     gm = getattr(service, "group_manager", None) if service is not None else None
-    group = None
-    if gm is not None and conv:
+    if gm is None or not conv:
+        return True
+    try:
+        group = gm.get_group(conv)
+    except Exception:
+        return True
+    if group is None or getattr(group, "is_discord_bridge", False):
+        return True
+    try:
+        members = set(getattr(group, "members", None) or ())
+    except Exception:
+        return True
+    if not members:
+        return True
+    this_node = (getattr(gm, "node_id", None)
+                 or getattr(getattr(service, "p2p_manager", None), "node_id", None))
+    if not isinstance(this_node, str) or not this_node:
+        return True
+    agent = getattr(ctx, "_agent", None)
+    own_nodes = frozenset()
+    own_fn = getattr(agent, "_own_nodes", None)
+    if callable(own_fn):
         try:
-            group = gm.get_group(conv)
+            own_nodes = frozenset(own_fn()[1] or ())
         except Exception:
-            group = None
-    if group is not None:
-        if getattr(group, "is_discord_bridge", False):
-            return True
-        if hasattr(group, "members"):
-            members = set(getattr(group, "members", None) or ())
-            if not members:
-                return True
-            this_node = (getattr(gm, "node_id", None)
-                         or getattr(getattr(service, "p2p_manager", None), "node_id", None))
-            agent = getattr(ctx, "_agent", None)
             own_nodes = frozenset()
-            own_fn = getattr(agent, "_own_nodes", None)
-            if callable(own_fn):
-                try:
-                    own_nodes = frozenset(own_fn()[1] or ())
-                except Exception:
-                    own_nodes = frozenset()
-            if this_node:
-                return turn_class("group", group, this_node, own_nodes) != OWNER_TURN
-            if cls == OWNER_TURN:
-                return len(members) > 1
-            return True
-    return cls != OWNER_TURN
+    return turn_class("group", group, this_node, own_nodes) != OWNER_TURN
 
 
 def asker_card_fields(ctx: Any) -> Optional[Dict[str, Any]]:

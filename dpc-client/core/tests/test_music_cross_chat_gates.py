@@ -749,7 +749,9 @@ async def test_multi_node_group_blocks_1to1_and_private_library_even_when_owner_
         pl2 = await rig.library.create_playlist("Group Mix", [])
         added_out = await _exec(reg, ctx, "music_playlist_add", playlist_id=pl2["id"],
                                 take_id=take_group["id"])
-        assert "added 1 track(s)" in added_out
+        assert "not_your_job" in added_out, added_out
+        assert "Group Mix" not in added_out
+        assert next(p for p in rig.library.list_playlists() if p["id"] == pl2["id"])["track_ids"] == []
 
 
 @pytest.mark.asyncio
@@ -842,6 +844,8 @@ async def test_one_node_group_and_1to1_allow_owner_1to1_reads_but_block_foreign_
         reg_dm = registry_for(ctx_dm)
         assert "review" in await _exec(reg_dm, ctx_dm, "music_check", job_id=job_dm["id"])
         assert "SECRET 1TO1 VERSE" in await _exec(reg_dm, ctx_dm, "music_get_lyrics", track_id=trk_dm)
+        assert "added 1 track(s)" in await _exec(
+            reg_dm, ctx_dm, "music_playlist_add", playlist_id=pl_solo["id"], track_ids=[trk_folder])
         assert "Posted " in await _exec(reg_dm, ctx_dm, "chat_post_file", take_id=take_dm["id"])
         assert person.asked == []
 
@@ -886,4 +890,243 @@ async def test_multi_node_detection_checks_group_roster_and_discord_bridge_and_f
         assert "review" in await _exec(
             registry_for(ctx_unclassified_solo), ctx_unclassified_solo,
             "music_check", job_id=job_dm["id"])
+
+
+def _norm(text: str, *ids: str) -> str:
+    out = text
+    for item in ids:
+        out = out.replace(item, "<ID>")
+    return out
+
+
+@pytest.mark.asyncio
+async def test_zcode_43_owner_turn_in_group_with_unreadable_or_missing_roster_fails_closed(tmp_path, monkeypatch):
+    _user_home, dpc_home = await _seed_world(tmp_path, monkeypatch)
+    async with Rig(dpc_home) as rig:
+        person = Person(True)
+        service = _MultiChatService(dpc_home, rig, person)
+        data = await _populate_world(rig, dpc_home, service)
+        job_dm, take_dm = data["job_dm"], data["take_dm"]
+
+        def broken_get_group(_gid):
+            raise RuntimeError("roster unreadable")
+
+        service._groups["group-empty"] = SimpleNamespace(
+            group_id="group-empty", name="Empty", members=[], is_discord_bridge=False)
+        service._groups["group-no-members"] = SimpleNamespace(
+            group_id="group-no-members", name="NoMembers", is_discord_bridge=False)
+        service._groups["group-foreign-only"] = SimpleNamespace(
+            group_id="group-foreign-only", name="ForeignOnly",
+            members=[FRIEND_NODE], is_discord_bridge=False)
+
+        no_gm_service = _MultiChatService(dpc_home, rig, person)
+        no_gm_service.group_manager = None
+
+        raising_gm_service = _MultiChatService(dpc_home, rig, person)
+        raising_gm_service.group_manager = SimpleNamespace(node_id=THIS_NODE, get_group=broken_get_group)
+
+        no_node_service = _MultiChatService(dpc_home, rig, person)
+        no_node_service.p2p_manager = SimpleNamespace(get_display_name=lambda: "Owner", node_id=None)
+        no_node_service.group_manager = SimpleNamespace(
+            node_id=None, get_group=lambda gid: service._groups.get(gid))
+
+        bad_contexts = [
+            _multi_ctx(dpc_home, None, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OWNER_TURN, source="group"),
+            _multi_ctx(dpc_home, no_gm_service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OWNER_TURN, source="group"),
+            _multi_ctx(dpc_home, service, "group-missing", asker=OWNER_ASKER, turn_class=OWNER_TURN, source="group"),
+            _multi_ctx(dpc_home, raising_gm_service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OWNER_TURN, source="group"),
+            _multi_ctx(dpc_home, service, "group-empty", asker=OWNER_ASKER, turn_class=OWNER_TURN, source="group"),
+            _multi_ctx(dpc_home, service, "group-no-members", asker=OWNER_ASKER, turn_class=OWNER_TURN, source="group"),
+            _multi_ctx(dpc_home, no_node_service, SOLO_GROUP, asker=OWNER_ASKER, turn_class=OWNER_TURN, source="group"),
+            _multi_ctx(dpc_home, service, "group-foreign-only", asker=OWNER_ASKER, turn_class=OWNER_TURN, source="group"),
+        ]
+        for ctx in bad_contexts:
+            assert owner_approval.is_multi_node_group(ctx) is True, ctx.conversation_id
+            if ctx.dpc_service is not None:
+                reg = registry_for(ctx)
+                out_dm = await _exec(reg, ctx, "music_check", job_id=job_dm["id"])
+                out_unknown = await _exec(reg, ctx, "music_check", job_id="job_0000000000000000")
+                assert "not_your_job" in out_dm, out_dm
+                assert "review" not in out_dm and ".flac" not in out_dm and take_dm["id"] not in out_dm
+                assert _norm(out_dm, job_dm["id"]) == _norm(out_unknown, "job_0000000000000000")
+
+        # Legitimate verified 1-node group with OWNER_TURN or None stays non-multi-node.
+        for cls in (OWNER_TURN, None):
+            ctx_solo = _multi_ctx(dpc_home, service, SOLO_GROUP, asker=OWNER_ASKER, turn_class=cls, source="group")
+            assert owner_approval.is_multi_node_group(ctx_solo) is False
+            assert "review" in await _exec(registry_for(ctx_solo), ctx_solo, "music_check", job_id=job_dm["id"])
+
+
+@pytest.mark.asyncio
+async def test_music_cancel_job_in_multi_node_group_has_no_existence_oracle_and_does_not_cancel_1to1_job(
+        tmp_path, monkeypatch):
+    _user_home, dpc_home = await _seed_world(tmp_path, monkeypatch)
+    async with Rig(dpc_home, start_runner=False) as rig:
+        person = Person(True)
+        service = _MultiChatService(dpc_home, rig, person)
+
+        # Queued 1:1 job, UI job, and queued multi-node group job
+        ctx_dm = _multi_ctx(dpc_home, service, ONE_TO_ONE, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+        out_dm = await _exec(registry_for(ctx_dm), ctx_dm, "music_propose_job", turn="turn-dm",
+                             params=from_text(style="private queued", variants=1, seed=1))
+        assert out_dm.startswith("Proposed (approved by the person)."), out_dm
+        job_dm_q = rig.store.list_jobs()[-1]
+
+        job_ui_q = rig.store.create_job("generate_from_text", from_text(style="ui queued"))
+
+        ctx_grp = _multi_ctx(dpc_home, service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OTHER_NODE_TURN)
+        out_grp = await _exec(registry_for(ctx_grp), ctx_grp, "music_propose_job", turn="turn-grp",
+                              params=from_text(style="group queued", variants=1, seed=2))
+        assert out_grp.startswith("Proposed (approved by the person)."), out_grp
+        job_grp_q = next(j for j in rig.store.list_jobs() if j["id"] not in (job_dm_q["id"], job_ui_q["id"]))
+        person.asked.clear()
+
+        unknown_id = "job_0000000000000000"
+        for cls in (OTHER_NODE_TURN, OWNER_TURN):
+            ctx = _multi_ctx(dpc_home, service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=cls)
+            reg = registry_for(ctx)
+            out_other = await _exec(reg, ctx, "music_cancel_job", job_id=job_dm_q["id"])
+            out_ui = await _exec(reg, ctx, "music_cancel_job", job_id=job_ui_q["id"])
+            out_unknown = await _exec(reg, ctx, "music_cancel_job", job_id=unknown_id)
+            assert "not_your_job" in out_other, out_other
+            assert "not_found" not in out_other and "another chat" not in out_other
+            assert "not proposed by this agent;" not in out_other
+            assert _norm(out_other, job_dm_q["id"]) == _norm(out_ui, job_ui_q["id"]) == _norm(out_unknown, unknown_id)
+            assert rig.store.get_job(job_dm_q["id"])["state"] == js.QUEUED
+            assert rig.store.get_job(job_ui_q["id"])["state"] == js.QUEUED
+            assert person.asked == []
+
+        # Foreign asker refuses before card, byte-identical modulo ID
+        ctx_foreign = _multi_ctx(dpc_home, service, FRIENDS_GROUP, asker=FRIEND, turn_class=OTHER_NODE_TURN)
+        reg_foreign = registry_for(ctx_foreign)
+        out_f_other = await _exec(reg_foreign, ctx_foreign, "music_cancel_job", job_id=job_dm_q["id"])
+        out_f_unknown = await _exec(reg_foreign, ctx_foreign, "music_cancel_job", job_id=unknown_id)
+        assert "not_your_job" in out_f_other
+        assert _norm(out_f_other, job_dm_q["id"]) == _norm(out_f_unknown, unknown_id)
+        assert person.asked == []
+        assert rig.store.get_job(job_dm_q["id"])["state"] == js.QUEUED
+
+        # Legitimate group job can still be cancelled from FRIENDS_GROUP
+        out_cancel_grp = await _exec(registry_for(ctx_grp), ctx_grp, "music_cancel_job", job_id=job_grp_q["id"])
+        assert out_cancel_grp.startswith(f"job {job_grp_q['id']}: cancelled"), out_cancel_grp
+        assert rig.store.get_job(job_grp_q["id"])["state"] == js.CANCELLED
+
+    # Fallback collapse if cancel_music_job itself returns not_found or not_your_job under _chat_scoped_music
+    ctx_fallback = _multi_ctx(dpc_home, service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OTHER_NODE_TURN)
+    for code, msg in (("not_found", "no music job"), ("not_your_job", "proposed in another chat")):
+        def fake_call(_ctx, method, **kwargs):
+            if method == "get_music_job":
+                return {"status": "ok", "job": {"id": kwargs["job_id"], "state": js.QUEUED,
+                                                "requested_by": {"kind": "agent", "agent_id": ONE_AGENT,
+                                                                 "conversation_id": FRIENDS_GROUP}}}
+            if method == "cancel_music_job":
+                return {"status": "error", "code": code, "message": msg}
+            raise AssertionError(method)
+
+        monkeypatch.setattr(music_tools, "_service_call", fake_call)
+        res = music_tools.music_cancel_job.__wrapped__(ctx_fallback, "job_1111111111111111")
+        if code == "not_found":
+            res_nf = res
+        else:
+            res_nyj = res
+    assert res_nf == res_nyj and "not_your_job" in res_nf and "another chat" not in res_nf
+
+
+@pytest.mark.asyncio
+async def test_all_chat_scoped_music_tools_return_byte_identical_refusals_for_other_chat_and_unknown_ids(
+        tmp_path, monkeypatch):
+    # World A: populated with 1:1 job/take/track/folder/playlist and a group job/take/track.
+    # World B: clean store without those 1:1 items (same IDs queried in both -> literal == equality!).
+    home_a_root = tmp_path / "world_a"
+    home_b_root = tmp_path / "world_b"
+    _ua, dpc_a = await _seed_world(home_a_root, monkeypatch)
+    roles = ((OWNER_ASKER, OTHER_NODE_TURN), (OWNER_ASKER, OWNER_TURN), (FRIEND, OTHER_NODE_TURN))
+    world_a_results = {}
+    in_world_a_pairs = []
+
+    async with Rig(dpc_a) as rig_a:
+        person_a = Person(True)
+        svc_a = _MultiChatService(dpc_a, rig_a, person_a)
+        data = await _populate_world(rig_a, dpc_a, svc_a)
+
+        job_dm, take_dm, trk_dm = data["job_dm"], data["take_dm"], data["trk_dm"]
+        trk_folder, pl = data["trk_folder"], data["pl_private"]
+        trk_group, take_group = data["trk_group"], data["take_group"]
+
+        same_id_probes = [
+            ("music_check", {"job_id": job_dm["id"]}),
+            ("music_wait", {"job_id": job_dm["id"], "timeout": 1}),
+            ("music_list_takes", {"job_id": job_dm["id"]}),
+            ("music_cancel_job", {"job_id": job_dm["id"]}),
+            ("music_get_lyrics", {"track_id": trk_dm}),
+            ("music_get_lyrics", {"track_id": trk_folder}),
+            ("music_playlist_add", {"playlist_id": pl["id"], "track_ids": [trk_dm]}),
+            ("music_playlist_add", {"playlist_id": pl["id"], "track_ids": [trk_folder]}),
+            ("music_playlist_add", {"playlist_id": pl["id"], "take_id": take_dm["id"]}),
+            ("music_playlist_add", {"playlist_id": pl["id"], "track_ids": [trk_group]}),
+            ("music_playlist_add", {"playlist_id": pl["id"], "take_id": take_group["id"]}),
+            ("chat_post_file", {"take_id": take_dm["id"]}),
+        ]
+
+        for asker, cls in roles:
+            key_role = (asker.is_owner, cls)
+            ctx_a = _multi_ctx(dpc_a, svc_a, FRIENDS_GROUP, asker=asker, turn_class=cls)
+            reg_a = registry_for(ctx_a)
+            world_a_results[key_role] = [
+                (tool_name, args, await _exec(reg_a, ctx_a, tool_name, **args))
+                for tool_name, args in same_id_probes
+            ]
+
+            for tool_name, other_args, unknown_args, other_id, unk_id in (
+                ("music_check", {"job_id": job_dm["id"]}, {"job_id": "job_0000000000000000"},
+                 job_dm["id"], "job_0000000000000000"),
+                ("music_wait", {"job_id": job_dm["id"], "timeout": 1},
+                 {"job_id": "job_0000000000000000", "timeout": 1},
+                 job_dm["id"], "job_0000000000000000"),
+                ("music_list_takes", {"job_id": job_dm["id"]}, {"job_id": "job_0000000000000000"},
+                 job_dm["id"], "job_0000000000000000"),
+                ("music_cancel_job", {"job_id": job_dm["id"]}, {"job_id": "job_0000000000000000"},
+                 job_dm["id"], "job_0000000000000000"),
+                ("music_get_lyrics", {"track_id": trk_dm}, {"track_id": "trk_0000000000000000"},
+                 trk_dm, "trk_0000000000000000"),
+                ("music_playlist_add", {"playlist_id": pl["id"], "track_ids": [trk_dm]},
+                 {"playlist_id": pl["id"], "track_ids": ["trk_0000000000000000"]},
+                 trk_dm, "trk_0000000000000000"),
+                ("music_playlist_add", {"playlist_id": pl["id"], "track_ids": [trk_group]},
+                 {"playlist_id": "pl_0000000000000000", "track_ids": [trk_group]},
+                 pl["id"], "pl_0000000000000000"),
+                ("chat_post_file", {"take_id": take_dm["id"]}, {"take_id": "take_0000000000000000"},
+                 take_dm["id"], "take_0000000000000000"),
+            ):
+                out_other = await _exec(reg_a, ctx_a, tool_name, **other_args)
+                out_unknown = await _exec(reg_a, ctx_a, tool_name, **unknown_args)
+                in_world_a_pairs.append((tool_name, key_role, other_id, unk_id, out_other, out_unknown))
+
+        assert person_a.asked == [] and svc_a.sent == []
+
+    for tool_name, key_role, other_id, unk_id, out_other, out_unknown in in_world_a_pairs:
+        assert _norm(out_other, other_id) == _norm(out_unknown, unk_id), (
+            tool_name, key_role, out_other, out_unknown)
+
+    _ub, dpc_b = await _seed_world(home_b_root, monkeypatch)
+    async with Rig(dpc_b) as rig_b:
+        person_b = Person(True)
+        svc_b = _MultiChatService(dpc_b, rig_b, person_b)
+        for asker, cls in roles:
+            key_role = (asker.is_owner, cls)
+            ctx_b = _multi_ctx(dpc_b, svc_b, FRIENDS_GROUP, asker=asker, turn_class=cls)
+            reg_b = registry_for(ctx_b)
+            for tool_name, args, out_other in world_a_results[key_role]:
+                out_unknown = await _exec(reg_b, ctx_b, tool_name, **args)
+                assert out_other == out_unknown, (tool_name, args, key_role, out_other, out_unknown)
+                assert "not_your_job" in out_other, (tool_name, out_other)
+        assert person_b.asked == [] and svc_b.sent == []
+
+
+def test_music_get_tools_asserts_approval_checks_cover_music_tool_names(monkeypatch):
+    entries = music_tools.get_tools()
+    assert {e.name for e in entries} == music_tools.MUSIC_TOOL_NAMES
+    monkeypatch.setattr(music_tools, "MUSIC_TOOL_NAMES", music_tools.MUSIC_TOOL_NAMES | {"music_unapproved_fake"})
+    with pytest.raises(AssertionError):
+        music_tools.get_tools()
 
