@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { cancelTauriRecording, isTauriEnvironment, removeVoiceTempFile } from '$lib/utils/voiceCleanup';
 
   interface VoiceRecorderProps {
     disabled?: boolean;
@@ -14,14 +15,29 @@
   let recordingDuration = $state(0);
   let recordingStartTime = $state<number | null>(null);
   let timerInterval: ReturnType<typeof setInterval> | null = null;
+  let activeRecordingPath: string | null = null;
+  let recordingCancelled = false;
+  let isStopping = false;
+  let mediaRecorder: MediaRecorder | null = null;
+  let mediaStream: MediaStream | null = null;
+  let discardBrowserRecording = false;
 
   onMount(() => {
     // Check for Tauri environment
-    isTauri = typeof window !== 'undefined' && (
-      (window as any).isTauri === true ||
-      !!(window as any).__TAURI__
-    );
+    isTauri = isTauriEnvironment();
     console.log('[VoiceRecorder] Environment:', isTauri ? 'Tauri (using Rust backend)' : 'Browser (using getUserMedia)');
+
+    return () => {
+      if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+      }
+      if (isRecording) {
+        void cancelRecording();
+      } else {
+        cleanup();
+      }
+    };
   });
 
   // Format duration as MM:SS
@@ -32,7 +48,12 @@
   }
 
   async function startRecording() {
-    // Reset duration for new recording
+    if (isRecording || isStopping) return;
+
+    // Reset state for new recording
+    recordingCancelled = false;
+    discardBrowserRecording = false;
+    activeRecordingPath = null;
     recordingDuration = 0;
     recordingStartTime = Date.now();
 
@@ -57,10 +78,21 @@
       const result = await invoke('tauri_start_recording', {
         outputDir,
         maxDurationSeconds: maxDuration
-      });
+      }) as { output_path?: string } | null;
+
+      const startedPath = result?.output_path ?? null;
+
+      if (recordingCancelled) {
+        await cancelTauriRecording(startedPath, {
+          stopRecording: () => invoke<string>('tauri_stop_recording'),
+          getStatus: () => invoke('tauri_get_recording_status'),
+        });
+        return;
+      }
 
       console.log('[VoiceRecorder] Recording started:', result);
 
+      activeRecordingPath = startedPath;
       isRecording = true;
 
       // Start timer
@@ -81,25 +113,37 @@
   async function startRecordingBrowser() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream, {
+      mediaStream = stream;
+      const recorder = new MediaRecorder(stream, {
         mimeType: getSupportedMimeType()
       });
+      mediaRecorder = recorder;
 
       const audioChunks: Blob[] = [];
 
-      mediaRecorder.ondataavailable = (e) => {
+      recorder.ondataavailable = (e) => {
         if (e.data.size > 0) {
           audioChunks.push(e.data);
         }
       };
 
-      mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
-        onRecordingComplete(audioBlob, recordingDuration);
+      recorder.onstop = () => {
+        const duration = recordingDuration;
+        const mimeType = recorder.mimeType || 'audio/webm';
+        const shouldDiscard = discardBrowserRecording;
         cleanup();
+        if (!shouldDiscard) {
+          const audioBlob = new Blob(audioChunks, { type: mimeType });
+          onRecordingComplete(audioBlob, duration);
+        }
       };
 
-      mediaRecorder.start();
+      if (recordingCancelled) {
+        cleanup();
+        return;
+      }
+
+      recorder.start();
       isRecording = true;
 
       // Start timer
@@ -111,6 +155,7 @@
       }, 1000);
 
     } catch (error) {
+      cleanup();
       console.error('[VoiceRecorder] Error starting recording (Browser):', error);
       if (error instanceof Error) {
         if (error.name === 'NotAllowedError') {
@@ -135,11 +180,25 @@
   }
 
   async function stopRecordingTauri() {
+    if (isStopping) return;
+    isStopping = true;
+    const duration = recordingDuration;
+    activeRecordingPath = null;
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+
     try {
       const { invoke } = await import('@tauri-apps/api/core');
 
       console.log('[VoiceRecorder] Stopping recording...');
       const outputPath = await invoke('tauri_stop_recording') as string;
+
+      if (recordingCancelled) {
+        await removeVoiceTempFile(outputPath);
+        return;
+      }
 
       console.log('[VoiceRecorder] Recording saved to:', outputPath);
 
@@ -158,15 +217,21 @@
       const relativePath = outputPath.slice(dpcIndex); // e.g., ".dpc/temp/voice_xxx.wav"
       const contents = await readFile(relativePath, { baseDir: BaseDirectory.Home });
 
+      if (recordingCancelled) {
+        await removeVoiceTempFile(outputPath);
+        return;
+      }
+
       // Create a blob from the WAV file (48 kHz mono, 16-bit PCM)
       // Python backend will transcode to OGG/Opus for transmission
       const blob = new Blob([contents], { type: 'audio/wav' });
-      onRecordingComplete(blob, recordingDuration, outputPath);
+      onRecordingComplete(blob, duration, outputPath);
 
     } catch (error) {
       console.error('[VoiceRecorder] Error stopping recording:', error);
       alert(`Failed to stop recording: ${error}`);
     } finally {
+      isStopping = false;
       isRecording = false;
       if (timerInterval) {
         clearInterval(timerInterval);
@@ -176,23 +241,48 @@
   }
 
   function stopRecordingBrowser() {
-    // This would be handled by the mediaRecorder.onstop callback
+    discardBrowserRecording = false;
     isRecording = false;
     if (timerInterval) {
       clearInterval(timerInterval);
       timerInterval = null;
     }
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop();
+    } else {
+      cleanup();
+    }
   }
 
-  function cancelRecording() {
-    if (isRecording && isTauri) {
-      // Try to stop and delete the recording
-      stopRecording();
-    } else {
-      stopRecordingBrowser();
-    }
+  async function cancelRecording() {
+    recordingCancelled = true;
+    const wasRecording = isRecording || activeRecordingPath !== null;
+    isRecording = false;
     recordingDuration = 0;
     recordingStartTime = null;
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+
+    if (isTauri) {
+      const knownPath = activeRecordingPath;
+      activeRecordingPath = null;
+      if (wasRecording && !isStopping) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await cancelTauriRecording(knownPath, {
+          stopRecording: () => invoke<string>('tauri_stop_recording'),
+          getStatus: () => invoke('tauri_get_recording_status'),
+        });
+      }
+    } else {
+      discardBrowserRecording = true;
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+      } else {
+        cleanup();
+      }
+    }
   }
 
   function getSupportedMimeType(): string {
@@ -214,18 +304,14 @@
   }
 
   function cleanup() {
-    // Browser-specific cleanup
-  }
-
-  // Cleanup on unmount
-  onMount(() => {
-    return () => {
-      if (timerInterval) {
-        clearInterval(timerInterval);
+    if (mediaStream) {
+      for (const track of mediaStream.getTracks()) {
+        track.stop();
       }
-      cleanup();
-    };
-  });
+      mediaStream = null;
+    }
+    mediaRecorder = null;
+  }
 </script>
 
 <div class="voice-recorder" class:disabled>

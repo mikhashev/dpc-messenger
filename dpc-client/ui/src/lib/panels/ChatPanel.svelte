@@ -64,6 +64,7 @@
     type AgentChatAttachment, type HeldAgentSend, type UnconfirmedRestore,
   } from '$lib/utils/agentChatAttachment';
   import { groupRecordingRoute, groupRecordingSentNotice } from '$lib/utils/groupRecording';
+  import { discardVoicePreview, removeVoiceTempFile } from '$lib/utils/voiceCleanup';
 
   type AIChatMeta = {
     name: string;
@@ -223,6 +224,11 @@
     heldSendTimers.clear();
     heldAgentSends.clear();
     unconfirmedAgentSends.clear();
+    if (voicePreview !== null) {
+      void discardVoicePreview(voicePreview, () => {
+        voicePreview = null;
+      });
+    }
   });
   let isSendingFile = $state(false);
 
@@ -334,7 +340,13 @@
       currentInput = next.currentInput;
       if (pendingImage !== null) pendingImage = null;
       if (pendingFile !== null) pendingFile = null;
-      if (voicePreview !== null) voicePreview = null;
+      untrack(() => {
+        if (voicePreview !== null) {
+          void discardVoicePreview(voicePreview, () => {
+            voicePreview = null;
+          });
+        }
+      });
       previousChatId = currentChat;
     }
   });
@@ -920,7 +932,7 @@
     // A recording that could not go back has nowhere to be sent from: drop its temp file.
     if (!next.attachmentRestored && held.recording?.filePath) {
       const lost = held.recording.filePath;
-      import('@tauri-apps/plugin-fs').then(({ remove }) => remove(lost)).catch(() => {});
+      void removeVoiceTempFile(lost);
     }
     fileOfferToastMessage = refusalNoticeFor(reason, next.attachmentRestored, !!(held.file || held.recording));
     showFileOfferToast = true;
@@ -1208,8 +1220,9 @@
 
   async function handleSendVoiceMessage() {
     if (!voicePreview) return;
-    const blob = voicePreview.blob;
-    const duration = voicePreview.duration;
+    const preview = voicePreview;
+    const blob = preview.blob;
+    const duration = preview.duration;
 
     try {
       if (activeChatId.startsWith('telegram-')) {
@@ -1250,15 +1263,12 @@
           } catch (error) {
             if (activeChatId === chatId && !voicePreview) voicePreview = preview;
             // A recording that could not go back has nowhere to be sent from: drop its temp file.
-            else import('@tauri-apps/plugin-fs').then(({ remove }) => remove(recorded)).catch(() => {});
+            else void removeVoiceTempFile(recorded);
             throw error;
           }
           chatDraftInputs = new Map(chatDraftInputs).set(chatId, '');
           if (activeChatId === chatId && currentInput.trim() === text) currentInput = '';
-          try {
-            const { remove } = await import('@tauri-apps/plugin-fs');
-            await remove(recorded);
-          } catch { /* ignore */ }
+          await removeVoiceTempFile(recorded);
           fileOfferToastMessage = groupRecordingSentNotice(text);
           showFileOfferToast = true;
           setTimeout(() => (showFileOfferToast = false), 6000);
@@ -1289,14 +1299,11 @@
         await sendVoiceMessage(activeChatId, blob, duration);
       }
 
-      const tempFilePath = voicePreview?.filePath;
+      const tempFilePath = voicePreview === preview ? preview.filePath : undefined;
+      if (voicePreview === preview) voicePreview = null;
       if (tempFilePath) {
-        try {
-          const { remove } = await import('@tauri-apps/plugin-fs');
-          await remove(tempFilePath);
-        } catch { /* ignore */ }
+        await removeVoiceTempFile(tempFilePath);
       }
-      voicePreview = null;
     } catch (error) {
       fileOfferToastMessage = `Failed to send voice: ${error}`;
       showFileOfferToast = true;
@@ -1338,11 +1345,11 @@
       chatDraftInputs = next.drafts;
       currentInput = next.currentInput;
 
-      const tempFilePath = preview.filePath;
-      if (tempFilePath) {
-        try { const { remove } = await import('@tauri-apps/plugin-fs'); await remove(tempFilePath); } catch { /* ignore */ }
-      }
+      const tempFilePath = voicePreview === preview ? preview.filePath : undefined;
       if (voicePreview === preview) voicePreview = null;
+      if (tempFilePath) {
+        await removeVoiceTempFile(tempFilePath);
+      }
 
       if (originChatId !== inputOwnerChatId) {
         if (transcription) {
@@ -1368,10 +1375,9 @@
   }
 
   function handleCancelVoicePreview() {
-    if (voicePreview?.filePath) {
-      import('@tauri-apps/plugin-fs').then(({ remove }) => { remove(voicePreview!.filePath!).catch(() => {}); });
-    }
-    voicePreview = null;
+    void discardVoicePreview(voicePreview, () => {
+      voicePreview = null;
+    });
   }
 
   async function _blobToBase64(blob: Blob): Promise<string> {

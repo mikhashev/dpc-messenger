@@ -15,12 +15,21 @@
     "opener:default",
     "dialog:default",
     "notification:default",
-    "fs:allow-mkdir",
-    "fs:allow-read-file",
-    "fs:allow-write-file",
     {
-      "identifier": "fs:scope",
-      "allow": ["$HOME/.dpc/**"]
+      "identifier": "fs:allow-mkdir",
+      "allow": [{ "path": "$HOME/.dpc/**" }]
+    },
+    {
+      "identifier": "fs:allow-read-file",
+      "allow": [{ "path": "$HOME/.dpc/**" }]
+    },
+    {
+      "identifier": "fs:allow-write-file",
+      "allow": [{ "path": "$HOME/.dpc/**" }]
+    },
+    {
+      "identifier": "fs:allow-remove",
+      "allow": [{ "path": "$HOME/.dpc/temp/**" }]
     }
   ]
 }
