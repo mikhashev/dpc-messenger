@@ -173,6 +173,16 @@ failed 7 runs in 1000 until it read a frozen clock (6c03484c, 02fa3f48). That is
 platform, not a flake to chase: freeze the clock (`freeze_clocks` in `tests/_card_lease_helpers.py`
 stops the card's clocks), or make the margin at least 50 ms.
 
+**A fix is tested on its input and on at least one neighbouring input.** A test that pins only the
+exact form from the bug report lets the fix break the form next to it, and the suite stays green.
+Three regressions in wave 3 (2026-11-27) passed a green full suite this way: LRC stamps were tested
+only as `[..][..]` and broke when separated by a space; the voice cascade was tested with one
+provider order and lost its error toast with another; the `DPC_HOME` resolver was tested only with
+the variable unset and let a shell value override the test stand-in. So every fix carries at least
+one test on a neighbouring variant: whitespace or separator, another order, an environment variable
+set as well as unset, an empty or boundary value. A reviewer asks for that test, or probes it, before
+approving.
+
 ## Commit message hook — one command per clone
 
 ```bash
