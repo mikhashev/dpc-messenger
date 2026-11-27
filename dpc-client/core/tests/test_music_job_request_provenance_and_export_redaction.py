@@ -664,3 +664,368 @@ def test_mp3_and_opus_exports_redact_private_request_fields_and_keep_title_asked
     assert plain_take["requested_by"]["conversation_id"] == pv.NODE_ID_WITHHELD
     assert plain_take["request"]["text"] == pv.NODE_ID_WITHHELD
     assert plain_take["request"]["title"] == "Neon Rain"
+
+
+# -- 6. CC #51 fixes: fallback sidecar redaction, request byte cap + fit_size, message_id ----
+
+
+def test_withhold_for_export_redacts_node_id_in_requested_by_and_arbitrary_schemas():
+    rec = {
+        "schema": "dpc.take-sidecar/1",
+        "node_id": NODE,
+        "requested_by": {
+            "kind": "agent",
+            "agent_id": "agent-studio",
+            "conversation_id": "conv-secret-1",
+            "turn_id": "turn-secret-1",
+            "node_id": NODE,
+        },
+        "request": {
+            "message_id": "msg-secret-1",
+            "text": "Private prompt at /home/user/secret/track.wav",
+            "title": "Safe Title",
+            "asked": {"style": "jazz"},
+            "changes": ["tempo 120 -> 110"],
+            "surface": "player",
+            "form": {"engine": "yue2"},
+        },
+    }
+    exported = pv.withhold_for_export(rec)
+    assert exported["node_id"] == pv.NODE_ID_WITHHELD
+    assert exported["requested_by"] == {
+        "kind": "agent",
+        "agent_id": "agent-studio",
+        "conversation_id": pv.NODE_ID_WITHHELD,
+        "turn_id": pv.NODE_ID_WITHHELD,
+        "node_id": pv.NODE_ID_WITHHELD,
+    }
+    assert exported["request"] == {
+        "message_id": pv.NODE_ID_WITHHELD,
+        "text": pv.NODE_ID_WITHHELD,
+        "title": "Safe Title",
+        "asked": {"style": "jazz"},
+        "changes": ["tempo 120 -> 110"],
+        "surface": "player",
+        "form": {"engine": "yue2"},
+    }
+    # Original remains untouched
+    assert rec["requested_by"]["node_id"] == NODE
+    assert rec["request"]["message_id"] == "msg-secret-1"
+
+
+@pytest.mark.parametrize("preset,reader", [("mp3-v0", read_id3_txxx), ("opus-160", read_opus_comments)])
+def test_fallback_take_sidecar_and_unknown_schemas_are_redacted_on_export(tmp_path, preset, reader):
+    from dpc_client_core.music.export import ExportSource
+
+    fallback_sidecar = {
+        "schema": "dpc.take-sidecar/1",
+        "job_id": "job_0123456789abcdef",
+        "take_id": "tak_0123456789abcdef",
+        "variant": 1,
+        "node_id": NODE,
+        "requested_by": {
+            "kind": "agent",
+            "agent_id": "agent-studio",
+            "conversation_id": "group-fallback-secret-999",
+            "turn_id": "turn-fallback-secret-555",
+            "node_id": NODE,
+        },
+        "request": {
+            "message_id": "msg-fallback-secret-111",
+            "title": "Fallback Song",
+            "text": "CONFIDENTIAL /home/user/music/demo.wav 192.168.1.50 password: secret123",
+            "asked": {"duration_s": 180, "style": "synthwave"},
+            "changes": ["duration_s: 180 -> 30"],
+            "surface": "player",
+            "form": {"engine": "yue2"},
+        },
+    }
+    flac_plain = _tagged_flac(tmp_path / f"plain_{preset}")
+    src_plain = ExportSource(
+        track_id="trk_fb", path=flac_plain, content_hash="md5:" + "ef" * 16, title="Fallback Song",
+        artist="Band", true_peak_dbtp=-2.0, true_peak_basis="test",
+        take_record=fallback_sidecar, origin="generated",
+    )
+    exporter = MusicExporter(
+        tmp_path / f"out_fb_{preset}",
+        tools=MediaTools(ffmpeg="ffmpeg", ffprobe=None, runner=FakeFfmpeg()),
+        measure=Peaks(-1.5),
+    )
+    out_path = Path(exporter.export_track(src_plain, preset)["path"])
+    tags = reader(out_path)
+    prov_raw = tags["DPC_PROVENANCE"]
+    for secret in (
+        NODE, "group-fallback-secret-999", "turn-fallback-secret-555", "msg-fallback-secret-111",
+        "CONFIDENTIAL", "/home/user/music/demo.wav", "192.168.1.50", "secret123",
+    ):
+        assert secret not in prov_raw
+    pv.check_privacy(prov_raw)
+
+    take_doc = json.loads(prov_raw)["take"]
+    assert take_doc["node_id"] == pv.NODE_ID_WITHHELD
+    assert take_doc["requested_by"] == {
+        "kind": "agent",
+        "agent_id": "agent-studio",
+        "conversation_id": pv.NODE_ID_WITHHELD,
+        "turn_id": pv.NODE_ID_WITHHELD,
+        "node_id": pv.NODE_ID_WITHHELD,
+    }
+    assert take_doc["request"] == {
+        "message_id": pv.NODE_ID_WITHHELD,
+        "title": "Fallback Song",
+        "text": pv.NODE_ID_WITHHELD,
+        "asked": {"duration_s": 180, "style": "synthwave"},
+        "changes": ["duration_s: 180 -> 30"],
+        "surface": "player",
+        "form": {"engine": "yue2"},
+    }
+
+    # Unknown/future take schema alongside a valid embedded source_record is redacted too
+    _rec, text = pv.finalize(acestep(requested_by=_agent_requester(conv_id="conv-emb", turn_id="turn-emb"),
+                                     job_request=_agent_request(message_id="msg-emb", text="emb prompt")))
+    flac_tagged = _tagged_flac(tmp_path / f"tagged_{preset}", text)
+    unknown_take = {**fallback_sidecar, "schema": "dpc.future-take/99"}
+    src_unknown = ExportSource(
+        track_id="trk_unk", path=flac_tagged, content_hash="md5:" + "11" * 16, title="Fallback Song",
+        artist="Band", true_peak_dbtp=-2.0, true_peak_basis="test",
+        take_record=unknown_take, origin="generated",
+    )
+    out_unk = Path(exporter.export_track(src_unknown, preset)["path"])
+    unk_raw = reader(out_unk)["DPC_PROVENANCE"]
+    for secret in (
+        NODE, "group-fallback-secret-999", "turn-fallback-secret-555", "msg-fallback-secret-111",
+        "CONFIDENTIAL", "/home/user/music/demo.wav", "192.168.1.50", "secret123",
+        "conv-emb", "turn-emb", "msg-emb", "emb prompt",
+    ):
+        assert secret not in unk_raw
+    pv.check_privacy(unk_raw)
+    assert json.loads(unk_raw)["take"]["request"]["text"] == pv.NODE_ID_WITHHELD
+
+
+@pytest.mark.asyncio
+async def test_runner_privacy_error_fallback_sidecar_is_redacted_on_mp3_and_opus_export(tmp_path, monkeypatch):
+    free_env(monkeypatch)
+    home = tmp_path / "dpc"
+    install_fake_engine(home)
+
+    async with Rig(home) as rig:
+        who = _agent_requester(agent_id=AGENT, conv_id="group-priv-runner", turn_id="turn-priv-runner")
+        req = {
+            "message_id": "msg-priv-runner",
+            "title": "Privacy Fallback Track",
+            "text": "Use C:\\Users\\user\\music\\secret.wav and 192.168.1.25",
+            "asked": {"style": "ambient"},
+            "changes": ["capped duration to 30 s"],
+        }
+        job = rig.store.create_job(
+            "generate_from_text", from_text(variants=1),
+            requested_by=who, request=req,
+        )
+        rig.runner.wake()
+        job = await rig.wait_for(job["id"], DONE)
+        assert job["state"] == js.REVIEW, job["state_reason"]
+
+        flac = home / "music" / "generated" / job["id"] / "privacy-fallback-track_v1.flac"
+        assert flac.is_file()
+        assert pv.TAG not in at.flac_read_comments(flac, max_block_bytes=1 << 20)
+
+        from dpc_client_core.music.export import ExportSource, read_take_sidecar
+        side = read_take_sidecar(flac)
+        assert side is not None and side["schema"] == "dpc.take-sidecar/1"
+        assert side["request"]["text"] == req["text"]
+
+        [take] = rig.store.list_takes(job["id"])
+        src = ExportSource(
+            track_id=take["library_track_id"], path=flac, content_hash=take["file"]["content_hash"],
+            title=take["title"], artist="Band", true_peak_dbtp=-2.0, true_peak_basis="test",
+            take_record=side, origin="generated",
+        )
+        exporter = MusicExporter(
+            tmp_path / "out_runner_fb",
+            tools=MediaTools(ffmpeg="ffmpeg", ffprobe=None, runner=FakeFfmpeg()),
+            measure=Peaks(-1.5),
+        )
+        for preset, reader in (("mp3-v0", read_id3_txxx), ("opus-160", read_opus_comments)):
+            out_path = Path(exporter.export_track(src, preset)["path"])
+            prov_raw = reader(out_path)["DPC_PROVENANCE"]
+            for secret in (
+                "group-priv-runner", "turn-priv-runner", "msg-priv-runner",
+                "C:\\\\Users\\\\user", "192.168.1.25", "secret.wav",
+            ):
+                assert secret not in prov_raw
+            pv.check_privacy(prov_raw)
+            exported_take = json.loads(prov_raw)["take"]
+            assert exported_take["requested_by"]["conversation_id"] == pv.NODE_ID_WITHHELD
+            assert exported_take["requested_by"]["turn_id"] == pv.NODE_ID_WITHHELD
+            assert exported_take["request"]["message_id"] == pv.NODE_ID_WITHHELD
+            assert exported_take["request"]["text"] == pv.NODE_ID_WITHHELD
+            assert exported_take["request"]["title"] == "Privacy Fallback Track"
+            assert exported_take["request"]["asked"] == {"style": "ambient"}
+            assert exported_take["request"]["changes"] == ["capped duration to 30 s"]
+
+
+def test_check_request_enforces_total_serialized_byte_cap():
+    assert hasattr(js, "MAX_REQUEST_BYTES")
+    assert 12 * 1024 <= js.MAX_REQUEST_BYTES <= 16 * 1024
+
+    # Individual fields each stay within per-field bounds, but combined JSON exceeds MAX_REQUEST_BYTES (~30 KB)
+    big_changes = [{"index": i, "note": "x" * 4000} for i in range(8)]
+    with pytest.raises(js.ParamsError) as err:
+        js.check_request({"title": "Oversized Request", "changes": big_changes})
+    assert err.value.field == "request"
+
+    # String-only changes hitting ~29 KB (each <= MAX_REQUEST_CHANGE_LEN=500, len <= MAX_REQUEST_CHANGES=64)
+    many_strings = [f"c{i:02d}-" + ("z" * 450) for i in range(64)]
+    with pytest.raises(js.ParamsError) as err2:
+        js.check_request({"changes": many_strings})
+    assert err2.value.field == "request"
+
+    # A request within MAX_REQUEST_BYTES still passes cleanly
+    ok = js.check_request({"title": "Small", "asked": {"style": "jazz"}, "changes": ["short note"]})
+    assert ok is not None and ok["title"] == "Small"
+
+
+def test_fit_size_evicts_request_before_reproducibility_fields():
+    # Case 1: acestep audio_codes (~52 KB) + sizable request (~14 KB) > 64 KB
+    # Request must be trimmed/dropped first so audio_codes stays intact.
+    codes_52k = ",".join(str(10000 + (i % 9000)) for i in range(8800))
+    assert 48 * 1024 < len(codes_52k.encode("utf-8")) < 56 * 1024
+    big_req = {
+        "message_id": "msg-fit-1",
+        "title": "Preserve Codes",
+        "text": "User asked for synthwave. " + ("a" * 1800),
+        "asked": {"style": "synthwave", "duration_s": 180},
+        "changes": [{"step": i, "detail": "k" * 1800} for i in range(6)],
+    }
+    rec = acestep(
+        lm_result={"caption": "synthwave", "audio_codes": codes_52k, "lyrics": "la\n"},
+        job_request=big_req,
+    )
+    done, text = pv.finalize(rec)
+    assert len(text.encode("utf-8")) <= pv.MAX_BYTES
+    assert done["audio_codes"] == codes_52k
+    assert "audio_codes" not in done.get("omitted_for_size", {})
+    assert "request" in done.get("omitted_for_size", {})
+    pv.validate_embedded(done)
+
+    # Case 2: yue2 semantic_tokens + score_abc (~48 KB) + sizable request (~14 KB) > 64 KB
+    # Request must be trimmed/dropped first so both semantic_tokens and score_abc stay intact.
+    tokens_42k = ",".join(str(20000 + (i % 9000)) for i in range(7200))
+    abc_8k = "X:1\nT:Test\nK:C\n" + ("CDEF GABc |\n" * 650)
+    yrec = yue2(
+        replay={"style": "rock", "abc": abc_8k, "semantic_tokens": tokens_42k, "seed": 42, "lm_seed": 42},
+        job_request=big_req,
+    )
+    ydone, ytext = pv.finalize(yrec)
+    assert len(ytext.encode("utf-8")) <= pv.MAX_BYTES
+    assert ydone["semantic_tokens"] == tokens_42k
+    assert ydone["score_abc"] == abc_8k
+    assert "semantic_tokens" not in ydone.get("omitted_for_size", {})
+    assert "score_abc" not in ydone.get("omitted_for_size", {})
+    assert "request" in ydone.get("omitted_for_size", {})
+    pv.validate_embedded(ydone)
+
+    # Case 3: progressive trimming drops `text` before `changes`, and `changes` before `asked`
+    prog_rec = acestep(job_request={
+        "title": "Progressive",
+        "text": "T" * 1200,
+        "asked": {"style": "jazz"},
+        "changes": ["c1-" + ("x" * 300), "c2-" + ("y" * 300)],
+    })
+    base_sz = len(pv.serialize(prog_rec).encode("utf-8"))
+    # Tight budget that only needs ~1 KB shed: drops `text` (~1.2 KB) while keeping `changes`, `asked`, `title`, and `audio_codes`
+    tight_rec = json.loads(json.dumps(prog_rec))
+    pv.fit_size(tight_rec, max_bytes=base_sz - 600)
+    assert "text" not in tight_rec["request"]
+    assert tight_rec["request"]["changes"] == prog_rec["request"]["changes"]
+    assert tight_rec["request"]["asked"] == {"style": "jazz"}
+    assert tight_rec["audio_codes"] == prog_rec["audio_codes"]
+
+
+def test_music_propose_job_schema_omits_message_id_and_marks_asked_changes_as_summaries():
+    entry = next(e for e in music_tools.get_tools() if e.name == "music_propose_job")
+    req_schema = entry.schema["parameters"]["properties"]["request"]
+    req_props = req_schema["properties"]
+    assert "message_id" not in req_props
+    for field in ("asked", "changes"):
+        desc = req_props[field].get("description", "").lower()
+        assert "summar" in desc or "paraphras" in desc
+        assert "not verbatim" in desc or "no verbatim" in desc
+
+
+@pytest.mark.asyncio
+async def test_music_propose_job_overwrites_or_strips_model_supplied_message_id(tmp_path, monkeypatch):
+    home = tmp_path / "dpc"
+    install_fake_engine(home)
+    free_env(monkeypatch)
+    monkeypatch.setattr(music_tools, "POLL_INTERVAL_S", 0.05)
+
+    async with Rig(home, start_runner=False) as rig:
+        person = Person(True)
+        service = MusicService(home, rig, person)
+        ctx = make_ctx(home, service)
+        reg = registry_for(ctx)
+
+        # Case A: SpawnOrigin has message_id -> overwrites forged model-supplied message_id
+        tc_overwrite = {"id": "c-spoof-1", "type": "function", "function": {
+            "name": "music_propose_job",
+            "arguments": json.dumps({
+                "params": from_text(variants=1),
+                "request": {
+                    "title": "Jazz Cut",
+                    "asked": {"style": "jazz"},
+                    "message_id": "forged-other-chat-msg",
+                },
+            }),
+        }}
+        res1 = await asyncio.wait_for(loop_mod._execute_with_timeout(
+            reg, tc_overwrite, ctx.agent_root / "logs", reg.get_timeout("music_propose_job"), ctx=ctx,
+            agent_id=ctx.agent_root.name, session_id=CHAT, turn_id="turn-spoof-1",
+            message_id="real-msg-1",
+        ), BOUND)
+        assert res1["result"].startswith("Proposed (approved by the person)."), res1["result"]
+        [job1] = rig.store.list_jobs()
+        assert job1["request"]["message_id"] == "real-msg-1"
+        assert job1["request"]["title"] == "Jazz Cut"
+        assert job1["request"]["asked"] == {"style": "jazz"}
+
+        # Case B: SpawnOrigin has empty message_id -> strips forged model-supplied message_id
+        tc_strip = {"id": "c-spoof-2", "type": "function", "function": {
+            "name": "music_propose_job",
+            "arguments": json.dumps({
+                "params": from_text(variants=1, style="ambient pad"),
+                "request": {
+                    "title": "Ambient Cut",
+                    "asked": {"style": "ambient"},
+                    "message_id": "forged-other-chat-msg",
+                },
+            }),
+        }}
+        res2 = await asyncio.wait_for(loop_mod._execute_with_timeout(
+            reg, tc_strip, ctx.agent_root / "logs", reg.get_timeout("music_propose_job"), ctx=ctx,
+            agent_id=ctx.agent_root.name, session_id=CHAT, turn_id="turn-spoof-2",
+            message_id="",
+        ), BOUND)
+        assert res2["result"].startswith("Proposed (approved by the person)."), res2["result"]
+        job2 = [j for j in rig.store.list_jobs() if j["id"] != job1["id"]][0]
+        assert "message_id" not in job2["request"]
+        assert job2["request"]["title"] == "Ambient Cut"
+        assert job2["request"]["asked"] == {"style": "ambient"}
+
+        # Case C: SpawnOrigin has empty message_id and model passes ONLY forged message_id -> no request stored
+        rig.store.cancel_job(job1["id"])
+        tc_strip_only = {"id": "c-spoof-3", "type": "function", "function": {
+            "name": "music_propose_job",
+            "arguments": json.dumps({
+                "params": from_text(variants=1, style="minimal pulse"),
+                "request": {"message_id": "forged-only"},
+            }),
+        }}
+        res3 = await asyncio.wait_for(loop_mod._execute_with_timeout(
+            reg, tc_strip_only, ctx.agent_root / "logs", reg.get_timeout("music_propose_job"), ctx=ctx,
+            agent_id=ctx.agent_root.name, session_id=CHAT, turn_id="turn-spoof-3",
+            message_id="",
+        ), BOUND)
+        assert res3["result"].startswith("Proposed (approved by the person)."), res3["result"]
+        job3 = [j for j in rig.store.list_jobs() if j["id"] not in (job1["id"], job2["id"])][0]
+        assert "request" not in job3

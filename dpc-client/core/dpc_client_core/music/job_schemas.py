@@ -242,6 +242,9 @@ MAX_REQUEST_CHANGES = 64
 MAX_REQUEST_CHANGE_LEN = 500
 MAX_REQUEST_MAPPING_KEYS = 64
 MAX_REQUEST_MAPPING_BYTES = 8192
+# Total UTF-8 compact JSON ceiling across the whole `request` block so per-field limits
+# (e.g. up to 64 `changes` items) cannot combine to crowd out provenance codes or exceed 64 KB.
+MAX_REQUEST_BYTES = 16 * 1024
 ENGINE_CHOICE_RULES = ("instrumental",)
 _ENGINE_CHOICE_KEYS = {"rule", "engine", "adapters", "fallback", "reason", "at", "fell_back"}
 _FELL_BACK_KEYS = {"from", "adapters", "why", "at"}
@@ -435,7 +438,12 @@ def check_request(value: Any) -> Optional[dict]:
             else:
                 raise ParamsError("request", f"request.changes[{idx}] must be a string or an object")
         out["changes"] = cleaned_changes
-    return out or None
+    if not out:
+        return None
+    encoded = json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > MAX_REQUEST_BYTES:
+        raise ParamsError("request", f"request is {len(encoded)} bytes, over the {MAX_REQUEST_BYTES}-byte limit")
+    return out
 
 
 def _check_keys(schema: str, record: Any, required: Iterable[str], allowed: set) -> None:

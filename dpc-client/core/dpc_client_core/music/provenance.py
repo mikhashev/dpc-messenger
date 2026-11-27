@@ -430,29 +430,36 @@ def node_identity() -> str:
     return value if isinstance(value, str) and NODE_ID_RE.match(value) else NOT_STORED
 
 
-def withhold_for_export(rec: Mapping[str, Any]) -> Dict[str, Any]:
-    """Copy of `rec` safe for export outside the node: redacts `node_id`,
-    `requested_by.conversation_id`, `requested_by.turn_id`, `request.message_id`, and
-    `request.text` to `NODE_ID_WITHHELD` while keeping title, asked, changes, surface, form,
-    and non-private requester fields (`kind`, `agent_id`)."""
+def _withhold_for_export(rec: Mapping[str, Any], *, redact_nested: bool = True) -> Dict[str, Any]:
     out = dict(rec)
-    if isinstance(out.get("node_id"), str) and out["node_id"] != NOT_STORED:
+    if out.get("node_id") is not None and out["node_id"] != NOT_STORED:
         out["node_id"] = NODE_ID_WITHHELD
     rb = out.get("requested_by")
     if isinstance(rb, Mapping):
         rb_copy = copy.deepcopy(dict(rb))
-        for key in ("conversation_id", "turn_id"):
-            if isinstance(rb_copy.get(key), str) and rb_copy[key] != NOT_STORED:
+        for key in ("conversation_id", "turn_id", "node_id"):
+            if rb_copy.get(key) is not None and rb_copy[key] != NOT_STORED:
                 rb_copy[key] = NODE_ID_WITHHELD
         out["requested_by"] = rb_copy
     req = out.get("request")
     if isinstance(req, Mapping):
         req_copy = copy.deepcopy(dict(req))
         for key in ("message_id", "text"):
-            if isinstance(req_copy.get(key), str) and req_copy[key] != NOT_STORED:
+            if req_copy.get(key) is not None and req_copy[key] != NOT_STORED:
                 req_copy[key] = NODE_ID_WITHHELD
         out["request"] = req_copy
+    if redact_nested and isinstance(out.get("mp_provenance"), Mapping):
+        out["mp_provenance"] = _withhold_for_export(out["mp_provenance"], redact_nested=False)
     return out
+
+
+def withhold_for_export(rec: Mapping[str, Any]) -> Dict[str, Any]:
+    """Copy of `rec` safe for export outside the node: redacts `node_id`,
+    `requested_by.conversation_id`, `requested_by.turn_id`, `requested_by.node_id`,
+    `request.message_id`, and `request.text` to `NODE_ID_WITHHELD` while keeping title, asked,
+    changes, surface, form, and non-private requester fields (`kind`, `agent_id`). Works on any
+    take/sidecar schema."""
+    return _withhold_for_export(rec, redact_nested=True)
 
 
 def withhold_node_id(rec: Mapping[str, Any]) -> Dict[str, Any]:
@@ -802,12 +809,93 @@ def serialize(rec: Mapping[str, Any]) -> str:
     return compact_json(rec)
 
 
+def _size_bytes(obj: Mapping[str, Any]) -> int:
+    return len(serialize(obj).encode("utf-8"))
+
+
+def _trim_request_for_size(rec: Dict[str, Any], omitted: Dict[str, Any], max_bytes: int) -> None:
+    """Progressively trim/drop `rec['request']` fields (`text`, `changes`, `form`, `asked`, ids,
+    `title`) before `fit_size` touches reproducibility fields."""
+    req_raw = rec.get("request")
+    if not isinstance(req_raw, Mapping) or not req_raw or _size_bytes(rec) <= max_bytes:
+        return
+    req = copy.deepcopy(dict(req_raw))
+    rec["request"] = req
+    orig_bytes = _size_bytes(req)
+    orig_sha = sha256_of(canonical_json(req))
+    dropped: List[str] = []
+
+    def sync_omission() -> None:
+        if not req and "request" in rec:
+            del rec["request"]
+        if not dropped:
+            return
+        omitted["request"] = {
+            "sha256": orig_sha,
+            "bytes": orig_bytes,
+            "dropped": list(dropped),
+            "reason": f"the record was over {max_bytes} bytes",
+        }
+        rec["omitted_for_size"] = dict(omitted)
+
+    def drop_key(key: str, label: Optional[str] = None) -> None:
+        if key not in req:
+            return
+        del req[key]
+        tag = label or key
+        if tag not in dropped:
+            dropped.append(tag)
+        sync_omission()
+
+    if "text" in req and _size_bytes(rec) > max_bytes:
+        drop_key("text")
+
+    if "changes" in req and _size_bytes(rec) > max_bytes:
+        changes = req.get("changes")
+        if isinstance(changes, list):
+            while changes and _size_bytes(rec) > max_bytes:
+                changes.pop()
+                if not changes:
+                    if "changes_trimmed" in dropped:
+                        dropped[dropped.index("changes_trimmed")] = "changes"
+                    drop_key("changes")
+                else:
+                    if "changes_trimmed" not in dropped and "changes" not in dropped:
+                        dropped.append("changes_trimmed")
+                    sync_omission()
+        else:
+            drop_key("changes")
+
+    ordered_rest = ("form", "asked", "message_id", "surface", "title")
+    for key in (*ordered_rest, *sorted(set(req) - set(ordered_rest))):
+        if _size_bytes(rec) <= max_bytes:
+            break
+        drop_key(key)
+
+    if not req and "request" in rec:
+        del rec["request"]
+    if "request" not in rec and "request" in omitted and _size_bytes(rec) > max_bytes:
+        # If the omission marker itself keeps a tight record over `max_bytes`, drop it before touching codes.
+        saved = rec.get("omitted_for_size")
+        reduced = {k: v for k, v in omitted.items() if k != "request"}
+        if reduced:
+            rec["omitted_for_size"] = reduced
+        else:
+            rec.pop("omitted_for_size", None)
+        if _size_bytes(rec) <= max_bytes:
+            omitted.pop("request", None)
+        elif saved is not None:
+            rec["omitted_for_size"] = saved
+
+
 def fit_size(rec: Dict[str, Any], max_bytes: int = MAX_BYTES) -> None:
-    """Replace the big fields by hash references until the compact JSON fits `max_bytes`
-    (PROVENANCE rule 4). Raises `ProvenanceError` when even that is not enough."""
-    omitted: Dict[str, Any] = {}
+    """Trim or drop `request` metadata first, then replace big reproducibility fields
+    (`audio_codes`, `semantic_tokens`, `score_abc`) by hash references until the compact JSON
+    fits `max_bytes` (PROVENANCE rule 4). Raises `ProvenanceError` when even that is not enough."""
+    omitted: Dict[str, Any] = dict(rec["omitted_for_size"]) if isinstance(rec.get("omitted_for_size"), dict) else {}
+    _trim_request_for_size(rec, omitted, max_bytes)
     for field, sha_field, count_field, payload in _BIG_FIELDS:
-        if len(serialize(rec).encode("utf-8")) <= max_bytes:
+        if _size_bytes(rec) <= max_bytes:
             break
         if not isinstance(rec.get(field), str) or not rec[field]:
             continue
@@ -823,10 +911,10 @@ def fit_size(rec: Dict[str, Any], max_bytes: int = MAX_BYTES) -> None:
         omitted[field] = ref
         del rec[field]
         rec["omitted_for_size"] = dict(omitted)
-    size = len(serialize(rec).encode("utf-8"))
+    size = _size_bytes(rec)
     if size > max_bytes:
         raise ProvenanceError(f"the provenance record is {size} bytes, over the {max_bytes}-byte limit even with the "
-                              "codes, tokens and score replaced by hashes")
+                              "request, codes, tokens and score trimmed or replaced by hashes")
 
 
 def finalize(rec: Dict[str, Any], *, extra_private: Sequence[str] = ()) -> Tuple[Dict[str, Any], str]:

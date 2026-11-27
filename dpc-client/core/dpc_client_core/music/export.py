@@ -123,7 +123,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import provenance as mp_provenance
 from .audio_tags import (WAV_INFO_PROVENANCE_KEY, WAV_RECORD_READ_MAX, _build_vorbis, _parse_vorbis,
@@ -1123,10 +1123,10 @@ class MusicExporter:
                 record["source_record_note"] = f"the source's DPC_PROVENANCE was not carried over: {problem}"
         if source.take_record is not None:
             take = source.take_record
-            if parsed is not None and take.get("schema") == mp_provenance.SCHEMA:
+            if parsed is not None and isinstance(take, Mapping) and take.get("schema") == mp_provenance.SCHEMA:
                 # The sidecar is the same record as the file's: only what the file cannot hold.
                 take = {k: take.get(k) for k in ("schema", "take_id", "library_track_id") if k in take}
-            record["take"] = mp_provenance.withhold_for_export(take) if take.get("schema") == mp_provenance.SCHEMA else take
+            record["take"] = mp_provenance.withhold_for_export(take) if isinstance(take, Mapping) else take
         text = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
         if len(text.encode("utf-8")) > max_bytes:
             for key in ("take", "source_record"):

@@ -725,12 +725,14 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
         req_data = dict(request)
     if isinstance(title, str) and title.strip():
         req_data = dict(req_data or {})
-        req_data.setdefault("title", title)
-    msg_id = _message_id()
+        if not isinstance(req_data.get("title"), str) or not req_data["title"].strip():
+            req_data["title"] = title
+    msg_id = str(_message_id()).strip()
     if msg_id:
         req_data = dict(req_data or {})
-        if not req_data.get("message_id"):
-            req_data["message_id"] = msg_id
+        req_data["message_id"] = msg_id
+    elif req_data is not None:
+        req_data.pop("message_id", None)
     if req_data is not None:
         try:
             req_data = js.check_request(req_data)
@@ -1330,15 +1332,29 @@ def get_tools() -> List[ToolEntry]:
                     "type": "object",
                     "description": "Optional trace of the request this job came from: title (short song title "
                                    "for the take and library entry), text (clipped excerpt from the requester's "
-                                   "message), asked (object summarizing what was requested), changes (list of "
-                                   "strings or objects describing what you changed from the request), and "
-                                   "message_id (auto-populated from the triggering message when omitted).",
+                                   "message), asked (concise structured summary/paraphrase of what was "
+                                   "requested, not verbatim message quotes), and changes (concise summary list "
+                                   "of what you changed from the request, not verbatim message quotes).",
                     "properties": {
-                        "title": {"type": "string"},
-                        "text": {"type": "string"},
-                        "asked": {"type": "object"},
-                        "changes": {"type": "array"},
-                        "message_id": {"type": "string"},
+                        "title": {
+                            "type": "string",
+                            "description": "Short song title for the take and library entry.",
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "Clipped excerpt from the requester's message (kept local, withheld on export).",
+                        },
+                        "asked": {
+                            "type": "object",
+                            "description": "Concise structured summary/paraphrase of what the user asked for "
+                                           "(not verbatim message quotes; kept in exported metadata).",
+                        },
+                        "changes": {
+                            "type": "array",
+                            "description": "Concise summary list of strings or objects describing what you "
+                                           "changed or adapted from the request (not verbatim message quotes; "
+                                           "kept in exported metadata).",
+                        },
                     },
                 }},
                ["params"], music_propose_job, timeout_sec=PROPOSE_TOOL_TIMEOUT_S),
