@@ -215,11 +215,14 @@ is required whatever the option; it orders calls and jobs and owns engine swaps.
 **Open (owner decides), Q7.** The owner (#102): "we will need to think about the queue and
 the scheduler". Before A/B/C there is a question only the owner can answer (Johnny #111):
 **Q7.0 — what makes a long guest call acceptable**, given his 120 s rule and that acestep.cpp
-and edits have no duration estimate at all: (i) "music calls are a separate class with their
-own bound" (the 120 s rule stays for transcription and text), (ii) a measured estimate for
-acestep and edits first (a fit like YuE2's), then a larger bound, or (iii) keep 120 s and
-let peers run only short calls. S1 does not depend on Q7; S2-S4 do (an amendment to
-ADR-052 L13).
+and edits have no duration estimate at all. **Decided 2026-11-27 (the owner, #115):** music is
+a **separate guest class** — the 120 s trip stays for transcription and text; a music call is
+admitted by **the load of the owner's own queue** (how much owner work is queued or running
+on the card), not by a fixed trip; and the owner gets **music-class quotas for peers in the
+settings** (the Q1 limits become real settings, not hidden constants). A measured estimate
+for acestep and edits (a fit like YuE2's) is still wanted, for an honest ETA, but it does not
+gate admission. The choice among Q7-A/B/C below remains open. S1 does not depend on Q7;
+S2-S4 do (an amendment to ADR-052 L13 adding the music guest class).
 - **The peer mark must cover the whole trip** (Johnny #111): the mark is a context variable
   set inside `with serving_a_peer(...)` (`managers/llama_server_supervisor.py:228-243`); the
   output transfer, the peer's ACK and the owner's delete happen after the engine call, and
@@ -479,7 +482,8 @@ Each slice runs the full core suite before it is called green.
 
 ## Open Questions
 
-- **Q1. Limits (quotas): Open (owner decides), recommended:** no daily quotas by default; one
+- **Q1. Limits (quotas): partly decided (#115): they are settings the owner sets for the music
+  class of peers.** Open: the defaults. Recommended defaults: no daily quotas by default; one
   concurrent call per peer; `peer_wait_s` 1800 per call; result hold 24 h; the
   anti-starvation budget (a peer's next call keeps its place for 15 min).
 - **Q2. Consent (approval): Open (owner decides), recommended "as for text inference"** (CC #88,
@@ -493,10 +497,12 @@ Each slice runs the full core suite before it is called green.
 - ~~Q5. Adapters~~ **Decided (#89):** "Share to peers" per adapter plus `music.adapters`;
   voice adapters unticked with their note.
 - ~~Q6. ADR-051 D17~~ **Decided (#90, `e54c6b74`):** a licence is a warning, never a block.
-- **Q7. Queue and scheduler: Open (owner decides)** (#102). First **Q7.0**: what makes a long
-  guest call acceptable under the owner's 120 s rule (Mike #17), when acestep and edits have
-  no estimate (D2). Then options Q7-A, Q7-B, Q7-C in D2; CC recommends Q7-B on Q7-A's lease
-  class once Q7.0 is answered. S2-S4 wait for it.
+- **Q7. Queue and scheduler: Open (owner decides)** (#102). **Q7.0 decided (#115):** music is
+  a separate guest class, admitted by the load of the owner's queue, with music-class peer
+  quotas in the settings; the 120 s trip stays for transcription and text. Still open: the
+  scheduler shape (Q7-A, Q7-B, Q7-C in D2; CC recommends Q7-B on Q7-A's lease class) and what
+  "load" means in numbers (e.g. admit when no owner job is queued and the running one ends
+  within N minutes). S2-S4 wait for it.
 
 ## Authors
 
