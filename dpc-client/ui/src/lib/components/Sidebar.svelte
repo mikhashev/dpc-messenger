@@ -440,6 +440,7 @@
     onOpenBackgroundModels,
     onOpenPrivacyLogging,
     onOpenTelegramDiscord,
+    onOpenNetwork,
     onOpenAgentBoard,
     onOpenAgentMap,
     onOpenMusicPlayer,
@@ -483,6 +484,7 @@
     onOpenBackgroundModels?: () => void;
     onOpenPrivacyLogging?: () => void;
     onOpenTelegramDiscord?: () => void;
+    onOpenNetwork?: () => void;
     onOpenAgentBoard?: () => void;
     onOpenAgentMap?: () => void;
     onOpenMusicPlayer?: () => void;
@@ -924,6 +926,13 @@
         <button class="btn-context" onclick={onOpenTelegramDiscord}
           title="The Telegram and Discord enable switches, their bot tokens and the Discord limits">
           Telegram and Discord
+        </button>
+      {/if}
+
+      {#if onOpenNetwork}
+        <button class="btn-context" onclick={onOpenNetwork}
+          title="The network, hub and gateway settings: timeouts, DHT, relay, gossip, hole punching, TURN, STUN, OAuth and the gateway port">
+          Network and Gateway
         </button>
       {/if}
 

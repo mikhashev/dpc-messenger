@@ -171,6 +171,7 @@ from .managers.file_transfer_manager import (
 from .utils.image_utils import screenshot_attachment, screenshot_target
 from .voice_service import VoiceService
 from .background_models_service import BackgroundModelsService
+from .network_service import NetworkService
 from .privacy_logging_service import PrivacyLoggingService
 from .telegram_discord_service import TelegramDiscordService
 from .knowledge_service import KnowledgeService
@@ -1242,6 +1243,14 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         # readers belong to TelegramService/DiscordService/DiscordCoordinator,
         # so the writers get the same small shape here.
         self.telegram_discord_service = TelegramDiscordService(
+            settings=self.settings,
+            local_api=self.local_api,
+        )
+        # The network, hub and gateway keys — the readers belong to
+        # P2PManager, the connection-strategy managers, HubClient,
+        # GatewayServer and webrtc_peer.py, so the writers get the same small
+        # shape here.
+        self.network_service = NetworkService(
             settings=self.settings,
             local_api=self.local_api,
         )
@@ -7062,6 +7071,14 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
     async def save_telegram_discord_config(self, config: dict) -> dict:
         """Delegated to TelegramDiscordService."""
         return await self.telegram_discord_service.save_telegram_discord_config(config)
+
+    async def get_network_config(self) -> dict:
+        """Delegated to NetworkService."""
+        return await self.network_service.get_network_config()
+
+    async def save_network_config(self, config: dict) -> dict:
+        """Delegated to NetworkService."""
+        return await self.network_service.save_network_config(config)
 
     async def get_local_transcription_config(self) -> dict:
         """Delegated to VoiceService."""

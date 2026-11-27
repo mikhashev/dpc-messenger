@@ -1839,6 +1839,17 @@ export async function saveTelegramDiscordConfig(config: any): Promise<any> {
     return sendCommand('save_telegram_discord_config', { config });
 }
 
+// Network config commands (the network, hub and gateway keys, editable from
+// the Network and Gateway form; a stored TURN credential is answered only as
+// credential_set, never as text)
+export async function getNetworkConfig(): Promise<any> {
+    return sendCommand('get_network_config', {});
+}
+
+export async function saveNetworkConfig(config: any): Promise<any> {
+    return sendCommand('save_network_config', { config });
+}
+
 // Per-conversation transcription control (v0.13.2+ checkbox)
 export async function setConversationTranscription(nodeId: string, enabled: boolean): Promise<any> {
     return sendCommand('set_conversation_transcription', { node_id: nodeId, enabled });

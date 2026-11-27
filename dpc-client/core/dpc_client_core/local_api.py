@@ -266,6 +266,11 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # editable from the Telegram and Discord form
     "get_telegram_discord_config",
     "save_telegram_discord_config",
+    # The network, hub and gateway keys (same audit) — editable from the
+    # Network and Gateway form; a stored TURN credential is answered only as
+    # credential_set, never as text
+    "get_network_config",
+    "save_network_config",
     "set_conversation_transcription",
     "get_conversation_transcription",
     "transcribe_audio",

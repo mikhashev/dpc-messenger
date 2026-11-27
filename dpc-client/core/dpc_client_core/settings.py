@@ -3,9 +3,11 @@
 import logging
 import math
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, List, Optional, Dict
+from urllib.parse import urlparse
 import configparser
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,74 @@ def _figure_text(value: float) -> str:
     keeps its decimals (300.5 -> '300.5'). Both read back through `float()` unchanged."""
     number = float(value)
     return str(int(number)) if number.is_integer() else str(number)
+
+
+# A [webrtc]/[turn] server entry as its readers parse it (webrtc_peer.py hands
+# each to aiortc's RTCIceServer): scheme stun/turn/turns, then a host with an
+# optional port and an optional ?query — no whitespace, no path.
+_ICE_URL_RE = re.compile(r"^(?:stun|turn|turns):\S+$", re.IGNORECASE)
+# A [file_transfer] chunk_size as its reader parses it (chunk_window.py
+# _SIZE_SETTING): a bare byte count or one of the k/kib/m/mib suffixes; 'auto'
+# is checked separately.
+_CHUNK_SIZE_RE = re.compile(r"^\d+\s*(?:kib|mib|k|m)?$", re.IGNORECASE)
+
+
+def _ice_urls_text(section: str, key: str, value: Any) -> str:
+    """A comma-separated ICE server list as config.ini text, or ValueError.
+
+    The readers (Settings.get_stun_servers/get_turn_servers/get_turn_fallback_servers)
+    split on commas and hand each entry to aiortc verbatim, so the writer's job
+    is only that each entry is one the peer can parse: a stun:/turn:/turns:
+    scheme, a host with no spaces, and a port that is a port when one is given.
+    Accepts the same shape the UI sends: one comma-separated string or a list.
+    """
+    items = value if isinstance(value, list) else [value]
+    if not items or not all(isinstance(item, str) for item in items):
+        raise ValueError(f"{section}.{key} must be a comma-separated list of "
+                         f"stun:, turn: or turns: addresses.")
+    entries: List[str] = []
+    for item in items:
+        for entry in item.split(','):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if not _ICE_URL_RE.match(entry):
+                raise ValueError(f"{section}.{key} must be a comma-separated list "
+                                 f"of stun:, turn: or turns: addresses.")
+            host = entry.split(':', 1)[1].split('?', 1)[0]
+            if ':' in host:
+                port = host.rsplit(':', 1)[1]
+                if not port.isdigit() or not 1 <= int(port) <= 65535:
+                    raise ValueError(f"{section}.{key} must be a comma-separated list "
+                                     f"of stun:, turn: or turns: addresses.")
+            entries.append(entry)
+    return ', '.join(entries)
+
+
+def _seed_nodes_text(value: Any) -> str:
+    """A [dht] seed_nodes list as config.ini text, or ValueError.
+
+    The reader (get_dht_seed_nodes) splits on commas and takes the part after
+    the last colon as the port, silently skipping an entry whose port is not a
+    number — the writer refuses those instead, so nothing is saved that the
+    reader would quietly drop.
+    """
+    items = value if isinstance(value, list) else [value]
+    if not items or not all(isinstance(item, str) for item in items):
+        raise ValueError("dht.seed_nodes must be a comma-separated list of "
+                         "host:port entries.")
+    entries: List[str] = []
+    for item in items:
+        for entry in item.split(','):
+            entry = entry.strip()
+            if not entry:
+                continue
+            host, _, port = entry.rpartition(':')
+            if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+                raise ValueError("dht.seed_nodes must be a comma-separated list "
+                                 "of host:port entries.")
+            entries.append(entry)
+    return ', '.join(entries)
 
 
 def _check_model_files_dir(raw: str) -> Path:
@@ -1961,6 +2031,334 @@ class Settings:
                         f"{section_name}.{key} must be a whole number "
                         f"of {at_least} or more.")
                 writes.append((section_name, key, str(value)))
+        for section, key, text in writes:
+            self.set(section, key, text)
+
+    def get_network_settings(self) -> Dict[str, Any]:
+        """The keys of the Network form in one read
+        (THE-NETWORK-HUB-AND-GATEWAY-SETTINGS-HAVE-NO-CONTROL-IN-THE-UI):
+        the live [p2p]/[connection]/[hole_punch]/[turn]/[webrtc] keys, the
+        start-only [dht]/[relay]/[gossip]/[hub]/[oauth]/[gateway]/
+        [file_transfer] ones, and p2p.listen_port for display only — the port
+        is bound when the backend starts and has no writer here (the form
+        shows it read-only). A stored TURN credential is answered only as
+        `credential_set` / `fallback_credential_set` — never its value — and
+        read from the stored config, not through get(), so an overriding
+        DPC_TURN_CREDENTIAL-style variable cannot make the form claim a
+        secret it cannot clear. The comma-separated lists (seed_nodes, the
+        ICE server lists) are answered as the stored text, verbatim. When a
+        written value is in force, per key: p2p.connection_timeout,
+        connection.remote_inference_timeout,
+        connection.reconnect_slow_interval_max_seconds and
+        hole_punch.dtls_handshake_timeout are re-read per dial, per request,
+        per slow-reconnect start and per punch attempt, so they apply at
+        once / to the next use; p2p.auto_connect_node_groups is re-read at
+        each reconnect give-up check, so it applies to the next reconnect
+        check; the six [turn] keys and webrtc.stun_servers are read per new
+        WebRTC peer through a fresh Settings parse (the STUN discovery task
+        keeps its own copy for the life of the process, so the
+        public-address discovery follows a new stun_servers only after a
+        restart); everything else is captured once at start
+        (P2PManager.start_server into DHTConfig, the relay/gossip/hole-punch/
+        file-transfer managers' __init__, CoreService.start's one-shot reads,
+        HubClient's fields, the GatewayServer built in CoreService.__init__),
+        so it applies after the next backend start."""
+        return {
+            "p2p": {
+                "listen_port": self.get_p2p_listen_port(),
+                "listen_host": self.get_p2p_listen_host(),
+                "connection_timeout": self.get_p2p_connection_timeout(),
+                "auto_connect_node_groups": self.get_p2p_auto_connect_node_groups(),
+                "auto_connect_delay": self.get_p2p_auto_connect_delay(),
+            },
+            "dht": {
+                "enabled": self.get_dht_enabled(),
+                "port": self.get_dht_port(),
+                "k": self.get_dht_k(),
+                "alpha": self.get_dht_alpha(),
+                "bootstrap_timeout": self.get_dht_bootstrap_timeout(),
+                "lookup_timeout": self.get_dht_lookup_timeout(),
+                "bucket_refresh_interval": self.get_dht_bucket_refresh_interval(),
+                "announce_interval": self.get_dht_announce_interval(),
+                "seed_nodes": self.get('dht', 'seed_nodes', ''),
+            },
+            "relay": {
+                "volunteer": self.get_relay_volunteer(),
+                "max_peers": self.get_relay_max_peers(),
+                "bandwidth_limit_mbps": self.get_relay_bandwidth_limit(),
+            },
+            "gossip": {
+                "max_hops": self.get_gossip_max_hops(),
+                "fanout": self.get_gossip_fanout(),
+                "ttl_seconds": self.get_gossip_ttl(),
+                "sync_interval": self.get_gossip_sync_interval(),
+            },
+            "connection": {
+                "remote_inference_timeout": self.get_remote_inference_timeout(),
+                "reconnect_slow_interval_max_seconds":
+                    self.get_reconnect_slow_interval_max_seconds(),
+                "hole_punch_timeout": self.get_hole_punch_timeout(),
+                "hello_timeout": self.get_hello_timeout(),
+                "link_silence_timeout": self.get_link_silence_timeout(),
+                "max_pending_hellos_per_ip": self.get_max_pending_hellos_per_ip(),
+                "max_proved_connections_per_ip": self.get_max_proved_connections_per_ip(),
+                "enable_hole_punching": self.get_enable_hole_punching(),
+            },
+            "hole_punch": {
+                "udp_punch_port": self.get_hole_punch_port(),
+                "dtls_handshake_timeout": self.get_hole_punch_dtls_handshake_timeout(),
+            },
+            "turn": {
+                "username": self.get('turn', 'username', ''),
+                "credential_set": bool(self._config.get(
+                    'turn', 'credential', fallback='').strip()),
+                "servers": self.get('turn', 'servers', ''),
+                "fallback_servers": self.get('turn', 'fallback_servers', ''),
+                "fallback_username": self.get('turn', 'fallback_username', ''),
+                "fallback_credential_set": bool(self._config.get(
+                    'turn', 'fallback_credential', fallback='').strip()),
+            },
+            "webrtc": {
+                "stun_servers": self.get('webrtc', 'stun_servers', ''),
+            },
+            "hub": {
+                "url": self.get_hub_url(),
+                "auto_connect": self.get_hub_auto_connect(),
+            },
+            "oauth": {
+                "callback_host": self.get_oauth_callback_host(),
+                "callback_port": self.get_oauth_callback_port(),
+                "default_provider": self.get_oauth_default_provider(),
+            },
+            "gateway": {
+                "enabled": self.get_gateway_enabled(),
+                "port": self.get_gateway_port(),
+            },
+            "file_transfer": {
+                "chunk_size": self.get('file_transfer', 'chunk_size', 'auto'),
+                "chunk_delay": float(self.get('file_transfer', 'chunk_delay', '0')),
+                "background_threshold_mb": int(self.get(
+                    'file_transfer', 'background_threshold_mb', '50')),
+                "direct_tls_only_threshold_mb": int(self.get(
+                    'file_transfer', 'direct_tls_only_threshold_mb', '100')),
+                "max_concurrent_transfers": int(self.get(
+                    'file_transfer', 'max_concurrent_transfers', '3')),
+                "verify_hash": self.get(
+                    'file_transfer', 'verify_hash', 'true').lower() in ('true', '1', 'yes'),
+            },
+        }
+
+    def set_network_settings(
+        self, p2p: Optional[Dict[str, Any]] = None,
+        dht: Optional[Dict[str, Any]] = None,
+        relay: Optional[Dict[str, Any]] = None,
+        gossip: Optional[Dict[str, Any]] = None,
+        connection: Optional[Dict[str, Any]] = None,
+        hole_punch: Optional[Dict[str, Any]] = None,
+        turn: Optional[Dict[str, Any]] = None,
+        webrtc: Optional[Dict[str, Any]] = None,
+        hub: Optional[Dict[str, Any]] = None,
+        oauth: Optional[Dict[str, Any]] = None,
+        gateway: Optional[Dict[str, Any]] = None,
+        file_transfer: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Write the Network form's keys; a key left out keeps its stored
+        value, and every value is validated before anything is written.
+
+        p2p.listen_port has no writer: the port is bound when the backend
+        starts and is not changed from the UI (the owner's decision), and
+        gateway.host is not a setting a person can change (the gateway refuses
+        any value but 127.0.0.1, ADR-041 D1) — the form's service refuses both
+        before this method is reached, and neither has a row here.
+
+        The two TURN credentials follow the bot-token contract: left out or
+        empty *keeps* the stored one, only a non-empty string sets it, and
+        only `clear_credential` / `clear_fallback_credential` (with no new
+        value in the same section) removes it.
+
+        ValueError, one sentence naming the key, and nothing written, unless
+        each given value is one its reader knows: the switches must be a real
+        bool; the ports (dht.port, hole_punch.udp_punch_port,
+        oauth.callback_port, gateway.port) whole numbers 1..65535; the counts
+        (dht.k, dht.alpha, the two per-ip ceilings, relay.max_peers, the
+        gossip hops/fanout/ttl/sync and file_transfer.max_concurrent_transfers)
+        whole numbers of 1 or more; the timeouts numbers of seconds greater
+        than 0; the zeros that are honest choices (p2p.auto_connect_delay,
+        file_transfer.chunk_delay and the two MB thresholds, and
+        relay.bandwidth_limit_mbps as a figure of Mbps) numbers of 0 or more;
+        p2p.listen_host one of the three bind hosts p2p_manager.start_server
+        documents (dual, 0.0.0.0, ::); oauth.default_provider google or
+        github; hub.url an http:// or https:// address (HubClient hands it to
+        httpx as a base_url, which refuses anything else at construction);
+        oauth.callback_host a host name or address without spaces; the ICE
+        server lists (turn.servers, turn.fallback_servers,
+        webrtc.stun_servers) comma-separated stun:/turn:/turns: addresses;
+        dht.seed_nodes comma-separated host:port entries; and
+        file_transfer.chunk_size auto or a size in bytes (64KiB, 1MiB,
+        1048576) as chunk_window's parser reads it."""
+        # (section, key) -> the validator that answers config.ini text.
+        seconds_more_than_zero = (
+            ('p2p', 'connection_timeout'),
+            ('connection', 'remote_inference_timeout'),
+            ('connection', 'reconnect_slow_interval_max_seconds'),
+            ('connection', 'hole_punch_timeout'),
+            ('connection', 'hello_timeout'),
+            ('connection', 'link_silence_timeout'),
+            ('hole_punch', 'dtls_handshake_timeout'),
+            ('dht', 'bootstrap_timeout'),
+            ('dht', 'lookup_timeout'),
+            ('dht', 'bucket_refresh_interval'),
+            ('dht', 'announce_interval'),
+        )
+        seconds_zero_or_more = (
+            ('p2p', 'auto_connect_delay'),
+            ('file_transfer', 'chunk_delay'),
+        )
+        figures_zero_or_more = (
+            ('relay', 'bandwidth_limit_mbps'),
+            ('file_transfer', 'background_threshold_mb'),
+            ('file_transfer', 'direct_tls_only_threshold_mb'),
+        )
+        counts_one_or_more = (
+            ('dht', 'k'), ('dht', 'alpha'),
+            ('connection', 'max_pending_hellos_per_ip'),
+            ('connection', 'max_proved_connections_per_ip'),
+            ('relay', 'max_peers'),
+            ('gossip', 'max_hops'), ('gossip', 'fanout'),
+            ('gossip', 'ttl_seconds'), ('gossip', 'sync_interval'),
+            ('file_transfer', 'max_concurrent_transfers'),
+        )
+        ports = (
+            ('dht', 'port'), ('hole_punch', 'udp_punch_port'),
+            ('oauth', 'callback_port'), ('gateway', 'port'),
+        )
+        switches = (
+            ('p2p', 'auto_connect_node_groups'),
+            ('dht', 'enabled'),
+            ('relay', 'volunteer'),
+            ('connection', 'enable_hole_punching'),
+            ('hub', 'auto_connect'),
+            ('gateway', 'enabled'),
+            ('file_transfer', 'verify_hash'),
+        )
+        given = {
+            'p2p': p2p, 'dht': dht, 'relay': relay, 'gossip': gossip,
+            'connection': connection, 'hole_punch': hole_punch, 'turn': turn,
+            'webrtc': webrtc, 'hub': hub, 'oauth': oauth,
+            'gateway': gateway, 'file_transfer': file_transfer,
+        }
+        rows: Dict[tuple, Any] = {}
+        for section_name, section_given in given.items():
+            if section_given is None:
+                continue
+            for key, value in section_given.items():
+                rows[(section_name, key)] = value
+
+        writes: List[tuple] = []
+        # The credential keys follow the token contract and are handled after
+        # the plain rows, so the first pass skips them and their clear flags.
+        token_contract = {('turn', 'credential'), ('turn', 'clear_credential'),
+                          ('turn', 'fallback_credential'),
+                          ('turn', 'clear_fallback_credential')}
+        for (section, key), value in rows.items():
+            if (section, key) in token_contract:
+                continue
+            if (section, key) in ports:
+                if (isinstance(value, bool) or not isinstance(value, int)
+                        or not 1 <= value <= 65535):
+                    raise ValueError(f"{section}.{key} must be a whole number "
+                                     f"from 1 to 65535.")
+                writes.append((section, key, str(value)))
+            elif (section, key) in counts_one_or_more:
+                if (isinstance(value, bool) or not isinstance(value, int)
+                        or value < 1):
+                    raise ValueError(f"{section}.{key} must be a whole number "
+                                     f"of 1 or more.")
+                writes.append((section, key, str(value)))
+            elif (section, key) in figures_zero_or_more:
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or value < 0):
+                    raise ValueError(f"{section}.{key} must be a number, "
+                                     f"0 or more.")
+                writes.append((section, key, _figure_text(value)))
+            elif (section, key) in seconds_zero_or_more:
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or value < 0):
+                    raise ValueError(f"{section}.{key} must be a number of "
+                                     f"seconds, 0 or more.")
+                writes.append((section, key, _figure_text(value)))
+            elif (section, key) in seconds_more_than_zero:
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or value <= 0):
+                    raise ValueError(f"{section}.{key} must be a number of "
+                                     f"seconds, more than 0.")
+                writes.append((section, key, _figure_text(value)))
+            elif (section, key) in switches:
+                if not isinstance(value, bool):
+                    raise ValueError(f"{section}.{key} must be true or false.")
+                writes.append((section, key, 'true' if value else 'false'))
+            elif (section, key) == ('p2p', 'listen_host'):
+                if value not in ('dual', '0.0.0.0', '::'):
+                    raise ValueError("p2p.listen_host must be one of: "
+                                     "dual, 0.0.0.0, ::.")
+                writes.append((section, key, value))
+            elif (section, key) == ('oauth', 'default_provider'):
+                if value not in ('google', 'github'):
+                    raise ValueError("oauth.default_provider must be "
+                                     "google or github.")
+                writes.append((section, key, value))
+            elif (section, key) == ('hub', 'url'):
+                parsed = urlparse(value if isinstance(value, str) else '')
+                if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+                    raise ValueError("hub.url must be an http:// or https:// "
+                                     "address.")
+                writes.append((section, key, value.strip().rstrip('/')))
+            elif (section, key) == ('oauth', 'callback_host'):
+                if not isinstance(value, str) or not value.strip() or len(value.split()) > 1:
+                    raise ValueError("oauth.callback_host must be a host name "
+                                     "or address without spaces.")
+                writes.append((section, key, value.strip()))
+            elif (section, key) in (('turn', 'servers'),
+                                    ('turn', 'fallback_servers'),
+                                    ('webrtc', 'stun_servers')):
+                writes.append((section, key, _ice_urls_text(section, key, value)))
+            elif (section, key) == ('dht', 'seed_nodes'):
+                writes.append((section, key, _seed_nodes_text(value)))
+            elif (section, key) == ('file_transfer', 'chunk_size'):
+                if isinstance(value, bool) or not isinstance(value, (str, int)):
+                    raise ValueError("file_transfer.chunk_size must be auto "
+                                     "or a size in bytes (64KiB, 1MiB, 1048576).")
+                text = str(value).strip()
+                if text == 'auto' or _CHUNK_SIZE_RE.match(text):
+                    writes.append((section, key, text))
+                else:
+                    raise ValueError("file_transfer.chunk_size must be auto "
+                                     "or a size in bytes (64KiB, 1MiB, 1048576).")
+            elif (section, key) in (('turn', 'username'),
+                                    ('turn', 'fallback_username')):
+                if not isinstance(value, str):
+                    raise ValueError(f"{section}.{key} must be a string.")
+                writes.append((section, key, value.strip()))
+            else:
+                raise ValueError(f"{section}.{key} is not a key "
+                                 f"the Network form writes.")
+        for key in ('credential', 'fallback_credential'):
+            value = rows.get(('turn', key))
+            clearing = rows.get(('turn', f'clear_{key}'), False)
+            if value is None and not clearing:
+                continue  # neither set nor cleared: the token-contract pass skips it
+            if not isinstance(clearing, bool):
+                raise ValueError(f"turn.clear_{key} must be true or false.")
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"turn.{key} must be a string.")
+            stripped = value.strip() if isinstance(value, str) else ''
+            if clearing and stripped:
+                raise ValueError(f"turn.{key} cannot be set and cleared "
+                                 f"in one save.")
+            if clearing:
+                writes.append(('turn', key, ''))
+            elif stripped:
+                writes.append(('turn', key, stripped))
         for section, key, text in writes:
             self.set(section, key, text)
 
