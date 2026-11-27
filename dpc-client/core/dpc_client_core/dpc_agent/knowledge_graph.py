@@ -9,6 +9,7 @@ Graph traversal feeds the L7 channel in hybrid_search.py RRF fusion.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -123,9 +124,41 @@ GLINER_MAX_TEXT_LEN = 5000
 # a pure attribute read (safe under the GIL).
 _GLINER_MODEL: Any = None
 _GLINER_LOAD_LOCK = threading.Lock()
-#: What the loaded singleton was put on, so a later caller asking for something
-#: else is answered honestly rather than silently ignored.
+#: Where the loaded singleton is now (a lease-gated one: `cpu` outside a stint).
 _GLINER_DEVICE: Optional[str] = None
+#: Loaded lease-gated (`cuda`, or auto with CUDA): on the card only inside a
+#: stint of its card lease client `_GLINER_CARD` (ADR-052 3.4, S7).
+_GLINER_GATED = False
+_GLINER_CARD: Any = None
+
+#: Card lease figures per text: conservative starts (a whole sleep pass took
+#: 10.9 s on the CPU, 2.7 s on CUDA); the card figure follows what it measures.
+_GLINER_GPU_S_PER_TEXT = 0.1
+_GLINER_CPU_S_PER_TEXT = 0.5
+_GLINER_MOVE_S = 3.0
+
+
+def _gliner_to_gpu() -> None:
+    """The stint client's `to_gpu`, under its device lock, inside a granted lease use."""
+    global _GLINER_DEVICE
+    _GLINER_MODEL.to("cuda")
+    _GLINER_DEVICE = "cuda"
+    log.info("GLiNER moved to the card under the card lease")
+
+
+def _gliner_to_cpu() -> None:
+    """The stint client's `to_cpu`, under its device lock, before its use closes."""
+    global _GLINER_DEVICE
+    if _GLINER_MODEL is not None:
+        _GLINER_MODEL.to("cpu")
+    _GLINER_DEVICE = "cpu"
+    from .memory import _release_device_memory
+    _release_device_memory()
+
+
+def _gliner_card_client():
+    """The card lease client of a lease-gated GLiNER (built at its load), else None."""
+    return _GLINER_CARD if _GLINER_GATED else None
 
 
 def _get_gliner_model(device: Optional[str] = None):
@@ -135,8 +168,13 @@ def _get_gliner_model(device: Optional[str] = None):
     absence as "skip NER", mirroring the ImportError path in
     extract_entities_gliner. Safe to call from any thread (including
     asyncio worker threads via to_thread()).
+
+    `cpu` loads on the CPU and never asks for the card. `cuda`, and auto on a
+    machine with CUDA, are lease-gated (ADR-052 3.4, S7): the model loads on the
+    CPU and reaches the card only inside a stint of `extract_entities_gliner`
+    that holds the card lease (`managers.background_model_lease`).
     """
-    global _GLINER_MODEL, _GLINER_DEVICE
+    global _GLINER_MODEL, _GLINER_DEVICE, _GLINER_GATED, _GLINER_CARD
     if _GLINER_MODEL is not None:
         _warn_if_device_differs(device)
         return _GLINER_MODEL
@@ -156,13 +194,27 @@ def _get_gliner_model(device: Optional[str] = None):
         else:
             resolved = device
             reason = "configured"
+        gated = resolved == "cuda"
+        load_on = "cpu" if gated else resolved
         log.info(
-            "Loading GLiNER model %s on %s (%s; first use, process-wide singleton)...",
-            GLINER_MODEL_NAME, resolved, reason,
+            "Loading GLiNER model %s on %s (%s; first use, process-wide singleton)%s...",
+            GLINER_MODEL_NAME, load_on, reason,
+            "; on the card only under the card lease, for bulk work" if gated else "",
         )
-        _GLINER_MODEL = GLiNER.from_pretrained(GLINER_MODEL_NAME).to(resolved)
-        _GLINER_DEVICE = resolved
-        log.info("GLiNER model loaded on %s", resolved)
+        model = GLiNER.from_pretrained(GLINER_MODEL_NAME).to(load_on)
+        if gated:
+            from ..managers.background_model_lease import BackgroundModelLease
+            _GLINER_CARD = BackgroundModelLease(
+                "ner:gliner", kind="ner", engine="gliner",
+                display=f"GLiNER ({GLINER_MODEL_NAME.rsplit('/', 1)[-1]})", vram_mib=None,
+                to_gpu=_gliner_to_gpu, to_cpu=_gliner_to_cpu,
+                gpu_s_per_item=_GLINER_GPU_S_PER_TEXT, cpu_s_per_item=_GLINER_CPU_S_PER_TEXT,
+                move_s=_GLINER_MOVE_S,
+            )
+        _GLINER_GATED = gated
+        _GLINER_DEVICE = load_on
+        _GLINER_MODEL = model
+        log.info("GLiNER model loaded on %s", load_on)
         return _GLINER_MODEL
 
 
@@ -174,12 +226,14 @@ def _warn_if_device_differs(device: Optional[str]) -> None:
     for a model expects to trigger. Silence here would read as if the second
     agent's setting had been obeyed.
     """
-    if device in (None, "auto") or _GLINER_DEVICE is None or device == _GLINER_DEVICE:
+    # A lease-gated singleton answers for `cuda`, wherever it sits this moment.
+    loaded = "cuda" if _GLINER_GATED else _GLINER_DEVICE
+    if device in (None, "auto") or loaded is None or device == loaded:
         return
     log.warning(
         "GLiNER already loaded on %s; request for %s ignored "
         "(one model per process, first caller decides)",
-        _GLINER_DEVICE, device,
+        loaded, device,
     )
 
 
@@ -1216,6 +1270,37 @@ def _dpc_home_for(agent_root: Path) -> Path:
     return dpc_home()
 
 
+def _predict_entities(model, card, usable: List[dict], entity_types: List[str], asked: int) -> List[dict]:
+    """GLiNER over `usable` texts, one compute call each: on the card while a stint of `card` holds it,
+    else on the CPU (counted as CPU work, ADR-052 L12 point 3)."""
+    all_entities = []
+    for item in usable:
+        source_id = item.get("source_id", "")
+        text = item.get("text", "")
+        try:
+            where = card.compute(1) if card is not None else contextlib.nullcontext(_GLINER_DEVICE)
+            with where as device, _cpu_work.computing_on_the_cpu("GLiNER on the CPU", on_cpu=device == "cpu"):
+                entities = model.predict_entities(text[:GLINER_MAX_TEXT_LEN], entity_types,
+                                                  threshold=GLINER_THRESHOLD)
+        except Exception as e:
+            log.debug("GLiNER extraction failed for %s: %s", source_id, e)
+            continue
+        for ent in entities:
+            label = ent.get("text", "").strip()
+            ent_type = ent.get("label", "concept")
+            if not label or len(label) < 2:
+                continue
+            all_entities.append({
+                "entity": label,
+                "type": ent_type,
+                "source_id": source_id,
+                "score": float(ent.get("score", 0.0)),
+            })
+
+    log.info("GLiNER extracted %d entities from %d texts", len(all_entities), asked)
+    return all_entities
+
+
 class KnowledgeGraph:
     """High-level API for the agent knowledge graph."""
 
@@ -1683,33 +1768,14 @@ class KnowledgeGraph:
         if entity_types is None:
             entity_types = DEFAULT_ENTITY_TYPES
 
-        all_entities = []
-        for item in texts:
-            source_id = item.get("source_id", "")
-            text = item.get("text", "")
-            if not text or len(text) < 20:
-                continue
-            try:
-                with _cpu_work.computing_on_the_cpu("GLiNER on the CPU", on_cpu=_GLINER_DEVICE == "cpu"):
-                    entities = model.predict_entities(text[:GLINER_MAX_TEXT_LEN], entity_types,
-                                                      threshold=GLINER_THRESHOLD)
-            except Exception as e:
-                log.debug("GLiNER extraction failed for %s: %s", source_id, e)
-                continue
-            for ent in entities:
-                label = ent.get("text", "").strip()
-                ent_type = ent.get("label", "concept")
-                if not label or len(label) < 2:
-                    continue
-                all_entities.append({
-                    "entity": label,
-                    "type": ent_type,
-                    "source_id": source_id,
-                    "score": float(ent.get("score", 0.0)),
-                })
-
-        log.info("GLiNER extracted %d entities from %d texts", len(all_entities), len(texts))
-        return all_entities
+        usable = [item for item in texts if len(item.get("text", "") or "") >= 20]
+        card = _gliner_card_client()
+        # More than one text is bulk work: a lease-gated model takes one card lease use for it
+        # (ADR-052 3.4, S7); a single text never asks and computes where the model is.
+        stint = (card.stint("entity extraction", len(usable)) if card is not None and len(usable) > 1
+                 else contextlib.nullcontext())
+        with stint:
+            return _predict_entities(model, card, usable, entity_types, len(texts))
 
     def persist_extracted_entities(self, entities: List[dict]) -> int:
         """Write Entity nodes + MENTIONS edges for entities produced by

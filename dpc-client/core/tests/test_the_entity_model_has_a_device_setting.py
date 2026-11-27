@@ -135,10 +135,10 @@ def fake_gliner(monkeypatch):
     monkeypatch.setitem(sys.modules, "gliner", module)
     import torch
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    saved = kg._GLINER_MODEL, kg._GLINER_DEVICE
-    kg._GLINER_MODEL, kg._GLINER_DEVICE = None, None
+    saved = kg._GLINER_MODEL, kg._GLINER_DEVICE, kg._GLINER_GATED, kg._GLINER_CARD
+    kg._GLINER_MODEL, kg._GLINER_DEVICE, kg._GLINER_GATED, kg._GLINER_CARD = None, None, False, None
     yield made
-    kg._GLINER_MODEL, kg._GLINER_DEVICE = saved
+    kg._GLINER_MODEL, kg._GLINER_DEVICE, kg._GLINER_GATED, kg._GLINER_CARD = saved
 
 
 class TestTheConfiguredDeviceIsTheOneUsed:
@@ -150,10 +150,25 @@ class TestTheConfiguredDeviceIsTheOneUsed:
         assert fake_gliner["model"].moved_to == "cpu"
         assert kg._GLINER_DEVICE == "cpu"
 
-    def test_auto_still_takes_the_card_when_there_is_one(self, fake_gliner):
+    def test_auto_takes_the_card_through_the_card_lease_when_there_is_one(self, fake_gliner):
+        """Since the card lease (ADR-052 3.4, S7) auto on a CUDA machine is lease-gated: the weights load
+        on the CPU and reach the card only inside a stint that holds the lease."""
         kg._get_gliner_model("auto")
-        assert fake_gliner["model"].moved_to == "cuda"
+        assert fake_gliner["model"].moved_to == "cpu"
+        assert kg._GLINER_GATED and kg._GLINER_DEVICE == "cpu"
+        assert kg._gliner_card_client().holder == "ner:gliner"
 
     def test_no_opinion_reads_as_auto(self, fake_gliner):
         kg._get_gliner_model(None)
-        assert fake_gliner["model"].moved_to == "cuda"
+        assert fake_gliner["model"].moved_to == "cpu" and kg._GLINER_GATED
+
+    def test_cuda_is_lease_gated_too_and_answers_for_cuda(self, fake_gliner, caplog):
+        kg._get_gliner_model("cuda")
+        assert fake_gliner["model"].moved_to == "cpu" and kg._GLINER_GATED
+        with caplog.at_level(logging.WARNING):
+            kg._get_gliner_model("cuda")
+        assert caplog.text == "", "a lease-gated model sitting on the CPU is still the cuda setting"
+
+    def test_cpu_never_builds_a_card_lease_client(self, fake_gliner):
+        kg._get_gliner_model("cpu")
+        assert not kg._GLINER_GATED and kg._gliner_card_client() is None
