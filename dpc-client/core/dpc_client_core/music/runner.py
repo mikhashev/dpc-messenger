@@ -916,13 +916,26 @@ class MusicJobRunner:
             self._clear_deferred_align(job_id)
 
     @staticmethod
+    def _adapter_mentioned(name: str, message: str) -> bool:
+        """Whether `name` or either of its split filenames appears in `message`."""
+        from .yue2 import split_name as yue2_split_name
+
+        if name in message:
+            return True
+        for half in ("music", "sound"):
+            cand = yue2_split_name(name, half)
+            if cand and re.search(rf"(?<![A-Za-z0-9._-]){re.escape(cand)}(?![A-Za-z0-9._-])", message):
+                return True
+        return False
+
+    @staticmethod
     def _fall_back_why(job: Mapping[str, Any], exc: Exception, what: str) -> Optional[str]:
         """The path-free reason a job falls back, when `exc` says that an adapter its engine choice
         picked is missing or did not load and the choice has a fallback; else None."""
         choice = job.get("engine_choice") or {}
         if not isinstance(exc, MusicEngineError) or exc.code != "invalid_adapter" or not choice.get("fallback"):
             return None
-        hit = [n for n in choice.get("adapters") or [] if n in exc.message]
+        hit = [n for n in choice.get("adapters") or [] if MusicJobRunner._adapter_mentioned(n, exc.message)]
         if not hit:
             return None
         return f"the {choice['rule']} adapter {', '.join(hit)} {what}"
@@ -1489,6 +1502,11 @@ class MusicJobRunner:
             raise _JobFailure(f"the control is {pcm.rate} Hz x {pcm.channels}, not {re_.RATE} Hz x {re_.CHANNELS}")
         control_sha = await asyncio.to_thread(_file_sha256, control)
         zones = re_.zones_of(job["region"], params)
+        if action == re_.REMOVE_REGION and bool(params.get("cut_with_shift")):
+            r0, r1 = re_.remove_frame_bounds(pcm.frames, pcm.rate, zones["intent"])
+            if pcm.frames - (r1 - r0) < 2:
+                raise re_.EditError("whole_track_removal: cut_with_shift cannot remove the entire track "
+                                    "(no audio would remain)", "region")
         base_rec = await asyncio.to_thread(_base_record, Path(path))
         parent_take = await self._call(self.store.find_take_by_library_track, job["track_id"])
         parent = {"role": "base", "library_track_id": job["track_id"], "content_hash": entry.get("content_hash"),
@@ -1497,10 +1515,18 @@ class MusicJobRunner:
                   "comment_id": job.get("comment_id"),
                   "licence_key": (entry.get("provenance") or {}).get("licence_key")}
         have = {p["name"] for p in job.get("payloads") or []}
+        wrote = False
         if EDIT_PAYLOAD in have:
-            body = await self._call(self.store.read_payload, job_id, EDIT_PAYLOAD)
-            request = json.loads(body.decode("utf-8"))
-            if request.get("control", {}).get("sha256") != control_sha:
+            try:
+                body = await self._call(self.store.read_payload, job_id, EDIT_PAYLOAD)
+                request = json.loads(body.decode("utf-8"))
+            except (OSError, ValueError, UnicodeDecodeError) as exc:
+                raise MusicJobError("invalid_payload",
+                                    f"invalid_payload: stored payload {EDIT_PAYLOAD!r} is unreadable: {exc}") from exc
+            if not isinstance(request, dict):
+                raise MusicJobError("invalid_payload",
+                                    f"invalid_payload: stored payload {EDIT_PAYLOAD!r} must be a JSON object")
+            if (request.get("control") or {}).get("sha256") != control_sha:
                 raise _JobFailure("the track decodes to another control than the one recorded when the job was "
                                   "first prepared; propose the edit again")
         else:
@@ -1541,12 +1567,44 @@ class MusicJobRunner:
                                 "lyrics": lyrics, "lyrics_from": lyr_from, "engine_window": window.as_dict()})
             body = json.dumps(request, ensure_ascii=False).encode("utf-8")
             await self._call(self.store.write_payload, job_id, EDIT_PAYLOAD, body, endpoint=None)
-            if action in re_.REPAINT_ACTIONS:
+            wrote = True
+        if action in re_.REPAINT_ACTIONS:
+            if SYNTH_PAYLOAD in have:
+                if not await self._call(self.store.verify_payload, job_id, SYNTH_PAYLOAD):
+                    raise MusicJobError("invalid_payload",
+                                        f"invalid_payload: stored payload {SYNTH_PAYLOAD!r} is missing or corrupt")
+                try:
+                    raw_synth = await self._call(self.store.read_payload, job_id, SYNTH_PAYLOAD)
+                    parsed_synth = json.loads(raw_synth.decode("utf-8"))
+                except (OSError, ValueError, UnicodeDecodeError) as exc:
+                    raise MusicJobError("invalid_payload",
+                                        f"invalid_payload: stored payload {SYNTH_PAYLOAD!r} is unreadable: {exc}") from exc
+                if not isinstance(parsed_synth, dict):
+                    raise MusicJobError("invalid_payload",
+                                        f"invalid_payload: stored payload {SYNTH_PAYLOAD!r} must be a JSON object")
+            else:
+                caption = request.get("caption")
+                lyrics = request.get("lyrics")
+                seed = request.get("seed")
+                raw_window = request.get("engine_window")
+                if (not isinstance(caption, str) or not caption.strip()
+                        or not isinstance(lyrics, str)
+                        or isinstance(seed, bool) or not isinstance(seed, int)
+                        or not isinstance(raw_window, Mapping)):
+                    raise MusicJobError("invalid_payload",
+                                        f"invalid_payload: stored payload {EDIT_PAYLOAD!r} lacks repaint fields")
+                try:
+                    window = re_.EngineWindow.from_dict(raw_window)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise MusicJobError("invalid_payload",
+                                        f"invalid_payload: stored payload {EDIT_PAYLOAD!r} has invalid engine_window: {exc}") from exc
                 synth = re_.build_repaint_request(
-                    caption=request["caption"], lyrics=request["lyrics"], window=window, seed=request["seed"],
+                    caption=caption.strip(), lyrics=lyrics, window=window, seed=seed,
                     takes=params["takes"], inference_steps=js.FROM_TEXT_INFERENCE_STEPS,
                     synth_model=MODEL_FILES["dit"], vae=MODEL_FILES["vae"])
                 await self._call(self.store.write_payload, job_id, SYNTH_PAYLOAD, synth, endpoint="/synth")
+                wrote = True
+        if wrote:
             self._emit(await self._get(job_id))
         return {"entry": entry, "path": Path(path), "control": control, "pcm": pcm, "control_sha": control_sha,
                 "zones": zones, "request": request, "parent": parent,
@@ -1658,6 +1716,9 @@ class MusicJobRunner:
         spliced = out_dir / f"take_v{variant}.splice.part"
         cut = bool(params.get("cut_with_shift"))
         expected = pcm.frames - ((result.splice_frames[1] - result.splice_frames[0]) if cut else 0)
+        if expected <= 0 or result.frames <= 0:
+            raise _JobFailure("whole_track_removal: cut_with_shift cannot remove the entire track "
+                              "(no audio would remain)")
         try:
             frames = await asyncio.to_thread(re_.write_wav_s24, spliced, result.pieces, rate=pcm.rate,
                                              channels=pcm.channels)

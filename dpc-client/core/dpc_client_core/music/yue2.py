@@ -903,6 +903,12 @@ class Yue2Server(SupervisedEngine):
             raise MusicEngineError("invalid_backbone", f"backbone must be one of {', '.join(js.YUE2_BACKBONES)}, "
                                                        f"got {want!r}")
         needed = [r["name"] for r in self.request_adapters(adapters)] if adapters else []
+        split_to_source: Dict[str, str] = {}
+        for a in adapters:
+            src_name = a.get("name")
+            if isinstance(src_name, str) and src_name:
+                for half in ("music", "sound"):
+                    split_to_source.setdefault(split_name(src_name, half), src_name)
         # The card before any lock (ADR-052 section 3.2): asked for at once, never waited for.
         await self._card_for_a_start()
         async with self._start_lock():
@@ -931,8 +937,10 @@ class Yue2Server(SupervisedEngine):
                 raise
             missing = sorted(set(needed) - set(self._served_adapters))
             if missing:
+                missing_sources = sorted({split_to_source[m] for m in missing if m in split_to_source})
+                source_note = f" (adapter(s): {', '.join(missing_sources)})" if missing_sources else ""
                 raise MusicEngineError("invalid_adapter", f"yue2.cpp did not load the adapter split(s) "
-                                                          f"{', '.join(missing)} from {self.split_dir}; see "
+                                                          f"{', '.join(missing)}{source_note} from {self.split_dir}; see "
                                                           f"{self.log_path.name}")
 
     def _start_lock(self) -> asyncio.Lock:

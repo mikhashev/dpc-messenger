@@ -568,7 +568,9 @@ def _normalize_adapters(raw: Any) -> list:
     return out
 
 
-def normalize_params_from_text(params: Any, *, missing_engine: str = DEFAULT_FROM_TEXT_ENGINE) -> Dict[str, Any]:
+def normalize_params_from_text(
+    params: Any, *, missing_engine: str = DEFAULT_FROM_TEXT_ENGINE, check_context: bool = True
+) -> Dict[str, Any]:
     """The params of a `generate_from_text` job with the defaults filled in, or
     `ParamsError` naming the first param that breaks a rule.
 
@@ -664,9 +666,10 @@ def normalize_params_from_text(params: Any, *, missing_engine: str = DEFAULT_FRO
     # (`normalize_params_song`), on the text as the body will carry it. The run checks it again.
     # An instrumental (lyrics null) runs with the adapter's tag as its lyrics (`runner.build_yue2_body`): the door
     # counts the same tag, so a job at the ceiling is not refused only at the run (follow-up 23, Zcode #214).
-    why = yue2_text_overflow(style, lyrics if lyrics is not None else YUE2_INSTRUMENTAL_LYRICS, duration)
-    if why is not None:
-        raise SongParamsError("context_exceeded", "lyrics", why)
+    if check_context:
+        why = yue2_text_overflow(style, lyrics if lyrics is not None else YUE2_INSTRUMENTAL_LYRICS, duration)
+        if why is not None:
+            raise SongParamsError("context_exceeded", "lyrics", why)
     return out
 
 
@@ -999,7 +1002,7 @@ YUE2_COVER_TEMPO_RESERVE_BYTES = len(", 9999 BPM")
 
 
 def _song_duration(job_type: str, engine: str, params: Mapping[str, Any], src_s: Optional[float],
-                   text_bytes: int = 0, *, section_s: float = 0.0) -> float:
+                   text_bytes: int = 0, *, section_s: float = 0.0, check_context: bool = True) -> float:
     dmin, dmax, ddefault = DURATION_LIMITS[engine]
     if section_s:
         # Same style on yue2.cpp: `duration_s` is the new part, asked for with the section (`_similar_section`).
@@ -1018,8 +1021,10 @@ def _song_duration(job_type: str, engine: str, params: Mapping[str, Any], src_s:
                                   f"{ENGINE_IDS[engine]} is as long as its source and needs at least {floor:.4f} s ({why})")
         if engine == ENGINE_YUE2:
             text_bytes += yue2_cover_tag_reserve_bytes(src_s)   # the tags Match sections may add
-        ceiling = dmax if engine == ENGINE_ACESTEP else yue2_cover_door_max_s(text_bytes)
-        if engine == ENGINE_YUE2 and ceiling < YUE2_COVER_MIN_S:
+        ceiling = dmax if engine == ENGINE_ACESTEP else (
+            yue2_cover_door_max_s(text_bytes) if check_context else YUE2_COVER_MAX_S
+        )
+        if check_context and engine == ENGINE_YUE2 and ceiling < YUE2_COVER_MIN_S:
             raise SongParamsError("context_exceeded", "lyrics",
                                   f"the caption and the lyrics, with what the run may add (the tempo, section tags), "
                                   f"are {text_bytes} bytes; with the score a cover on yue2.cpp needs, they leave no "
@@ -1162,7 +1167,7 @@ def _keep_from_source(raw: Any, keep: Mapping[str, Any]) -> List[str]:
 
 
 def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str] = None,
-                          source: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+                          source: Optional[Mapping[str, Any]] = None, check_context: bool = True) -> Dict[str, Any]:
     """The params of a `generate_similar`, `cover` or `generate_from_lyrics` job with every key filled
     in, or `ParamsError` naming the first param that breaks a rule (`SongParamsError` for
     `missing_lyrics` and `track_not_ready`). `source` is the library's `{kind, content_hash,
@@ -1244,8 +1249,9 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
         section_s = round(out["source_section"]["end_s"] - out["source_section"]["start_s"], 3)
         out["keep_from_source"] = _keep_from_source(params.get("keep_from_source"), out["keep"])
     out["duration_s"] = _song_duration(job_type, engine, params, out["source_duration_s"],
-                                       sent_bytes + YUE2_COVER_TEMPO_RESERVE_BYTES, section_s=section_s)
-    if engine == ENGINE_YUE2 and job_type != COVER:
+                                       sent_bytes + YUE2_COVER_TEMPO_RESERVE_BYTES, section_s=section_s,
+                                       check_context=check_context)
+    if check_context and engine == ENGINE_YUE2 and job_type != COVER:
         # A new song on yue2.cpp shares the context too: its text, the frames its duration cap lets run and the
         # end token (no score). The run checks it again before /synth (`similar.check_song_context`). Same style
         # asks for its section and its new part together (the section is in the prompt and counts in the length);
@@ -1283,10 +1289,10 @@ def normalize_params_song(job_type: str, params: Any, *, track_id: Optional[str]
     return out
 
 
-def check_params_song(job_type: str, params: Any) -> Optional[str]:
+def check_params_song(job_type: str, params: Any, *, check_context: bool = True) -> Optional[str]:
     """Why stored song-job params are not a normalized record, or None (`validate_job`)."""
     try:
-        normalized = normalize_params_song(job_type, params)
+        normalized = normalize_params_song(job_type, params, check_context=check_context)
     except ParamsError as exc:
         return exc.message
     return None if normalized == dict(params) else f"params of {job_type} must carry every key, normalized"
@@ -1354,7 +1360,7 @@ def validate_job(job: Any) -> None:
                 "a generate_from_text job has track_id and base_version_id null")
         # A record without `engine` predates YuE2: it ran on acestep and is read so.
         try:
-            normalized = normalize_params_from_text(job["params"], missing_engine=ENGINE_ACESTEP)
+            normalized = normalize_params_from_text(job["params"], missing_engine=ENGINE_ACESTEP, check_context=False)
         except ParamsError as exc:
             _fail(s, f"params: {exc.message}")
         if isinstance(job["params"], Mapping) and "engine" not in job["params"]:
@@ -1364,7 +1370,7 @@ def validate_job(job: Any) -> None:
         _expect(s, _is_str(job["track_id"]) and _is_str(job["base_version_id"]),
                 f"a {job['type']} job has string track_id and base_version_id")
     if job["type"] in SONG_TYPES:
-        problem = check_params_song(job["type"], job["params"])
+        problem = check_params_song(job["type"], job["params"], check_context=False)
         _expect(s, problem is None, f"params: {problem}")
         _expect(s, job["params"].get("source_track_id") == job["track_id"],
                 "params.source_track_id must be the job's track_id")

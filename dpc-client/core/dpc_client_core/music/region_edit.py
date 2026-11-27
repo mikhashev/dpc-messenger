@@ -201,6 +201,9 @@ def normalize_params_edit(action: str, params: Any, region: Any, *, duration_s: 
             if intent[1] < duration_s - NEAR_END_S:
                 raise EditError(f"cut_with_shift is for a region near the end: it must end within {NEAR_END_S:g} s of "
                                 f"the end ({duration_s:g} s)", "cut_with_shift")
+            if duration_s - (intent[1] - intent[0]) <= DURATION_ROUND_EPS_S:
+                raise EditError("whole_track_removal: cut_with_shift cannot remove the entire track "
+                                "(no audio would remain)", "region")
         if 2 * crossfade / 1000.0 > intent[1] - intent[0]:
             out["crossfade_ms"] = round((intent[1] - intent[0]) * 500.0, 3)
         out["cut_with_shift"] = cut
@@ -669,15 +672,24 @@ def splice(control: Pcm, engine: Pcm, splice_s: Tuple[float, float], crossfade_m
     return SpliceResult(pieces, frames, seams, (a, b), notes)
 
 
+def remove_frame_bounds(frames: int, rate: int, region_s: Tuple[float, float]) -> Tuple[int, int]:
+    """Sample indices `[r0, r1)` for `remove_region`, snapping a rounded end to `frames`."""
+    r0 = max(0, int(round(region_s[0] * rate)))
+    r1 = _snap_rounded_end(min(frames, int(round(region_s[1] * rate))), frames, region_s[1], rate, None)
+    return r0, r1
+
+
 def remove(control: Pcm, region_s: Tuple[float, float], fade_ms: float, *, cut_with_shift: bool = False) -> SpliceResult:
     """The take of a remove: the region silent with a fade out and a fade in inside it (the length kept,
     decision 23), or with `cut_with_shift` the region cut out, a fade out before the cut and a fade in
     after it (decision 27)."""
     rate, n = control.rate, control.frames
-    r0 = max(0, int(round(region_s[0] * rate)))
-    r1 = _snap_rounded_end(min(n, int(round(region_s[1] * rate))), n, region_s[1], rate, None)
+    r0, r1 = remove_frame_bounds(n, rate, region_s)
     if r1 - r0 < 2:
         raise EditError("region_too_short: the region is under two samples at the control's rate")
+    if cut_with_shift and n - (r1 - r0) < 2:
+        raise EditError("whole_track_removal: cut_with_shift cannot remove the entire track "
+                        "(no audio would remain)", "region")
     f = max(1, int(round(fade_ms * rate / 1000.0)))
     c = control.data
     seams: List[Seam] = []

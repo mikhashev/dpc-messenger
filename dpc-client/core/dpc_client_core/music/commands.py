@@ -1433,6 +1433,78 @@ class MusicCommandsMixin:
         """A cut-with-shift take's re-timed lyrics, stored as its own (decision 27)."""
         await (await self._music_lyrics()).save_manual(track_id, lrc_text)
 
+    @staticmethod
+    def _edit_check_job(
+        store: MusicJobStore,
+        params: Any,
+        *,
+        track_id: Optional[str],
+        base_version_id: Optional[str],
+        action: Optional[str],
+        region: Optional[Dict[str, Any]],
+        prompt: Optional[str],
+        idempotency_key: Optional[str],
+        requested_by: Any,
+        request: Any,
+        source: Any,
+        agent_queue_max: Optional[int],
+        turn_jobs_max: Optional[int],
+    ) -> dict:
+        """Probe `store.check_job` for an edit proposed without `comment_id`, trying any matching
+        prior job's created `comment_id` first so retries in the same turn still match."""
+        base = base_version_id or ORIGINAL_VERSION_ID
+        clean_prompt = ((prompt or f"{action} (proposed without a note)").strip() if action else None)
+        rb = requested_by if isinstance(requested_by, dict) else {"kind": js.REQUESTER_PERSON}
+        canon_region = store._canonical_region(region)
+        candidates: List[str] = []
+        for j in store.list_jobs(job_type="edit"):
+            if j.get("track_id") != track_id or j.get("base_version_id") != base or j.get("action") != action:
+                continue
+            if store._canonical_region(j.get("region")) != canon_region:
+                continue
+            if idempotency_key is not None and j.get("idempotency_key") != idempotency_key:
+                continue
+            if idempotency_key is None and rb.get("kind") == js.REQUESTER_AGENT:
+                j_rb = js.requested_by_of(j)
+                if (j_rb.get("kind") != js.REQUESTER_AGENT
+                        or j_rb.get("agent_id") != rb.get("agent_id")
+                        or j_rb.get("conversation_id") != rb.get("conversation_id")
+                        or j_rb.get("turn_id") != rb.get("turn_id")):
+                    continue
+            if clean_prompt is not None and j.get("prompt") != clean_prompt:
+                continue
+            cid = j.get("comment_id")
+            if isinstance(cid, str) and cid and cid not in candidates:
+                candidates.append(cid)
+
+        last_answer: Optional[dict] = None
+        last_limit_exc: Optional[MusicJobError] = None
+        for cid in candidates:
+            try:
+                ans = store.check_job(
+                    "edit", params, track_id=track_id, base_version_id=base, comment_id=cid, action=action,
+                    region=region, prompt=prompt, idempotency_key=idempotency_key, requested_by=requested_by,
+                    request=request, source=source, agent_queue_max=agent_queue_max, turn_jobs_max=turn_jobs_max,
+                )
+            except MusicJobError as exc:
+                if exc.code == "turn_job_limit":
+                    last_limit_exc = exc
+                    continue
+                raise
+            if ans.get("repeat"):
+                return ans
+            last_answer = ans
+        if last_answer is not None:
+            return last_answer
+        if candidates and last_limit_exc is not None:
+            raise last_limit_exc
+        return store.check_job(
+            "edit", params, track_id=track_id, base_version_id=base, comment_id="cmt_" + "0" * 16,
+            action=action, region=region, prompt=prompt, idempotency_key=idempotency_key,
+            requested_by=requested_by, request=request, source=source,
+            agent_queue_max=agent_queue_max, turn_jobs_max=turn_jobs_max,
+        )
+
     @slow_command
     async def propose_music_job(self, type: Any = None, params: Any = None, track_id: Any = None,
                                 base_version_id: Any = None, comment_id: Any = None, action: Any = None,
@@ -1470,11 +1542,13 @@ class MusicCommandsMixin:
                 source = await self._music_edit_source(strs.get("track_id"))
                 if strs.get("comment_id") is None:
                     # Every check that can refuse runs before the comment is made, so a refusal leaves none.
-                    probe = dict(strs, comment_id="cmt_" + "0" * 16,
-                                 base_version_id=strs.get("base_version_id") or ORIGINAL_VERSION_ID)
-                    checked = await asyncio.to_thread(lambda: store.check_job(
-                        job_type, params, region=region, requested_by=requested_by, request=request,
-                        source=source, agent_queue_max=queue_max, turn_jobs_max=turn_max, **probe))
+                    checked = await asyncio.to_thread(lambda: self._edit_check_job(
+                        store, params, track_id=strs.get("track_id"),
+                        base_version_id=strs.get("base_version_id"), action=strs.get("action"),
+                        region=region, prompt=strs.get("prompt"),
+                        idempotency_key=strs.get("idempotency_key"), requested_by=requested_by,
+                        request=request, source=source, agent_queue_max=queue_max, turn_jobs_max=turn_max,
+                    ))
                     if checked.get("repeat"):
                         return {"status": "ok", "job": checked["repeat"]}
                 await self._music_edit_comment(strs, region, requested_by)
@@ -1515,14 +1589,19 @@ class MusicCommandsMixin:
                 raise _bad("invalid_params", "region", "an object or null")
             store = await self._music_jobs()
             queue_max, turn_max = self._music_agent_queue_max(), self._music_turn_jobs_max()
-            edit: Dict[str, Any] = {}
             if job_type == "edit":
                 tid = _opt_str(track_id, "track_id", "invalid_params")
-                edit = {"track_id": tid, "action": _opt_str(action, "action", "invalid_params"), "region": region,
-                        "prompt": _opt_str(prompt, "prompt", "invalid_params"),
-                        "comment_id": "cmt_" + "0" * 16, "base_version_id": ORIGINAL_VERSION_ID,
-                        "source": await self._music_edit_source(tid)}
-            elif job_type in js.SONG_TYPES:
+                act = _opt_str(action, "action", "invalid_params")
+                pr = _opt_str(prompt, "prompt", "invalid_params")
+                source = await self._music_edit_source(tid)
+                answer = await asyncio.to_thread(lambda: self._edit_check_job(
+                    store, params, track_id=tid, base_version_id=ORIGINAL_VERSION_ID, action=act,
+                    region=region, prompt=pr, idempotency_key=key, requested_by=requested_by,
+                    request=request, source=source, agent_queue_max=queue_max, turn_jobs_max=turn_max,
+                ))
+                return {"status": "ok", **answer}
+            edit: Dict[str, Any] = {}
+            if job_type in js.SONG_TYPES:
                 tid = _opt_str(track_id, "track_id", "invalid_params")
                 edit = {"track_id": tid, "base_version_id": ORIGINAL_VERSION_ID,
                         "source": await self._music_edit_source(tid)}

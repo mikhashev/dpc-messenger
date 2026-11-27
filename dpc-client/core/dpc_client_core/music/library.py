@@ -819,8 +819,32 @@ class MusicLibrary:
 
     # -- entries -----------------------------------------------------------------
 
-    def _new_folder_entry(self, path: str, folder_id: str, size: int, mtime_ns: int) -> dict:
+    @staticmethod
+    def _valid_folder_id(folder_id: Any) -> Optional[str]:
+        if isinstance(folder_id, str) and schemas.FOLDER_ID_RE.match(folder_id):
+            return folder_id
+        return None
+
+    def _normalize_folder_origin(self, entry: dict, path: Optional[str] = None) -> None:
+        """Ensure an entry with `origin == 'folder'` always carries a valid `folder_id`."""
+        if entry.get("origin") != "folder":
+            return
+        if self._valid_folder_id(entry.get("folder_id")) is not None:
+            return
+        resolved = self._valid_folder_id(self._folder_of(path)) if path else None
+        if resolved is not None:
+            entry["folder_id"] = resolved
+        else:
+            entry["origin"] = "import"
+            entry["folder_id"] = None
+
+    def _new_folder_entry(self, path: str, folder_id: Optional[str], size: int, mtime_ns: int, *,
+                          origin: Optional[str] = None) -> dict:
         p = Path(path)
+        valid_folder_id = self._valid_folder_id(folder_id)
+        resolved_origin = origin if origin is not None else ("folder" if valid_folder_id is not None else "import")
+        if resolved_origin == "folder" and valid_folder_id is None:
+            resolved_origin = "import"
         entry = {
             "schema": schemas.LIBRARY_ENTRY,
             "id": _new_id("trk_"),
@@ -836,9 +860,9 @@ class MusicLibrary:
             "added_at": _now(),
             "persist": "full",
             "placeholder": None,
-            "origin": "folder",
+            "origin": resolved_origin,
             "path": path,
-            "folder_id": folder_id,
+            "folder_id": valid_folder_id if resolved_origin == "folder" else None,
             "alt_paths": [],
             "file_stat": {"size_bytes": size, "mtime": _mtime_text(mtime_ns)},
             "hash_state": "pending",
@@ -1043,19 +1067,30 @@ class MusicLibrary:
                 # Same audio after a change (a retag, a touch): the same track.
                 self._set_path(e, hashed_path, None, stat)
                 self._apply_metadata(e, ident)
+                self._normalize_folder_origin(e, hashed_path)
                 self._mark_dirty()
                 self.notify_changed("hash", [track_id])
                 return
             # New audio at this path: the old track's bytes are no longer here.
+            orig_origin = e.get("origin")
+            orig_folder_id = self._valid_folder_id(e.get("folder_id"))
             logger.info("music: %s holds new audio; %s keeps its state and the path becomes a new entry",
                         hashed_path, track_id)
             if e.get("alt_paths"):
                 alt = e["alt_paths"].pop(0)
                 self._set_path(e, alt, self._folder_of(alt), None)
+                self._normalize_folder_origin(e, alt)
             else:
                 e["missing"] = True
-            folder_id = e.get("folder_id") or self._folder_of(hashed_path)
-            e = self._new_folder_entry(hashed_path, folder_id, *stat)
+                self._normalize_folder_origin(e, e.get("path") or hashed_path)
+            folder_id = self._valid_folder_id(self._folder_of(hashed_path)) or orig_folder_id
+            if folder_id is not None:
+                e = self._new_folder_entry(hashed_path, folder_id, *stat)
+            else:
+                new_origin = orig_origin if orig_origin in ("import", "recording") else "import"
+                e = self._new_folder_entry(hashed_path, None, *stat, origin=new_origin)
+        else:
+            self._normalize_folder_origin(e, hashed_path)
         self._resolve(e, ident, stat)
         self._mark_dirty()
         self.notify_changed("hash", [track_id, e["id"]])
@@ -1089,6 +1124,7 @@ class MusicLibrary:
             # A move or a rename: the known track takes the new path.
             logger.info("music: relinked %s to %s (same audio hash)", other["id"], e["path"])
             self._set_path(other, e["path"], e.get("folder_id"), stat)
+            self._normalize_folder_origin(other, e["path"])
             self._apply_metadata(other, ident)
             self._delete_entry(e["id"], replaced_by=other["id"])
             for extra in missing[1:]:

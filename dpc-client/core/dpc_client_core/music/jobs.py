@@ -470,10 +470,38 @@ class MusicJobStore:
         return job
 
     @staticmethod
-    def _derived_key(requested_by: dict, job_type: str, params: Any, track_id: Optional[str]) -> str:
+    def _canonical_region(region: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not isinstance(region, Mapping):
+            return None
+        return {
+            str(k): (float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+            for k, v in region.items()
+        }
+
+    @staticmethod
+    def _derived_key(
+        requested_by: dict,
+        job_type: str,
+        params: Any,
+        track_id: Optional[str],
+        *,
+        base_version_id: Optional[str] = None,
+        comment_id: Optional[str] = None,
+        action: Optional[str] = None,
+        region: Optional[Mapping[str, Any]] = None,
+    ) -> str:
         """The idempotency key of an agent request that gave none: agent, turn and what is asked."""
-        body = json.dumps({"type": job_type, "params": params, "track_id": track_id}, sort_keys=True,
-                          ensure_ascii=False, separators=(",", ":"))
+        payload = {
+            "type": job_type,
+            "params": params,
+            "track_id": track_id,
+            "base_version_id": base_version_id,
+            "comment_id": comment_id,
+            "action": action,
+            "region": MusicJobStore._canonical_region(region),
+            "conversation_id": requested_by.get("conversation_id"),
+        }
+        body = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
         return f"turn:{requested_by['agent_id']}:{requested_by['turn_id']}:{digest}"
 
@@ -579,10 +607,27 @@ class MusicJobStore:
                     prompt = params["caption"]
 
             if is_agent and idempotency_key is None and requester.get("turn_id") is not None:
-                idempotency_key = self._derived_key(requester, job_type, params, track_id)
+                idempotency_key = self._derived_key(
+                    requester,
+                    job_type,
+                    params,
+                    track_id,
+                    base_version_id=base_version_id,
+                    comment_id=comment_id,
+                    action=action,
+                    region=region,
+                )
             if idempotency_key is not None and idempotency_key in self._by_key:
                 old = self._jobs[self._by_key[idempotency_key]]
-                if old["type"] != job_type or not self._same_params(old, params) or old["track_id"] != track_id:
+                if (
+                    old["type"] != job_type
+                    or not self._same_params(old, params)
+                    or old["track_id"] != track_id
+                    or old.get("base_version_id") != base_version_id
+                    or old.get("comment_id") != comment_id
+                    or old.get("action") != action
+                    or self._canonical_region(old.get("region")) != self._canonical_region(region)
+                ):
                     raise MusicJobError("idempotency_conflict",
                                         f"idempotency_key {idempotency_key!r} belongs to job {old['id']} with other params")
                 if _check_only:
