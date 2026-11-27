@@ -671,13 +671,19 @@ class MusicJobRunner:
             except (asyncio.CancelledError, Exception):
                 pass
 
-    async def wait_auto_align(self) -> None:
-        """Await any detached background auto-align tasks currently in flight (primarily for tests)."""
+    async def wait_auto_align(self, timeout_s: float = 5.0) -> None:
+        """Await any pending or in-flight detached background auto-align tasks (primarily for tests)."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout_s))
         while True:
             pending = [t for t in self._bg_align_tasks if not t.done()]
-            if not pending:
-                return
-            await asyncio.gather(*pending, return_exceptions=True)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+                continue
+            if self._pending_align and not self._stopping and loop.time() < deadline:
+                await asyncio.sleep(0.01)
+                continue
+            return
 
     def has_pending_jobs(self, *, exclude_job_id: Optional[str] = None) -> bool:
         """True when another runnable music job is queued or currently running on the runner."""
@@ -1681,15 +1687,21 @@ class MusicJobRunner:
 
     async def _finalize_deferred(self, job_id: str) -> None:
         """Spawn detached background auto-alignment outside the runner loop after `finish_job` and lease release."""
-        pending = self._pending_align.pop(job_id, None)
-        if not pending or self._auto_align is None or self._stopping:
+        if job_id not in self._pending_align or self._auto_align is None or self._stopping:
+            self._pending_align.pop(job_id, None)
             return
-        job = await self._get(job_id)
-        if job is None or job["state"] != js.REVIEW:
-            return
-        task = asyncio.get_running_loop().create_task(self._run_background_align(job_id, pending))
-        self._bg_align_tasks.add(task)
-        task.add_done_callback(self._bg_align_tasks.discard)
+        try:
+            job = await self._get(job_id)
+            if job is None or job["state"] != js.REVIEW:
+                return
+            pending = self._pending_align.get(job_id)
+            if not pending or self._auto_align is None or self._stopping:
+                return
+            task = asyncio.get_running_loop().create_task(self._run_background_align(job_id, pending))
+            self._bg_align_tasks.add(task)
+            task.add_done_callback(self._bg_align_tasks.discard)
+        finally:
+            self._pending_align.pop(job_id, None)
 
     async def _run_background_align(self, job_id: str, pending: List[Dict[str, Any]]) -> None:
         if self._bg_align_lock is None:
