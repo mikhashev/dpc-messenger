@@ -1943,6 +1943,11 @@ anyway" is answered: it waits, or the CPU twin takes a file up to 5 minutes.
   `[knowledge_graph] gliner_device`. Proposal: `auto` comes to mean `lease` on CUDA. This
   is a further decision for Mike, listed under Open for Mike as not numbered (no default
   is proposed beyond the one stated).
+  *Decided 2026-11-27 (Mike, 1:1 with CC):* `auto` means lease on CUDA, and so does
+  `cuda`; no separate `lease` value. A background model never asks an engine to yield:
+  the big indexing pass happens at backend start, when the card is usually empty, and a
+  node without a card stays on the CPU (built on branch feat/background-models-card-lease:
+  a stint takes the card only when it is free, `background=True, wait_s=0`).
 - **Embedder.**
   - `EmbeddingProvider` keeps a CPU model, plus a GPU model loaded only inside
     `lease.use_blocking("index rebuild"|"memory search", background=...)`.
@@ -2896,8 +2901,8 @@ proposed default.
 - **The reference for the GPU real-time ratio** (Forge #21, §5): **closed.** Mike's answer,
   2026-11-22: CC measures it on real speech; done, ≈16–43× (L12, "GPU figures on speech").
 
-Also open, and not numbered: whether `auto` means `lease` on CUDA for the embedder and
-GLiNER (section 3.4); whether L11 should also spare an *idle* music engine its stop when
+Also open, and not numbered: ~~whether `auto` means `lease` on CUDA for the embedder and
+GLiNER (section 3.4)~~ decided 2026-11-27, yes, and no eviction by background models (3.4); whether L11 should also spare an *idle* music engine its stop when
 Whisper fits beside it; and, outside this ADR, whether Ark writes the track into his knowledge base (CC
 #75 D).
 
