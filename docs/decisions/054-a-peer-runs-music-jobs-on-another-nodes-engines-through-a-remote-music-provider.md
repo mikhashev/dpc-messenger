@@ -107,6 +107,36 @@ peer's music service treats `remote:<node_id>` as one more engine choice; the ow
 admits, queues, runs and returns the job through its own job store, card lease and
 provenance; the take lands in the peer's library as the peer's own track.**
 
+> **Revision 2026-11-27, the owner (#86, #92): the door is at the engine level, not the
+> job level.** "My node just provides remote inference, as for text LLMs"; "if we provide
+> the engine and the peer sets everything up on its own side, why a FLAC?" So the owner's
+> node is a **remote engine**, exactly as a `remote_peer` host is a remote model:
+> - **The peer runs the whole job itself**: its own job store, runner, parameters, lyrics,
+>   seeds, post-processing (WAV to FLAC), QA, tags, provenance record, library entry and
+>   export. Its runner calls `remote:<node_id>` where it would call its local engine.
+> - **The owner's door serves one engine call at a time** (a `/synth`-level request with
+>   the engine parameters the peer's runner built), after `peer_proof`, the firewall's
+>   `music` allow-list and the card lease (owner first, D2). It returns the **engine's own
+>   output** (the wav24 the engine writes today, `job_schemas.ENGINE_OUTPUT_FORMAT`), sent
+>   as a file (losslessly compressed in transit if that halves the transfer; the peer
+>   stores what the engine made), plus the **engine identity** the peer's provenance needs:
+>   engine name and version, binary sha256, weights names, backbone, adapters used, and the
+>   licence keys of those parts (`licence_record` inputs).
+> - **The owner keeps nothing and builds nothing**: no job record, no take, no provenance,
+>   no library entry; the output is deleted once the peer confirms it (D5). The ledger row
+>   stays (D6).
+> - The peer's provenance records the engine as `computed_on: {kind: "remote_node",
+>   node_id}` and computes the licence from the reported parts, so a remote take carries
+>   the same licence warning as a local one.
+>
+> This replaces the job-level door in D1 (owner-side `propose_music_job`, proxy job,
+> `MUSIC_JOB_RESULT` with a withheld record) and the owner-side record in D3 and D5; the
+> consent, queue, adapter, failure and privacy rules (D2, D4, D7, D8) apply to engine
+> calls unchanged. Still never tunnel the engine's HTTP port: the call crosses as a DPTP
+> message the owner's door checks and forwards to its loopback engine. D1-D3/D5 below are
+> kept as the first draft; slices S1-S4 are to be rewritten to this shape after the
+> owner answers Q1/Q2.
+
 ### D1. Shape: guest-side provider plus host-side door (the remote_peer split)
 
 - **Peer side.** The music service gains a remote engine source: for each allowed peer,
