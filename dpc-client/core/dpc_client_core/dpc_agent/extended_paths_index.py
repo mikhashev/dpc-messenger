@@ -172,6 +172,14 @@ def collect_extended_files(
     legitimately appear both as an implicit layer source and in the extended paths, and
     indexing it twice puts the same file in the index under two keys.
 
+    A directory below a root that is a linked git worktree is pruned whole, whatever
+    `excluded_dirs` says: its `.git` is a file pointing into `<main>/.git/worktrees/`,
+    which part-based exclusion never matches, and a worktree is a full second checkout
+    of a repository the index already has — the incident that added this re-embedded
+    250 files per agent, ~56 min of CPU. A submodule, an ordinary clone and a worktree
+    that is itself the indexed root are all kept (`_is_linked_git_worktree` says how
+    each is told apart).
+
     A file is yielded once however many configured roots lead to it. Three arrangements
     reach the same file twice and all of them are ordinary: a root granted both
     read_only and read_write (the access lists are separate and a path may sit in both),
@@ -187,6 +195,7 @@ def collect_extended_files(
     seen: set = set()
     skipped_dupes = 0
     skipped_repeats = 0
+    skipped_worktrees = 0
     files: List[pathlib.Path] = []
 
     if indexed_paths is not None:
@@ -213,25 +222,46 @@ def collect_extended_files(
                     seen.add(key)
                     files.append(p)
             elif p.is_dir():
-                for f in p.rglob("*"):
-                    if not f.is_file() or not _is_ext_match(f, extensions):
-                        continue
-                    if any(part in exclude for part in f.relative_to(p).parts):
-                        continue
-                    key = _norm(str(f))
-                    if key in claimed:
-                        skipped_dupes += 1
-                        continue
-                    if key in seen:
-                        skipped_repeats += 1
-                        continue
-                    seen.add(key)
-                    files.append(f)
+                for dirpath, dirnames, filenames in os.walk(p):
+                    # Pruned in place, not filtered after the walk: os.walk (top-down,
+                    # its default) descends only into the dirnames it is left with, so
+                    # an excluded subtree — or a linked worktree, which is a whole
+                    # second checkout — is never walked at all.
+                    kept: List[str] = []
+                    for d in dirnames:
+                        candidate = pathlib.Path(dirpath) / d
+                        if d in exclude:
+                            continue
+                        if _is_linked_git_worktree(candidate):
+                            skipped_worktrees += 1
+                            log.debug("collect_extended_files: skipping linked git worktree %s", candidate)
+                            continue
+                        kept.append(d)
+                    dirnames[:] = kept
+                    for name in filenames:
+                        f = pathlib.Path(dirpath) / name
+                        if not f.is_file() or not _is_ext_match(f, extensions):
+                            continue
+                        # The old part filter matched the file's own name too; the
+                        # prune above covers every directory part, this covers the last.
+                        if name in exclude:
+                            continue
+                        key = _norm(str(f))
+                        if key in claimed:
+                            skipped_dupes += 1
+                            continue
+                        if key in seen:
+                            skipped_repeats += 1
+                            continue
+                        seen.add(key)
+                        files.append(f)
 
     if skipped_dupes:
         log.info("collect_extended_files: skipped %d file(s) already indexed by another layer", skipped_dupes)
     if skipped_repeats:
         log.info("collect_extended_files: skipped %d file(s) reachable through more than one indexed root", skipped_repeats)
+    if skipped_worktrees:
+        log.info("collect_extended_files: skipped %d linked git worktree(s), each a second checkout of a repository the index already has", skipped_worktrees)
     log.info("collect_extended_files: %d files (extensions: %s, excluded: %s)",
              len(files), ", ".join(sorted(extensions)), ", ".join(sorted(exclude)[:5]) + ("..." if len(exclude) > 5 else ""))
     return files
@@ -239,6 +269,38 @@ def collect_extended_files(
 
 def _is_ext_match(path: pathlib.Path, extensions: frozenset) -> bool:
     return path.suffix.lower() in extensions and not is_binary(path)
+
+
+def _is_linked_git_worktree(directory: pathlib.Path) -> bool:
+    """True when `directory` is a linked git worktree, as git itself tells it.
+
+    A linked worktree keeps no metadata of its own: its `.git` is a FILE reading
+    `gitdir: <main>/.git/worktrees/<name>`, and everything lives in the main
+    checkout that created it. The neighbours that also carry a `.git` file must
+    stay indexed — a submodule's gitdir points into `.../.git/modules/<name>`,
+    and a standalone worktree that IS an indexed root is the user's choice — so
+    only a `worktrees` parent is a match. An unreadable, empty or garbled `.git`
+    file is not a match either: a folder is skipped only on a confirmed gitdir,
+    never because the check could not read one.
+    """
+    dot_git = directory / ".git"
+    if not dot_git.is_file():
+        return False
+    try:
+        first_line = dot_git.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0].strip()
+    except OSError:
+        return False
+    prefix = "gitdir:"
+    if not first_line.startswith(prefix):
+        return False
+    # Git writes forward slashes on every platform; a backslashed value has been
+    # seen from tools that do not, and both spellings must read the same here.
+    gitdir = first_line[len(prefix):].strip().replace("\\", "/")
+    if not gitdir:
+        return False
+    # An absolute gitdir replaces the base, a relative one resolves against the
+    # directory holding the `.git` file — one construction does both.
+    return pathlib.Path(directory, gitdir).parent.name == "worktrees"
 
 
 def check_mtime_changes(
