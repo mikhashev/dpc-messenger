@@ -151,3 +151,18 @@ async def test_an_owner_request_mid_pass_sends_gliner_back_and_the_pass_finishes
     assert set(gliner["model"].predicted_on[1:]) == {"cpu"}
     assert gliner["model"].moves == ["cpu", "cuda", "cpu"]
     await nothing_left()
+
+
+def test_gliner_moves_carry_no_dtype_so_the_cpu_weights_never_change(gliner, monkeypatch):
+    """Review finding 3 (2026-11-27), the GLiNER half: a move of device only, never a cast."""
+    calls = []
+
+    class Recorder:
+        def to(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return self
+
+    monkeypatch.setattr(kg, "_GLINER_MODEL", Recorder())
+    kg._gliner_to_gpu()
+    kg._gliner_to_cpu()
+    assert calls == [(("cuda",), {}), (("cpu",), {})]

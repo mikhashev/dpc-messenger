@@ -139,7 +139,8 @@ _GLINER_MOVE_S = 3.0
 
 
 def _gliner_to_gpu() -> None:
-    """The stint client's `to_gpu`, under its device lock, inside a granted lease use."""
+    """The stint client's `to_gpu`, under its device lock, inside a granted lease use. A move of
+    device only, never of dtype: the round trip leaves the CPU weights exactly as they were."""
     global _GLINER_DEVICE
     _GLINER_MODEL.to("cuda")
     _GLINER_DEVICE = "cuda"
