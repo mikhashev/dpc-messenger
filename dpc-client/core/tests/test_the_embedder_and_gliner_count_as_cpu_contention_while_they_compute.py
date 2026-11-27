@@ -86,16 +86,27 @@ def test_the_embedder_counts_while_it_encodes_on_the_cpu_and_not_after(monkeypat
 
 
 def test_an_embedder_on_a_gpu_counts_nothing(monkeypatch):
+    """On the card means inside a stint that holds it (ADR-052 3.4): the model is there, not on the CPU."""
     provider = embedder(monkeypatch, "cuda")
+    provider._card_client()._on_gpu = True
     provider.embed("one text")
     provider.embed_batch(["a", "b"])
     assert provider._model.during == [[], []]
 
 
+def test_a_cuda_embedder_outside_a_stint_computes_on_the_cpu_and_counts(monkeypatch):
+    """`cuda` is lease-gated since the card lease (ADR-052 3.4): with no stint holding the card the
+    model is on the CPU, and that is CPU work."""
+    provider = embedder(monkeypatch, "cuda")
+    provider.embed("one text")
+    provider.embed_batch(["a", "b"])
+    assert provider._model.during == [[EMBEDDER], [EMBEDDER]]
+
+
 @pytest.mark.parametrize("cuda, mps, counted", [
     (False, False, True),   # `auto` resolves to the CPU: counted, as Whisper and GLiNER count what they run on
-    (True, False, False),   # `auto` resolves to CUDA: not CPU work
-    (False, True, False),   # `auto` resolves to MPS (Apple silicon): not CPU work either
+    (True, False, True),    # `auto` resolves to CUDA, lease-gated (ADR-052 3.4): on the CPU outside a stint
+    (False, True, False),   # `auto` resolves to MPS (Apple silicon): not CPU work
 ])
 def test_an_embedder_on_device_auto_counts_the_device_it_resolved_to(monkeypatch, cuda, mps, counted):
     """Follow-up 10 (Zcode #14): `[memory] embedding_device = auto` (and a profile's `auto`) reach the

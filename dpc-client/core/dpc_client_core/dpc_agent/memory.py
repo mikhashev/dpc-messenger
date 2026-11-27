@@ -16,6 +16,7 @@ Manages:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -567,8 +568,28 @@ def _release_device_memory() -> None:
             pass
 
 
+#: The card lease figures for the embedding model (ADR-052 3.4). Per document (one document is one
+#: text, up to max_tokens): on the card 523 documents took 4.2 s (2026-08-18, about 0.008 s each), so
+#: 0.05 is a conservative start that each compute call on the card replaces with what it measures; on
+#: the CPU 37-100 ms per 800-token chunk and up to ~7 s for a long document, so 1.0 s. A move of bge-m3
+#: (~1.1 GB in half precision) to or from the card: 3 s, conservative.
+_EMBEDDER_GPU_S_PER_ITEM = 0.05
+_EMBEDDER_CPU_S_PER_ITEM = 1.0
+_EMBEDDER_MOVE_S = 3.0
+#: What bge-m3 held on the card at start on the Old PC (2026-10-27, A-NODE-HAS-NO-ONE-SWITCH-...): 1.3 GB.
+_EMBEDDER_VRAM_MIB = {"BAAI/bge-m3": 1400}
+
+
 class EmbeddingProvider:
-    """Lazy-loading embedding provider. BGE-M3 via sentence-transformers + PyTorch."""
+    """Lazy-loading embedding provider. BGE-M3 via sentence-transformers + PyTorch.
+
+    The device setting keeps its meaning (ADR-052 3.4; backlog THE-EMBEDDER-GLINER-AND-SKILL-
+    EMBEDDINGS-TAKE-THE-GPU-OUTSIDE-THE-CARD-LEASE-...): `cpu` and `mps` load there and never ask for
+    the card. `cuda`, and auto on a machine with CUDA, are lease-gated: the model loads on the CPU and
+    is on the card only inside `card_stint`, bulk work that holds one card lease use
+    (`managers.background_model_lease`). `embed` and `embed_batch` compute where the model is now and
+    never wait for the card. The model is one per process, so every move and every compute call of a
+    lease-gated model goes through the stint client's device lock."""
 
     _gpu_semaphore = threading.Semaphore(1)
 
@@ -581,6 +602,10 @@ class EmbeddingProvider:
         self._local_files_only = local_files_only
         self._model = None
         self._load_lock = threading.Lock()
+        # The card lease client, built on first need when the device is lease-gated (`_card_client`).
+        self._card = None
+        self._gated: Optional[bool] = None
+        self._card_lock = threading.Lock()
 
     @property
     def device(self) -> str:
@@ -629,15 +654,97 @@ class EmbeddingProvider:
 
         cuda keeps fp16, which is what it has always used and what its kernels want.
         """
+        return self._dtype_for(self.device)
+
+    def _dtype_for(self, device: str):
+        """The dtype for `device`, by the measurements in `_torch_dtype`."""
         try:
             import torch
         except ImportError:
             return None
-        if self.device == "cuda":
+        if device == "cuda":
             return torch.float16
-        if self.device == "cpu" and self._cpu_supports_bfloat16():
+        if device == "cpu" and self._cpu_supports_bfloat16():
             return torch.bfloat16
         return None
+
+    # -- the card lease (ADR-052 3.4) --
+
+    @property
+    def lease_gated(self) -> bool:
+        """Whether the card is reached only through the card lease: the setting, resolved, is `cuda`.
+        Read once per provider (resolving auto imports torch)."""
+        if self._gated is None:
+            self._gated = self.device == "cuda"
+        return self._gated
+
+    @property
+    def compute_device(self) -> str:
+        """Where a compute call runs now: the setting's device, except that a lease-gated model is on
+        the card only inside a stint that holds it, and on the CPU otherwise."""
+        if not self.lease_gated:
+            return self.device
+        card = self._card
+        return card.device if card is not None else "cpu"
+
+    def _card_client(self):
+        """The card lease client of a lease-gated model, built once; None for any other device."""
+        if not self.lease_gated:
+            return None
+        if self._card is None:
+            with self._card_lock:
+                if self._card is None:
+                    from ..managers.background_model_lease import BackgroundModelLease
+                    self._card = BackgroundModelLease(
+                        f"embedder:{self.model_name}", kind="embedding", engine="embedder",
+                        display=f"Embedding model ({self.model_name.rsplit('/', 1)[-1]})",
+                        vram_mib=_EMBEDDER_VRAM_MIB.get(self.model_name),
+                        to_gpu=self._move_to_gpu, to_cpu=self._move_to_cpu,
+                        gpu_s_per_item=_EMBEDDER_GPU_S_PER_ITEM, cpu_s_per_item=_EMBEDDER_CPU_S_PER_ITEM,
+                        move_s=_EMBEDDER_MOVE_S,
+                    )
+        return self._card
+
+    def _move_to_gpu(self) -> None:
+        """Called by the stint client under its device lock, inside a granted lease use."""
+        self._model.to(device="cuda", dtype=self._dtype_for("cuda"))
+        log.info("Embedding model %s moved to the card (FP16) under the card lease", self.model_name)
+
+    def _move_to_cpu(self) -> None:
+        """Called by the stint client under its device lock, before its use closes. A model unloaded
+        meanwhile has nothing left on the card."""
+        if self._model is not None:
+            import torch
+            self._model.to(device="cpu", dtype=self._dtype_for("cpu") or torch.float32)
+        _release_device_memory()
+
+    @contextlib.contextmanager
+    def card_stint(self, what: str, items: int):
+        """Bulk work of `items` texts (an index pass, a reindex of many files), from a worker thread.
+        A lease-gated model takes one card lease use for the batch when the card is free and the batch
+        is worth it, and is moved off again, and the card let go, when the batch ends or an owner's
+        request waits; the rest of the batch runs on the CPU. Any other device: nothing happens.
+        `what` names the use in the card queue and never carries chat content. Yields the device the
+        batch starts on."""
+        card = self._card_client()
+        if card is None:
+            yield self.device
+            return
+        self._load_model()
+        with card.stint(what, items) as device:
+            yield device
+
+    @contextlib.contextmanager
+    def _compute(self, items: int):
+        """Around one encode call: a lease-gated model's device lock (no encode mid-move), then the
+        one-at-a-time semaphore. Yields the device the call runs on."""
+        card = self._card_client()
+        if card is None:
+            with self._gpu_semaphore:
+                yield self.device
+            return
+        with card.compute(items) as device, self._gpu_semaphore:
+            yield device
 
     def _load_model(self):
         if self._model is not None:
@@ -667,8 +774,10 @@ class EmbeddingProvider:
                     "from dpc-client/core run: uv sync --extra voice-memory "
                     f"--inexact ({e})"
                 ) from e
-            kwargs = {"device": self.device}
-            dtype = self._torch_dtype()
+            # A lease-gated model loads on the CPU: the card only inside a stint (`card_stint`).
+            load_device = "cpu" if self.lease_gated else self.device
+            kwargs = {"device": load_device}
+            dtype = self._dtype_for(load_device)
             if dtype is not None:
                 kwargs["model_kwargs"] = {"dtype": dtype}
             if self._local_files_only:
@@ -687,8 +796,9 @@ class EmbeddingProvider:
                 self._model = SentenceTransformer(self.model_name, **kwargs)
             self._apply_token_limit()
             precision = str(dtype).replace("torch.", "").upper() if dtype is not None else "FP32"
-            log.info("Loaded embedding model %s on %s (%s, max %d tokens)",
-                     self.model_name, self.device, precision, self.max_tokens)
+            log.info("Loaded embedding model %s on %s (%s, max %d tokens)%s",
+                     self.model_name, load_device, precision, self.max_tokens,
+                     "; on the card only under the card lease, for bulk work" if self.lease_gated else "")
 
     def _apply_token_limit(self) -> None:
         """Hold the model to the configured window instead of its own.
@@ -723,11 +833,11 @@ class EmbeddingProvider:
             return None
         return dim if isinstance(dim, int) and not isinstance(dim, bool) and dim > 0 else None
 
-    def _counted_on_the_cpu(self):
+    def _counted_on_the_cpu(self, device: Optional[str] = None):
         """The compute call as CPU work for the card lease's contention reading (ADR-052 L12 point 3):
-        counted while it runs, and only when the model is on the CPU."""
+        counted while it runs, and only when it runs on the CPU (`device`, else where it would now)."""
         return _cpu_work.computing_on_the_cpu(f"the embedding model ({self.model_name}) on the CPU",
-                                              on_cpu=self.device == "cpu")
+                                              on_cpu=(device or self.compute_device) == "cpu")
 
     def embed(self, text: str) -> List[float]:
         import numpy as np
@@ -738,7 +848,7 @@ class EmbeddingProvider:
         cached = cache.get(text, self.model_name, window, self._loaded_dimensions())
         if cached is not None:
             return cached.tolist()
-        with self._gpu_semaphore, self._counted_on_the_cpu():
+        with self._compute(1) as device, self._counted_on_the_cpu(device):
             vector = np.asarray(self._model.encode(text, normalize_embeddings=True), dtype=np.float32)
         cache.put(text, self.model_name, window, vector)
         return vector.tolist()
@@ -783,7 +893,7 @@ class EmbeddingProvider:
                 misses.append((i, text))
         if misses:
             miss_texts = [t for _, t in misses]
-            with self._gpu_semaphore, self._counted_on_the_cpu():
+            with self._compute(len(miss_texts)) as device, self._counted_on_the_cpu(device):
                 vectors = self._encode_within_memory(miss_texts)
             for (idx, text), vec in zip(misses, vectors):
                 # Rounded to float32 here as in the cache, so hit and miss agree.
@@ -804,7 +914,14 @@ class EmbeddingProvider:
         return dim()
 
     def unload(self):
-        self._model = None
+        """Drop the model and hand its device memory back (ADR-052 new card (c): dropping the reference
+        alone freed nothing). Under a lease-gated model's device lock, so no encode runs on it."""
+        card = self._card
+        with card.device_lock if card is not None else contextlib.nullcontext():
+            self._model = None
+            import gc
+            gc.collect()
+            _release_device_memory()
         log.info("Unloaded embedding model %s", self.model_name)
 
 

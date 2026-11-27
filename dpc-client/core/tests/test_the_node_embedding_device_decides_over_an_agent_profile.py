@@ -106,11 +106,14 @@ class TestAutoKeepsTodaysBehaviour:
         assert fake_loader["device"] == "cpu"
 
     def test_no_profile_value_is_the_automatic_choice(self, fake_loader):
+        """Auto still resolves to the card when there is one, and since the card lease (ADR-052 3.4)
+        that means lease-gated: the weights load on the CPU and reach the card only inside a stint."""
         memory.set_node_embedding_device("auto")
         provider = memory.get_embedding_provider(model_name="test/auto-b", device=None)
-        assert provider.device == "cuda"
+        assert provider.device == "cuda" and provider.lease_gated
         provider._load_model()
-        assert fake_loader["device"] == "cuda"
+        assert fake_loader["device"] == "cpu"
+        assert provider.compute_device == "cpu"
 
     def test_a_later_profile_that_disagrees_gets_the_old_first_caller_warning(self, caplog):
         memory.set_node_embedding_device("auto")
