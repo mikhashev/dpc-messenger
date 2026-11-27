@@ -145,21 +145,24 @@ PRESET_TAG = "DPC_EXPORT_PRESET"
 LIMIT_TAG = "DPC_EXPORT_TP_LIMIT"          # written only as "off": no tag means the limit was on
 PROVENANCE_TAG = "DPC_PROVENANCE"
 _EXPORT_OWN_TAGS = frozenset({MARKER_TAG, PRESET_TAG, LIMIT_TAG, PROVENANCE_TAG})
-_DPC_TAG_KEY_RE = re.compile(r"^DPC_[A-Z0-9_.-]+$")
-_DPC_TAG_MAX_BYTES = 4096
-_PRIVATE_DPC_TAGS = frozenset({
-    "DPC_NODE_ID", "DPC_CONVERSATION_ID", "DPC_TURN_ID", "DPC_AGENT_ID",
-    "DPC_MESSAGE_ID", "DPC_MESSAGE_TEXT", "DPC_REQUESTED_BY", "DPC_REQUEST",
-    "DPC_USER", "DPC_USERNAME", "DPC_HOME", "DPC_HOME_DIR", "DPC_RAW_DIR",
-    "DPC_PATH", "DPC_FILE_PATH",
+MAX_COPIED_DPC_TAGS = 32
+MAX_COPIED_DPC_VALUE_BYTES = 512
+MAX_COPIED_DPC_TOTAL_BYTES = 4096
+ALLOWED_SOURCE_DPC_TAGS = frozenset({
+    "DPC_SEED",
+    "DPC_LM_SEED",
+    "DPC_ENGINE",
+    "DPC_ENGINE_VERSION",
+    "DPC_VARIANT",
+    "DPC_BACKBONE",
+    "DPC_JOB_ID",
+    "DPC_COVER_OF",
+    "DPC_SYNTH_BATCH_SIZE",
+    "DPC_SYNTH_BATCH_INDEX",
+    "DPC_EDIT_ACTION",
+    "DPC_EDIT_OF",
+    "DPC_EDIT_REGION",
 })
-_PRIVATE_DPC_MARKERS = (
-    "NODE_ID", "CONVERSATION_ID", "TURN_ID", "AGENT_ID",
-    "MESSAGE_ID", "MESSAGE_TEXT", "REQUESTED_BY",
-    "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE",
-    "API_KEY", "AUTH_KEY", "ACCESS_KEY", "SIGNING_KEY",
-    "_TOKEN", "TOKEN_", "RAW_DIR", "HOME_DIR",
-)
 DEFAULT_EXPORT_SUBDIR = ("exports", "music")
 
 FORMAT_MP3 = "mp3"
@@ -1190,13 +1193,12 @@ class MusicExporter:
 
     @staticmethod
     def _is_safe_dpc_key(key: str) -> bool:
-        if not _DPC_TAG_KEY_RE.match(key):
+        if not isinstance(key, str):
             return False
-        if key in _EXPORT_OWN_TAGS or key.startswith("DPC_EXPORT_"):
+        normalized = key.strip().upper()
+        if normalized in _EXPORT_OWN_TAGS or normalized.startswith("DPC_EXPORT_"):
             return False
-        if key in _PRIVATE_DPC_TAGS:
-            return False
-        return not any(marker in key for marker in _PRIVATE_DPC_MARKERS)
+        return normalized in ALLOWED_SOURCE_DPC_TAGS
 
     @staticmethod
     def _safe_dpc_value(key: str, value: Any) -> Optional[str]:
@@ -1210,7 +1212,8 @@ class MusicExporter:
             return None
         if not text or text in (mp_provenance.NOT_STORED, mp_provenance.ENGINE_DEFAULT):
             return None
-        if len(text.encode("utf-8")) > _DPC_TAG_MAX_BYTES:
+        if len(text.encode("utf-8")) > MAX_COPIED_DPC_VALUE_BYTES:
+            logger.info("music export: omitting %s from export tags (over %d bytes)", key, MAX_COPIED_DPC_VALUE_BYTES)
             return None
         if mp_provenance.NODE_ID_RE.match(text):
             logger.info("music export: omitting %s from export tags (node id)", key)
@@ -1226,7 +1229,8 @@ class MusicExporter:
     def _source_dpc_tags(cls, source: ExportSource, tags: Dict[str, str],
                          record: Dict[str, Any]) -> List[Tuple[str, str]]:
         """Safe `DPC_*` metadata tags from the source file's own tags and provenance record,
-        excluding export-owned tags, node-private identifiers, and values blocked by privacy rules."""
+        strictly allowlisted, excluding export-owned tags and values blocked by privacy rules,
+        and bounded in count and total bytes so OpusTags stays well below 60 KB."""
         collected: Dict[str, str] = {}
         for raw_key, raw_val in tags.items():
             key = str(raw_key).strip().upper()
@@ -1257,12 +1261,28 @@ class MusicExporter:
                 ("DPC_EDIT_ACTION", rec.get("edit_action")),
             )
             for key, raw_val in fields:
-                if key in collected:
+                if key in collected or not cls._is_safe_dpc_key(key):
                     continue
                 val = cls._safe_dpc_value(key, raw_val)
                 if val is not None:
                     collected[key] = val
-        return list(collected.items())
+
+        bounded: List[Tuple[str, str]] = []
+        total_bytes = 0
+        for key, val in sorted(collected.items()):
+            if len(bounded) >= MAX_COPIED_DPC_TAGS:
+                logger.info("music export: capping copied DPC_* tags at %d entries", MAX_COPIED_DPC_TAGS)
+                break
+            entry_bytes = len(key.encode("utf-8")) + len(val.encode("utf-8"))
+            if total_bytes + entry_bytes > MAX_COPIED_DPC_TOTAL_BYTES:
+                logger.info(
+                    "music export: omitting %s from export tags (copied DPC_* byte budget %d exceeded)",
+                    key, MAX_COPIED_DPC_TOTAL_BYTES,
+                )
+                continue
+            bounded.append((key, val))
+            total_bytes += entry_bytes
+        return bounded
 
     @staticmethod
     def _synced_lines_for_tag(source: ExportSource, lyrics: Optional[str]) -> List[Dict[str, Any]]:

@@ -22,6 +22,7 @@ import pytest
 from dpc_client_core.music import audio_tags as at
 from dpc_client_core.music import lyrics as lyrics_mod
 from dpc_client_core.music import provenance as pv
+from dpc_client_core.music import export as export_mod
 from dpc_client_core.music.export import (
     ExportSource,
     MusicExporter,
@@ -499,3 +500,200 @@ def test_real_ffmpeg_and_ffprobe_round_trip_dpc_tags_and_uslt_blank_lines(tmp_pa
     assert probed_tags["DPC_JOB_ID"] == "job_real1234"
     assert probed_tags["DPC_ENGINE"] == "yue2.cpp"
     assert any(k.startswith("lyrics") and v == MULTI_SECTION_LYRICS for k, v in probed_tags.items())
+
+
+def test_is_safe_dpc_key_uses_strict_allowlist_and_rejects_chat_prompt_and_custom_tags(tmp_path):
+    allowed = (
+        "DPC_SEED",
+        "DPC_LM_SEED",
+        "DPC_ENGINE",
+        "DPC_ENGINE_VERSION",
+        "DPC_VARIANT",
+        "DPC_BACKBONE",
+        "DPC_JOB_ID",
+        "DPC_COVER_OF",
+        "DPC_SYNTH_BATCH_SIZE",
+        "DPC_SYNTH_BATCH_INDEX",
+        "DPC_EDIT_ACTION",
+        "DPC_EDIT_OF",
+        "DPC_EDIT_REGION",
+    )
+    for key in allowed:
+        assert MusicExporter._is_safe_dpc_key(key) is True, key
+
+    rejected = (
+        "DPC_CHAT_ID",
+        "DPC_CONVERSATION",
+        "DPC_MESSAGE",
+        "DPC_REQUESTER",
+        "DPC_PROMPT",
+        "DPC_NODE_ID",
+        "DPC_PROVENANCE",
+        "DPC_UNKNOWN_CUSTOM",
+        "DPC_EXPORT_OF",
+        "DPC_EXPORT_PRESET",
+        "DPC_EXPORT_TP_LIMIT",
+        "DPC_EDIT_PROMPT",
+        "DPC_SYNTH_BATCH_NODE_ID",
+        "OTHER_TAG",
+    )
+    for key in rejected:
+        assert MusicExporter._is_safe_dpc_key(key) is False, key
+
+    flac = _build_flac(
+        tmp_path,
+        {
+            "DPC_SEED": "101",
+            "DPC_LM_SEED": "202",
+            "DPC_ENGINE": "yue2.cpp",
+            "DPC_ENGINE_VERSION": "v1.2.3",
+            "DPC_VARIANT": "1",
+            "DPC_BACKBONE": "stock",
+            "DPC_JOB_ID": "job_allow_01",
+            "DPC_COVER_OF": "md5:1111",
+            "DPC_SYNTH_BATCH_SIZE": "2",
+            "DPC_SYNTH_BATCH_INDEX": "0",
+            "DPC_EDIT_ACTION": "repaint",
+            "DPC_EDIT_OF": "md5:2222",
+            "DPC_EDIT_REGION": "5.0-15.0",
+            # Unrecognized / chat / prompt tags that must never be copied:
+            "DPC_CHAT_ID": "chat_leak_99",
+            "DPC_CONVERSATION": "conv_leak_88",
+            "DPC_MESSAGE": "msg_leak_77",
+            "DPC_REQUESTER": "requester_leak_66",
+            "DPC_PROMPT": "secret prompt text",
+            "DPC_NODE_ID": "dpc-node-leak0055",
+            "DPC_UNKNOWN_CUSTOM": "custom_leak_44",
+            "DPC_EDIT_PROMPT": "edit prompt leak",
+            "DPC_SYNTH_BATCH_NODE_ID": "batch_node_leak",
+        },
+        name="allowlist.flac",
+    )
+    source = ExportSource(
+        track_id="trk_allow",
+        path=flac,
+        content_hash="md5:" + "aa" * 16,
+        title="Allowlist",
+        artist="DPC",
+        true_peak_dbtp=-2.0,
+        true_peak_basis="test",
+    )
+    exporter = _exporter(tmp_path)
+    mp3 = Path(exporter.export_track(source, "mp3-v0")["path"])
+    opus = Path(exporter.export_track(source, "opus-160")["path"])
+
+    for tag_map in (read_id3_txxx(mp3), read_opus_comments(opus)):
+        assert tag_map["DPC_SEED"] == "101"
+        assert tag_map["DPC_LM_SEED"] == "202"
+        assert tag_map["DPC_ENGINE"] == "yue2.cpp"
+        assert tag_map["DPC_ENGINE_VERSION"] == "v1.2.3"
+        assert tag_map["DPC_VARIANT"] == "1"
+        assert tag_map["DPC_BACKBONE"] == "stock"
+        assert tag_map["DPC_JOB_ID"] == "job_allow_01"
+        assert tag_map["DPC_COVER_OF"] == "md5:1111"
+        assert tag_map["DPC_SYNTH_BATCH_SIZE"] == "2"
+        assert tag_map["DPC_SYNTH_BATCH_INDEX"] == "0"
+        assert tag_map["DPC_EDIT_ACTION"] == "repaint"
+        assert tag_map["DPC_EDIT_OF"] == "md5:2222"
+        assert tag_map["DPC_EDIT_REGION"] == "5.0-15.0"
+        for blocked in (
+            "DPC_CHAT_ID",
+            "DPC_CONVERSATION",
+            "DPC_MESSAGE",
+            "DPC_REQUESTER",
+            "DPC_PROMPT",
+            "DPC_NODE_ID",
+            "DPC_UNKNOWN_CUSTOM",
+            "DPC_EDIT_PROMPT",
+            "DPC_SYNTH_BATCH_NODE_ID",
+        ):
+            assert blocked not in tag_map
+
+    for raw in (mp3.read_bytes(), opus.read_bytes()):
+        for secret in (
+            b"chat_leak_99",
+            b"conv_leak_88",
+            b"msg_leak_77",
+            b"requester_leak_66",
+            b"secret prompt text",
+            b"dpc-node-leak0055",
+            b"custom_leak_44",
+            b"edit prompt leak",
+            b"batch_node_leak",
+        ):
+            assert secret not in raw
+
+
+def test_copied_dpc_tags_enforce_value_cap_total_byte_budget_count_cap_and_deterministic_sort(
+    tmp_path, monkeypatch
+):
+    assert export_mod.MAX_COPIED_DPC_TAGS == 32
+    assert export_mod.MAX_COPIED_DPC_VALUE_BYTES == 512
+    assert export_mod.MAX_COPIED_DPC_TOTAL_BYTES == 4096
+
+    # 1. Per-value cap: 512 bytes passes, 513 bytes is omitted.
+    exact_val = "v" * export_mod.MAX_COPIED_DPC_VALUE_BYTES
+    over_val = "w" * (export_mod.MAX_COPIED_DPC_VALUE_BYTES + 1)
+    source = ExportSource(
+        track_id="trk_cap",
+        path=tmp_path / "missing.flac",
+        content_hash="md5:" + "bb" * 16,
+        title="Cap Test",
+    )
+    per_val_tags = dict(
+        MusicExporter._source_dpc_tags(
+            source,
+            {"DPC_BACKBONE": exact_val, "DPC_ENGINE_VERSION": over_val},
+            {},
+        )
+    )
+    assert per_val_tags == {"DPC_BACKBONE": exact_val}
+
+    # 2. Total byte budget across 12 allowed tags (each 450 bytes -> >5400 bytes total > 4096).
+    big_tags = {
+        "DPC_SEED": "s" * 450,
+        "DPC_LM_SEED": "l" * 450,
+        "DPC_ENGINE": "e" * 450,
+        "DPC_ENGINE_VERSION": "v" * 450,
+        "DPC_VARIANT": "r" * 450,
+        "DPC_BACKBONE": "b" * 450,
+        "DPC_JOB_ID": "j" * 450,
+        "DPC_COVER_OF": "c" * 450,
+        "DPC_SYNTH_BATCH_SIZE": "z" * 450,
+        "DPC_SYNTH_BATCH_INDEX": "i" * 450,
+        "DPC_EDIT_ACTION": "a" * 450,
+        "DPC_EDIT_OF": "o" * 450,
+    }
+    flac = _build_flac(tmp_path, {**big_tags, "LYRICS": MULTI_SECTION_LYRICS}, name="budget.flac")
+    export_source = ExportSource(
+        track_id="trk_budget",
+        path=flac,
+        content_hash="md5:" + "cc" * 16,
+        title="Budget",
+        artist="DPC",
+        true_peak_dbtp=-2.0,
+        true_peak_basis="test",
+    )
+    opus = Path(_exporter(tmp_path).export_track(export_source, "opus-160")["path"])
+    opus_comments = read_opus_comments(opus)
+    copied_in_opus = {
+        k: v for k, v in opus_comments.items() if k in export_mod.ALLOWED_SOURCE_DPC_TAGS
+    }
+    assert len(copied_in_opus) < len(big_tags)
+    total_copied_bytes = sum(len(k.encode("utf-8")) + len(v.encode("utf-8")) for k, v in copied_in_opus.items())
+    assert total_copied_bytes <= export_mod.MAX_COPIED_DPC_TOTAL_BYTES
+    assert opus_comments["DPC_EXPORT_OF"] == export_source.content_hash
+    assert opus_comments["LYRICS"] == MULTI_SECTION_LYRICS
+    packet = export_mod.read_opus_tags_packet(opus)
+    assert packet is not None and len(packet) <= export_mod.OPUS_TAGS_MAX_BYTES
+
+    # 3. Count cap (32) and deterministic key sorting regardless of input tag order.
+    synthetic_allowed = frozenset(f"DPC_SYNTH_BATCH_K{i:02d}" for i in range(40))
+    monkeypatch.setattr(export_mod, "ALLOWED_SOURCE_DPC_TAGS", synthetic_allowed)
+    forward_input = {f"DPC_SYNTH_BATCH_K{i:02d}": str(i) for i in range(40)}
+    reverse_input = {f"DPC_SYNTH_BATCH_K{i:02d}": str(i) for i in reversed(range(40))}
+    res_forward = MusicExporter._source_dpc_tags(source, forward_input, {})
+    res_reverse = MusicExporter._source_dpc_tags(source, reverse_input, {})
+    assert len(res_forward) == export_mod.MAX_COPIED_DPC_TAGS
+    assert res_forward == res_reverse
+    assert [k for k, _ in res_forward] == sorted(k for k, _ in res_forward)
