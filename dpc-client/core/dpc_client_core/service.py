@@ -171,6 +171,7 @@ from .managers.file_transfer_manager import (
 from .utils.image_utils import screenshot_attachment, screenshot_target
 from .voice_service import VoiceService
 from .background_models_service import BackgroundModelsService
+from .privacy_logging_service import PrivacyLoggingService
 from .knowledge_service import KnowledgeService
 from .telegram_service import TelegramService
 from .agent_service import AgentService
@@ -1226,6 +1227,13 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         # [knowledge_graph] gliner_device and backend) — no older service owned them
         # (KnowledgeService is PCM/consensus), so they get this small one.
         self.background_models_service = BackgroundModelsService(
+            settings=self.settings,
+            local_api=self.local_api,
+        )
+        # The [system] collection switches and the [logging] levels — likewise
+        # unowned (the device-context reader is service start's own code, the
+        # levels are run_service's), so they get the same small shape.
+        self.privacy_logging_service = PrivacyLoggingService(
             settings=self.settings,
             local_api=self.local_api,
         )
@@ -7030,6 +7038,14 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
     async def save_background_model_config(self, config: dict) -> dict:
         """Delegated to BackgroundModelsService."""
         return await self.background_models_service.save_background_model_config(config)
+
+    async def get_privacy_logging_config(self) -> dict:
+        """Delegated to PrivacyLoggingService."""
+        return await self.privacy_logging_service.get_privacy_logging_config()
+
+    async def save_privacy_logging_config(self, config: dict) -> dict:
+        """Delegated to PrivacyLoggingService."""
+        return await self.privacy_logging_service.save_privacy_logging_config(config)
 
     async def get_local_transcription_config(self) -> dict:
         """Delegated to VoiceService."""

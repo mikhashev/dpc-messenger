@@ -257,6 +257,10 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # background models form
     "get_background_model_config",
     "save_background_model_config",
+    # The [system] collection switches and the [logging] level keys (same
+    # audit) — editable from the privacy and logging form
+    "get_privacy_logging_config",
+    "save_privacy_logging_config",
     "set_conversation_transcription",
     "get_conversation_transcription",
     "transcribe_audio",

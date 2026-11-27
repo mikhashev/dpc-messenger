@@ -438,6 +438,7 @@
     onOpenProvidersEditor,
     onOpenVoiceSettings,
     onOpenBackgroundModels,
+    onOpenPrivacyLogging,
     onOpenAgentBoard,
     onOpenAgentMap,
     onOpenMusicPlayer,
@@ -479,6 +480,7 @@
     onOpenProvidersEditor: () => void;
     onOpenVoiceSettings?: () => void;
     onOpenBackgroundModels?: () => void;
+    onOpenPrivacyLogging?: () => void;
     onOpenAgentBoard?: () => void;
     onOpenAgentMap?: () => void;
     onOpenMusicPlayer?: () => void;
@@ -906,6 +908,13 @@
         <button class="btn-context" onclick={onOpenBackgroundModels}
           title="Where the background models run and which graph store they use">
           Background Models
+        </button>
+      {/if}
+
+      {#if onOpenPrivacyLogging}
+        <button class="btn-context" onclick={onOpenPrivacyLogging}
+          title="What this node collects about the device it runs on, and its log levels">
+          Privacy and Logging
         </button>
       {/if}
 

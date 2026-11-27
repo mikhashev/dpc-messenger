@@ -930,6 +930,84 @@ class Settings:
                 overrides[module_name] = level.upper()
         return overrides
 
+    def get_privacy_logging_settings(self) -> Dict[str, Any]:
+        """The keys of the privacy and logging form in one read
+        (THE-PRIVACY-COLLECTION-AND-LOGGING-SETTINGS-HAVE-NO-CONTROL-IN-THE-UI):
+        the two [system] collection switches and the level keys of [logging].
+        `collect_ai_models` has no getter of its own — its reader parses the raw
+        key inline (device_context_collector), so this getter parses it the same
+        way. When a written value is in force, per key: both switches are read at
+        each device-context collection, and a collection runs at each backend
+        start; the levels are applied once at backend start
+        (run_service.setup_logging) — the form says so per key."""
+        return {
+            "auto_collect_device_info": self.get_auto_collect_device_info(),
+            "collect_ai_models": self.get('system', 'collect_ai_models', 'false').lower()
+            in ('true', '1', 'yes'),
+            "level": self.get_log_level(),
+            "console_level": self.get_log_console_level(),
+            "module_levels": self.get_module_log_levels(),
+        }
+
+    def set_privacy_logging_settings(
+        self, auto_collect_device_info: Optional[bool] = None,
+        collect_ai_models: Optional[bool] = None, level: Optional[str] = None,
+        console_level: Optional[str] = None,
+        module_levels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Write the privacy and logging form's keys; a left-out key keeps its
+        stored value, and a module left out of `module_levels` keeps its stored
+        level.
+
+        ValueError, one sentence, and nothing written, unless each given value is
+        one its reader knows: the switches must be a real bool (their readers
+        test a true set and read everything else as false, so a typo would
+        silently turn a switch off — the writer is where that stops); a level
+        must be one of DEBUG, INFO, WARNING, ERROR or CRITICAL, the set
+        run_service feeds to getattr(logging, ...), in any case the way the
+        getters upper-case what they read. No level is applied to the running
+        process here: setup_logging runs once at backend start, and no live
+        path exists."""
+        levels = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
+        writes: List[tuple] = []
+        if auto_collect_device_info is not None:
+            if not isinstance(auto_collect_device_info, bool):
+                raise ValueError("auto_collect_device_info must be true or false.")
+            writes.append(('system', 'auto_collect_device_info',
+                           'true' if auto_collect_device_info else 'false'))
+        if collect_ai_models is not None:
+            if not isinstance(collect_ai_models, bool):
+                raise ValueError("collect_ai_models must be true or false.")
+            writes.append(('system', 'collect_ai_models',
+                           'true' if collect_ai_models else 'false'))
+        if level is not None:
+            if not isinstance(level, str) or level.strip().upper() not in levels:
+                raise ValueError("level must be one of DEBUG, INFO, WARNING, ERROR or CRITICAL.")
+            writes.append(('logging', 'level', level.strip().upper()))
+        if console_level is not None:
+            if not isinstance(console_level, str) or console_level.strip().upper() not in levels:
+                raise ValueError("console_level must be one of DEBUG, INFO, WARNING, ERROR or CRITICAL.")
+            writes.append(('logging', 'console_level', console_level.strip().upper()))
+        if module_levels is not None:
+            if not isinstance(module_levels, dict):
+                raise ValueError(
+                    "module_levels must map module names to one of "
+                    "DEBUG, INFO, WARNING, ERROR or CRITICAL.")
+            for module_name, module_level in module_levels.items():
+                name = module_name.strip() if isinstance(module_name, str) else ''
+                if not name or not all(part.isidentifier() for part in name.split('.')):
+                    raise ValueError(
+                        f"module_levels has a module name this build cannot "
+                        f"write: {module_name!r}.")
+                if (not isinstance(module_level, str)
+                        or module_level.strip().upper() not in levels):
+                    raise ValueError(
+                        f"module_levels[{name}] must be one of "
+                        f"DEBUG, INFO, WARNING, ERROR or CRITICAL.")
+                writes.append(('logging.modules', name, module_level.strip().upper()))
+        for section, key, text in writes:
+            self.set(section, key, text)
+
     def get_stun_servers(self) -> list[str]:
         """
         Get list of STUN server URLs from configuration.

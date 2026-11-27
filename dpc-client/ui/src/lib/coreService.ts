@@ -1817,6 +1817,16 @@ export async function saveBackgroundModelConfig(config: any): Promise<any> {
     return sendCommand('save_background_model_config', { config });
 }
 
+// Privacy/logging config commands (the [system] collection switches and the
+// [logging] level keys, editable from the privacy and logging form)
+export async function getPrivacyLoggingConfig(): Promise<any> {
+    return sendCommand('get_privacy_logging_config', {});
+}
+
+export async function savePrivacyLoggingConfig(config: any): Promise<any> {
+    return sendCommand('save_privacy_logging_config', { config });
+}
+
 // Per-conversation transcription control (v0.13.2+ checkbox)
 export async function setConversationTranscription(nodeId: string, enabled: boolean): Promise<any> {
     return sendCommand('set_conversation_transcription', { node_id: nodeId, enabled });
