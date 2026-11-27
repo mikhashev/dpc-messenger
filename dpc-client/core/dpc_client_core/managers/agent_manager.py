@@ -706,13 +706,6 @@ class DpcAgentManager:
                             # agent's pass, so anything per-pass lives here, never on it.
                             cache_counters = EmbeddingCacheCounters()
                             embed_device = provider.device
-                            # Said at the start, not only at the end: a pass killed mid-flight
-                            # never reaches the summary, and its scale is what the kill was
-                            # about. One embedding per file, so documents are the whole count.
-                            log.info(
-                                "[%s] Per-file index update: %d documents to embed this pass",
-                                self.agent_id, len(to_embed),
-                            )
 
                             from dpc_client_core.dpc_agent.indexing_pipeline import (
                                 IndexRepair, repair_before_embedding,
@@ -730,6 +723,17 @@ class DpcAgentManager:
                                     backend, index_dir, collected, to_embed,
                                     old_hashes, removed_files, self.agent_id,
                                 )
+                            # Said at the start, not only at the end: a pass killed mid-flight
+                            # never reaches the summary, and its scale is what the kill was
+                            # about. One embedding per file, so documents are the whole count.
+                            # Under the repair, not above it: the repair appends to
+                            # `to_embed` (collapsed keys, keys with no vector row left),
+                            # and a start that counted fewer documents than the summary
+                            # re-embeds would read as the two lines disagreeing.
+                            log.info(
+                                "[%s] Per-file index update: %d documents to embed this pass",
+                                self.agent_id, len(to_embed),
+                            )
 
                             BATCH_SIZE = max(1, int(mem_cfg.batch_size))
                             embedded = 0
@@ -827,11 +831,14 @@ class DpcAgentManager:
                             # embed_batch, are the source here: that line is printed only
                             # when a batch had hits, so an all-miss pass — the one whose
                             # minutes the card is about — would otherwise log no numbers
-                            # at all. Zero hits prints as zero.
+                            # at all. Zero hits prints as zero. The device is named as
+                            # the stint's, not the pass's: it is where the bulk work
+                            # started, and a live veto can move the rest of it to the
+                            # CPU without this line knowing — so it claims no more.
                             log.info(
-                                "Per-file index update: %d unchanged, %d modified+new, %d removed → re-embed %d docs "
-                                "(%.1fs, on %s, cache %d hits / %d misses) [L5:%d L6:%d EXT:%d]",
-                                len(unchanged), len(to_embed), len(removed_files),
+                                "[%s] Per-file index update: %d unchanged, %d modified+new, %d removed → re-embed %d docs "
+                                "(%.1fs, stint on %s, cache %d hits / %d misses) [L5:%d L6:%d EXT:%d]",
+                                self.agent_id, len(unchanged), len(to_embed), len(removed_files),
                                 embedded, elapsed, embed_device, cache_counters.hits,
                                 cache_counters.misses, l5_count, l6_count, ext_count,
                             )

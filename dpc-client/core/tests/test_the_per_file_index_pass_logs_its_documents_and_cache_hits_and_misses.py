@@ -17,6 +17,7 @@ seam of `embed_batch` is pinned directly beside it. No GPU.
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import threading
@@ -32,6 +33,7 @@ from dpc_client_core.dpc_agent.memory import EmbeddingCacheCounters, EmbeddingPr
 DIMS = 8
 MODEL = "fake-embed"
 PASS_LOG = "dpc_client_core.managers.agent_manager"
+REPAIR_LOG = "dpc_client_core.dpc_agent.indexing_pipeline"
 _END_NUMBERS = re.compile(r"cache (\d+) hits / (\d+) misses")
 
 
@@ -109,8 +111,12 @@ def _start(root, provider, monkeypatch):
 
 
 def _summaries(caplog):
+    # Both of the pass's lines open "[<agent_id>] Per-file index update: " now, so a
+    # human grepping the phrase finds the start line and the summary alike — the
+    # reason the summary gained the prefix. The summary is told apart here by its
+    # counts, not by a prefix the start line happens to lack.
     return [r.getMessage() for r in caplog.records
-            if r.name == PASS_LOG and r.getMessage().startswith("Per-file index update: ")]
+            if r.name == PASS_LOG and "unchanged, " in r.getMessage()]
 
 
 def _start_lines(caplog):
@@ -127,6 +133,33 @@ def _assert_the_pass_did_not_fail(caplog):
 
 def _encoded_texts(provider):
     return [t for call in provider._model.calls for t in call]
+
+
+def _wipe_the_vector_rows_behind_a_current_map(root, provider):
+    """Take the documents' vector rows away, everything else staying as the warm pass
+    wrote it: the text channel, and a file map whose hashes are all still current — so
+    the hash comparison finds nothing to embed and only the repair can supply the list.
+
+    The channel is left with one ghost row rather than emptied, because an empty
+    channel — like a deleted vectors.faiss, which `load()` refuses — is the shape
+    `map_outlives_index` answers with a full rebuild, and the pass under test here is
+    the one that repairs the damage incrementally. Runs on the index writer, like
+    every mutation of the directory."""
+    from dpc_client_core.dpc_agent.retrieval import VectorAddItem, make_backend_for_agent
+
+    keys = list(json.loads(
+        (_index_dir(root) / "index_meta.json").read_text(encoding="utf-8")
+    ).get("file_hashes", {}))
+    backend = make_backend_for_agent(root, model_name=provider.model_name,
+                                     dimensions=provider.dimensions)
+    assert backend.vector.load()
+    assert len(keys) == 3 and backend.vector.remove_by_sources(keys) == 3
+    backend.vector.add([VectorAddItem(
+        vector=np.full(DIMS, 1 / np.sqrt(DIMS), dtype=np.float32),
+        meta={"source_file": "L5:gone.md",
+              "source_path": str(root / "knowledge" / "gone.md")},
+    )])
+    backend.vector.save()
 
 
 # 1 ---------------------------------------------------------------------------
@@ -151,7 +184,7 @@ def test_an_all_miss_pass_logs_zero_hits_and_the_true_miss_count(agent, monkeypa
     # accumulated across the pass's two embed_batch calls (batch_size 2 over 3 docs).
     assert len(provider._model.calls) == 2
     assert len(_encoded_texts(provider)) == 3
-    assert ", on cpu, cache 0 hits / 3 misses)" in summary
+    assert ", stint on cpu, cache 0 hits / 3 misses)" in summary
 
 
 # 2 ---------------------------------------------------------------------------
@@ -209,7 +242,42 @@ def test_a_pass_over_a_lost_file_map_logs_its_mixed_hits_and_misses(agent, monke
     assert "a changed body" in _encoded_texts(provider)[0]
 
 
-# 4 -- the counters seam of embed_batch, without the pass around it ------------
+# 4 -- the falsifier for where the start line sits ------------------------------
+
+def test_the_start_line_counts_the_documents_the_repair_appends(agent, monkeypatch, pass_log):
+    """A warmed 3-document index whose vector channel lost its rows behind a current
+    file map: the hashes find nothing to embed, the repair appends all three (missing
+    keys), and the start line must count what the repair left in the list — printed
+    above the repair it said 0 documents beside a summary that re-embedded 3."""
+    provider = _provider()
+    for i in range(3):
+        _write(agent, f"note_{i}.md", f"# Note {i}\nbody of note number {i}\n")
+    _start(agent, provider, monkeypatch)          # warms the index: 3 rows, map current
+    pass_log.clear()
+    provider._model.calls.clear()
+    pass_log.set_level(logging.INFO, logger=REPAIR_LOG)
+
+    writer_for(_index_dir(agent)).submit(
+        lambda: _wipe_the_vector_rows_behind_a_current_map(agent, provider)).result(timeout=120)
+
+    _start(agent, provider, monkeypatch)
+
+    _assert_the_pass_did_not_fail(pass_log)
+    # The incremental repair path ran, not the full rebuild that would make the two
+    # numbers agree for a different reason: the map was never declared unusable...
+    assert not [r.getMessage() for r in pass_log.records
+                if "rebuilding rather than trusting the map" in r.getMessage()]
+    # ...and it was the repair that put the three documents back on the embedder's list.
+    (repair,) = [r.getMessage() for r in pass_log.records
+                 if r.name == REPAIR_LOG and "memory index repair" in r.getMessage()]
+    assert "3 missing keys re-embedded" in repair
+    (start,) = _start_lines(pass_log)
+    (summary,) = _summaries(pass_log)
+    assert start == f"[{agent.name}] Per-file index update: 3 documents to embed this pass"
+    assert "→ re-embed 3 docs" in summary
+
+
+# 5 -- the counters seam of embed_batch, without the pass around it ------------
 
 def test_embed_batch_counts_into_the_callers_object_and_the_debug_line_keeps_its_guard(caplog):
     provider = _provider()
