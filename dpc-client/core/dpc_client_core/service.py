@@ -4859,12 +4859,12 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             self.settings, Path(audio_path), size_mb, declared_s=duration_seconds
         )
 
-    @slow_command
     @staticmethod
     def _is_toastable_transcription_error(error_msg: str) -> bool:
         """Whether a transcription failure message should surface a UI error toast."""
         return "VRAM" in error_msg or "too long" in error_msg or "CUDA out of memory" in error_msg
 
+    @slow_command
     async def transcribe_audio(
         self,
         audio_base64: str = "",

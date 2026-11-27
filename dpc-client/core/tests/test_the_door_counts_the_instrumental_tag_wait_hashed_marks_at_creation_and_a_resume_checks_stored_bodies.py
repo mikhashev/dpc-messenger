@@ -187,8 +187,9 @@ async def test_a_scan_coroutine_dropped_on_a_worker_thread_wakes_wait_hashed_imm
         holder = [coro]
         del coro
 
-        wait_task = asyncio.create_task(lib.wait_hashed(timeout=0.6))
+        wait_task = asyncio.create_task(lib.wait_hashed(timeout=3.0))
         await asyncio.sleep(0.02)  # wait_hashed is now blocked waiting on marker
+        released_at = []
 
         def drop_off_loop():
             time.sleep(0.05)
@@ -196,16 +197,16 @@ async def test_a_scan_coroutine_dropped_on_a_worker_thread_wakes_wait_hashed_imm
             c.close()
             del c
             gc.collect()
+            released_at.append(time.monotonic())
 
         t = threading.Thread(target=drop_off_loop)
-        started = time.monotonic()
         t.start()
         try:
             await wait_task
-            elapsed = time.monotonic() - started
+            woke_at = time.monotonic()
         finally:
-            t.join(timeout=1.0)
-        assert elapsed < 0.4
+            t.join(timeout=2.0)
+        assert released_at and (woke_at - released_at[0]) < 0.4
         assert thread_ids == [threading.get_ident()], "marker.set_result must run on the event loop thread"
         assert threadsafe_calls, "off-loop finalizer must wake the loop via call_soon_threadsafe"
         assert not lib._scans_running
