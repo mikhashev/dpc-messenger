@@ -353,10 +353,29 @@ def _now_iso() -> str:
     )
 
 
+def _names_dropped_by(new: list[dict], stored: list[dict]) -> list[str]:
+    """Cookie names `stored` holds sendable that appear nowhere in `new`.
+
+    The periodic writeback's fact about a snapshot: names the stored jar
+    itself carries, compared as names and nothing else. Never a judgement
+    about which of them carries the login — no jar can answer that (a site
+    hands guest cookies to any anonymous visitor), and the httponly-and-
+    length heuristic that tried was measured counting Cloudflare's
+    `cf_clearance` as identity and deleted (ADR-028, *Amendment
+    2026-09-11 (third)* §1)."""
+    sendable = filter_expired(stored)
+    if not sendable:
+        return []
+    incoming = {c.get("name") or "" for c in new}
+    return sorted({c.get("name") or "" for c in sendable} - incoming)
+
+
 def save_cookies(
     agent_id: str,
     domain: str,
     cookies: list[dict],
+    *,
+    protect_stored_session: bool = False,
 ) -> bool:
     """Persist cookies for agent+domain. Replaces any existing jar for
     that domain — partial merges are not supported (cookies arrive as a
@@ -379,6 +398,18 @@ def save_cookies(
     judgement about a page, which is why no page can defeat it; and it is
     deliberately not a count threshold, because "how few is too few" would
     be a guess again.
+
+    A second write is refused only on the periodic path
+    (`protect_stored_session=True` — the window probe's writeback, which
+    runs every half minute with no agent call behind it): a jar is not
+    displaced by a snapshot that no longer carries a name that jar holds
+    sendable. The case is a window holding the site's guest cookies over
+    a login it never loaded — or that the site took back — and the rule is
+    again a fact about names in hand: a snapshot that still carries them
+    all is a re-authentication or a rotation and writes as ordinary.
+    Navigate and close never pass the flag: the ordinary writeback is how
+    a sign-in is saved as it is made, `previous` stays behind it, and
+    those semantics are pinned by tests.
 
     A non-empty jar being replaced is kept under `previous`, one generation
     deep, and `restore_previous_cookies` puts it back — recovery for when
@@ -404,6 +435,18 @@ def save_cookies(
             key, agent_id, len(cookies),
         )
         return False
+    if protect_stored_session and holds_something:
+        dropped = _names_dropped_by(cookies, displaced["cookies"])
+        if dropped:
+            # INFO, not WARNING: nothing was lost — the stored jar is the
+            # one that stays, and the window that declined is still open.
+            logging.getLogger(__name__).info(
+                "refusing to replace the stored %s jar for agent=%s with a "
+                "snapshot that no longer carries %s — the periodic "
+                "writeback keeps the stored jar",
+                key, agent_id, ", ".join(dropped),
+            )
+            return False
     now = _now_iso()
     entry: dict[str, Any] = {
         "cookies": cookies,

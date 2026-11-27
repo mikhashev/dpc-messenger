@@ -871,6 +871,23 @@ def _from_playwright_cookies(cookies: list[dict]) -> list[dict]:
     return out
 
 
+def _jar_fingerprint(items: list[dict]) -> str:
+    """A stable identity for one jar-shaped snapshot, for the skip in
+    `_sync_cookies_to_vault`.
+
+    Order is not part of a jar's meaning — the same cookies arrived in a
+    different order are the same jar — so it is sorted away, and every
+    field the vault writes is in the print, so a change in any of them is
+    a change worth writing. A digest rather than the bytes only because
+    the print is kept for the session's life, one per jar."""
+    return hashlib.sha1(json.dumps(
+        sorted(items, key=lambda c: (
+            c.get("domain") or "", c.get("path") or "", c.get("name") or "",
+        )),
+        sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+
+
 class _WritebackTally(NamedTuple):
     """What one cookie writeback did, in the terms its audit row carries.
 
@@ -881,12 +898,23 @@ class _WritebackTally(NamedTuple):
     were reached. `session_cookie` takes the vault's own word — a cookie
     with no live `expires`, which `web_auth.filter_expired` keeps for that
     reason — and stays a flag, since a count of them reads as a number of
-    logins, which no jar can say."""
+    logins, which no jar can say.
+
+    `unchanged` counts jars left as this session last wrote them — a
+    writeback that wrote nothing because nothing changed, which is the
+    answer the window probe needs to keep a half-minute cadence from
+    stamping `authenticated_at` on every tick. `protected` names the jars
+    the periodic path declined to displace (see
+    `web_auth.save_cookies`), which is a refusal of a different kind than
+    `refused`: nothing was lost, and the stored jar is the one that
+    stayed."""
 
     cookies: int
     refused: list[str]
     jars: int
     session_cookie: bool
+    unchanged: int
+    protected: list[str]
 
 
 # Hostname per origin, for the route gate: one page load asks for the same
@@ -1026,13 +1054,21 @@ def _take_session(registry: dict, agent_id: str, session: "AuthBrowser") -> bool
 
 
 async def sweep_closed_windows() -> int:
-    """Close headed sessions whose window the person has closed.
+    """Close headed sessions whose window the person has closed, and store
+    what the still-open ones now hold.
 
     Separate from the idle sweep and running far more often, because the
     two answer different questions. Idle asks how long nobody has used a
     browser and can afford half an hour; this asks whether the window is
     still there at all, and the person who closed it expects the processes
     to go with it. Returns the number of sessions released.
+
+    A window that is still there gets its cookie writeback on the same
+    round trip: a sign-in the person is making reaches the vault while
+    they make it, with no agent call to carry it (ADR-029, *Amendment
+    2026-09-11 (third)* §2 — "saved as they make it"). Best-effort by
+    contract: a writeback that raises or finds the thread busy is skipped
+    to the next tick, and nothing in it may close the window.
     """
     released = 0
     for agent_id, session in list(_active_browser_sessions.items()):
@@ -1059,7 +1095,22 @@ async def sweep_closed_windows() -> int:
             "window probe for %s: gone=%s in %.0f ms",
             agent_id, gone, (time.monotonic() - started) * 1000,
         )
-        if not gone or not _take_session(_active_browser_sessions, agent_id, session):
+        if not gone:
+            # Same `_touch=False` as the probe itself: the housekeeping's
+            # own asking is not use, or no window would ever look idle.
+            try:
+                await _run_in_session(
+                    session, "_persist_session_cookies", periodic=True,
+                    _touch=False, _timeout=WINDOW_PROBE_TIMEOUT_SECONDS,
+                )
+            except Exception as e:
+                # Includes busy, timeout and any writeback failure. The
+                # window stays; the next tick asks again.
+                log.debug(
+                    "probe cookie writeback skipped for %s: %s", agent_id, e,
+                )
+            continue
+        if not _take_session(_active_browser_sessions, agent_id, session):
             continue
         log.info("Window closed for %s — releasing the browser", agent_id)
         try:
@@ -2554,6 +2605,18 @@ class AuthBrowser:
         # Why the last cookie snapshot was not written, so `browser_close`
         # can say it in the chat. None once one has been written.
         self._last_writeback_decline: Optional[str] = None
+        # What each jar last heard from this session, as a fingerprint of
+        # the snapshot that was written. The window probe asks every half
+        # minute, and rewriting an unchanged jar would move
+        # `authenticated_at` on nothing — a fresh-login stamp on every
+        # tick (board THE-VAULT-STAMPS-A-FRESH-LOGIN-EVERY-TIME-THE-
+        # BROWSER-CLOSES). Cleared never: a snapshot equal to the last
+        # write has nothing to say whatever wrote the jar in between.
+        self._written_jar_prints: dict[str, str] = {}
+        # The last decline a periodic writeback reported, so a state that
+        # persists across probes is audited once, on the change — the same
+        # folding the gate trail gives a repeated decision.
+        self._last_periodic_decline: Optional[str] = None
         self._last_refs: dict[str, dict] = {}
         # Scopes the `data-dpc-el` marks to one snapshot, so a mark left on an
         # element this walk no longer reaches cannot answer a current ref.
@@ -2963,7 +3026,9 @@ class AuthBrowser:
             d: _from_playwright_cookies(items) for d, items in by_etld1.items()
         }
 
-    def _sync_cookies_to_vault(self, cookies: list[dict]) -> _WritebackTally:
+    def _sync_cookies_to_vault(
+        self, cookies: list[dict], *, periodic: bool = False,
+    ) -> _WritebackTally:
         """Write the session's in-scope cookies to the vault. Returns what
         the write did, in the terms the audit row carries: how many cookies
         landed, which jars refused, how many jars took them, and whether a
@@ -2976,29 +3041,56 @@ class AuthBrowser:
 
         This is how a sign-in the person performed in a visible window
         reaches the vault: they log in, the page sets its cookies, and the
-        writeback after each navigate and at close copies the ones inside
-        `_etld1s`. Nothing else is stored, and nothing is inferred from
-        what appears.
+        writeback after each navigate, at close and on the window probe
+        copies the ones inside `_etld1s`. Nothing else is stored, and
+        nothing is inferred from what appears.
 
         A jar refuses when the snapshot holds nothing sendable for it.
         `web_auth.save_cookies` owns that condition, because it is about the
-        cookies and not about this session."""
+        cookies and not about this session.
+
+        A jar whose snapshot is exactly what this session last wrote to it
+        is left alone, whatever the caller: the probe asks every half
+        minute, and a rewrite of the same bytes would move
+        `authenticated_at` on nothing. `periodic=True` — the probe's
+        asking, never an agent call — additionally declines a snapshot
+        that no longer carries the stored jar's own sendable names: the
+        guest cookies a window holds before anyone signs in must not spend
+        a login the window never loaded. That guard lives in
+        `web_auth.save_cookies` with the vault's other refusals."""
         from dpc_client_core import web_auth
 
         written = 0
         jars = 0
         session_cookie = False
         refused: list[str] = []
+        protected: list[str] = []
+        unchanged = 0
         for domain, items in self._scope_cookies_by_etld1(cookies).items():
-            if web_auth.save_cookies(self._agent_id, domain, items):
+            print_ = _jar_fingerprint(items)
+            if self._written_jar_prints.get(domain) == print_:
+                unchanged += 1
+                continue
+            if web_auth.save_cookies(
+                self._agent_id, domain, items,
+                protect_stored_session=periodic,
+            ):
                 written += len(items)
                 jars += 1
                 session_cookie = session_cookie or any(
                     c.get("expires") is None for c in items
                 )
-            else:
+                self._written_jar_prints[domain] = print_
+            elif not web_auth.filter_expired(items):
                 refused.append(domain)
-        return _WritebackTally(written, refused, jars, session_cookie)
+            else:
+                # Sendable snapshot, refused: with the flag set this is the
+                # stored session's names gone missing from it, and the jar
+                # that stayed is the fact the audit row should name.
+                protected.append(domain)
+        return _WritebackTally(
+            written, refused, jars, session_cookie, unchanged, protected,
+        )
 
     def _audit_cookie_writeback(self, result: str, **fields: Any) -> None:
         """One `cookie_writeback` row per writeback, taken or refused, so
@@ -3017,12 +3109,31 @@ class AuthBrowser:
                 pass
         self._audit_action("cookie_writeback", url, result, **fields)
 
-    def _decline_cookie_writeback(self, reason: str, *, notify: bool = True) -> None:
+    def _decline_cookie_writeback(
+        self, reason: str, *, notify: bool = True, periodic: bool = False,
+    ) -> None:
         """Record a snapshot that was not written, and leave the reason
         where `browser_close` can turn it into a sentence in the chat.
 
         `notify=False` keeps the audit row and drops the sentence, for the
-        case the person already knows about: they closed the window."""
+        case the person already knows about: they closed the window.
+
+        `periodic=True` folds and stays quiet: the probe asks every half
+        minute, so a decline that persists across probes is one decision
+        and is written once, on the change — the folding `_note_gate_event`
+        gives the trail. The sentence is dropped too, because no tool
+        answer is being built when nobody called anything, and the window
+        still being open means nothing is lost yet."""
+        if periodic:
+            if reason == self._last_periodic_decline:
+                log.debug(
+                    "periodic cookie writeback declined again for agent=%s "
+                    "(%s) — audited once already",
+                    self._agent_id, reason,
+                )
+                return
+            self._last_periodic_decline = reason
+            notify = False
         if notify:
             self._last_writeback_decline = reason
         log.log(
@@ -3033,7 +3144,7 @@ class AuthBrowser:
         )
         self._audit_cookie_writeback("declined", reason=reason)
 
-    def _persist_session_cookies(self) -> str:
+    def _persist_session_cookies(self, periodic: bool = False) -> str:
         """Copy this session's in-scope cookies into the vault. Returns the
         reason it took, written or not.
 
@@ -3043,13 +3154,21 @@ class AuthBrowser:
         and it declined a real sign-in every time it was asked.
 
         A window arriving with no session must still not write the site's
-        guest cookies over a stored login, and two facts prevent that
-        instead, neither reachable from a page. A scoped window opens
-        carrying the vault's own jar for its scope (see `_open`), so its
-        snapshot already holds the login it might displace; and
-        `web_auth.save_cookies` refuses a snapshot with nothing sendable in
-        it over a jar that has something, with `restore_previous_cookies`
-        behind that.
+        guest cookies over a stored login, and three facts prevent that
+        instead, none reachable from a page. A scoped window opens carrying
+        the vault's own jar for its scope (see `_open`), so its snapshot
+        already holds the login it might displace; `web_auth.save_cookies`
+        refuses a snapshot with nothing sendable in it over a jar that has
+        something, with `restore_previous_cookies` behind that; and the
+        periodic writeback refuses to displace a stored jar with a snapshot
+        that no longer carries its sendable names at all.
+
+        `periodic=True` is the window probe's asking, not an agent call:
+        same jars, same facts, and the two halves of the cadence hold — a
+        jar this session already wrote unchanged is not rewritten, so
+        `authenticated_at` moves only when the cookies did, and a decline
+        that repeats across probes is said once. An exception in the
+        writeback is the caller's to catch, and the probe does.
 
         browser_state.json is neither read (see `_open`) nor written any
         more — the file on disk is left alone, but nothing here maintains
@@ -3060,7 +3179,9 @@ class AuthBrowser:
             # Carries no identity and owns no jar, so it has nothing to say.
             return "no_scope"
         try:
-            tally = self._sync_cookies_to_vault(self._context.cookies())
+            tally = self._sync_cookies_to_vault(
+                self._context.cookies(), periodic=periodic,
+            )
         except Exception as e:
             if self._disconnected:
                 log.debug(
@@ -3074,17 +3195,30 @@ class AuthBrowser:
                     self._agent_id, e,
                 )
             self._decline_cookie_writeback(
-                "write_failed", notify=not self._disconnected,
+                "write_failed", notify=not self._disconnected, periodic=periodic,
             )
             return "write_failed"
         if tally.refused:
             reason = (
                 "nothing_sendable_in_snapshot:" + ",".join(sorted(tally.refused))
             )
-            self._decline_cookie_writeback(reason)
+            self._decline_cookie_writeback(reason, periodic=periodic)
+            return reason
+        if tally.protected:
+            reason = (
+                "drops_the_stored_session:" + ",".join(sorted(tally.protected))
+            )
+            self._decline_cookie_writeback(reason, periodic=periodic)
             return reason
         if not tally.cookies:
-            self._decline_cookie_writeback("no_cookies_in_scope")
+            if tally.unchanged:
+                # Every jar in scope holds what this session last wrote to
+                # it: nothing to write, nothing lost, nothing to audit —
+                # an empty row here would mean a writeback was attempted.
+                return "unchanged"
+            self._decline_cookie_writeback(
+                "no_cookies_in_scope", periodic=periodic,
+            )
             return "no_cookies_in_scope"
         self._audit_cookie_writeback(
             "ok",
@@ -3093,6 +3227,8 @@ class AuthBrowser:
             has_session_cookie=tally.session_cookie,
         )
         self._last_writeback_decline = None
+        if periodic:
+            self._last_periodic_decline = None
         return "written"
 
     def _install_domain_route_handler(self) -> None:
@@ -5509,7 +5645,14 @@ def _login_needed_notice(etld1: str) -> str:
 
     There is no push channel from a tool into the conversation: a tool
     returns a string to the model and the model writes the chat message. So
-    the string has to be unambiguous about who acts next."""
+    the string has to be unambiguous about who acts next.
+
+    The save it promises is the window's own site and nothing wider: the
+    write side stays scoped to the window's registrable domain (ADR-028,
+    Amendment 2026-09-11 (third) §3), other sites the window visits are
+    not stored, and what is stored is the browser tools' to use again —
+    no promise is made here about any other tool, because none of them
+    gets these cookies."""
     site = etld1 or "this site"
     return (
         f"\n\n---\nA LOGIN IS NEEDED — this page is asking for a sign-in, and "
@@ -5519,9 +5662,32 @@ def _login_needed_notice(etld1: str) -> str:
         f"reply here when they are done. Then STOP and wait for their reply "
         f"— do not retry this page, and do not call any other tool, until "
         f"they answer. Tell them to finish the sign-in through any code or "
-        f"verification step before replying: what the window holds is saved "
-        f"as they go, so a sign-in stopped half way stores half a sign-in "
-        f"and {site} will ask again.\n---"
+        f"verification step before replying: what the window holds for "
+        f"{site} is saved as they go — while the window is open, and for "
+        f"{site} only — so a sign-in stopped half way stores half a sign-in "
+        f"and {site} will ask again. The saved sign-in is used again by "
+        f"your browser tools on {site}; other sites this window visits are "
+        f"not saved.\n---"
+    )
+
+
+def _login_unsaveable_notice(url: str) -> str:
+    """The counterpart for an address with no registrable domain: the page
+    is still asking for a sign-in and the person is still looking at it,
+    so they still have to be told — but no save may be promised, because
+    the vault has no jar to key an IP literal or `localhost` to, and a
+    promise the code cannot keep is how the window above came to be opened
+    for sign-ins it could never store."""
+    return (
+        f"\n\n---\nA LOGIN IS NEEDED — this page is asking for a sign-in, and "
+        f"the browser window for {url} is open on screen right now.\n"
+        f"Say so in the chat in your own words: that the site wants a "
+        f"login, and that they can sign in in the window if they want to. "
+        f"Also say that a sign-in there will NOT be saved: the address "
+        f"names no registrable domain, so there is no per-site jar to "
+        f"store it in and you cannot use it again later. Then STOP and "
+        f"wait for their reply — do not retry this page, and do not call "
+        f"any other tool, until they answer.\n---"
     )
 
 
@@ -5716,10 +5882,37 @@ async def browse_page(
 
     if keep_open:
         agent_id = ctx.agent_root.name if hasattr(ctx, 'agent_root') else "anonymous"
+        # The scope a use_auth window would have gotten, taken from the URL
+        # itself: the registrable domain of the address is this window's
+        # jar, so a sign-in made in it is stored for that site — loaded at
+        # open, written back on the probe, kept off every other site (the
+        # write side stays scoped, ADR-028 Amendment 2026-09-11 (third) §3).
+        # Nothing about the approval moves with it: the plain-fetch card
+        # still asks only to open the page, and "logged in as the owner"
+        # stays what `use_auth` alone says. An address with no registrable
+        # domain — an IP literal, localhost — opens unscoped and saves
+        # nothing: the vault has no jar to key it to, and the notice below
+        # says that rather than promising a save that cannot happen.
+        from dpc_client_core import web_auth as _web_auth_mod
+
+        window_scope = _web_auth_mod.resolve_etld1(url)
+        window_domains = [window_scope] if window_scope else []
         try:
-            session = await _get_or_create_session_async(agent_id, [], True)
-            session = await _navigate_with_recovery(session, agent_id, url, [])
+            session = await _get_or_create_session_async(
+                agent_id, window_domains, True,
+            )
+            session = await _navigate_with_recovery(
+                session, agent_id, url, window_domains,
+            )
             html = await _run_in_session(session, "get_page_html")
+            if window_scope:
+                # The window carries an identity for its scope now, so it
+                # takes the same per-turn mark a use_auth window does; a
+                # session with no mark reads as the owner's, which fails
+                # closed for foreign turns either way.
+                _note_turn_of_binding(
+                    session, ctx, await _read_page_url(session),
+                )
         except CamoufoxBinaryMissing as e:
             return await _camoufox_binary_refusal(ctx, e)
         except Exception as e:
@@ -5728,11 +5921,22 @@ async def browse_page(
         saved_to, save_warning = _save_page_markdown(ctx, save_to, text)
         answer = _rendered_page_answer(
             url, html, text, size,
-            session="visible browser, no auth domain named",
+            session=(
+                f"visible browser, save scope {window_scope}"
+                if window_scope else
+                "visible browser, no save scope (the address names no "
+                "registrable domain)"
+            ),
             saved_to=saved_to, save_warning=save_warning,
         )
         if _page_wants_a_login(html):
-            answer += _login_needed_notice(_domain_of(url))
+            if window_scope:
+                _web_auth_mod.audit_append(
+                    agent_id, window_scope, url, status="login_page_shown",
+                )
+                answer += _login_needed_notice(window_scope)
+            else:
+                answer += _login_unsaveable_notice(url)
         return answer
 
     result = await asyncio.to_thread(_browse_sync, url)
@@ -7308,7 +7512,7 @@ def get_tools() -> List[ToolEntry]:
             name="browse_page",
             schema={
                 "name": "browse_page",
-                "description": f"Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. A tool result is cut again at {cap} chars before it reaches you, so for a long page pass save_to=<filename>: the whole markdown is written there and read_file(offset=, limit=) pages through it. Set use_auth=<domain> to fetch authenticated content using the cookies stored for that site. Set keep_open=true for a VISIBLE browser window: it opens with whatever cookies are stored, goes anywhere, and whatever it ends up holding for that site is saved as it goes — a window left part-way through a sign-in saves what it has, which is the site's anonymous cookies. The one write that is refused is a snapshot holding nothing usable for the site, so a stored session is never replaced by nothing; the set it displaced is kept one generation back. Without keep_open the fetch runs in a background browser that reaches only the site and the hosts its manifest names, and it is refused outright when no session is stored — because a login page fetched into a window nobody can see helps nobody. When a visible page asks for a sign-in, say so in the chat and wait for the person.",
+                "description": f"Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full. A tool result is cut again at {cap} chars before it reaches you, so for a long page pass save_to=<filename>: the whole markdown is written there and read_file(offset=, limit=) pages through it. Set use_auth=<domain> to fetch authenticated content using the cookies stored for that site. Set keep_open=true for a VISIBLE browser window: it opens with the cookies stored for the site of this URL, goes anywhere, and what it holds for that site is saved as it goes — while the window is open, not only at your next call — so a sign-in the person makes in it is stored for that site and used again by your browser tools. A window left part-way through a sign-in saves what it has, which is the site's anonymous cookies. Other sites the window visits are not saved, and no tool outside the browser gets these cookies. The one write that is refused is a snapshot holding nothing usable for the site, so a stored session is never replaced by nothing; the set it displaced is kept one generation back. Without keep_open the fetch runs in a background browser that reaches only the site and the hosts its manifest names, and it is refused outright when no session is stored — because a login page fetched into a window nobody can see helps nobody. When a visible page asks for a sign-in, say so in the chat and wait for the person.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -7328,7 +7532,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "keep_open": {
                             "type": "boolean",
-                            "description": "When true, the page loads in a VISIBLE Camoufox window that stays open after the fetch returns, and that window is ungated — it may follow the site wherever it goes, including to identity providers, because a person can see it. Works on both the anonymous and use_auth paths, and the same window is reused by later keep_open calls and by the browser_* tools for this agent. Use it whenever a site may ask for a sign-in: the person logs in there by hand while you wait, and their session is stored as they do it. Window stays open until DPC restart, an explicit browser_close call, or the person closes it.",
+                            "description": "When true, the page loads in a VISIBLE Camoufox window that stays open after the fetch returns, and that window is ungated — it may follow the site wherever it goes, including to identity providers, because a person can see it. Works on both the anonymous and use_auth paths, and the window is scoped to the registrable domain of the URL it was opened on: it opens with that site's stored cookies, later keep_open calls for the same site and the browser_* tools reuse it, and a keep_open call for a different site replaces it. Use it whenever a site may ask for a sign-in: the person logs in there by hand while you wait, and their session for that site is stored as they do it — while the window stays open — and used again by your browser tools. Window stays open until DPC restart, an explicit browser_close call, or the person closes it.",
                             "default": False
                         },
                         "verify": {

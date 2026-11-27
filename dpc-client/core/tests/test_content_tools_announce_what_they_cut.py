@@ -562,7 +562,12 @@ class TestTheOtherTwoBrowsePagePathsAnnounceTheSameThings:
     # --- and what the old line did carry is not lost ----------------------
 
     def test_the_session_that_served_the_page_is_still_named(self, monkeypatch):
-        assert "visible browser, no auth domain named" in self._headed(monkeypatch, _APP_SHELL)
+        # Amended with the keep_open scope (A-SIGN-IN-IN-A-KEEP-OPEN-WINDOW):
+        # the no-auth window names where its writes go — the URL's own
+        # registrable domain — and still does not claim an auth domain.
+        headed = self._headed(monkeypatch, _APP_SHELL)
+        assert "visible browser, save scope example.test" in headed
+        assert "auth domain" not in headed
         assert "auth domain example.test" in self._auth(monkeypatch, _APP_SHELL)
 
 
