@@ -1516,14 +1516,17 @@ class MusicJobRunner:
             await self._progress(job_id, 0.8)
             identity = await asyncio.to_thread(engine.identity)
             request = json.loads(synth_body.decode("utf-8"))
+            raw_window = prepared["request"].get("engine_window")
+            window = re_.EngineWindow.from_dict(raw_window) if isinstance(raw_window, Mapping) else None
             rejected: List[str] = []
             for index, (_h, a, b) in enumerate(audio):
                 await self._check(job_id)
                 variant = index + 1
                 try:
                     engine_pcm = await asyncio.to_thread(re_.read_pcm, multipart, a, b)
-                    result = await asyncio.to_thread(re_.splice, prepared["pcm"], engine_pcm,
-                                                     prepared["zones"]["splice"], params["crossfade_ms"])
+                    result = await asyncio.to_thread(
+                        re_.splice, prepared["pcm"], engine_pcm, prepared["zones"]["splice"],
+                        params["crossfade_ms"], window=window, source_duration_s=params.get("source_duration_s"))
                 except re_.EditError as exc:
                     logger.warning("music: variant %s of edit job %s is not kept: %s", variant, job_id, exc.message)
                     rejected.append(f"variant {variant} rejected: {exc.message}")
@@ -1575,13 +1578,16 @@ class MusicJobRunner:
                 return
             window = None
             if request is not None and isinstance(prepared["request"].get("engine_window"), Mapping):
-                w = prepared["request"]["engine_window"]
-                window = re_.EngineWindow(int(round(w["t_start"] * re_.GRID_HZ)), int(round(w["t_end"] * re_.GRID_HZ)),
-                                          w["repainting_start"], w["repainting_end"])
+                window = re_.EngineWindow.from_dict(prepared["request"]["engine_window"])
             seams = await asyncio.to_thread(re_.seams_entry, action, result, pcm.rate,
                                             crossfade_ms=params["crossfade_ms"], window=window)
             control_s = round(expected / pcm.rate, 6)
-            zone = None if cut else (zones["intent"] if action == re_.REMOVE_REGION else zones["splice"])
+            effective_zone = (
+                zones["intent"] if action == re_.REMOVE_REGION
+                else re_.effective_splice(zones["splice"], pcm.frames, pcm.rate, window=window,
+                                          source_duration_s=params.get("source_duration_s"))
+            )
+            zone = None if cut else effective_zone
             qa_override = {"requested_s": control_s, "length_mode": LENGTH_SAME,
                            "edit": {"action": action, "zone": zone, "expects_silence": action == re_.REMOVE_REGION,
                                     "seams": seams}}
@@ -1595,9 +1601,10 @@ class MusicJobRunner:
             title = take_title_of(source_job, variant, int(params.get("takes") or 1), f"{base_title} ({words}, v{variant})")
             slug = slug_of(req_title or f"{base_title}-{action}")
             seed = (request or {}).get("seed")
+            edit_zones = {**zones, "splice": effective_zone} if action in re_.REPAINT_ACTIONS else zones
             edit_rec = {
                 "action": action, "region": dict(job["region"]),
-                "zones": {k: {"t_start": v[0], "t_end": v[1]} for k, v in zones.items()},
+                "zones": {k: {"t_start": v[0], "t_end": v[1]} for k, v in edit_zones.items()},
                 "engine_window": prepared["request"].get("engine_window"),
                 "crossfade_ms": params["crossfade_ms"], "cut_with_shift": cut,
                 "seams": [s.as_dict(pcm.rate) for s in result.seams], "notes": list(result.notes),

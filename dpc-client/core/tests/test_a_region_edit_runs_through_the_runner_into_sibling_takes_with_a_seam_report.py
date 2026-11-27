@@ -478,3 +478,72 @@ async def test_edit_rollback_never_deletes_an_existing_entry_even_when_audio_has
         assert [e["id"] for e in remaining] == [entry["id"]]
         assert remaining[0]["alt_paths"] == []
         assert src_path.is_file()
+
+
+@pytest.mark.asyncio
+async def test_tail_edit_on_40ms_multiple_plus_17ms_track_runs_through_runner_with_end_crossfade(tmp_path, monkeypatch):
+    """Track of 250 * 40 ms + 17 ms (10.017 s = 480816 frames): tail, middle, and start edits all
+    succeed through the runner, keeping exact length and crossfading before the 17 ms remainder."""
+    free_env(monkeypatch)
+    install_fake_engine(tmp_path)
+    seconds = 10.017
+    expected_frames = 250 * 1920 + int(round(0.017 * RATE))
+    assert int(seconds * RATE) == expected_frames
+
+    async with EditRig(tmp_path) as rig:
+        entry, base = await rig.base(seconds=seconds)
+        control = re_.read_pcm(base)
+        assert control.frames == expected_frames
+
+        # Tail edit touching the end of the 10.017 s track
+        tail_job = rig.propose(entry, "regenerate_region", {"t_start": 8.0, "t_end": seconds},
+                               {"caption": "synthwave"}, seconds=seconds)
+        tail_done = await rig.wait_for(tail_job["id"], DONE)
+        assert tail_done["state"] == js.REVIEW, tail_done.get("state_reason")
+        takes = rig.store.list_takes(tail_job["id"])
+        assert len(takes) == 2
+        for i, take in enumerate(takes):
+            assert take["file"]["duration_s"] == pytest.approx(seconds)
+            seams = take["qa_report"]["advisory"]["seams"]
+            assert seams["engine_window"]["t_end"] == 10.0
+            assert seams["engine_window"].get("clamped_to_source") is True
+            assert [s["side"] for s in seams["seams"]] == ["start", "end"]
+            assert seams["seams"][1]["t_end"] <= 10.0
+            side = sidecar_of(take)
+            assert side["edit"]["zones"]["splice"] == {"t_start": 8.0, "t_end": 10.0}
+            pcm_out = re_.read_pcm(rig.keep.wavs[i])
+            assert pcm_out.frames == expected_frames
+            # Samples in the unrepainted 17 ms tail stay the control's and transition smoothly from 10.000 s.
+            assert np.max(np.abs(pcm_out.data[250 * 1920:] - control.data[250 * 1920:])) < 1e-4
+            assert float(np.max(np.abs(pcm_out.data[250 * 1920] - pcm_out.data[250 * 1920 - 1]))) < 0.05
+
+        # fix_seam near the end of the 10.017 s track (widened window clamped to 10.000 s)
+        seam_job = rig.propose(entry, "fix_seam", {"t_start": 9.5, "t_end": 9.7},
+                               {"caption": "synthwave"}, seconds=seconds)
+        seam_done = await rig.wait_for(seam_job["id"], DONE)
+        assert seam_done["state"] == js.REVIEW, seam_done.get("state_reason")
+        for take in rig.store.list_takes(seam_job["id"]):
+            seams = take["qa_report"]["advisory"]["seams"]
+            assert seams["engine_window"]["t_end"] == 10.0
+            assert seams["engine_window"].get("clamped_to_source") is True
+            assert [s["side"] for s in seams["seams"]] == ["start", "end"]
+            assert sidecar_of(take)["edit"]["zones"]["splice"]["t_end"] == 10.0
+
+        # Middle and start edits on the same odd-length track
+        mid_job = rig.propose(entry, "regenerate_region", {"t_start": 2.0, "t_end": 4.0},
+                              {"caption": "synthwave"}, seconds=seconds)
+        mid_done = await rig.wait_for(mid_job["id"], DONE)
+        assert mid_done["state"] == js.REVIEW, mid_done.get("state_reason")
+        for take in rig.store.list_takes(mid_job["id"]):
+            seams = take["qa_report"]["advisory"]["seams"]
+            assert [s["side"] for s in seams["seams"]] == ["start", "end"]
+            assert sidecar_of(take)["edit"]["zones"]["splice"] == {"t_start": 2.0, "t_end": 4.0}
+
+        start_job = rig.propose(entry, "regenerate_region", {"t_start": 0.0, "t_end": 2.0},
+                                {"caption": "synthwave"}, seconds=seconds)
+        start_done = await rig.wait_for(start_job["id"], DONE)
+        assert start_done["state"] == js.REVIEW, start_done.get("state_reason")
+        for take in rig.store.list_takes(start_job["id"]):
+            seams = take["qa_report"]["advisory"]["seams"]
+            assert [s["side"] for s in seams["seams"]] == ["end"]
+            assert sidecar_of(take)["edit"]["zones"]["splice"] == {"t_start": 0.0, "t_end": 2.0}

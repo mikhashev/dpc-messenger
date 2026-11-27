@@ -87,6 +87,7 @@ COHERENCE_LINEAR_MIN = 0.85       # start value (SPEC §6: threshold not chosen,
 ZERO_CROSS_SEARCH_MS = 10.0
 NEAR_END_S = 10.0                 # decision 27: "near the end" for cut_with_shift (start value)
 EDGE_EPS_S = 0.01                 # a region may reach the track's probed end within this
+DURATION_ROUND_EPS_S = 0.0002     # covers 4-decimal rounding (~10 samples at 48 kHz)
 MIN_REGION_S = 0.05               # the shortest intent zone: more than one 40 ms latent frame (region_too_short)
 FULL_SCALE = 8388607 / 8388608    # the largest sample a 24-bit take holds; a crossfade stays at or under it
 
@@ -248,6 +249,9 @@ def normalize_params_edit(action: str, params: Any, region: Any, *, duration_s: 
 def zones_of(region: Mapping[str, Any], params: Mapping[str, Any]) -> Dict[str, Tuple[float, float]]:
     """`{intent, allowed, splice}` in seconds from a job's region and normalised params."""
     intent = (float(region["t_start"]), float(region["t_end"]))
+    src_s = params.get("source_duration_s")
+    if isinstance(src_s, (int, float)) and not isinstance(src_s, bool) and src_s > 0 and intent[1] > float(src_s) + 1e-4:
+        intent = (intent[0], float(src_s))
     a = params.get("allowed_zone")
     allowed = (float(a["t_start"]), float(a["t_end"])) if a else intent
     s = params.get("splice_bounds")
@@ -284,12 +288,27 @@ class EngineWindow:
     def end_s(self) -> float:
         return self.frame_end / GRID_HZ
 
+    def frame_range(self, rate: int = RATE) -> Tuple[int, int]:
+        """Sample indices `[start, end)` at `rate` matching the 25 Hz latent frame boundaries."""
+        return int(round(self.frame_start * rate / GRID_HZ)), int(round(self.frame_end * rate / GRID_HZ))
+
     def as_dict(self) -> Dict[str, Any]:
         out = {"t_start": round(self.start_s, 4), "t_end": round(self.end_s, 4), "grid_hz": GRID_HZ,
                "repainting_start": self.sent_start_s, "repainting_end": self.sent_end_s}
         if self.clamped_to_source:
             out["clamped_to_source"] = True
         return out
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "EngineWindow":
+        """Rebuild an `EngineWindow` from its serialised `as_dict()` mapping."""
+        return cls(
+            int(round(float(data["t_start"]) * GRID_HZ)),
+            int(round(float(data["t_end"]) * GRID_HZ)),
+            float(data["repainting_start"]),
+            float(data["repainting_end"]),
+            clamped_to_source=bool(data.get("clamped_to_source", False)),
+        )
 
 
 def engine_window(allowed: Tuple[float, float], control_frames: int, rate: int = RATE) -> EngineWindow:
@@ -299,7 +318,7 @@ def engine_window(allowed: Tuple[float, float], control_frames: int, rate: int =
     values sent sit `WINDOW_NUDGE_S` past each grid line, so the engine's `(int)(s * 25)`
     (pipeline-synth-ops.cpp) lands on the line and a float that falls just short cannot drop a frame;
     the end is also held at or under the source's length in seconds."""
-    whole = int(control_frames // (rate / GRID_HZ))
+    whole = int((control_frames * GRID_HZ) // rate)
     if whole < 1:
         raise EditError("the source is shorter than one latent frame (40 ms)")
     f0 = min(whole - 1, max(0, int(math.floor(allowed[0] * GRID_HZ + 1e-9))))
@@ -307,7 +326,7 @@ def engine_window(allowed: Tuple[float, float], control_frames: int, rate: int =
     f1 = min(whole, wanted)
     if f1 <= f0:
         f1 = min(whole, f0 + 1)
-    source_s = math.floor(control_frames / rate * 10000.0 + 1e-6) / 10000.0
+    source_s = math.floor(control_frames / rate * 1_000_000.0 + 1e-6) / 1_000_000.0
     sent_end = min(round(f1 / GRID_HZ + WINDOW_NUDGE_S, 4), source_s)
     return EngineWindow(f0, f1, round(f0 / GRID_HZ + WINDOW_NUDGE_S, 4), sent_end,
                         clamped_to_source=wanted > whole)
@@ -449,7 +468,8 @@ def coherence(a: np.ndarray, b: np.ndarray) -> Optional[float]:
 
 def _quietest(ctrl: np.ndarray, other: np.ndarray, lo: int, hi: int) -> int:
     """The index in [lo, hi] where |control| + |other| (mono) is smallest: a near-zero crossing of both."""
-    lo, hi = max(0, lo), max(lo, hi)
+    lo = max(0, lo)
+    hi = min(hi, ctrl.shape[0] - 1, other.shape[0] - 1)
     if hi <= lo:
         return lo
     score = np.abs(_mono(ctrl[lo:hi + 1])) + np.abs(_mono(other[lo:hi + 1]))
@@ -522,7 +542,72 @@ class SpliceResult:
     notes: List[str] = field(default_factory=list)
 
 
-def splice(control: Pcm, engine: Pcm, splice_s: Tuple[float, float], crossfade_ms: float) -> SpliceResult:
+def _snap_rounded_end(
+    s1: int, n: int, end_s: float, rate: int, source_duration_s: Optional[float],
+) -> int:
+    """Snap `s1` to `n` when it fell short only from duration rounding or probed-vs-decoded length."""
+    if s1 >= n:
+        return n
+    round_samples = max(1, int(round(DURATION_ROUND_EPS_S * rate)))
+    at_probed_end = (
+        source_duration_s is not None
+        and not isinstance(source_duration_s, bool)
+        and float(source_duration_s) > 0
+        and end_s >= float(source_duration_s) - 1e-4
+        and n - s1 <= max(round_samples, int(round(EDGE_EPS_S * rate)))
+    )
+    return n if (n - s1 <= round_samples or at_probed_end) else s1
+
+
+def _splice_sample_bounds(
+    splice_s: Tuple[float, float],
+    control_frames: int,
+    rate: int,
+    *,
+    window: Optional[EngineWindow] = None,
+    source_duration_s: Optional[float] = None,
+    engine_frames: Optional[int] = None,
+) -> Tuple[int, int, int]:
+    """Sample indices `(s0, s1, raw_s1)` for `splice`, aligned to `window` and duration rounding."""
+    n = control_frames
+    s0 = max(0, int(round(splice_s[0] * rate)))
+    raw_s1 = min(n, int(round(splice_s[1] * rate)))
+    s1 = raw_s1
+    if window is not None:
+        w0, w1 = window.frame_range(rate)
+        w0, w1 = max(0, w0), min(n, w1)
+        s0 = max(s0, w0)
+        s1 = min(s1, w1)
+        if w1 == n:
+            s1 = _snap_rounded_end(s1, n, splice_s[1], rate, source_duration_s)
+    else:
+        whole_end = int(round(((n * GRID_HZ) // rate) * rate / GRID_HZ))
+        if engine_frames is not None and 0 < whole_end < raw_s1 and engine_frames == whole_end:
+            s1 = whole_end
+        elif whole_end == n:
+            s1 = _snap_rounded_end(s1, n, splice_s[1], rate, source_duration_s)
+    return s0, s1, raw_s1
+
+
+def effective_splice(
+    splice_s: Tuple[float, float],
+    control_frames: int,
+    rate: int = RATE,
+    *,
+    window: Optional[EngineWindow] = None,
+    source_duration_s: Optional[float] = None,
+) -> Tuple[float, float]:
+    """The splice bounds in seconds aligned to `window` and `control_frames`."""
+    s0, s1, _ = _splice_sample_bounds(
+        splice_s, control_frames, rate, window=window, source_duration_s=source_duration_s,
+    )
+    out0 = float(splice_s[0]) if s0 == max(0, int(round(splice_s[0] * rate))) else round(s0 / rate, 6)
+    out1 = float(splice_s[1]) if s1 == min(control_frames, int(round(splice_s[1] * rate))) else round(s1 / rate, 6)
+    return (out0, out1)
+
+
+def splice(control: Pcm, engine: Pcm, splice_s: Tuple[float, float], crossfade_ms: float, *,
+           window: Optional[EngineWindow] = None, source_duration_s: Optional[float] = None) -> SpliceResult:
     """The take of a repaint: the control outside the splice bounds, the engine's output inside, a
     crossfade at each edge (shape by coherence), each edge moved inward to a near-zero crossing.
     The take has exactly the control's frames (Forge's option A). Raises `EditError` when the engine's
@@ -531,16 +616,22 @@ def splice(control: Pcm, engine: Pcm, splice_s: Tuple[float, float], crossfade_m
         raise EditError(f"the engine answered {engine.rate} Hz x {engine.channels}, the control is "
                         f"{control.rate} Hz x {control.channels}")
     rate, n = control.rate, control.frames
-    s0 = max(0, int(round(splice_s[0] * rate)))
-    s1 = min(n, int(round(splice_s[1] * rate)))
+    s0, s1, raw_s1 = _splice_sample_bounds(
+        splice_s, n, rate, window=window, source_duration_s=source_duration_s, engine_frames=engine.frames,
+    )
     if engine.frames < s1:
         raise EditError(f"the engine's output ({engine.frames / rate:.3f} s) ends before the splice ({s1 / rate:.3f} s)")
     xf = max(1, int(round(crossfade_ms * rate / 1000.0)))
+    min_xf = max(1, int(round(CROSSFADE_MS_MIN * rate / 1000.0)))
     search = int(round(ZERO_CROSS_SEARCH_MS * rate / 1000.0))
-    if s1 - s0 < 2 * xf:
-        raise EditError("the crossfades do not fit inside the splice bounds")
     seams: List[Seam] = []
     notes: List[str] = []
+    if s1 - s0 < 2 * xf:
+        if s1 < raw_s1 and raw_s1 - s0 >= 2 * xf and s1 - s0 >= 2 * min_xf:
+            xf = (s1 - s0) // 2
+            notes.append(f"crossfade shortened to {xf * 1000.0 / rate:.1f} ms to fit the whole-frame window")
+        else:
+            raise EditError("the crossfades do not fit inside the splice bounds")
     c, e = control.data, engine.data
     if s0 > 0:
         a = _quietest(c, e, s0, min(s0 + search, s1 - 2 * xf))
@@ -584,7 +675,7 @@ def remove(control: Pcm, region_s: Tuple[float, float], fade_ms: float, *, cut_w
     after it (decision 27)."""
     rate, n = control.rate, control.frames
     r0 = max(0, int(round(region_s[0] * rate)))
-    r1 = min(n, int(round(region_s[1] * rate)))
+    r1 = _snap_rounded_end(min(n, int(round(region_s[1] * rate))), n, region_s[1], rate, None)
     if r1 - r0 < 2:
         raise EditError("region_too_short: the region is under two samples at the control's rate")
     f = max(1, int(round(fade_ms * rate / 1000.0)))

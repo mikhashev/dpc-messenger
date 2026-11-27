@@ -333,3 +333,76 @@ def test_the_takes_per_job_follow_the_spec_limits():
     assert re_.takes_for("regenerate_region") == re_.takes_for("fix_seam") == 2
     assert re_.takes_for("remove_region") == 1
     assert set(re_.BUILT_ACTIONS) < set(js.EDIT_ACTIONS)
+
+
+def test_tail_edit_on_40ms_multiple_plus_17ms_track_agrees_with_engine_window():
+    """Tracks of N * 40 ms + 17 ms (250 * 40 ms + 17 ms = 10.017 s): splice must agree with
+    engine_window's whole-frame end so whole-frame engine outputs are not rejected and a padded
+    unrepainted 17 ms tail still gets its crossfade."""
+    frames_whole = 250 * 1920                       # 10.000 s (480000 samples)
+    rem = int(round(0.017 * RATE))                  # 17 ms (816 samples)
+    control_frames = frames_whole + rem             # 10.017 s (480816 samples)
+    t_ctrl = np.arange(control_frames) / RATE
+    ctrl_wave = (0.3 * np.sin(2 * math.pi * 220 * t_ctrl + 0.7)).astype(np.float32)
+    control = pcm(np.stack([ctrl_wave, ctrl_wave], axis=1))
+    win = re_.engine_window((8.0, control_frames / RATE), control_frames=control.frames)
+    assert (win.frame_start, win.frame_end, win.clamped_to_source) == (200, 250, True)
+
+    # 1. Real acestep.cpp whole-frame answer (480000 samples): must NOT reject variants.
+    t_eng = np.arange(frames_whole) / RATE
+    eng_wave = (0.25 * np.sin(2 * math.pi * 440 * t_eng + 1.2)).astype(np.float32)
+    engine_whole = pcm(np.stack([eng_wave, eng_wave], axis=1))
+    res_whole = re_.splice(control, engine_whole, (8.0, control_frames / RATE), 75.0, window=win)
+    take_whole = joined(res_whole)
+    assert res_whole.frames == control.frames == control_frames
+    assert [s.side for s in res_whole.seams] == ["start", "end"]
+    assert res_whole.seams[1].end <= frames_whole
+    assert np.array_equal(take_whole[frames_whole:], control.data[frames_whole:])
+    # Smooth transition across the 10.000 s boundary (no uncrossfaded jump).
+    step_at_boundary = float(np.max(np.abs(take_whole[frames_whole] - take_whole[frames_whole - 1])))
+    assert step_at_boundary < 0.05
+
+    # 2. Padded/ceil engine answer (251 frames = 481920 samples) where [480000, 480816) was NOT
+    #    repainted (holds control samples): must NOT drop the end crossfade at 480000.
+    padded = np.zeros((251 * 1920, 2), dtype=np.float32)
+    padded[:frames_whole] = engine_whole.data
+    padded[frames_whole:control_frames] = control.data[frames_whole:control_frames]
+    res_padded = re_.splice(control, pcm(padded), (8.0, control_frames / RATE), 75.0, window=win)
+    take_padded = joined(res_padded)
+    assert res_padded.frames == control.frames == control_frames
+    assert [s.side for s in res_padded.seams] == ["start", "end"]
+    assert res_padded.seams[1].end <= frames_whole
+    assert float(np.max(np.abs(take_padded[frames_whole] - take_padded[frames_whole - 1]))) < 0.05
+
+    # 3. Start and middle edits on the same 10.017 s track with a whole-frame engine output.
+    win_start = re_.engine_window((0.0, 2.0), control_frames=control.frames)
+    res_start = re_.splice(control, engine_whole, (0.0, 2.0), 75.0, window=win_start)
+    assert res_start.frames == control_frames and [s.side for s in res_start.seams] == ["end"]
+
+    win_mid = re_.engine_window((2.0, 4.0), control_frames=control.frames)
+    res_mid = re_.splice(control, engine_whole, (2.0, 4.0), 75.0, window=win_mid)
+    assert res_mid.frames == control_frames and [s.side for s in res_mid.seams] == ["start", "end"]
+
+    # 4. Tight tail region (9.86..10.017 s = 157 ms >= 2 * 75 ms) clamped to 10.000 s (140 ms).
+    win_tight = re_.engine_window((9.86, control_frames / RATE), control_frames=control.frames)
+    res_tight = re_.splice(control, engine_whole, (9.86, control_frames / RATE), 75.0, window=win_tight)
+    assert res_tight.frames == control_frames and [s.side for s in res_tight.seams] == ["start", "end"]
+
+
+def test_duration_rounding_near_frame_aligned_end_adds_no_spurious_crossfade():
+    """If the engine window reaches the track's exact end and splice_s[1] fell short only from
+    duration rounding (e.g. 9.9999 s or probed 9.995 s on a 10.000 s track), no spurious 75 ms
+    crossfade is added before the rounding remainder."""
+    control = pcm(tone(10.0, 220))                    # 250 * 40 ms exact (480000 samples)
+    engine = pcm(tone(10.0, 330))
+    win = re_.engine_window((8.0, 9.9999), control_frames=control.frames)
+    assert win.frame_end == 250 and not win.clamped_to_source
+    res_round = re_.splice(control, engine, (8.0, 9.9999), 75.0, window=win)
+    assert [s.side for s in res_round.seams] == ["start"]
+    assert "reaches the track's end" in res_round.notes[0]
+
+    win_probed = re_.engine_window((8.0, 9.995), control_frames=control.frames)
+    res_probed = re_.splice(control, engine, (8.0, 9.995), 75.0, window=win_probed, source_duration_s=9.995)
+    assert [s.side for s in res_probed.seams] == ["start"]
+    assert re_.effective_splice((8.0, 10.017), 480816, RATE, window=re_.engine_window((8.0, 10.017), 480816)) == (8.0, 10.0)
+    assert re_.EngineWindow.from_dict(re_.engine_window((8.0, 10.017), 480816).as_dict()).clamped_to_source is True
