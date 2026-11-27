@@ -1,7 +1,7 @@
 ---
 adr: 054
 title: "A peer runs music jobs on another node's engines through a remote music provider"
-status: proposed
+status: accepted
 date: 2026-11-27
 axis: network, collective
 deciders: [owner]
@@ -15,7 +15,7 @@ session: "AI Studio group chat, 2026-11-27, #72 (card A-PEER-NODES-MUSIC-PLAYER-
 
 # ADR-054 — A peer runs music jobs on another node's engines
 
-> **Proposed, 2026-11-27. Draft by CC.** History: first draft `8166e03b` (a job-level door),
+> **Accepted 2026-11-27 by the owner (#137: Q1 defaults, Q2, Q4); every open question is decided. Drafted by CC.** History: first draft `8166e03b` (a job-level door),
 > revised `96dee7bb` to an engine-level door on the owner's word (#86, #92), rewritten after
 > review (Zcode #96, Anti #103) with the owner's scope (#98, #99, #101, #102). Every claim
 > about existing code carries a `file:line` read at `dev` HEAD `e184b49b` (paths under
@@ -544,9 +544,8 @@ minutes; it is left to the owner (Q7).
 
 ## Implementation plan (slices)
 
-> **Q1, Q2 and Q7 are not decided by the owner; every number below (`peer_wait_s` 1800, the
-> 24 h hold, the 15 min budget, one concurrent call) is a draft recommendation, not a
-> decision** (Johnny #111).
+> All questions are decided (#115-#137): `peer_wait_s` 1800, the 24 h hold and one concurrent
+> call are the owner's defaults; there is no anti-starvation budget (#129).
 
 | Slice | What | Tests | Live two-node check |
 |---|---|---|---|
@@ -559,18 +558,16 @@ Each slice runs the full core suite before it is called green.
 
 ## Open Questions
 
-- **Q1. Limits (quotas): partly decided (#115): they are settings the owner sets for the music
-  class of peers.** Open: the defaults. Recommended defaults: no daily quotas by default; one
-  concurrent call per peer; `peer_wait_s` 1800 per call; result hold 24 h; the
-  anti-starvation budget (a peer's next call keeps its place for 15 min).
-- **Q2. Consent (approval): Open (owner decides), recommended "as for text inference"** (CC #88,
-  Zcode #96): the allow-list is the consent; no per-call approval card by default; if ever
-  an option, only in the owner's UI with its own mechanism.
+- ~~Q1. Limits~~ **Decided 2026-11-27 (#115, #117, #137):** music-class peer quotas are settings
+  in the firewall `music` section; defaults: one concurrent call per peer, `peer_wait_s` 1800
+  (30 min) per call, result hold 24 h (only for an output the peer has not fetched because it
+  went offline mid-call), no daily quotas.
+- ~~Q2. Consent~~ **Decided 2026-11-27 (#137):** the allow-list is the consent, as for text
+  inference; no per-call approval card.
 - ~~Q3. Copies~~ **Decided (#86):** no copy, no audition.
-- **Q4. Economy: Open (owner decides), recommended: no tariff now.** Record each call as
-  `unpriced`, the path the peer ledger already has (`p2p_coordinator.py` `_record_peer_call`,
-  Johnny #111); decide a price (per GPU-second, `duration_s` is in the row vocabulary) when
-  a second node actually serves music. No tariff is a gift, as for text.
+- ~~Q4. Economy~~ **Decided 2026-11-27 (#137):** no tariff now; every call is recorded
+  `unpriced` (the peer ledger's existing path); a price, if ever, per GPU-second, decided when
+  a second node actually serves music.
 - ~~Q5. Adapters~~ **Decided (#89):** "Share to peers" per adapter plus `music.adapters`;
   voice adapters unticked with their note.
 - ~~Q6. ADR-051 D17~~ **Decided (#90, `e54c6b74`):** a licence is a warning, never a block.
@@ -580,18 +577,17 @@ Each slice runs the full core suite before it is called green.
   refused "the owner's GPU is busy", **with the estimate of when it will be free** ("busy for
   about X, free in about Y") — which needs the lease ETA above. The peer can always write to
   the owner and ask. The 15 min budget is dropped from Q1 and S4.
-- **Q7. Queue and scheduler: Open (owner decides)** (#102). **Q7.0 decided (#115):** music is
-  a separate guest class, admitted by the load of the owner's queue, with music-class peer
-  quotas in the settings; the 120 s trip stays for transcription and text. Still open: the
-  scheduler shape: **the owner chose CardLease as the one scheduler (#124)**, comments asked
-  from Zcode, Ark, Johnny before final (D2). The
-  load rule is decided (#119): admit at once if no owner job is queued and the running one
-  ends within N minutes; else wait behind owner jobs up to the peer's limit; else refuse
-  "owner's GPU is busy". S2-S4 wait for the scheduler choice.
+- ~~Q7. Queue and scheduler~~ **Decided 2026-11-27:** music is a separate guest class admitted
+  by the load of the owner's queue, quotas in the firewall (#115, #117); the load rule (#119):
+  admit at once if no owner job is queued and the running one ends within N minutes, else
+  wait behind owner jobs up to the peer's limit, else refuse "owner's GPU is busy, free in
+  about Y"; **CardLease itself is the one scheduler** (#124), with Zcode's typed compat key and
+  generic guest classes (#125), the lease ETA and the engine busy gate (Johnny #126, Ark #128)
+  as preconditions of S2.
 
 ## Authors
 
-- **The owner**: Decision (direction #86, #92, #101; Q3, Q5, Q6 decided; Q1, Q2, Q4, Q7 open)
+- **The owner**: Decision (direction #86, #92, #101; Q3, Q5, Q6 decided; all decided by 2026-11-27)
 - **CC**: Analysis, Draft
 - **Zcode, Anti**: Review (#96, #103)
 
