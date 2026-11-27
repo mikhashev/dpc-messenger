@@ -335,7 +335,7 @@ def yue2_result_name(variant: int) -> str:
 
 
 def variant_seed(seed: int, index: int) -> int:
-    """The seed of variant `index` (0-based) of a yue2 job: `seed + index`, kept in the
+    """The seed of variant `index` (0-based): `(seed + index) % (SEED_MAX + 1)`, kept in the
     seed range."""
     return (seed + index) % (js.SEED_MAX + 1)
 
@@ -1172,7 +1172,7 @@ class MusicJobRunner:
                 "engine_choice": engine_choice,
                 "payloads": payloads,
                 "seed": seed,
-                "variant_seed": seed + index,
+                "variant_seed": variant_seed(seed, index),
                 "synth_batch_size": batch_size,
                 "synth_batch_index": index,
                 "inference_steps": lm0.get("inference_steps", js.FROM_TEXT_INFERENCE_STEPS),
@@ -1488,7 +1488,7 @@ class MusicJobRunner:
             await self._edit_finish(job_id, rejected)
         except _Cancelled:
             logger.info("music: edit job %s cancelled", job_id)
-        except (_JobFailure, re_.EditError, MusicEngineError) as exc:
+        except (_JobFailure, re_.EditError, MusicEngineError, MusicJobError) as exc:
             await self._edit_failed(job_id, exc)
 
     async def _edit_on_the_card(self, job: dict, prepared: Dict[str, Any], engine: Any) -> None:
@@ -1539,7 +1539,7 @@ class MusicJobRunner:
             if engine_job[0] is not None and engine.alive():
                 await engine.cancel(engine_job[0])
             logger.info("music: edit job %s cancelled", job_id)
-        except (_JobFailure, re_.EditError, MusicEngineError) as exc:
+        except (_JobFailure, re_.EditError, MusicEngineError, MusicJobError) as exc:
             await self._edit_failed(job_id, exc)
 
     async def _edit_failed(self, job_id: str, exc: Exception) -> None:
@@ -1639,7 +1639,7 @@ class MusicJobRunner:
                 record={"task_type": "repaint" if action in re_.REPAINT_ACTIONS else action,
                         "relation": "region_edit", "parent": prepared["parent"], "edit": edit_rec,
                         "payloads": payloads, "seed": seed},
-                take={"seed": seed + batch[1] if seed is not None and batch else None,
+                take={"seed": variant_seed(seed, batch[1]) if seed is not None and batch else None,
                       "synth_batch_size": batch[0] if batch else None,
                       "synth_batch_index": batch[1] if batch else None,
                       "payload": SYNTH_PAYLOAD if request is not None else EDIT_PAYLOAD,
@@ -1770,6 +1770,14 @@ class MusicJobRunner:
                 raise _JobFailure(f"variant {variant}: {exc}")
         else:
             await asyncio.to_thread(copy_range, source, start, end, wav_part)
+        wrote_flac = False
+        wrote_sidecar = False
+        library: Any = None
+        library_id: Optional[str] = None
+        library_added = False
+        added_alt_path: Optional[str] = None
+        recorded_take = False
+        source_track_id = (lineage or {}).get("base_track_id") or (lineage or {}).get("source_track_id")
         try:
             try:
                 wav = await asyncio.to_thread(read_wav_info, wav_part)
@@ -1811,6 +1819,7 @@ class MusicJobRunner:
             embedded = await asyncio.to_thread(self._embed, flac_part, record_obj, record_text, wav_md5, job_id,
                                                variant)
             os.replace(flac_part, flac)
+            wrote_flac = True
         finally:
             for p in (wav_part, flac_part):
                 try:
@@ -1820,62 +1829,85 @@ class MusicJobRunner:
                 except OSError:
                     logger.warning("music: could not remove %s", p, exc_info=True)
 
-        if record_obj is not None:
-            # The same record the file carries (PROVENANCE §3), plus the ids the store assigns once
-            # the file exists (the file's own copy is immutable and cannot hold them).
-            sidecar_record: Dict[str, Any] = {**record_obj, "take_id": None, "library_track_id": None,
-                                              "embedded_in_file": embedded}
-        else:
-            job_snap = await self._get(job_id)
-            sidecar_record = {
-                "schema": SIDECAR_SCHEMA,
-                "note": "the mp.provenance/1 record could not be built for this take (see the log); this is the "
-                        "older subset",
-                "job_id": job_id,
-                "take_id": None,
-                "library_track_id": None,
-                "variant": variant,
-                "created_at": created_at,
-                **({"requested_by": job_snap["requested_by"]} if isinstance((job_snap or {}).get("requested_by"), Mapping) else {}),
-                **({"request": job_snap["request"]} if isinstance((job_snap or {}).get("request"), Mapping) else {}),
-                **record,
-                **({"engine_window_s": window_s, **length_take} if length_take else {}),
-                "duration_requested_s": params.get("duration_s"),
-                "duration_received_s": info.duration_s,
-                "engine_output": {"format": js.ENGINE_OUTPUT_FORMAT, "sha256": wav_sha, "pcm_md5": wav_md5,
-                                  "sample_rate": wav.sample_rate, "channels": wav.channels, "bits": wav.bits,
-                                  "latent_sha256": latent_sha, "kept": False},
-                "dpc_postprocess": {"tool": "ffmpeg", "codec": "flac",
-                                    "lossless_check": "flac streaminfo md5 == wav pcm md5"},
-                "output": {"container": js.LIBRARY_FORMAT, "file": flac.name, "pcm_md5": info.md5,
-                           "sample_rate": info.sample_rate, "channels": info.channels,
-                           "bits": info.bits_per_sample},
-            }
-        await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(sidecar_record, ensure_ascii=False, indent=1))
-
-        library_id: Optional[str] = None
-        content_hash = f"md5:{info.md5}"
         try:
-            library = await self._library()
-            entry = await library.register_generated(
-                str(flac), job_id=job_id, lineage=lineage or {"relation": "song_from_own_text", "variant": variant},
-                title=title)
-            library_id = entry.get("id")
-            content_hash = entry.get("content_hash") or content_hash
-        except Exception as exc:
-            logger.warning("music: variant %s of job %s is not in the library: %s", variant, job_id, exc)
+            if record_obj is not None:
+                # The same record the file carries (PROVENANCE §3), plus the ids the store assigns once
+                # the file exists (the file's own copy is immutable and cannot hold them).
+                sidecar_record: Dict[str, Any] = {**record_obj, "take_id": None, "library_track_id": None,
+                                                  "embedded_in_file": embedded}
+            else:
+                job_snap = await self._get(job_id)
+                sidecar_record = {
+                    "schema": SIDECAR_SCHEMA,
+                    "note": "the mp.provenance/1 record could not be built for this take (see the log); this is the "
+                            "older subset",
+                    "job_id": job_id,
+                    "take_id": None,
+                    "library_track_id": None,
+                    "variant": variant,
+                    "created_at": created_at,
+                    **({"requested_by": job_snap["requested_by"]} if isinstance((job_snap or {}).get("requested_by"), Mapping) else {}),
+                    **({"request": job_snap["request"]} if isinstance((job_snap or {}).get("request"), Mapping) else {}),
+                    **record,
+                    **({"engine_window_s": window_s, **length_take} if length_take else {}),
+                    "duration_requested_s": params.get("duration_s"),
+                    "duration_received_s": info.duration_s,
+                    "engine_output": {"format": js.ENGINE_OUTPUT_FORMAT, "sha256": wav_sha, "pcm_md5": wav_md5,
+                                      "sample_rate": wav.sample_rate, "channels": wav.channels, "bits": wav.bits,
+                                      "latent_sha256": latent_sha, "kept": False},
+                    "dpc_postprocess": {"tool": "ffmpeg", "codec": "flac",
+                                        "lossless_check": "flac streaminfo md5 == wav pcm md5"},
+                    "output": {"container": js.LIBRARY_FORMAT, "file": flac.name, "pcm_md5": info.md5,
+                               "sample_rate": info.sample_rate, "channels": info.channels,
+                               "bits": info.bits_per_sample},
+                }
+            await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(sidecar_record, ensure_ascii=False, indent=1))
+            wrote_sidecar = True
 
-        await self._check(job_id)
-        try:
-            added = await self._call(
-                self.store.add_take, job_id, variant=variant, file_uri=flac.as_uri(), content_hash=content_hash,
-                title=title, sample_rate=info.sample_rate or None, channels=info.channels or None,
-                duration_s=info.duration_s, library_track_id=library_id, loudness=loudness,
-                qa=qa_record["qa"], qa_report=qa_record["qa_report"],
-                **({"engine_window_s": window_s, **length_take} if length_take else {}), **dict(take))
-        except MusicJobError:
+            content_hash = f"md5:{info.md5}"
+            try:
+                library = await self._library()
+                prior_ids = set(library._entries) if hasattr(library, "_entries") else (
+                    {e["id"] for e in library.list_entries()} if hasattr(library, "list_entries") else set()
+                )
+                entry = await library.register_generated(
+                    str(flac), job_id=job_id, lineage=lineage or {"relation": "song_from_own_text", "variant": variant},
+                    title=title)
+                library_id = entry.get("id")
+                library_added = bool(library_id and library_id not in prior_ids)
+                if not library_added and library_id and hasattr(library, "_entries"):
+                    norm_flac = str(Path(os.path.normpath(str(flac))))
+                    existing_entry = library._entries.get(library_id)
+                    if existing_entry and norm_flac in (existing_entry.get("alt_paths") or []):
+                        added_alt_path = norm_flac
+                content_hash = entry.get("content_hash") or content_hash
+            except Exception as exc:
+                logger.warning("music: variant %s of job %s is not in the library: %s", variant, job_id, exc)
+
             await self._check(job_id)
-            raise
+            try:
+                added = await self._call(
+                    self.store.add_take, job_id, variant=variant, file_uri=flac.as_uri(), content_hash=content_hash,
+                    title=title, sample_rate=info.sample_rate or None, channels=info.channels or None,
+                    duration_s=info.duration_s, library_track_id=library_id, loudness=loudness,
+                    qa=qa_record["qa"], qa_report=qa_record["qa_report"],
+                    **({"engine_window_s": window_s, **length_take} if length_take else {}), **dict(take))
+            except MusicJobError:
+                await self._check(job_id)
+                raise
+            recorded_take = True
+        finally:
+            if not recorded_take:
+                await self._rollback_unrecorded_take(
+                    flac=flac if wrote_flac else None,
+                    sidecar=sidecar if wrote_sidecar else None,
+                    lrc=flac.with_suffix(".lrc") if wrote_flac else None,
+                    library=library,
+                    library_id=library_id,
+                    library_added=library_added,
+                    added_alt_path=added_alt_path,
+                    source_track_id=source_track_id,
+                )
         self._emit(await self._get(job_id))
         sidecar_record["take_id"], sidecar_record["library_track_id"] = added["id"], library_id
         if after_register is not None:
@@ -1896,6 +1928,75 @@ class MusicJobRunner:
                     "replay": None if cut_s else align_replay,
                 })
         await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(sidecar_record, ensure_ascii=False, indent=1))
+
+    async def _rollback_unrecorded_take(
+        self,
+        *,
+        flac: Optional[Path],
+        sidecar: Optional[Path],
+        lrc: Optional[Path],
+        library: Any,
+        library_id: Optional[str],
+        library_added: bool,
+        added_alt_path: Optional[str],
+        source_track_id: Optional[str] = None,
+    ) -> None:
+        """Remove a take's newly written generated files and library entry if the take was never recorded."""
+        gen_root = self.generated_root.resolve()
+
+        async def drop_library_entry() -> None:
+            if not hasattr(library, "_delete_entry"):
+                return
+            library._delete_entry(library_id)
+            if hasattr(library, "notify_changed"):
+                library.notify_changed("track", [library_id])
+            if hasattr(library, "flush"):
+                await library.flush()
+
+        if library is not None and library_id and library_added and library_id != source_track_id and flac is not None:
+            same_file = False
+            try:
+                entry = library.get_entry(library_id) if hasattr(library, "get_entry") else (
+                    library._entries.get(library_id) if hasattr(library, "_entries") else None
+                )
+                entry_path = entry.get("path") if isinstance(entry, Mapping) else None
+                same_file = isinstance(entry_path, str) and Path(entry_path).resolve() == flac.resolve()
+                if same_file:
+                    if hasattr(library, "delete_generated_file"):
+                        await library.delete_generated_file(library_id)
+                    else:
+                        await drop_library_entry()
+            except Exception as exc:
+                logger.warning("music: could not remove unrecorded library entry %s: %s", library_id, exc)
+                if same_file:
+                    try:
+                        await drop_library_entry()
+                    except Exception:
+                        logger.warning("music: fallback cleanup of library entry %s failed", library_id, exc_info=True)
+        elif library is not None and library_id and added_alt_path and hasattr(library, "_entries"):
+            try:
+                existing = library._entries.get(library_id)
+                alts = existing.get("alt_paths") if isinstance(existing, dict) else None
+                if isinstance(alts, list) and added_alt_path in alts:
+                    alts.remove(added_alt_path)
+                    if hasattr(library, "notify_changed"):
+                        library.notify_changed("track", [library_id])
+                    if hasattr(library, "flush"):
+                        await library.flush()
+            except Exception:
+                logger.warning("music: could not drop alt_path %s from %s", added_alt_path, library_id, exc_info=True)
+
+        for path in (flac, sidecar, lrc):
+            if path is None:
+                continue
+            try:
+                resolved = path.resolve()
+                if resolved != gen_root and resolved.is_relative_to(gen_root):
+                    path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("music: could not remove unrecorded take file %s", path, exc_info=True)
 
 
     async def _measure_loudness(self, path: Path, job_id: str, variant: int) -> Optional[Dict[str, Any]]:

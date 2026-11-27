@@ -345,3 +345,136 @@ async def test_a_repaint_answer_missing_a_take_fails_the_job_and_names_the_count
         job = rig.propose(entry, "regenerate_region", {"t_start": 2.0, "t_end": 4.0}, {"caption": "synthwave"})
         done = await rig.wait_for(job["id"], DONE)
         assert done["state"] == js.FAILED and "1 audio part(s)" in done["state_reason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action,region", [
+    ("regenerate_region", {"t_start": 2.0, "t_end": 4.0}),
+    ("fix_seam", {"t_start": 3.0, "t_end": 3.2}),
+])
+async def test_repaint_edits_at_seed_max_wrap_the_second_variant_seed_to_zero(tmp_path, monkeypatch, action, region):
+    free_env(monkeypatch)
+    install_fake_engine(tmp_path)
+    async with EditRig(tmp_path) as rig:
+        entry, _base = await rig.base()
+        job = rig.propose(entry, action, region, {"caption": "synthwave", "seed": js.SEED_MAX})
+        done = await rig.wait_for(job["id"], DONE)
+        assert done["state"] == js.REVIEW, done.get("state_reason")
+        sent = json.loads(rig.store.read_payload(job["id"], "synth.request.json"))
+        assert sent["seed"] == js.SEED_MAX and sent["synth_batch_size"] == 2
+        takes = rig.store.list_takes(job["id"])
+        assert [t["variant"] for t in takes] == [1, 2]
+        assert [t["seed"] for t in takes] == [js.SEED_MAX, 0]
+        for take in takes:
+            js.validate_take(take)
+            side = sidecar_of(take)
+            assert side["seed"] == js.SEED_MAX
+        assert len([n for n in files_in(rig.runner.generated_root / job["id"]) if n.endswith(".flac")]) == 2
+        assert len(rig.library.list_entries()) == 3
+
+
+@pytest.mark.asyncio
+async def test_edit_on_the_card_catches_music_job_error_and_removes_orphan_flac_and_library_entry(tmp_path, monkeypatch):
+    from dpc_client_core.music.identity import MediaTools
+    from dpc_client_core.music.jobs import MusicJobError
+    from dpc_client_core.music.library import MusicLibrary
+
+    free_env(monkeypatch)
+    install_fake_engine(tmp_path)
+    async with EditRig(tmp_path) as rig:
+        entry, base = await rig.base()
+        before_sha = sha(base)
+
+        def fail_add_take(*args, **kwargs):
+            raise MusicJobError("invalid_params", "induced take validation failure")
+
+        monkeypatch.setattr(rig.store, "add_take", fail_add_take)
+        job = rig.propose(entry, "regenerate_region", {"t_start": 2.0, "t_end": 4.0}, {"caption": "synthwave"})
+        done = await rig.wait_for(job["id"], DONE)
+        assert done["state"] == js.FAILED
+        assert "induced take validation failure" in (done.get("state_reason") or "")
+        assert "internal error" not in (done.get("state_reason") or "").lower()
+        assert rig.store.list_takes(job["id"]) == []
+        assert files_in(rig.runner.generated_root / job["id"]) == []
+        assert [e["id"] for e in rig.library.list_entries()] == [entry["id"]]
+        assert base.is_file() and sha(base) == before_sha
+
+    reloaded = MusicLibrary(tmp_path, tools=MediaTools(ffmpeg=None, ffprobe=None))
+    await reloaded.open()
+    try:
+        assert [e["id"] for e in reloaded.list_entries()] == [entry["id"]]
+    finally:
+        await reloaded.stop()
+
+
+@pytest.mark.asyncio
+async def test_edit_on_the_card_rolls_back_only_the_failed_variant_and_never_deletes_generated_source(tmp_path, monkeypatch):
+    from dpc_client_core.music.jobs import MusicJobError
+
+    free_env(monkeypatch)
+    install_fake_engine(tmp_path)
+    async with EditRig(tmp_path) as rig:
+        src_dir = rig.runner.generated_root / ("job_" + "1" * 16)
+        src_dir.mkdir(parents=True, exist_ok=True)
+        src_path = write_base(src_dir / "source_v1.wav")
+        entry = await rig.library.register_generated(str(src_path), job_id="job_" + "1" * 16,
+                                                     lineage={"relation": "song_from_own_text", "variant": 1})
+        before_sha = sha(src_path)
+        real_add_take = rig.store.add_take
+        calls = 0
+
+        def fail_second_take(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise MusicJobError("invalid_params", "induced second-variant failure")
+            return real_add_take(*args, **kwargs)
+
+        monkeypatch.setattr(rig.store, "add_take", fail_second_take)
+        job = rig.propose(entry, "fix_seam", {"t_start": 3.0, "t_end": 3.2}, {"caption": "synthwave"})
+        done = await rig.wait_for(job["id"], DONE)
+        assert done["state"] == js.FAILED
+        assert "induced second-variant failure" in (done.get("state_reason") or "")
+        assert "internal error" not in (done.get("state_reason") or "").lower()
+        takes = rig.store.list_takes(job["id"])
+        assert len(takes) == 1 and takes[0]["variant"] == 1
+        kept_files = files_in(rig.runner.generated_root / job["id"])
+        assert [n for n in kept_files if n.endswith(".flac")] == [n for n in kept_files if "_v1." in n and n.endswith(".flac")]
+        assert not [n for n in kept_files if "_v2." in n]
+        assert {e["id"] for e in rig.library.list_entries()} == {entry["id"], takes[0]["library_track_id"]}
+        assert src_path.is_file() and sha(src_path) == before_sha
+
+
+@pytest.mark.asyncio
+async def test_edit_rollback_never_deletes_an_existing_entry_even_when_audio_hash_collides(tmp_path, monkeypatch):
+    from dpc_client_core.music.jobs import MusicJobError
+
+    free_env(monkeypatch)
+    install_fake_engine(tmp_path)
+    async with EditRig(tmp_path) as rig:
+        src_dir = rig.runner.generated_root / ("job_" + "1" * 16)
+        src_dir.mkdir(parents=True, exist_ok=True)
+        src_path = write_base(src_dir / "source_v1.wav")
+        entry = await rig.library.register_generated(str(src_path), job_id="job_" + "1" * 16,
+                                                     lineage={"relation": "song_from_own_text", "variant": 1})
+        real_register = rig.library.register_generated
+
+        async def colliding_register(path: str, **kwargs):
+            existing = rig.library._entries[entry["id"]]
+            existing.setdefault("alt_paths", []).append(path)
+            return dict(existing)
+
+        def fail_add_take(*args, **kwargs):
+            raise MusicJobError("invalid_params", "induced collision failure")
+
+        monkeypatch.setattr(rig.library, "register_generated", colliding_register)
+        monkeypatch.setattr(rig.store, "add_take", fail_add_take)
+        job = rig.propose(entry, "regenerate_region", {"t_start": 2.0, "t_end": 4.0}, {"caption": "synthwave"})
+        done = await rig.wait_for(job["id"], DONE)
+        assert done["state"] == js.FAILED
+        assert "induced collision failure" in (done.get("state_reason") or "")
+        assert files_in(rig.runner.generated_root / job["id"]) == []
+        remaining = rig.library.list_entries()
+        assert [e["id"] for e in remaining] == [entry["id"]]
+        assert remaining[0]["alt_paths"] == []
+        assert src_path.is_file()
