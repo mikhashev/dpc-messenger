@@ -25,6 +25,7 @@
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
   import VoiceSettingsEditor from "$lib/components/VoiceSettingsEditor.svelte";
+  import BackgroundModelsSettingsEditor from "$lib/components/BackgroundModelsSettingsEditor.svelte";
   import AgentMap from "$lib/components/AgentMap.svelte";
   import MusicPlayer from "$lib/components/music/MusicPlayer.svelte";
   import { musicWindowRequests } from "$lib/services/music";
@@ -179,6 +180,7 @@
   let showFirewallEditor = $state(false);
   let showProvidersEditor = $state(false);
   let showVoiceSettingsEditor = $state(false);
+  let showBackgroundModelsEditor = $state(false);
   let showAgentBoard = $state(false);
   let showAgentMap = $state(false);
   // The Music Player window (ADR-051 D1); its audio lives in services/music.ts, so
@@ -856,6 +858,10 @@
     showVoiceSettingsEditor = true;
   }
 
+  function openBackgroundModels() {
+    showBackgroundModelsEditor = true;
+  }
+
   async function handleCommitVote(event: CustomEvent) {
     const { proposal_id, vote, comment, entries, summary } = event.detail;
     // The dialog used to close on click, before the backend answered. When a
@@ -1120,6 +1126,7 @@
       onOpenFirewallEditor={openFirewallEditor}
       onOpenProvidersEditor={openProvidersEditor}
       onOpenVoiceSettings={openVoiceSettings}
+      onOpenBackgroundModels={openBackgroundModels}
       onOpenAgentBoard={openAgentBoard}
       onOpenAgentMap={() => showAgentMap = true}
       onOpenMusicPlayer={() => { showMusicPlayer = true; musicPlayerMinimised = false; }}
@@ -1638,6 +1645,11 @@
 <VoiceSettingsEditor
   bind:open={showVoiceSettingsEditor}
   on:close={() => showVoiceSettingsEditor = false}
+/>
+
+<BackgroundModelsSettingsEditor
+  bind:open={showBackgroundModelsEditor}
+  on:close={() => showBackgroundModelsEditor = false}
 />
 
 <AgentMap bind:open={showAgentMap} />

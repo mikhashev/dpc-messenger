@@ -170,6 +170,7 @@ from .managers.file_transfer_manager import (
 )
 from .utils.image_utils import screenshot_attachment, screenshot_target
 from .voice_service import VoiceService
+from .background_models_service import BackgroundModelsService
 from .knowledge_service import KnowledgeService
 from .telegram_service import TelegramService
 from .agent_service import AgentService
@@ -1220,6 +1221,13 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             local_api=self.local_api,
             on_transcription_enabled=self._retroactively_transcribe_conversation,
             model_download_service=self.model_download_service,
+        )
+        # The node-level background-model keys ([memory] embedding_device,
+        # [knowledge_graph] gliner_device and backend) — no older service owned them
+        # (KnowledgeService is PCM/consensus), so they get this small one.
+        self.background_models_service = BackgroundModelsService(
+            settings=self.settings,
+            local_api=self.local_api,
         )
         # Alias state refs for backward compat: methods that stay in CoreService
         # (_maybe_transcribe_voice_message, _retroactively_transcribe_conversation)
@@ -7014,6 +7022,14 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
     async def save_voice_transcription_config(self, config: dict) -> dict:
         """Delegated to VoiceService."""
         return await self.voice_service.save_voice_transcription_config(config)
+
+    async def get_background_model_config(self) -> dict:
+        """Delegated to BackgroundModelsService."""
+        return await self.background_models_service.get_background_model_config()
+
+    async def save_background_model_config(self, config: dict) -> dict:
+        """Delegated to BackgroundModelsService."""
+        return await self.background_models_service.save_background_model_config(config)
 
     async def get_local_transcription_config(self) -> dict:
         """Delegated to VoiceService."""

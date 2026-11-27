@@ -437,6 +437,7 @@
     onOpenFirewallEditor,
     onOpenProvidersEditor,
     onOpenVoiceSettings,
+    onOpenBackgroundModels,
     onOpenAgentBoard,
     onOpenAgentMap,
     onOpenMusicPlayer,
@@ -477,6 +478,7 @@
     onOpenFirewallEditor: () => void;
     onOpenProvidersEditor: () => void;
     onOpenVoiceSettings?: () => void;
+    onOpenBackgroundModels?: () => void;
     onOpenAgentBoard?: () => void;
     onOpenAgentMap?: () => void;
     onOpenMusicPlayer?: () => void;
@@ -897,6 +899,13 @@
         <button class="btn-context" onclick={onOpenVoiceSettings}
           title="Voice transcription, local transcription and voice message settings">
           Voice and Transcription
+        </button>
+      {/if}
+
+      {#if onOpenBackgroundModels}
+        <button class="btn-context" onclick={onOpenBackgroundModels}
+          title="Where the background models run and which graph store they use">
+          Background Models
         </button>
       {/if}
 

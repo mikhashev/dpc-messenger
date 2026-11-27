@@ -1807,6 +1807,16 @@ export async function saveVoiceMessagesConfig(config: any): Promise<any> {
     return sendCommand('save_voice_messages_config', { config });
 }
 
+// Background model config commands (the node-level device and backend keys,
+// editable from the background models form)
+export async function getBackgroundModelConfig(): Promise<any> {
+    return sendCommand('get_background_model_config', {});
+}
+
+export async function saveBackgroundModelConfig(config: any): Promise<any> {
+    return sendCommand('save_background_model_config', { config });
+}
+
 // Per-conversation transcription control (v0.13.2+ checkbox)
 export async function setConversationTranscription(nodeId: string, enabled: boolean): Promise<any> {
     return sendCommand('set_conversation_transcription', { node_id: nodeId, enabled });

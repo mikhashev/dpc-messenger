@@ -851,6 +851,51 @@ class Settings:
         )
         return 'auto'
 
+    def get_background_model_settings(self) -> Dict[str, str]:
+        """The three node-level background-model keys in one read, as the settings form
+        shows them (A-NODE-HAS-NO-ONE-SWITCH-THAT-KEEPS-ITS-BACKGROUND-MODELS-OFF-THE-GPU):
+        where the embedding model runs, where the GLiNER entity model runs, and which
+        store the agent graphs use. `embedding_device` is handed to the memory module once
+        at service start, so a written value is in force at the next start; the two
+        `[knowledge_graph]` keys are read at each graph open, and the GLiNER model, once
+        loaded, stays where it is for the process (`_get_gliner_model` warns and ignores
+        a later device) — the form says so per key."""
+        return {
+            "embedding_device": self.get_embedding_device(),
+            "gliner_device": self.get_gliner_device(),
+            "backend": self.get_kg_backend(),
+        }
+
+    def set_background_model_settings(
+        self, embedding_device: Optional[str] = None, gliner_device: Optional[str] = None,
+        backend: Optional[str] = None,
+    ) -> None:
+        """Write the three node-level background-model keys; a left-out key keeps its
+        stored value.
+
+        ValueError, one sentence, and nothing written, unless each given value is one its
+        reader knows: `embedding_device` auto, cpu, cuda or mps; `gliner_device` auto, cpu
+        or cuda (no mps — the reader's set, not a guess); `backend` sqlite or grafeo. The
+        readers fall back silently on an unknown stored value, so the writer is where a
+        typo is stopped."""
+        writes: List[tuple] = []
+        if embedding_device is not None:
+            if (not isinstance(embedding_device, str)
+                    or embedding_device.strip().lower() not in ('auto', 'cpu', 'cuda', 'mps')):
+                raise ValueError("embedding_device must be one of auto, cpu, cuda or mps.")
+            writes.append(('memory', 'embedding_device', embedding_device.strip().lower()))
+        if gliner_device is not None:
+            if (not isinstance(gliner_device, str)
+                    or gliner_device.strip().lower() not in ('auto', 'cpu', 'cuda')):
+                raise ValueError("gliner_device must be one of auto, cpu or cuda.")
+            writes.append(('knowledge_graph', 'gliner_device', gliner_device.strip().lower()))
+        if backend is not None:
+            if not isinstance(backend, str) or backend.strip().lower() not in ('sqlite', 'grafeo'):
+                raise ValueError("backend must be one of sqlite or grafeo.")
+            writes.append(('knowledge_graph', 'backend', backend.strip().lower()))
+        for section, key, text in writes:
+            self.set(section, key, text)
+
     def get_log_level(self) -> str:
         """Get global log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)."""
         return self.get('logging', 'level', 'INFO').upper()

@@ -252,6 +252,11 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "save_local_transcription_config",
     "get_voice_messages_config",
     "save_voice_messages_config",
+    # The node-level background-model keys, [memory] embedding_device and
+    # [knowledge_graph] gliner_device and backend (same audit) — editable from the
+    # background models form
+    "get_background_model_config",
+    "save_background_model_config",
     "set_conversation_transcription",
     "get_conversation_transcription",
     "transcribe_audio",
