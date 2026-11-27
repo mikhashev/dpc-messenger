@@ -741,6 +741,21 @@ class SupervisedEngine:
         if isinstance(pid, int) and code is not None:
             _procreg.get_registry().end(pid, code)
 
+    def _idle_stop_blocked(self) -> bool:
+        """Whether an idle unload must stand down: a job holds `in_use`, a start keeps the
+        card, or a contender already drains the card lease."""
+        return (
+            self.busy
+            or bool(self.card_lease._uses)
+            or self.card_lease._starting
+            or self.card_lease._draining
+        )
+
+    def _keep_card_on_idle_stop(self) -> bool:
+        """Whether `idle_unload` must leave the card granted because a job or starting
+        restart claimed it while the old child was stopping."""
+        return self.busy or bool(self.card_lease._uses) or self.card_lease._starting
+
     async def stop(self, why: str = "ui_stop", *, keep_the_card: bool = False) -> bool:
         """Ask the child to stop, then kill it after `STOP_GRACE_S`. True when a running
         child was stopped. `why` is the registry's stop word (`ui_stop`, `idle_unload`,
@@ -748,26 +763,34 @@ class SupervisedEngine:
         (ADR-052 L8), unless `keep_the_card`: a restart for other boot options (yue2.cpp) is
         one start, and the card stays with the engine across it."""
         async with self._the_lock():
-            proc = self._proc
-            if proc is None or proc.returncode is not None:
-                if proc is not None:
-                    self._proc = None
-                    self._end_child(proc)
-                    self._close_log()
-                if not keep_the_card:
+            return await self._stop_locked(why, keep_the_card=keep_the_card)
+
+    async def _stop_locked(self, why: str, *, keep_the_card: bool = False) -> bool:
+        if why == "idle_unload" and self._idle_stop_blocked():
+            return False
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            if proc is not None:
+                self._proc = None
+                self._end_child(proc)
+                self._close_log()
+            if not keep_the_card:
+                self._let_go_of_the_card(why)
+            return False
+        self._stopping = True
+        try:
+            await self._stop_proc(proc, why)
+        finally:
+            self._stopping = False
+            if not keep_the_card and not self.alive():
+                if why == "idle_unload" and self._keep_card_on_idle_stop():
+                    logger.info("%s: a job took the engine during %s; keeping the card", self.DISPLAY, why)
+                else:
                     self._let_go_of_the_card(why)
-                return False
-            self._stopping = True
-            try:
-                await self._stop_proc(proc, why)
-            finally:
-                self._stopping = False
-                if not keep_the_card and not self.alive():
-                    self._let_go_of_the_card(why)
-            self._last_exit = {"code": proc.returncode, "at": now_text(), "why": why}
-            self._set_state("stopped", f"stopped by DPC ({why}) at {self._last_exit['at']}")
-            logger.info("%s: stopped (%s, rc=%s)", self.DISPLAY, why, proc.returncode)
-            return True
+        self._last_exit = {"code": proc.returncode, "at": now_text(), "why": why}
+        self._set_state("stopped", f"stopped by DPC ({why}) at {self._last_exit['at']}")
+        logger.info("%s: stopped (%s, rc=%s)", self.DISPLAY, why, proc.returncode)
+        return True
 
     async def _stop_proc(self, proc: Any, why: str) -> None:
         """Signal `proc`, wait `STOP_GRACE_S`, then kill it and wait as long again. However this
@@ -889,6 +912,15 @@ class SupervisedEngine:
         await self.stop("swap")
         return "could_not_let_go" if self.alive() else "let_go"
 
+    async def _idle_stop(self, idle_s: float) -> bool:
+        async with self._the_lock():
+            if self._state != "running" or not self.alive():
+                return False
+            if self._idle_stop_blocked() or time.monotonic() - self._last_used < idle_s:
+                return False
+            logger.info("%s: idle for %.0f s; stopping it to free the card", self.DISPLAY, idle_s)
+            return await self._stop_locked("idle_unload", keep_the_card=False)
+
     async def _idle_loop(self) -> None:
         while True:
             idle_s = float(self.config.idle_stop_s)
@@ -897,12 +929,13 @@ class SupervisedEngine:
                 if not self.alive() and self._state != "starting":
                     return
                 continue
-            if self._busy:
+            if self._idle_stop_blocked():
                 continue
             if time.monotonic() - self._last_used >= idle_s:
-                logger.info("%s: idle for %.0f s; stopping it to free the card", self.DISPLAY, idle_s)
-                await self.stop("idle_unload")
-                return
+                if await self._idle_stop(idle_s):
+                    return
+                if not self.alive() and self._state != "starting":
+                    return
 
     # -- HTTP ----------------------------------------------------------------------
 
