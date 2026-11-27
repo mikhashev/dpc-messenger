@@ -173,7 +173,14 @@ it: `shared`, `not_shared` or `unavailable`, with the engine status words of
 1. *The lease refuses a long guest outright.* `PEER_TRIP_S = 120.0`
    (`managers/card_lease.py:83`). A waiter marked `serving_a_peer` gets
    `wait_s = max(0, 120 - expected_s)` (`:749-760`) and is refused at once, free card or
-   not, when `expected_s > 120` (`:1468-1474`) or unknown (`:1476-1486`). A `/synth` takes
+   not, when `expected_s > 120` (`:1468-1474`) or unknown (`:1476-1486`). The 120 s trip
+   is the owner's own rule, "a rule, not only arithmetic" (`card_lease.py:80-82`, Mike #17,
+   2026-11-23), so only the owner can change it (Johnny #111). It bites twice: `expected_s`
+   is **unknown** for every acestep.cpp call (`music/job_schemas.py:526-528`: "acestep.cpp
+   has no measured factor: unknown") and for every edit (`music/runner.py` region path
+   passes `expected_s=None`), so those are refused even on an idle card; and YuE2 at the
+   form's defaults exceeds it (2 variants of 360 s give about 164 s by
+   `YUE2_OVERHEAD_S`/`YUE2_AUDIO_S_PER_WALL_S`, `job_schemas.py:507-508`). A `/synth` takes
    minutes, so every music call is refused. Without the peer mark the call loses
    owner-first ordering (`_goes_before`, `:779-784`).
 2. *The lease does not serialize two music users of one engine.* `CardLease.use` is
@@ -206,7 +213,19 @@ is required whatever the option; it orders calls and jobs and owns engine swaps.
   `/synth` loses all its work.
 
 **Open (owner decides), Q7.** The owner (#102): "we will need to think about the queue and
-the scheduler". S1 does not depend on Q7; S2-S4 do.
+the scheduler". Before A/B/C there is a question only the owner can answer (Johnny #111):
+**Q7.0 — what makes a long guest call acceptable**, given his 120 s rule and that acestep.cpp
+and edits have no duration estimate at all: (i) "music calls are a separate class with their
+own bound" (the 120 s rule stays for transcription and text), (ii) a measured estimate for
+acestep and edits first (a fit like YuE2's), then a larger bound, or (iii) keep 120 s and
+let peers run only short calls. S1 does not depend on Q7; S2-S4 do (an amendment to
+ADR-052 L13).
+- **The peer mark must cover the whole trip** (Johnny #111): the mark is a context variable
+  set inside `with serving_a_peer(...)` (`managers/llama_server_supervisor.py:228-243`); the
+  output transfer, the peer's ACK and the owner's delete happen after the engine call, and
+  must run under the same mark so `queue_snapshot()` (`for_a_peer`) and the owner's UI show
+  the guest on both halves. S1 test: read `for_a_peer` during the call and during the
+  transfer.
 
 ### D3. What travels each way
 
@@ -326,6 +345,13 @@ owner restart never spends the GPU twice.
   engine id from the passport (`yue2.cpp`/`acestep.cpp`, `music/provenance.py:153`,
   `:170-191`), never `remote:<node>`: an unknown engine gives `non_commercial: null` instead
   of `true` for stock YuE2. A remote take carries the same licence warning as a local one.
+- **The peer computes the licence from its own table, never from the owner's word**
+  (Johnny #111): the passport carries names (engine, backbone, weights, adapters); the peer
+  maps them through its own `licence_record` constants (`music/provenance.py:146-155`) and
+  stores what the owner reported as `asserted_by: {node_id, reported_licences}` beside it.
+  A name the peer does not know is `unknown` (so `non_commercial: null`, shown as "licence
+  unknown"), never `mit`. Test: a passport naming a backbone the peer does not know gives
+  `unknown`/`null`, not `false`.
 - **The agent path stays** (ADR-053): a group member asks the owner's agent and the take is
   posted to the room. This door is player to player with no agent and no chat; their limits
   are counted separately.
@@ -438,6 +464,10 @@ minutes; it is left to the owner (Q7).
 
 ## Implementation plan (slices)
 
+> **Q1, Q2 and Q7 are not decided by the owner; every number below (`peer_wait_s` 1800, the
+> 24 h hold, the 15 min budget, one concurrent call) is a draft recommendation, not a
+> decision** (Johnny #111).
+
 | Slice | What | Tests | Live two-node check |
 |---|---|---|---|
 | S1 (before Q7) | Capability probe: `music` section, proof + firewall on `MUSIC_CAPABILITIES_*`, per-step shared report from a whitelist, passport whitelist builder, peer merges it and Create shows "engine on node X" (Create disabled) | refused when off / unproved / not allowed, same answer for missing and unshared; report and passport carry no path, PID, port or holder; voice adapters unticked; merge on Linux and Windows | the peer sees which steps node X shares |
@@ -456,13 +486,17 @@ Each slice runs the full core suite before it is called green.
   Zcode #96): the allow-list is the consent; no per-call approval card by default; if ever
   an option, only in the owner's UI with its own mechanism.
 - ~~Q3. Copies~~ **Decided (#86):** no copy, no audition.
-- **Q4. Economy: Open (owner decides).** If ever, a tariff per GPU-second (`duration_s` is in
-  the row vocabulary already); no tariff is a gift, as for text.
+- **Q4. Economy: Open (owner decides), recommended: no tariff now.** Record each call as
+  `unpriced`, the path the peer ledger already has (`p2p_coordinator.py` `_record_peer_call`,
+  Johnny #111); decide a price (per GPU-second, `duration_s` is in the row vocabulary) when
+  a second node actually serves music. No tariff is a gift, as for text.
 - ~~Q5. Adapters~~ **Decided (#89):** "Share to peers" per adapter plus `music.adapters`;
   voice adapters unticked with their note.
 - ~~Q6. ADR-051 D17~~ **Decided (#90, `e54c6b74`):** a licence is a warning, never a block.
-- **Q7. Queue and scheduler: Open (owner decides)** (#102). Options Q7-A, Q7-B, Q7-C in D2;
-  recommended Q7-B on Q7-A's lease class. S2-S4 wait for it.
+- **Q7. Queue and scheduler: Open (owner decides)** (#102). First **Q7.0**: what makes a long
+  guest call acceptable under the owner's 120 s rule (Mike #17), when acestep and edits have
+  no estimate (D2). Then options Q7-A, Q7-B, Q7-C in D2; CC recommends Q7-B on Q7-A's lease
+  class once Q7.0 is answered. S2-S4 wait for it.
 
 ## Authors
 
