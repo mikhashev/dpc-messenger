@@ -247,7 +247,48 @@ re-entrant, a different key waits; (2) CardLease stays **generic**: guest classe
 its own admission policy, and a compat key on the waiter, with no music names inside the
 lease, so Whisper, llama-server and Strata inherit no music logic. A coarse ETA is enough:
 the position in line plus the running item's estimate (acestep and edits have none, and
-admission is by load, not by ETA). S1 does not depend on Q7;
+admission is by load, not by ETA).
+
+**Johnny agrees with one CardLease (#126) and shows what the load rule needs first** (read
+in code at `7f5f02c1`; the probes he names are S1/S2 tests):
+1. **ETA is a precondition, not a courtesy** (this corrects the line above saying the
+   acestep/edit measurement "does not gate admission"). For a guest, `_estimate`
+   (`managers/card_lease.py` ~926-1000) makes any unknown part `known=False`, and `_enter`
+   (~1515-1523) refuses a guest at once when the estimate is unknown. The music lease is
+   built without `eta_s` (`music/engine_base.py` ~351-357; Whisper passes one,
+   `whisper_provider.py` ~1089), and the owner job's `expected_s` lives on its waiter, which
+   leaves the line at grant (~846-848). So while an owner generation runs, a guest gets an
+   instant refusal with no number. Required: the music lease supplies an ETA of the remaining
+   work (`eta_s`), and acestep and edits get a measured estimate. Probe: owner yue2 job
+   running, guest acquire -> a `wait_s` in seconds (today: refused).
+2. **"Music guest class" touches four sites**: the trip clamp in the waiter constructor
+   (~751-761), the refusal at `expected_s > bound` (~1468-1475), at `expected_s is None`
+   (~1476-1488), and at an unknown estimate (~1515-1523). And a fifth nobody named: in the
+   granted branch of `_blockers` (~819-821) a guest's new use of a granted lease is blocked by
+   **any** place in the card queue, so a resident llama-server's place keeps a guest out of
+   a granted `music:yue2`. The rule text must say so.
+3. **"Card free" is not "engine free"**: after a job the warm engine keeps the lease for
+   `idle_stop_s` = 300 s (`runner.py` ~903, `settings.py` ~410/~416); in that window a guest
+   may not ask (`_may_ask` ~914-923) nor swap (`why_a_peer_may_not_swap` ~1400-1413), and the
+   idle holder has no estimate. The load rule must define this state (warm, idle, no owner
+   waiter = admit) or the owner sees "owner's GPU is busy" right after finishing.
+4. **Per-engine serialization goes through the engine's own busy gate, not a new lease
+   lock**: CardLease knows no backbone or adapters (only Strata's VRAM reserve); the swap
+   decision is in `yue2.py` ~906-921, guarded for people by `commands.py` ~1128-1147
+   (`engine_busy`), which a peer door would bypass. The door must enter `engine.in_use(...)`
+   and the existing busy predicate (`engine_base.py` ~757, ~888-902), never call
+   `yue2.start()` directly. With Zcode's compat key: same key may share the warm engine,
+   a different key waits for the engine to be idle. Probe: owner job on adapter A running,
+   guest asks adapter B -> guest waits, the child is untouched.
+5. **Anti-starvation needs a change to the owner's 2026-11-24 swap rules**, or it is
+   decoration: lifting a guest ahead of owner waiters breaks ADR-044 rule 7 (read on both
+   sides, `_line_key` ~787-788 and the supervisor's `_owner_lease_waiting`,
+   `_earlier_lease_waiter`), and the lifted guest still hits `_may_ask`/no-swap/unknown
+   estimate. **Open (owner decides), Q8:** either guests get swap rights after the budget, or
+   the ADR promises no anti-starvation (a peer may wait out its limit and be refused).
+6. A guest's `expected_s` will count in the owner's own `card_wait` line, labelled with the
+   guest's lease display (~991); design it like `LeaseRefusedForPeer` (no alias, agent or
+   chat named), not as a side effect. S1 does not depend on Q7;
 S2-S4 do (an amendment to ADR-052 L13 adding the music guest class).
 - **The peer mark must cover the whole trip** (Johnny #111): the mark is a context variable
   set inside `with serving_a_peer(...)` (`managers/llama_server_supervisor.py:228-243`); the
@@ -523,6 +564,10 @@ Each slice runs the full core suite before it is called green.
 - ~~Q5. Adapters~~ **Decided (#89):** "Share to peers" per adapter plus `music.adapters`;
   voice adapters unticked with their note.
 - ~~Q6. ADR-051 D17~~ **Decided (#90, `e54c6b74`):** a licence is a warning, never a block.
+- **Q8. Anti-starvation vs the 2026-11-24 swap rules: Open (owner decides)** (Johnny #126):
+  give a waiting guest swap rights after the budget (changes ADR-044 rule 7 and the owner's
+  swap rules), or promise no anti-starvation (a guest may wait out its limit and be refused
+  "owner's GPU is busy"). CC recommends the second for S2-S4 and revisiting after live use.
 - **Q7. Queue and scheduler: Open (owner decides)** (#102). **Q7.0 decided (#115):** music is
   a separate guest class, admitted by the load of the owner's queue, with music-class peer
   quotas in the settings; the 120 s trip stays for transcription and text. Still open: the
