@@ -5,429 +5,483 @@ status: proposed
 date: 2026-11-27
 axis: network, collective
 deciders: [owner]
-consulted: [CC]
+consulted: [CC, Zcode, Anti]
 informed: []
 depends_on: [ADR-051, ADR-052, ADR-053]
 related: [ADR-031, ADR-040, ADR-041, ADR-047, ADR-048]
 supersedes: []
-session: "AI Studio group chat, 2026-11-27, #72 — backlog card A-PEER-NODES-MUSIC-PLAYER-CANNOT-USE-THE-MUSIC-ENGINES-SET-UP-ON-ANOTHER-NODE-BECAUSE-MUSIC-HAS-NO-REMOTE-PROVIDER; the owner: write the ADR if it is needed"
+session: "AI Studio group chat, 2026-11-27, #72 (card A-PEER-NODES-MUSIC-PLAYER-CANNOT-USE-THE-MUSIC-ENGINES-SET-UP-ON-ANOTHER-NODE-BECAUSE-MUSIC-HAS-NO-REMOTE-PROVIDER), #86-#103"
 ---
 
 # ADR-054 — A peer runs music jobs on another node's engines
 
-> **Proposed, 2026-11-27. Draft by CC; nothing here is decided.** Every claim about
-> existing behaviour carries a `file:line` read at `dev` HEAD `80df5c55` on 2026-11-27
-> (paths under `dpc-client/core/dpc_client_core/` unless stated). Anything not read in the
-> code is marked **Assumption**. Every new name (commands, settings, fields) is a proposal.
-> Items the owner must settle are marked **Open (owner decides)** and gathered in
+> **Proposed, 2026-11-27. Draft by CC.** History: first draft `8166e03b` (a job-level door),
+> revised `96dee7bb` to an engine-level door on the owner's word (#86, #92), rewritten after
+> review (Zcode #96, Anti #103) with the owner's scope (#98, #99, #101, #102). Every claim
+> about existing code carries a `file:line` read at `dev` HEAD `e184b49b` (paths under
+> `dpc-client/core/dpc_client_core/` unless stated); anything not read is marked
+> **Assumption**; every new name is a proposal. What the owner has decided is cited by
+> message number; what is still his is marked **Open (owner decides)** in
 > [Open Questions](#open-questions).
 
 ## Context and Problem Statement
 
-The music engines are local by construction. acestep.cpp and yue2.cpp are started and
-watched by the core and bound to loopback only: "The host is always 127.0.0.1"
-(`music/engine_base.py:40`, `LOOPBACK` at `:80`; `music/acestep.py:30`; ADR-051 D30,
-`051:466-471`). A job reaches them only through the core's job store and runner, one job
-at a time, oldest first (`music/runner.py:1-12`), holding the card lease while it runs
-(`music/runner.py:1022-1027`, holder `music job <id>`).
+The music models are local by construction. acestep.cpp and yue2.cpp are started and
+watched by the core and bound to loopback (`music/engine_base.py:40`; `music/yue2.py:777`
+passes `--host LOOPBACK`); a job reaches them only through the core's job store and runner,
+which holds the engine's card lease for the job (`music/runner.py:851`, holder
+`music job <id>`). The describer and the QA judge are audio llama-server aliases on the same
+node (`music/commands.py:1147-1161`, `music/qc_commands.py:75-78`), and lyrics transcription
+uses the voice provider (`music/commands.py:506-520`).
 
-Two other compute kinds already cross nodes, and music has neither:
+**The owner's goal, in his words (#98):** "there is our Linux node, it has the music player
+but no models and no hardware; I want that node to do everything in its own music player
+that I do on my node, by sharing my models and their add-ons." And (#86): "my node just
+provides remote inference, as for text LLMs."
 
-- **Text models:** a guest configures a `remote_peer` provider naming the host's
-  `peer_id` and alias (`providers/remote_peer_provider.py:145-180`); the host's door
-  checks the peer's proved key first (`p2p_coordinator.py:855-875`, ADR-041 D2), then the
-  firewall's `compute` allow-lists (`firewall.py:2246-2306`), class, ceiling and quota, and
-  writes one ledger row per served call (`node_ledger.py:1-60`, `served_rows` `:880-890`).
-  Answers stream back as `REMOTE_INFERENCE_CHUNK` frames (`dpc_protocol/protocol.py:215-227`).
-- **Voice:** a `remote:<node_id>:<alias>` voice provider sends the audio to a peer's
-  Whisper (`service.py:4910-4947`); the host checks `can_request_transcription`
-  (`firewall.py:2308-2340`) and runs the job on its card as served to that peer
-  (`p2p_coordinator.py:1416-1419`: `serving_a_peer`, holder `peer <id>`). The music
-  player's lyrics chain already uses it: a `remote:` voice choice is passed through
-  (`music/commands.py:36`, `:515-516`).
-
-So a node without engines (for example a Linux node) cannot have its **own player** run
-a job on engines that another node has already set up. The only path today is the agent:
-in a group, the peer asks the owner's agent; `music_propose_job`
-(`dpc_agent/tools/music.py:697-888`) raises the owner's approval card (ADR-053,
-`dpc_agent/owner_approval.py:351-362`), the job runs on the owner's card, and the take is
-posted to the group as a plain audio attachment whose music block never crosses
-(ADR-051, `051:938-943`). That is *asking the owner*, not *the peer's player computing on
-the owner's node*: the peer gets no job card, no progress, no provenance record, and no
-library entry of its own.
+Two compute kinds already cross nodes; music has neither. **Text:** a guest's
+`remote_peer` provider (`providers/remote_peer_provider.py:145`) calls a host whose door
+checks the proved key first (`p2p_coordinator.py:883`, ADR-041 D2), then the firewall's
+`compute` allow-lists (`p2p_coordinator.py:890`, section at `firewall.py:1762`), and writes
+one ledger row per served call (`p2p_coordinator.py:795`). **Voice:** a
+`remote:<node_id>:<alias>` provider sends audio to a peer's Whisper (`service.py:4916`); the
+host checks proof (`p2p_coordinator.py:1374`, since `49c78e3d`), then
+`can_request_transcription` (`:1379`), and runs inside `serving_a_peer` (`:1435`). Today a
+node without models can only ask the owner's agent in a group (ADR-053), which gives it no
+job card, progress, provenance record or library entry of its own.
 
 ## Decision Drivers
 
-- **One card, owner first.** The owner's GPU is one card shared through the lease
-  (ADR-052). A peer's job must queue behind the owner's waiters, as a peer's
-  transcription does (`052:529`), and never preempt a running owner job.
-- **Consent is the owner's, per peer.** Every existing remote door is off by default with
-  per-node and per-group allow-lists (`firewall.py:1762-1791`).
-- **Nothing private leaves either node.** Rule #19 (`dpc_agent/tools/music.py:197-203`,
-  `dpc_agent/owner_approval.py:133-181`): in a multi-node group nothing from 1:1 chats
-  leaks. Provenance has one redaction function for anything leaving a node
-  (`music/provenance.py:456-462`) and a privacy check (`:265-282`).
-- **Licences travel, they do not block.** The owner, relayed in the brief for this ADR
-  (2026-11-27): "nothing blocks the sale, it is a warning to the user, like a kitchen
-  knife". The licence block (`music/provenance.py:170-192`) must reach the peer intact.
-- **Reuse what is built.** The remote_peer split (guest-side provider, host-side door),
-  the music capability report (`music/capabilities.py:1-47`), the job store, the file
-  transfer.
-- **Cross-platform.** The peer may be Linux or macOS with no engine; the owner any OS.
+- **One card, owner first.** The owner's GPU is one card shared through the lease (ADR-052);
+  a peer stands behind every owner waiter (`managers/card_lease.py:779-784`).
+- **Consent is the owner's, per peer and per model.** Every remote door is off by default
+  with node and group allow-lists (`firewall.py:1762-1793`).
+- **Nothing private leaves either node; the owner keeps nothing** (#86).
+- **Licences travel, they do not block** (ADR-051 D17 as amended in `e54c6b74`, #90).
+- **Reuse:** the runner's engine seam (`submit`/`submit_form`/`job_status`/`fetch_result`/
+  `cancel`, `music/engine_base.py:956-1056`), the voice `remote:` provider, provenance.
+- **Cross-platform.** The peer may be Linux or macOS with no GPU; the owner any OS.
 
 ## Prior art outside our engine
 
-- **(a) The project's own reading.** `rg --no-ignore -l -i
-  "music|petals|swarm|offload|remote gpu|job queue|consent" ideas/dpc-research/articles`
-  (2026-11-27): hits concern MoE expert offload (`2608.16157-freetoken-edge-native-moe-serving.md:121`)
-  and agent papers; nothing on running a job on another node's engine. **Nothing applicable
-  found.** Ruach Studio notes (ai-studio `experiments/music-player/docs/RUACH-BORROW.md`,
-  grep `remote|peer|network|queue`): one hit, line 59, `waitguard.py` — an ETA that is
-  `None` when unknown, never 0. **Take:** a remote job's ETA is unknown until measured.
-- **(b) The topic elsewhere.** From CC's knowledge, **not fetched this session**:
-  - AI Horde (https://aihorde.net): async submit, poll status, fetch result; workers
-    choose which models they serve; a credit ("kudos") orders the queue. **Take:** the
-    async submit/status/fetch shape and a ledger hook for credit; **not taken:** a public
-    pool of strangers.
-  - ComfyUI's HTTP API (https://github.com/comfyanonymous/ComfyUI): `/prompt` returns an
-    id, progress arrives as events, outputs are fetched from history. **Take:** job id,
-    pushed progress, result fetched separately from the request.
-  - Blender Flamenco (https://flamenco.blender.org): a manager owns the queue, workers
-    only run. **Take:** the owner's job store is the only queue; the peer holds a proxy.
-  - BOINC (https://boinc.berkeley.edu): redundant computation and result validation
-    against untrusted hosts. **Not taken:** peers here are allow-listed and proved.
-  - Petals (https://github.com/bigscience-workshop/petals): one model split across nodes.
-    **Not taken:** a song job fits one card; splitting is not the problem.
+- **(a) The project's own reading.** `rg --no-ignore -l -i "music|petals|swarm|offload|remote
+  gpu|job queue|consent" ideas/dpc-research/articles` (2026-11-27): MoE offload and agent
+  papers only; **nothing applicable found.** Ruach Studio notes (ai-studio
+  `experiments/music-player/docs/RUACH-BORROW.md`, grep `remote|peer|network|queue`): line 59,
+  an ETA that is `None` when unknown, never 0. **Take:** a remote call's ETA is `None` until
+  measured.
+- **(b) The topic elsewhere** (from CC's knowledge, **not fetched this session**):
+  - AI Horde (https://aihorde.net): submit, poll, fetch; workers choose the models they
+    serve; credit orders the queue. **Take:** submit/status/fetch and a ledger hook for
+    credit. **Not taken:** a public pool of strangers.
+  - ComfyUI HTTP API (https://github.com/comfyanonymous/ComfyUI): an id per prompt, pushed
+    progress, outputs fetched separately. **Take:** result fetched apart from the request.
+  - Blender Flamenco (https://flamenco.blender.org): a manager owns the queue, workers only
+    run. **Take, inverted from the first draft:** the peer's job store is the manager; the
+    owner's node is a worker that runs one typed step and forgets it.
+  - BOINC (https://boinc.berkeley.edu): redundant computation against untrusted hosts.
+    **Not taken:** hosts here are allow-listed and proved.
 
 ## Decision
 
-**A peer reaches another node's music engines through a remote music provider on its own
-side and a music door on the owner's side, over DPTP, in the shape of `remote_peer`: the
-peer's music service treats `remote:<node_id>` as one more engine choice; the owner's door
-admits, queues, runs and returns the job through its own job store, card lease and
-provenance; the take lands in the peer's library as the peer's own track.**
+**The peer runs every music job on its own node; each model-backed step of that job is one
+call to the owner's node, which runs it on its own models and returns the output and its
+identity, and keeps nothing.** Decided by the owner (#101: "YES" to this plan and its four
+building blocks: a firewall `music` section, the owner's door, the card-queue change, and an
+"engine on node X" choice in the peer's Create panel). The queue rule itself is **not**
+decided (#102, Q7).
 
-> **Revision 2026-11-27, the owner (#86, #92): the door is at the engine level, not the
-> job level.** "My node just provides remote inference, as for text LLMs"; "if we provide
-> the engine and the peer sets everything up on its own side, why a FLAC?" So the owner's
-> node is a **remote engine**, exactly as a `remote_peer` host is a remote model:
-> - **The peer runs the whole job itself**: its own job store, runner, parameters, lyrics,
->   seeds, post-processing (WAV to FLAC), QA, tags, provenance record, library entry and
->   export. Its runner calls `remote:<node_id>` where it would call its local engine.
-> - **The owner's door serves one engine call at a time** (a `/synth`-level request with
->   the engine parameters the peer's runner built), after `peer_proof`, the firewall's
->   `music` allow-list and the card lease (owner first, D2). It returns the **engine's own
->   output** (the wav24 the engine writes today, `job_schemas.ENGINE_OUTPUT_FORMAT`), sent
->   as a file (losslessly compressed in transit if that halves the transfer; the peer
->   stores what the engine made), plus the **engine identity** the peer's provenance needs:
->   engine name and version, binary sha256, weights names, backbone, adapters used, and the
->   licence keys of those parts (`licence_record` inputs).
-> - **The owner keeps nothing and builds nothing**: no job record, no take, no provenance,
->   no library entry; the output is deleted once the peer confirms it (D5). The ledger row
->   stays (D6).
-> - The peer's provenance records the engine as `computed_on: {kind: "remote_node",
->   node_id}` and computes the licence from the reported parts, so a remote take carries
->   the same licence warning as a local one.
->
-> This replaces the job-level door in D1 (owner-side `propose_music_job`, proxy job,
-> `MUSIC_JOB_RESULT` with a withheld record) and the owner-side record in D3 and D5; the
-> consent, queue, adapter, failure and privacy rules (D2, D4, D7, D8) apply to engine
-> calls unchanged. Still never tunnel the engine's HTTP port: the call crosses as a DPTP
-> message the owner's door checks and forwards to its loopback engine. D1-D3/D5 below are
-> kept as the first draft; slices S1-S4 are to be rewritten to this shape after the
-> owner answers Q1/Q2.
+### D1. Shape: the peer is the job, the owner is a remote model
 
-### D1. Shape: guest-side provider plus host-side door (the remote_peer split)
+- **Peer side.** The peer's job store, runner, parameters, lyrics, seeds, post-processing
+  (WAV to FLAC), QA stage 1, tags, provenance record, library entry and export are its own,
+  unchanged. The Create panel offers "engine on node X"; the job keeps `params.engine` =
+  `yue2`/`acestep` and gains a separate field `compute: {kind: "remote_node", node_id}`
+  (proposed name). `remote:<node>` must never go into `params.engine`: `engine_of` maps any
+  unknown word to acestep silently (`music/job_schemas.py:473-479`) while
+  `normalize_params_from_text` refuses it (`:590-593`). Where the runner calls a local
+  engine it calls a `RemoteMusicEngine` client offering the same seam.
+- **Owner side.** A music door in `p2p_coordinator.py` beside the inference and
+  transcription doors. It serves **typed calls**, never forwarded engine bodies (D3), runs
+  them on its loopback engines or aliases, and returns the output as a file plus a passport.
+  The engine HTTP port is never tunnelled.
+- **Wire (proposed, a DPTP minor bump):** `MUSIC_CAPABILITIES_REQUEST/RESPONSE`,
+  `MUSIC_CALL_REQUEST` (kind, typed params, seed, adapter names, input-media refs,
+  `request_id` minted by the peer), `MUSIC_CALL_STATUS` (pushed and on request),
+  `MUSIC_CALL_CANCEL`, `MUSIC_CALL_RESULT` (passport + output-media ref), `MUSIC_MEDIA_*`
+  (the media channel, D3) and `MUSIC_CALL_ACK` (the peer has the output).
 
-- **Peer side.** The music service gains a remote engine source: for each allowed peer,
-  a capability report fetched over DPTP and merged into the local report under
-  `remote:<node_id>`, so the Create form renders it as it renders `yue2` and `acestep`
-  today (`music/capabilities.py:200`, `report` `:578-667`). A job on it is a **proxy job**
-  in the peer's own job store (same `mp.job/1` record, engine word `remote:<node_id>`),
-  so job cards, cancel and review work unchanged. The runner hands a proxy job to the
-  remote client instead of an engine.
-- **Owner side.** A music door in `p2p_coordinator.py`, beside `handle_inference_request`
-  and `handle_transcription_request`: it calls `propose_music_job` (`music/commands.py:1353`)
-  with a peer requester, so the job goes through the same checks, store, runner and lease
-  as a person's job.
-- **Wire (proposed names, a DPTP minor bump as v1.7 and v1.14 were):**
-  `MUSIC_CAPABILITIES_REQUEST/RESPONSE`, `MUSIC_JOB_REQUEST` (type, params, `request_id`
-  minted by the peer), `MUSIC_JOB_STATUS` (owner → peer, pushed on each state change and
-  answered on request), `MUSIC_JOB_CANCEL`, `MUSIC_JOB_RESULT` (the withheld provenance
-  record and the file reference); the take itself as a file (D3).
-- **Never tunnel the engine port.** The peer never talks HTTP to the owner's engine.
+**Every model-backed step of the player, and how the peer reaches it** (owner #98, #101):
 
-### D2. Consent and limits on the owner's side
+| Step | Owner-side model | Peer call site today | How the peer calls it | Returned |
+|---|---|---|---|---|
+| Generate on acestep.cpp (text, lyrics) | acestep.cpp `/lm` then `/synth` | `runner._produce` (`music/runner.py:1064`, `/lm` `:1074`, `/synth` `:1098`) | one music call `acestep.generate`: the owner runs `/lm` and `/synth` back to back, so it never takes an LM answer from the peer | wav24 per variant; LM answer (`audio_codes`, `lm_seed`) in the passport |
+| Generate on yue2.cpp | yue2.cpp `/synth`, one per variant (batch 1, `music/yue2.py:51-53`, `:117`) | `runner._produce_yue2` (`:1193`, `/synth` `:1220`) | one call `yue2.synth` per variant | wav24 + replay (`semantic_tokens`, abc, style) |
+| Cover on yue2.cpp | SheetSage2 = yue2.cpp `/transcribe`, then `/synth` | `similar._transcribe` (`music/similar.py:675`, `:688`), `_cover_on_yue2` (`:877`) | `yue2.transcribe` (source audio in), then `yue2.synth` | ABC score; then wav24 + replay |
+| Cover on acestep.cpp | `/synth` with source audio | `similar._cover_on_acestep` (`:609`, `:623`) | `acestep.cover` (source audio in) | wav24 + LM answer |
+| Same style | yue2.cpp `/tokenize`, the describer, `/synth` | `similar._tokenize` (`:1039`, `:1048`), `_same_style_on_yue2` (`:1112`) | `yue2.tokenize` (audio in), `describe`, `yue2.synth` | codes; description; wav24 |
+| Region edit (regenerate, fix seam) | acestep.cpp repaint `/synth` with a control WAV | `runner._edit_on_the_card` (`:1494`, `:1508`) | `acestep.repaint` (control audio in) | **wav32** takes (`music/region_edit.py:103`) |
+| Describe a source | audio llama-server alias | `commands._music_describer` (`music/commands.py:1147`), `describe.describe_audio` (`music/describe.py:623`) | music call `describe`; the alias is the owner's own setting, never named by the peer (ADR-040 D4-0) | description JSON |
+| QA judge (stage 2), if the owner has one | audio llama-server alias, `[music] qc_judge_alias` (`music/capabilities.py:152`) | `qc.judge_take` (`music/qc.py:606`) | music call `judge` | judge answer |
+| Lyrics transcribe | Whisper | `_music_pick_transcriber` passes a `remote:` voice choice through (`music/commands.py:515-516`) | **the existing voice `remote:<node>:<alias>` provider** (`service.py:4916`), not duplicated | text only today (`dpc_protocol/protocol.py:392-418`): see below |
+| Lyrics align / auto-align | Whisper word times | local Whisper only (`music/commands.py:650-660`, `:701-703`) | same voice provider, once it returns segment times | segment timestamps |
+| Add-ons (yue2 adapters) | adapter splits on the owner | named in job params | names in the typed call, checked against the owner's grant (D4) | listed in the passport |
 
-- **A new `music` section in `privacy_rules.json`, off by default**, mirroring `compute`
-  and `transcription` (`firewall.py:1762-1791`): `enabled: false`, `allow_nodes`,
-  `allow_groups`, `engines` (empty = none), `adapters` (D4), `approval`, `quota`. A
-  `can_request_music(peer, engine)` check in the shape of `can_request_transcription`
-  (`firewall.py:2308-2340`).
-- **Identity before everything** (ADR-041 D2): the door runs `peer_proof` first, as the
-  inference door does (`p2p_coordinator.py:855-875`). The transcription door has no such
-  check today (`p2p_coordinator.py:1350-1360` goes straight to the firewall); the music
-  door follows inference, not transcription.
-- **Approval.** Two modes, set per allow entry: `per_job` (the owner sees a card naming
-  the peer, engine, type and length; the job is queued only on yes) or `standing` (queued
-  at once). **Recommended default: `per_job`**, and `standing` for nodes in the owner's
-  own node group (ADR-053 2.2 counts those nodes as the owner, `053:121-131`).
-  **Open (owner decides).** The ADR-053 card is raised from an agent turn
-  (`owner_approval.py:351-362` takes a `ToolContext`); a peer request has none.
-  **Assumption:** the card's UI can be reused with a new non-agent trigger.
-- **Quota**, counted from ledger rows (D6) with `NodeLedger.count_since`
-  (`node_ledger.py:807-832`): `jobs_per_day`, `gpu_seconds_per_day`, `concurrent`
-  (proposed default 1 running or queued per peer, as `[music] agent_queue_max` limits an
-  agent, `music/commands.py:96-97`, `:433`). A refused job is not a row, as on the
-  inference door. Numbers: **Open (owner decides).**
-- **Queue priority.** The runner today is strictly oldest first (`music/runner.py:1-2`,
-  `:10`). Proposed: the runner takes the oldest **owner** job (person or agent) before
-  any queued peer job; a running peer job is never preempted.
-- **The card lease.** The job keeps the runner's holder name (`music job <id>`,
-  `music/runner.py:1025`) and runs inside `serving_a_peer(peer_id)`
-  (`managers/llama_server_supervisor.py:232-238`), so the lease knows it is a guest's.
-  It waits in the lease line behind every owner waiter, as ADR-052 gives a peer
-  (`052:529`); a refusal shown to the peer is `LeaseRefusedForPeer`, which names no alias,
-  agent or chat (`managers/card_lease.py:148-150`, `052:503-504`). Music jobs wait with no
-  deadline (`052:528`); a peer job gets one: `[music] peer_wait_s` (proposed), plus the
-  cheap guard the transcription door uses (`p2p_coordinator.py:1413`: the peer is still
-  connected) at the wait and at the grant. A granted peer job yields only by the owner's
-  hand (the existing Cancel and Stop buttons), never automatically.
-- **Not shared onward** (ADR-041 D7): the door serves only local engines; a node never
-  re-serves a `remote:` engine it reaches itself.
+Two gaps on the voice path are in scope: the transcription response carries text only
+(`protocol.py:392-418`), and align refuses a remote provider by design
+(`music/commands.py:650-660`). Proposed: the response gains optional segment times (a DPTP
+minor field), and align accepts a `remote:` provider the person chose explicitly. The peer
+sends a 16 kHz mono downmix (**Assumption**: Whisper resamples to 16 kHz itself, so nothing
+is lost; 6 min is ~11.5 MB as 16-bit WAV, less as FLAC), which keeps it inside the inline
+frame (`MAX_FRAME_BYTES` 64 MiB, `protocol.py:665`). The voice door's 120 s rule applies to
+it unchanged (D2).
+
+**Not model-backed, already local on any OS without a GPU:** the UI, library, playlists,
+comments, metadata editing, export (`music/export.py`), peaks (`music/peaks.py`), QA stage 1
+and loudness (ffmpeg, `music/qa.py`, `music/loudness.py`), the LRCLIB lookup, FLAC packing.
+
+**The capability report the peer merges** shows, per step above, whether the owner shares
+it: `shared`, `not_shared` or `unavailable`, with the engine status words of
+`music/capabilities.py:14-19` and nothing else (D3 whitelist).
+
+### D2. Consent, limits and the card queue
+
+- **A `music` section in `privacy_rules.json`, off by default**, in the shape of `compute`
+  and `transcription` (`firewall.py:1762-1793`): `enabled: false`, `allow_nodes`,
+  `allow_groups`, `steps` (the D1 rows the owner shares; empty = none), `adapters` (D4). A
+  `can_request_music(peer, step, adapters)` check in the shape of `can_request_transcription`
+  (`firewall.py:2308`).
+- **Identity first, on every music command** (capabilities, call, status, cancel, media,
+  ack): `_refuse_unproved_peer` (`p2p_coordinator.py:798`) is the first line, the order the
+  inference door (`:883` then `:890`) and, since `49c78e3d`, the transcription door (`:1374`
+  then `:1379`) use. The capability report is not built on `handle_get_providers_request`
+  (`p2p_coordinator.py:1470-1489`), which has no proof check today (`service.py:3662`
+  `menu_for_peer` reads only the firewall).
+- **Consent is the allow-list, as for text** (recommended, **Open, Q2**): enabled + node or
+  group + shared steps and adapters IS the consent; no per-call approval card by default. If
+  ever an option, only in the owner's own UI, never in a chat, and with its own mechanism:
+  the ADR-053 card lives 60 s and allows 2 pending per process, shared with agent cards
+  (`dpc_agent/owner_approval.py:44`, `:49`).
+- **Limits** (recommended, **Open, Q1**): no daily quotas by default; one concurrent call
+  per peer (this also makes an in-flight reservation trivial, D6); `[music] peer_wait_s` =
+  1800 per call; result hold `[music] peer_result_hold_h` = 24.
+- **Not shared onward** (ADR-041 D7, `041:1608`): the door serves only local models; a node
+  never re-serves a `remote:` model it reaches itself.
+
+**The card queue: the problem** (Zcode #96 P1, Anti #103 item 1; verified):
+
+1. *The lease refuses a long guest outright.* `PEER_TRIP_S = 120.0`
+   (`managers/card_lease.py:83`). A waiter marked `serving_a_peer` gets
+   `wait_s = max(0, 120 - expected_s)` (`:749-760`) and is refused at once, free card or
+   not, when `expected_s > 120` (`:1468-1474`) or unknown (`:1476-1486`). A `/synth` takes
+   minutes, so every music call is refused. Without the peer mark the call loses
+   owner-first ordering (`_goes_before`, `:779-784`).
+2. *The lease does not serialize two music users of one engine.* `CardLease.use` is
+   re-entrant: a granted lease opens one more use (`managers/card_lease.py:606-609`), so a
+   door call under `music:yue2` would be admitted beside the runner's job.
+3. *A different backbone or adapter set restarts yue2.cpp.* `Yue2Server.start` stops a
+   running server to swap (`music/yue2.py:891-920`, `stop("swap")` at `:920`) and leaves the
+   busy check to its caller (docstring `:896-897`). A peer call wanting another adapter set
+   could kill the owner's generation mid-way.
+4. *A peer job is N sequential calls*; owner jobs slot in between; the engine's idle stop
+   (300 s, `music/yue2.py:116`, `music/acestep.py:93`) may restart it between calls (correct:
+   calls are stateless and seeded; slow).
+
+So one **music-compute line with owner priority**, shared by `MusicJobRunner` and the door,
+is required whatever the option; it orders calls and jobs and owns engine swaps. Options:
+
+- **Q7-A. A long-guest class in the lease.** The door passes its own bound (`peer_wait_s`)
+  instead of `PEER_TRIP_S` and keeps the peer mark, so `_goes_before` still puts owners first.
+  Good: smallest change (ADR-052 amendment to L13). Bad: fixes only item 1; a granted call
+  holds the card for minutes while an owner job waits; fairness and swaps need more.
+- **Q7-B. A music scheduler above the lease** (recommended). The runner owns one queue of
+  owner jobs and peer calls; peer calls are booked with an ETA; owner jobs go between calls,
+  never preempting a running call; anti-starvation: a peer's next call keeps its place for
+  15 min after its previous one ends. Swaps happen only between items. It takes the lease
+  under Q7-A's long-guest class, so Whisper and LLM clients still see owner first. Good:
+  one place for items 1-4, an honest ETA. Bad: the largest build; runner changes.
+- **Q7-C. Idle-only guests.** Peer calls run only when no owner job is queued or running;
+  a new owner job cancels the running call at once and the peer retries. Good: the owner
+  never waits. Bad: lost GPU minutes; on a busy owner a peer may never finish; a cancelled
+  `/synth` loses all its work.
+
+**Open (owner decides), Q7.** The owner (#102): "we will need to think about the queue and
+the scheduler". S1 does not depend on Q7; S2-S4 do.
 
 ### D3. What travels each way
 
-- **In:** `type`, `params`, `request_id`, optionally `request.title`. Checked by the same
-  code as a local job: `check_params` and `unsupported_reason`
-  (`music/capabilities.py:532-553`, `:467-476`), the job schemas. **No `track_id`, no
-  library reference**: the door accepts only types that need no source audio on the
-  owner (generate from text or from lyrics) until a later slice carries source audio in.
-- **Out, the take:** the FLAC as a file over the existing transfer
-  (`managers/file_transfer_manager.py:1001` `send_file`; ADR-047's pull when built,
-  `047:404-413`), never inline. The voice precedent inlines base64 in one frame
-  (`dpc_protocol/protocol.py:358-390`), which caps at 64 MiB (`:662`) — right for a voice
-  note, wrong for a song. **Assumption:** a 4-minute stereo FLAC is roughly 25-50 MB,
-  under the sender's 1000 MB default (`service.py:508`).
-- **Out, the record:** the take's provenance passed through `withhold_for_export`
-  (`music/provenance.py:456-462`: `node_id`, `requested_by.conversation_id/turn_id/node_id`,
-  `request.message_id`, `request.text` become `withheld_on_export`, `:407`), then
-  `check_privacy` on the serialized record (`:265-282`: no paths, home, user name, IP,
-  token) before it is sent. A record that fails is not sent and the job fails with the
-  kind named, never the match.
-- **What must stay:** the `licence` block exactly as `licence_record` wrote it
-  (`music/provenance.py:170-192`, docs `:54-61`), so the peer's library can tell
-  non-commercial takes apart. It is shown as a warning, never as a block (ADR-051 D17 as
-  amended 2026-11-27 on the owner's word, #90).
-- **What the peer sees of the owner:** the capability report filtered to the allowed
-  engines and adapters, by name and status only; never the owner's library, other jobs,
-  queue contents or who holds the card. Default: **no library access**, and nothing in
-  this door can read one.
+- **In: typed calls only** (Anti #103 item 2). The peer never sends an `/lm` or `/synth`
+  body: acestep bodies name `lm_model`, `synth_model`, `vae`, `inference_steps` and
+  `synth_batch_size` (`music/runner.py:318-325`, `:370-379`), and yue-server loads every
+  split in the adapter folder (`music/yue2.py:778-779`), voice adapters included, and is
+  unsafe at batch > 1 on CUDA (`:51-53`). The call carries the job's typed params, checked by
+  the owner with the same `normalize_params_*`, `check_params` and `unsupported_reason`
+  (`music/capabilities.py:467`, `:532`), plus the seed and variant; the owner rebuilds the
+  engine request with its own builders, fixing model files, steps, batch and output format.
+- **Media in both directions: a dedicated non-chat channel** (Anti #103 item 3). The chat
+  file transfer does not fit: it is firewall-gated with "ask" by default for a proved
+  connection and per-entry size caps of 50-500 MB in the default rules (`firewall.py:166`,
+  `:1875-1887`), allows 3 concurrent transfers (`managers/file_transfer_manager.py:754`),
+  writes "Sent/Received file" lines into the 1:1 history (`:2587`,
+  `message_handlers/file_complete_handler.py:169`, `:189`), has no resume (`:24`) and no
+  delete after the receiver's ACK. The music channel: chunked, hash-checked, never in chat
+  history, ACK-ed explicitly, used for input audio (cover/same-style source, edit control)
+  and for outputs. Lossless compression in transit is allowed (FLAC; the peer checks samples
+  against STREAMINFO MD5 and the passport's hash of the engine's original bytes).
+- **Sizes, from the code's rates:** acestep.cpp works at 48 kHz stereo
+  (`music/region_edit.py:94`): wav24 is 288 000 B/s, so 3 min ~52 MB, 4 min ~69 MB, 6 min
+  ~104 MB per variant; edit wav32 is 384 000 B/s (6 min ~138 MB). yue2.cpp's output rate is
+  not stated in code (**Assumption**: 44.1 or 48 kHz; the runner records it per take,
+  `music/runner.py:1863`). The reviewer figure of 104-198 MB for 3-6 min matches one wav24
+  variant only at 6 min, or two variants. Each output is held and can be fetched again
+  (D5), which stands in for resume.
+- **Out: the passport**, built from a whitelist, then `check_privacy`
+  (`music/provenance.py:265`) on the serialized passport; one that fails is not sent and the
+  call fails `privacy_check` naming the kind, never the match. Fields: engine id
+  (`yue2.cpp`/`acestep.cpp`), build and binary identity, backbone choice, weights and
+  adapters used with source and halves sha256 (from `identity()`, names and hashes, no paths:
+  `music/yue2.py:945-949`, `music/engine_base.py:1057-1066`), device identity
+  (`music/provenance.py:370`), output format, rate, channels, bits, duration, the hash of the
+  engine's bytes (`latent_sha256`, as `music/runner.py:1864` computes it), and the replay
+  material the record builders need: acestep `lm_request`, `lm_result` (`audio_codes`,
+  `lm_seed`), `synth_request` as sent (`music/provenance.py:543-547`); yue2 `sent`, `replay`,
+  `lm_seed`, `backbone` (`:604-606`); without them `genome_sha256` is `not_stored`
+  (`:753-768`). **Never sent:** `form_info()` (it carries `adapters_dir` as a path and
+  reasons like "<path> does not exist", `music/yue2.py:757`, `:762`, merged into each engine
+  of the report at `music/capabilities.py:589`) or `engine_base.status()` (PID, port,
+  `card_wait`, `music/engine_base.py:442-470`).
+- **What the peer sees of the owner:** per step shared or not, engine status words, allowed
+  adapter names and the voice-adapter note; never the owner's library, other jobs, queue
+  contents or who holds the card.
 
-### D4. Which engines and adapters
+### D4. Which adapters (decided, #89)
 
-- The peer may pick any engine the owner lists in `music.engines` and the capability
-  report marks available.
-- **The owner grants adapters himself** (the owner, #89): a **"Share to peers"** option in
-  the music player's settings, per adapter, plus the `music` section of the firewall
-  (`music.adapters`). Nothing is shared until the owner ticks it.
-- **Voice adapters stay unticked by default.** They are trained on real readers' voices
-  without stated consent and are marked "for local listening only"
-  (`music/yue2.py:67-69`, `ADAPTER_NOTE` `:147-148`); the option shows that note next to
-  them. Purpose adapters (the instrumental one, chosen by the job's kind) can be ticked
-  like any other.
+- **The owner grants each adapter** through a "Share to peers" option in the music player,
+  per adapter, mirrored in `music.adapters`. Nothing is shared until ticked.
+- **Voice adapters are unticked by default** and show their note, "for local listening
+  only" (`music/yue2.py:147-148`).
+- **Purpose adapters are a separate row.** An Instrumental job on YuE2 gets the
+  instrumental adapter by rule, or moves to acestep.cpp when it is not offered
+  (`music/capabilities.py:486-500`); "Share to peers" lists it as a purpose adapter, so an
+  unshared one shows the peer why its instrumental went to acestep.cpp, never silently.
 
-### D5. Where the take lives
+### D5. Nothing kept on the owner, and the sweep (decided in principle, #86)
 
-- **On the peer:** its own library entry, through the one entry point
-  (`music/library.py:1441-1499` `register_generated`, keyed by the proxy job's id), with
-  the received record as its provenance plus a peer-side field
-  `computed_on: {kind: "remote_node", node_id}`. `_withhold_for_export`
-  (`music/provenance.py:433-454`) must learn that field so the peer's own export withholds
-  it too.
-- **On the owner: no copy** (the owner, #86: "my node just provides remote inference, as
-  for text LLMs"). The take is not registered in the owner's library and nobody on the
-  owner's side auditions it. Its files and job record are removed as soon as the peer
-  confirms the file; only if the peer is offline are they held, for `[music]
-  peer_result_hold_h` (proposed 24 h), then removed. The ledger row (counts only, no
-  content) stays.
+- No job record, no take, no provenance, no library entry on the owner. The runner's
+  `write_payload` (`music/jobs.py:940`), which keeps each engine body on a job, is not used.
+- Input media and outputs live in one door-owned folder. An input is deleted when its call
+  ends; an output when the peer ACKs it, or after `peer_result_hold_h` (24 h) if the peer is
+  offline. **The door owns the sweep**: at startup and on a timer, it removes what is past
+  its hold or belongs to no call.
+- The door logs no lyrics, prompts or params, even at DEBUG. The engines' own logs on the
+  owner's disk are at the trust level of text prompts served to a peer, which the core
+  "shows, stores and logs none of" (`firewall.py:1763`, ADR-041 D7 amendment 2026-09-14);
+  an engine log may still hold request text (**Assumption**, not read in engine code).
+- What the door does keep, for idempotency (D7): `request_id`, peer id, call kind, state,
+  output file name and hash, timestamps; no content; removed with the output.
 
-### D6. Ledger
+### D6. Ledger: one row per call
 
-One row per served job on the owner (`caller_kind: "peer"`, `route: "local"`, alias such
-as `music:yue2`, tokens null, `duration_s` the job's card time) and one consumed row on
-the peer (`route: "peer"`, `served_by`), the pair the ledger already defines
-(`node_ledger.py:880-902`). **Assumption:** the row vocabulary (enforced, test
-`test_the_vocabulary_is_enforced_at_the_row`) needs a value for a non-token job. The
-tariff is per 1M tokens (`firewall.py` `serving_tariff`, `node_ledger.py:41-52`), so a
-music price (per job or per GPU second) is a new column group. **Open (owner decides).**
+One served row per **call** on the owner (`caller_kind` `peer`, `route` `local`, alias such
+as `music:yue2.synth`, tokens null, `duration_s` the call's card time) and one consumed row
+on the peer (`route` `peer`), from the existing vocabularies (`node_ledger.py:84-85`).
+`COUNTS_SOURCES` (`:86`) and `BILLINGS` (`:124`) are strict and need a value for a non-token
+GPU call. `count_since` counts rows only (`:807-832`), so GPU-seconds need a summing method.
+Quotas read finished calls only (`p2p_coordinator.py:966-970`), so a quota, if ever set, needs
+an in-flight reservation; one concurrent call per peer gives it for free.
 
-### D7. Failure and cancel
+### D7. Status vocabulary, failure, cancel and idempotency
 
-| Event | Owner side | Peer side |
+Statuses the peer sees (proposed): `off` (music sharing disabled), `not_allowed` (the same
+answer whether the model exists or not: no existence oracle), `busy` (with an ETA or `None`;
+no alias, chat or holder named, as `LeaseRefusedForPeer`, `managers/card_lease.py:148-150`),
+`waiting`, `running` (progress), `done` (output held until a time), `failed` with a class
+(`not_shared`, `invalid_params`, `engine_failed`, `timed_out`, `lease_refused`,
+`privacy_check`, `owner_restarted`, `cancelled_by_owner`), `cancelled`.
+
+| Event | Owner side | Peer's job card |
 |---|---|---|
-| Engine not installed / not built | capability report says so (`not_installed`, `not_built`, `music/capabilities.py:14-19`); propose refused `unsupported` | the form never offers it |
-| Card busy | job `queued`, waiting in the lease line | status "waiting for the owner's GPU", no holder named, ETA `None` until known |
-| Peer offline while queued or waiting | the guard cancels it (no card time spent) | proxy job marked failed `peer_gone` on reconnect |
-| Peer offline while running | job finishes; result held for `peer_result_hold_h` | on reconnect asks `MUSIC_JOB_STATUS`, then fetches |
-| Owner cancels | the person's Cancel takes any job (`music/commands.py:1474-1478`) | `cancelled_by_host` |
-| Peer cancels | `MUSIC_JOB_CANCEL` → `cancel_job` with the peer requester, own jobs only (as an agent's own-only cancel, `music/jobs.py:763-795`) | proxy job `cancelled` |
-| Owner restarts | the store resumes queued jobs (`music/runner.py:10-12`); a peer job resumes only if its peer is connected | status re-sent on reconnect |
-| Request id reused | refused, per peer, as on the inference door (`p2p_coordinator.py:119-121`) | — |
+| Step not shared / model missing | `not_allowed` | the form never offers it; "not shared by node X" |
+| Card busy | call waits in the music line (Q7) | "waiting for node X's GPU", ETA or unknown |
+| Peer gone while waiting | the guard drops the call, no card time (as `p2p_coordinator.py:1430-1439`) | job resumes the call on reconnect |
+| Peer gone while running | call finishes; output held 24 h | asks status on reconnect, fetches |
+| Transfer drops at 90 % | output still held | fetches again from the start |
+| Owner cancels | Stop/Cancel in the owner's UI | `failed: cancelled_by_owner` |
+| Peer cancels | `MUSIC_CALL_CANCEL`, own calls only; engine job cancelled | `cancelled` |
+| Owner restarts mid-call | the call is `failed: owner_restarted`, never rerun; a `done` output survives and is served | retries as a new call, or fetches |
+| Same `request_id` again | returns the existing call's status or output; never runs twice | — |
 
-### D8. Privacy and the agent path
+**Idempotency** (Zcode #96 P2): the inference door's guard is in-flight only
+(`p2p_coordinator.py:1061-1087`, released at `:1305`). A music call takes minutes, so the
+door keeps `request_id` -> call persistently for the call's life plus the hold (D5), so an
+owner restart never spends the GPU twice.
 
-- The door reads no conversation, no memory layer and no library, so rule #19 has nothing
-  to leak through it. A peer job's `requested_by` is a new kind `peer` with `node_id`
-  only (`REQUESTER_KINDS` is person and agent today, `music/job_schemas.py:233`, schema
-  `:65-71`); it carries no `conversation_id` or `turn_id`.
-- **The agent path stays.** It serves a different act: a group member asks the owner's
-  agent in chat, the owner approves, the take is posted to the room (ADR-053; ADR-051
-  `051:752-760`, `:938-943`). The new door is player to player, 1:1, with no agent and no
-  chat. Neither replaces the other; their queue limits are counted separately.
+### D8. Privacy, provenance on the peer, and the agent path
+
+- The door reads no conversation, memory or library, so rule #19 has nothing to leak
+  through it.
+- **The peer's record**: built by the peer's own builders from the passport, with
+  `computed_on: {kind: "remote_node", node_id}`; `_withhold_for_export`
+  (`music/provenance.py:433`) learns that field. `licence_record` must receive the real
+  engine id from the passport (`yue2.cpp`/`acestep.cpp`, `music/provenance.py:153`,
+  `:170-191`), never `remote:<node>`: an unknown engine gives `non_commercial: null` instead
+  of `true` for stock YuE2. A remote take carries the same licence warning as a local one.
+- **The agent path stays** (ADR-053): a group member asks the owner's agent and the take is
+  posted to the room. This door is player to player with no agent and no chat; their limits
+  are counted separately.
 
 ### D9. Cross-platform
 
-- **Peer:** needs no engine, binary or GPU; the remote source is pure DPTP and file
-  transfer, so it runs on Windows 10-11, Linux and macOS alike. No path crosses the wire.
-- **Owner:** any OS whose capability report shows an available engine. yue2.cpp has a
-  Windows build recipe only today (`music/yue2.py:150`), so a Linux or macOS owner will
-  usually report it `not_installed`; the probe, not the OS, decides. On macOS the lease
-  has no VRAM reading (`052:943`); it does not change the queue rule.
-- **Tests:** local runs are Windows, CI is ubuntu; every slice's tests use a fake peer
-  and a fake engine and must pass on both. Each slice names its live two-node check
-  (owner on Windows with engines, peer on Linux without).
+- **Peer:** no engine, binary or GPU. It needs ffmpeg, as today, for FLAC, loudness and QA
+  stage 1 (`music/runner.py:517`, `music/qa.py`). Windows 10-11, Linux and macOS alike; no
+  path crosses the wire.
+- **Owner:** any OS whose report shows a model available; the probe, not the OS, decides.
+  On macOS the lease has no VRAM reading (`052:943`); the queue rule is unchanged.
+- **Tests:** local runs are Windows, CI is ubuntu; every slice uses a fake peer and a fake
+  engine and passes on both; each slice names a live two-node check (owner on Windows with
+  models, peer on Linux without).
 
 ### Rationale
 
-The remote_peer split already answers the hard parts for text: identity, consent, the
-host deciding what runs, a ledger row on the node that spent the card. Music needs the
-same parts plus a long-running job, a large result and a provenance record. Putting the
-door at the **job** level, not the engine level, keeps the owner's store, runner, lease
-and provenance as the single path every take goes through (ADR-051's "one core music
-service"), so a peer's job is limited, queued, recorded and redacted by code that already
-exists. Putting a proxy job in the **peer's** store keeps its player unchanged.
+The owner wants remote inference, as for text: the guest builds the request and keeps the
+result, the host spends its card and forgets. At the engine level the peer's player stays the
+one place a job lives, so its job card, provenance, library and export work unchanged, and the
+owner's side is small: a door, a typed request builder, a media channel and a sweep. Typed
+calls instead of bodies keep the owner's model files, adapters and batch rules the owner's.
+The queue is the one part that cannot be lifted from text, because a call holds the card for
+minutes; it is left to the owner (Q7).
 
 ## Considered Options
 
-- **A. Tunnel the engine HTTP port to the peer.** The peer's runner drives the owner's
-  engine directly.
-- **B. Owner exposes a music service over DPTP; the peer gets a separate "remote music"
-  UI.**
-- **C. Guest-side remote provider plus host-side job door (recommended).** B's door
-  with A's place in the peer's player.
+- **A. Tunnel the engine HTTP port to the peer.**
+- **B. A job-level door** (the first draft, `8166e03b`): the owner runs the whole job
+  through its own `propose_music_job`, the peer holds a proxy job, the owner builds a
+  withheld provenance record and returns a FLAC.
+- **C. An engine-level door with typed calls (chosen, #86, #92, #101).**
 - **D. Keep the agent path only.**
 
 ### Pros and Cons of the Options
 
 #### Option A
-- Good: smallest wire; the peer's runner already knows the engine API.
-- Bad: bypasses the owner's job store, lease, quotas and provenance; breaks loopback-only
-  (`music/engine_base.py:40`); no consent point; one engine call is not one job.
+- Good: smallest wire; the peer's runner already speaks the engine API.
+- Bad: breaks loopback-only (`music/engine_base.py:40`); no consent point; the peer could
+  name any model file or adapter and any batch size (D3).
 
 #### Option B
-- Good: all control on the owner.
-- Bad: a second UI for the same act; the peer's library and job cards would not know the
-  take.
+- Good: the owner's store, lease and provenance would cover a peer's job.
+- Bad: rejected by the owner: "my node just provides remote inference, as for text LLMs"
+  (#86); "if we provide the engine and the peer sets everything up on its own side, why a
+  FLAC?" (#92). The owner would hold job records and takes it does not want, and the peer's
+  library would hold a record built elsewhere.
 
 #### Option C
-- Good: owner keeps control (B); peer's player unchanged (A); same pattern as text.
-- Neutral: a proxy job is new state on the peer that must be reconciled after
-  disconnects.
-- Bad: the largest build of the four.
+- Good: the peer's player is unchanged; the owner keeps nothing; the same pattern as text.
+- Bad: a new door, media channel and passport; a job becomes N calls, so the queue needs
+  work (Q7).
 
 #### Option D
-- Good: nothing to build; already approved per job.
-- Bad: the card's problem stays: no job card, progress, record or library entry on the
-  peer, and the owner has to be at the keyboard for every job.
+- Good: nothing to build.
+- Bad: no job card, progress, record or library entry on the peer; the owner answers every
+  request at the keyboard.
 
 ## Consequences
 
-- **Positive:** a node without engines makes music on its own player; the owner's card
-  is used by guests under the same rules as text and voice; every take keeps its licence
-  and lineage wherever it is computed.
-- **Negative:** a new DPTP command family and a privacy-rules section to maintain; peer
-  jobs lengthen the owner's queue; the transcription door's missing proof check
-  (`p2p_coordinator.py:1350-1360`) becomes more visible beside a music door that has one
-  (a card for it is suggested, not filed by this ADR).
-- **Neutral:** the agent path is unchanged.
+- **Positive:** a node without models does everything in its own player on the owner's
+  shared models (#98); every take keeps its licence and lineage wherever it is computed.
+- **Negative:** a DPTP command family, a privacy section, a media channel and a sweep to
+  maintain; peer calls lengthen the owner's queue; the lease gains a long-guest class
+  (ADR-052 amendment).
+- **Neutral:** the music door follows the proof-first order the inference door and, since
+  `49c78e3d`, the transcription door use; `handle_get_providers_request` still has no proof
+  check (`p2p_coordinator.py:1470`) and is not built on (a card for it is suggested, not
+  filed by this ADR). The agent path is unchanged.
 
 ## Confirmation
 
-- [ ] With `music.enabled` false, every music command from a peer is refused before the
-      firewall answers about engines, and no job, file or ledger row exists.
-- [ ] A peer over an unproved tier is refused before any engine is named (ADR-041 D2).
-- [ ] The owner's queued job runs before an older queued peer job; a running peer job is
-      never preempted.
-- [ ] The record the peer receives has `node_id`, `requested_by.node_id`, `request.text`
-      withheld and passes `check_privacy`; its `licence` equals the owner's record's.
-- [ ] No voice adapter is offered or accepted unless the owner listed it.
-- [ ] The owner's library gains no entry from a peer job; its files are gone after the
-      hold.
-- [ ] A peer that disconnects while waiting spends no card time.
+- [ ] With `music.enabled` false, every music command from a peer is refused, and no call,
+      file or ledger row exists.
+- [ ] An unproved peer is refused before any step or model is named, on every music command.
+- [ ] `not_allowed` is the same for a missing model and an unshared one.
+- [ ] No engine body from the peer reaches an engine; a call naming a model file, batch size
+      or unshared adapter is refused.
+- [ ] A running owner generation is never stopped by a peer call (no swap while busy).
+- [ ] An owner job queued after a peer call runs before that peer's next call; a peer job of
+      N calls still finishes (anti-starvation, per Q7).
+- [ ] The passport and the capability report carry no path (S1 test extended), no PID, port
+      or holder, and pass `check_privacy`.
+- [ ] The peer's record names `yue2.cpp`/`acestep.cpp` and its licence equals a local take's.
+- [ ] After ACK, or the hold, the owner's door folder is empty; a restart sweeps leftovers.
+- [ ] A repeated `request_id` never runs the model twice, across an owner restart.
+- [ ] No chat history line is written for any music media transfer.
 
 ## Scope
 
-- `dpc-protocol/dpc_protocol/protocol.py` — the music command builders; DPTP doc bump.
-- `firewall.py` — the `music` section and `can_request_music`.
-- `p2p_coordinator.py` — the music door (proof, firewall, quota, propose, status, cancel,
-  result).
-- `music/commands.py`, `music/jobs.py`, `music/job_schemas.py` — requester kind `peer`,
-  owner-first pick, peer cancel, result hold and cleanup.
-- `music/runner.py` — owner-first order; proxy jobs handed to the remote client.
-- `music/capabilities.py` — filtered report for a peer; merged `remote:` engines.
-- `music/provenance.py` — `computed_on`, and its withholding.
-- `node_ledger.py` — a row for a non-token job.
-- `ui/src/lib/components/music/` — the remote engine in the form; the owner's approval
-  card and settings.
+- `dpc-protocol/dpc_protocol/protocol.py`: the music command builders; optional segment
+  times on the transcription response; DPTP doc bump.
+- `firewall.py`: the `music` section (`steps`, `adapters`) and `can_request_music`.
+- `p2p_coordinator.py`: the music door (proof first, firewall, typed rebuild, status,
+  cancel, idempotency store, media, ack) and its sweep (startup + timer).
+- `managers/card_lease.py` and ADR-052: **amendment** for a long-guest class (Q7-A, also used
+  by Q7-B).
+- `music/runner.py`, `music/engine_base.py`: the music-compute line shared with the door
+  (Q7); the `RemoteMusicEngine` client on the peer.
+- `music/yue2.py`: no swap while busy, enforced inside the music line.
+- `music/capabilities.py`: the per-step shared report for a peer (whitelist); the peer
+  merges `remote_node` sources.
+- `music/job_schemas.py`: the `compute` field; `params.engine` unchanged.
+- `music/provenance.py`: `computed_on`, its withholding, passport-driven engine id and
+  licence on the peer.
+- `music/commands.py`: align accepts an explicitly chosen `remote:` voice provider.
+- `node_ledger.py`: vocabulary values for a non-token GPU call; a GPU-seconds sum.
+- `ui/src/lib/components/music/`: "engine on node X" in Create; "Share to peers" per step
+  and adapter; status words on the peer's job card.
 
 ## Implementation plan (slices)
 
 | Slice | What | Tests | Live two-node check |
 |---|---|---|---|
-| S1 | Read-only capability probe: `music` rules section, proof + firewall, `MUSIC_CAPABILITIES_*`, filtered report, peer merges it under `remote:<node>` and the form shows it (disabled Create) | refused when off / unproved / not allowed; report carries no path, no library, no voice adapter by default; merge on Linux and Windows | the peer sees the owner's engines and their status |
-| S2 | One job end to end: request, approval card or standing, owner job with requester `peer`, owner-first pick, FLAC by file transfer, withheld record, `register_generated` on the peer, ledger pair | privacy check on the sent record, licence intact, idempotent `request_id`, owner library untouched, quota of 1 concurrent | one short instrumental generated on the owner's card plays in the peer's library with its licence shown |
-| S3 | Progress and cancel: `MUSIC_JOB_STATUS` pushes, peer and owner cancel, peer-gone guard, result hold and fetch after reconnect, restart resume | each row of the D7 table with a fake peer and a fake engine | peer cancels while waiting; peer drops while running and fetches after reconnect |
-| S4 | Quotas and UI: jobs/day, GPU seconds/day from the ledger, owner settings page, peer job marked in the owner's queue | counts from ledger rows; refusal not recorded as a row | owner sets a quota of 1/day and the second job is refused with the reason |
-| later | Source-audio types (cover, edit) with audio carried in; ADR-047 pull for the take | — | — |
+| S1 (before Q7) | Capability probe: `music` section, proof + firewall on `MUSIC_CAPABILITIES_*`, per-step shared report from a whitelist, passport whitelist builder, peer merges it and Create shows "engine on node X" (Create disabled) | refused when off / unproved / not allowed, same answer for missing and unshared; report and passport carry no path, PID, port or holder; voice adapters unticked; merge on Linux and Windows | the peer sees which steps node X shares |
+| S2 (after Q7) | One call end to end on the chosen queue: `yue2.synth` typed call, owner rebuild, music line with owner priority, media channel out, passport, peer record with `computed_on` and passport licence, ledger pair | no body forwarded; no swap while busy; licence equals local; owner folder empty after ACK | one short instrumental made on node X plays in the peer's library with its licence shown |
+| S3 | Status, cancel, idempotency, hold, re-fetch; every other D1 row (acestep generate, cover, same style, repaint wav32, describe, judge); media in | each D7 row with a fake peer and engine; "drop at 90 %, re-fetch"; restart mid-call never reruns | the peer drops while running and fetches after reconnect |
+| S4 | "Share to peers" UI per step and adapter, anti-starvation budget, ledger per call with GPU-seconds, Whisper segment times and remote align | budget keeps a peer's place; rows per call; align on a remote provider gives synced lyrics | the peer runs a cover and aligns its lyrics, all on node X |
 
 Each slice runs the full core suite before it is called green.
 
 ## Open Questions
 
-All **Open (owner decides)**:
-
-- **Q1. Quota numbers:** jobs per day, GPU seconds per day, concurrent jobs per peer
-  (proposed 1), `peer_wait_s`, `peer_result_hold_h` (proposed 24 h).
-- **Q2. Approval default:** per job for every peer, or standing for the owner's own node
-  group (proposed) and per job for others.
-- ~~Q3. Copies~~ **Decided 2026-11-27 (#86):** no copy, no audition; removed once the
-  peer confirms.
-- **Q4. Economy:** charge or credit peer music jobs; if so, per job or per GPU second, and
-  which ledger columns (the token tariff does not fit).
-- ~~Q5. Adapters~~ **Decided 2026-11-27 (#89):** the owner grants each adapter through a
-  "Share to peers" option in the music player plus firewall settings; voice adapters
-  unticked by default.
-- ~~Q6. ADR-051 D17 wording~~ **Decided 2026-11-27 (#90):** amended in ADR-051 to the
-  warning reading.
+- **Q1. Limits (quotas): Open (owner decides), recommended:** no daily quotas by default; one
+  concurrent call per peer; `peer_wait_s` 1800 per call; result hold 24 h; the
+  anti-starvation budget (a peer's next call keeps its place for 15 min).
+- **Q2. Consent (approval): Open (owner decides), recommended "as for text inference"** (CC #88,
+  Zcode #96): the allow-list is the consent; no per-call approval card by default; if ever
+  an option, only in the owner's UI with its own mechanism.
+- ~~Q3. Copies~~ **Decided (#86):** no copy, no audition.
+- **Q4. Economy: Open (owner decides).** If ever, a tariff per GPU-second (`duration_s` is in
+  the row vocabulary already); no tariff is a gift, as for text.
+- ~~Q5. Adapters~~ **Decided (#89):** "Share to peers" per adapter plus `music.adapters`;
+  voice adapters unticked with their note.
+- ~~Q6. ADR-051 D17~~ **Decided (#90, `e54c6b74`):** a licence is a warning, never a block.
+- **Q7. Queue and scheduler: Open (owner decides)** (#102). Options Q7-A, Q7-B, Q7-C in D2;
+  recommended Q7-B on Q7-A's lease class. S2-S4 wait for it.
 
 ## Authors
 
-- **The owner** — Decision (pending)
-- **CC** — Analysis, Draft
+- **The owner**: Decision (direction #86, #92, #101; Q3, Q5, Q6 decided; Q1, Q2, Q4, Q7 open)
+- **CC**: Analysis, Draft
+- **Zcode, Anti**: Review (#96, #103)
 
 ## References
 
-- [ADR-051](051-the-music-player-is-a-dpc-window-over-one-core-music-service.md) — the
-  music service, D17 licence, D30 loopback, D43 agent turns
-- [ADR-052](052-the-card-lease-lets-every-gpu-client-in-dpc-hold-wait-for-and-yield-the-one-card.md)
-  — holder names `052:458-459`, peer refusal `:503-504`, waits `:528-529`
-- [ADR-053](053-who-asked-decides-what-an-agent-may-do.md) — who asked, owner approval card
-- [ADR-041](041-openai-compatible-gateway-as-a-dpc-surface.md) — D2 proved key (`041:279`),
-  D3 ledger (`:317`), D5 quota (`:1159`), D7 not shared onward (`:1608`)
-- [ADR-040](040-local-inference-second-path-as-a-dpc-owned-llama-server.md) — D4-0: the
-  alias a peer names is evidence, not an instruction
-- [ADR-031](031-participant-roles-llm-payload.md) — per-reader roles
-- [ADR-047](047-multi-source-file-transfer-and-peer-file-search.md) — large-file transfer
-- [ADR-048](048-memory-layer-audience.md) — the room decides what may be said
-- `backlog.md:72` — the card this ADR answers
+- [ADR-051](051-the-music-player-is-a-dpc-window-over-one-core-music-service.md): the music
+  service, D17 licence (amended `e54c6b74`)
+- [ADR-052](052-the-card-lease-lets-every-gpu-client-in-dpc-hold-wait-for-and-yield-the-one-card.md):
+  peer refusal `052:501-504`, peer waits and L13 `:529`
+- [ADR-053](053-who-asked-decides-what-an-agent-may-do.md): who asked; the owner approval card
+- [ADR-041](041-openai-compatible-gateway-as-a-dpc-surface.md): D2 proved key, D7 not shared
+  onward (`041:1608`)
+- [ADR-040](040-local-inference-second-path-as-a-dpc-owned-llama-server.md): D4-0, the alias
+  a peer names is evidence, not an instruction
+- [ADR-031](031-participant-roles-llm-payload.md), [ADR-047](047-multi-source-file-transfer-and-peer-file-search.md),
+  [ADR-048](048-memory-layer-audience.md)
+- `49c78e3d`: proof before the firewall on the transcription door
+- `backlog.md:115`: the card this ADR answers
