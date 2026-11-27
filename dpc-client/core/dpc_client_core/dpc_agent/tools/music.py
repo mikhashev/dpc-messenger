@@ -300,13 +300,11 @@ def _mine(ctx: ToolContext, job: Dict[str, Any], who: Dict[str, Any]) -> bool:
     return _ours_in_this_chat(ctx, job) or js.requested_by_of(job) == who
 
 
-# Core's pre-card refusal as a turn someone other than the owner asked for sees it (P2-6): what
-# core found in the owner's library (a track, its length, its stored lyrics), engines/adapters,
-# or job list stays behind the job card, which the owner sees.
-PRE_CARD_REFUSAL_FOR_OTHERS = ("⚠️ music_propose_job: core refused this request before the owner was "
-                               "asked; the reason concerns the owner's library or music jobs and is not "
-                               "shown to a request from someone other than the owner. Nothing was asked "
-                               "or proposed.")
+# Neutral refusal returned to chat-scoped turns (foreign requesters and multi-node groups)
+# when a music_propose_job request is refused before the card or on a cross-chat limit/conflict,
+# so nothing of the owner's library, engines/adapters, or other chats' jobs/queue is revealed.
+PRE_CARD_REFUSAL_FOR_OTHERS = ("⚠️ music_propose_job: this request cannot be proposed from this chat "
+                               "right now. No job was made.")
 
 
 def _ctx_dict(ctx: ToolContext, name: str) -> Dict[str, Any]:
@@ -862,8 +860,7 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
             if code == "idempotency_conflict":
                 return KEY_NOT_YOURS_REFUSAL if not scoped else PRE_CARD_REFUSAL_FOR_OTHERS
             if scoped and code == "requester_queue_full":
-                return ("⚠️ music_propose_job refused: requester_queue_full: "
-                        "this agent's music queue is full. No job was made.")
+                return PRE_CARD_REFUSAL_FOR_OTHERS
         return refused + " No job was made."
     job = answer["job"]
     if not _mine(ctx, job, who):

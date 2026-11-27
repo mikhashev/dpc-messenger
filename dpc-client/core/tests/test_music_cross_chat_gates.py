@@ -1395,4 +1395,58 @@ async def test_owner_turn_in_multi_node_group_cannot_probe_stored_lyrics_with_re
         assert out_match.startswith("Proposed (approved by the person)."), out_match
 
 
+@pytest.mark.asyncio
+async def test_post_approval_queue_full_on_scoped_turn_returns_neutral_pre_card_refusal(tmp_path, monkeypatch):
+    _user_home, dpc_home = await _seed_world(tmp_path, monkeypatch)
+    service = SimpleNamespace(
+        _conversation_display_name=lambda cid: cid,
+        p2p_manager=SimpleNamespace(get_display_name=lambda: "Owner", node_id=THIS_NODE),
+        group_manager=SimpleNamespace(
+            node_id=THIS_NODE,
+            get_group=lambda gid: SimpleNamespace(
+                group_id=gid, name="Friends", members=[THIS_NODE, FRIEND_NODE], is_discord_bridge=False
+            ) if gid == FRIENDS_GROUP else (
+                SimpleNamespace(
+                    group_id=gid, name="Solo", members=[THIS_NODE], is_discord_bridge=False
+                ) if gid == SOLO_GROUP else None
+            ),
+        ),
+    )
+
+    queue_full = {
+        "status": "error",
+        "code": "requester_queue_full",
+        "message": "2 music job(s) of this agent are queued or running; at most 2 at once",
+    }
+    _fake(monkeypatch, {"status": "ok", "repeat": None, "params": from_text()}, propose_answer=queue_full)
+    monkeypatch.setattr(core_tools, "_await_schedule_approval", lambda ctx, **kw: (True, ""))
+
+    scoped_contexts = [
+        _multi_ctx(dpc_home, service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OWNER_TURN),
+        _multi_ctx(dpc_home, service, FRIENDS_GROUP, asker=OWNER_ASKER, turn_class=OTHER_NODE_TURN),
+        _multi_ctx(dpc_home, service, FRIENDS_GROUP, asker=FRIEND, turn_class=OTHER_NODE_TURN),
+        _multi_ctx(dpc_home, service, "group-missing", asker=OWNER_ASKER, turn_class=OWNER_TURN),
+    ]
+    for ctx_scoped in scoped_contexts:
+        out = music_tools.music_propose_job.__wrapped__(ctx_scoped, params=from_text())
+        assert out == music_tools.PRE_CARD_REFUSAL_FOR_OTHERS, out
+        for leaked in ("queue", "full", "requester_queue_full", "2 music job"):
+            assert leaked not in out.lower(), (leaked, out)
+
+    for conv in (ONE_TO_ONE, SOLO_GROUP):
+        ctx_owner = _multi_ctx(dpc_home, service, conv, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+        out_owner = music_tools.music_propose_job.__wrapped__(ctx_owner, params=from_text())
+        assert "requester_queue_full: 2 music job(s)" in out_owner and "No job was made." in out_owner, (
+            conv, out_owner
+        )
+
+
+def test_pre_card_refusal_for_others_does_not_label_requester_non_owner():
+    text = music_tools.PRE_CARD_REFUSAL_FOR_OTHERS.lower()
+    assert text.startswith("⚠️ music_propose_job:"), music_tools.PRE_CARD_REFUSAL_FOR_OTHERS
+    for forbidden in ("non-owner", "not the owner", "other than the owner", "owner", "queue", "full"):
+        assert forbidden not in text, (forbidden, music_tools.PRE_CARD_REFUSAL_FOR_OTHERS)
+
+
+
 
