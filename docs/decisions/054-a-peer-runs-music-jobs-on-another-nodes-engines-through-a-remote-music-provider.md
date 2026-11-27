@@ -261,6 +261,14 @@ in code at `7f5f02c1`; the probes he names are S1/S2 tests):
    instant refusal with no number. Required: the music lease supplies an ETA of the remaining
    work (`eta_s`), and acestep and edits get a measured estimate. Probe: owner yue2 job
    running, guest acquire -> a `wait_s` in seconds (today: refused).
+   **Ark #128 found the cheap carrier:** the runner already passes `expected_s` to its waiter
+   (`runner.py` ~889-890) and `_proceed` opens the use with `waiter.arrival` (~843-846); keep
+   `expected_s` and the grant time on the use and let `_eta()` return `expected_s - elapsed`.
+   A few lines in the lease, honest for every client, not only music; `yield_bound_s` does not
+   help today because it only enters the "holder yields" branch (~949, ~952-954). For edits,
+   where `expected_s=None` is explicit (`runner.py` ~1442-1443), estimate from the window
+   length rather than leave it unknown. The acestep measurement then improves the estimate
+   instead of blocking the owner's #119 rule.
 2. **"Music guest class" touches four sites**: the trip clamp in the waiter constructor
    (~751-761), the refusal at `expected_s > bound` (~1468-1475), at `expected_s is None`
    (~1476-1488), and at an unknown estimate (~1515-1523). And a fifth nobody named: in the
