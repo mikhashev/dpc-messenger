@@ -219,7 +219,9 @@ and edits have no duration estimate at all. **Decided 2026-11-27 (the owner, #11
 a **separate guest class** — the 120 s trip stays for transcription and text; a music call is
 admitted by **the load of the owner's own queue** (how much owner work is queued or running
 on the card), not by a fixed trip; and the owner gets **music-class quotas for peers in the
-settings** (the Q1 limits become real settings, not hidden constants). A measured estimate
+settings** (the Q1 limits become real settings, not hidden constants), kept **in the
+firewall settings** (#117): the `music` section of `privacy_rules.json`, beside its
+allow-lists, as `vendor_quotas` sit in `compute` today. A measured estimate
 for acestep and edits (a fit like YuE2's) is still wanted, for an honest ETA, but it does not
 gate admission. The choice among Q7-A/B/C below remains open. S1 does not depend on Q7;
 S2-S4 do (an amendment to ADR-052 L13 adding the music guest class).
