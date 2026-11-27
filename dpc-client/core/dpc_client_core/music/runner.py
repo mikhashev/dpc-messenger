@@ -583,6 +583,7 @@ class MusicJobRunner:
         lyrics_get: Optional[LyricsGet] = None,
         lyrics_save: Optional[LyricsSave] = None,
         describer: Optional[Callable[[Path, Optional[str], float, Path], Awaitable[Dict[str, Any]]]] = None,
+        auto_align: Optional[Callable[..., Awaitable[Any]]] = None,
     ):
         self.store = store
         # A `MusicEngines`, a mapping of engine word to supervisor, or one supervisor.
@@ -600,6 +601,7 @@ class MusicJobRunner:
         self._decode_control = control_decoder or ffmpeg_control_decoder()
         self._lyrics_get = lyrics_get
         self._lyrics_save = lyrics_save
+        self._auto_align = auto_align
         # A same-style song's describer (`similar._describe_for_job`, `describe.py`): `(source, content hash, seconds,
         # work dir)` to a description record; None runs none (the record says so).
         self._describer = describer
@@ -619,6 +621,8 @@ class MusicJobRunner:
         self.current_engine: Optional[str] = None
         # job id -> `similar.SongDress` while a song job's takes are made (`_store_take` wears it)
         self._song_dress: Dict[str, Any] = {}
+        self._pending_align: Dict[str, List[Dict[str, Any]]] = {}
+        self._deferred_finish: set = set()
 
     @property
     def engine(self) -> Any:
@@ -813,13 +817,16 @@ class MusicJobRunner:
             except _Cancelled:
                 # Cancelled while it waited in the lease line: the wait left the line (`_leaves`).
                 await shown.settled()
+                self._clear_deferred_align(job_id)
                 logger.info("music: job %s cancelled while it waited for the card", job_id)
             except _FallBack as exc:
+                self._clear_deferred_align(job_id)
                 fell = exc   # handled once this engine's lease use has ended
             finally:
                 # A grant with nothing on the card (the job ended before its engine came up) goes back.
                 engine.card_lease.release_when_empty("its job ended with no engine running", holds=engine.alive)
             if fell is None:
+                await self._finalize_deferred(job_id)
                 return
             # The running job moves to the fallback engine, which asks for the card through its own
             # lease use; the idle engine left behind is let go by the usual exclusive start.
@@ -1088,7 +1095,7 @@ class MusicJobRunner:
             except OSError:
                 pass
         await self._check(job_id)
-        await self._change(self.store.finish_job, job_id)
+        await self._complete_generation(job_id)
 
     async def _one_take(self, job_id: str, params: Mapping[str, Any], out_dir: Path, slug: str, multipart: Path,
                         start: int, end: int, index: int, batch_size: int, seed: int, lm0: Mapping[str, Any],
@@ -1213,7 +1220,7 @@ class MusicJobRunner:
                     pass
             await self._progress(job_id, round(0.1 + 0.9 * variant / variants, 4))
         await self._check(job_id)
-        await self._change(self.store.finish_job, job_id)
+        await self._complete_generation(job_id)
 
     async def _yue2_take(self, job_id: str, params: Mapping[str, Any], out_dir: Path, slug: str, multipart: Path,
                          start: int, end: int, variant: int, seed: int, sent: Mapping[str, Any],
@@ -1276,7 +1283,8 @@ class MusicJobRunner:
             },
             take={"seed": v_seed, "synth_batch_size": 1, "synth_batch_index": 0, "payload": yue2_request_name(variant),
                   "engine": identity.get("engine") or "yue2.cpp",
-                  "lm_seed": v_lm_seed if 0 <= v_lm_seed <= js.LM_SEED_MAX else None})
+                  "lm_seed": v_lm_seed if 0 <= v_lm_seed <= js.LM_SEED_MAX else None},
+            align_replay=replay or None)
 
     # -- region edits: regenerate_region, fix_seam (acestep.cpp repaint), remove_region ---------------
 
@@ -1632,6 +1640,39 @@ class MusicJobRunner:
                                        "cut_s": [region_s[0], region_s[1]]}}
         return hook
 
+    def _clear_deferred_align(self, job_id: str) -> None:
+        self._pending_align.pop(job_id, None)
+        self._deferred_finish.discard(job_id)
+
+    async def _complete_generation(self, job_id: str) -> None:
+        """Move `job_id` to `review` now unless vocal takes are queued for post-lease auto-alignment."""
+        if self._auto_align is not None and self._pending_align.get(job_id):
+            self._deferred_finish.add(job_id)
+            return
+        await self._change(self.store.finish_job, job_id)
+
+    async def _finalize_deferred(self, job_id: str) -> None:
+        """Run queued post-take lyrics alignment after the engine's card lease is released, then finish."""
+        pending = self._pending_align.pop(job_id, None)
+        deferred = job_id in self._deferred_finish
+        self._deferred_finish.discard(job_id)
+        if not deferred:
+            return
+        try:
+            await self._check(job_id)
+            if pending and self._auto_align is not None:
+                for item in pending:
+                    await self._check(job_id)
+                    try:
+                        await self._auto_align(**item)
+                    except Exception:
+                        logger.warning("music: auto-align failed for track %s of job %s; keeping unsynced lyrics",
+                                       item.get("track_id"), job_id, exc_info=True)
+            await self._check(job_id)
+            await self._change(self.store.finish_job, job_id)
+        except _Cancelled:
+            logger.info("music: job %s cancelled during post-take lyrics alignment", job_id)
+
     # -- a take, whichever engine made it ---------------------------------------------------
 
     async def _store_take(self, job_id: str, params: Mapping[str, Any], out_dir: Path, slug: str, variant: int,
@@ -1641,7 +1682,8 @@ class MusicJobRunner:
                           provenance: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
                           title: Optional[str] = None, lineage: Optional[Dict[str, Any]] = None,
                           qa_override: Optional[Dict[str, Any]] = None,
-                          after_register: Optional[Callable[[Optional[str]], Awaitable[Dict[str, Any]]]] = None) -> None:
+                          after_register: Optional[Callable[[Optional[str]], Awaitable[Dict[str, Any]]]] = None,
+                          align_replay: Optional[Mapping[str, Any]] = None) -> None:
         """The engine's WAV bytes (`source[start:end]`) to a verified FLAC, a sidecar, a
         loudness measurement, a library entry and a take. An edit take passes its `title`, its
         library `lineage`, its QA terms (`qa_override`: `requested_s`, `length_mode`, `edit`) and a
@@ -1785,6 +1827,18 @@ class MusicJobRunner:
                 sidecar_record.update(await after_register(library_id))
             except Exception:
                 logger.exception("music: the after-take step of variant %s of job %s failed", variant, job_id)
+        elif (self._auto_align is not None and library_id
+              and (lineage or {}).get("relation") != "region_edit"):
+            raw_lyrics = params.get("lyrics")
+            from . import lyrics_align
+            if raw_lyrics is not None and lyrics_align.has_alignable_words(raw_lyrics):
+                self._pending_align.setdefault(job_id, []).append({
+                    "track_id": library_id,
+                    "path": flac,
+                    "lyrics": raw_lyrics,
+                    "duration_s": info.duration_s,
+                    "replay": align_replay,
+                })
         await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(sidecar_record, ensure_ascii=False, indent=1))
 
 

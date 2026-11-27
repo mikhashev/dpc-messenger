@@ -150,7 +150,7 @@ import { historyRestored, newSessionProposal, newSessionResult, conversationRese
 import type { MusicComment } from './utils/musicComments';
 import type { PrepReport } from './utils/musicLyricsPrep';
 import type { RawTranscriptAnswer } from './utils/musicLyricsFilter';
-import { callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
+import { alignLyricsPayload, callMusic, type LibraryEntry, type LyricsAnswer, type MusicAnswer, type MusicFolder, type Playlist } from './utils/musicPlayer';
 import type { DiscardReason, MusicCapabilities, MusicEngine, MusicJob, MusicRequest, MusicTake } from './utils/musicCreate';
 import type { JobQc, TakeQc } from './utils/musicQc';
 import type { DeleteExportAnswer, MusicExportInfo, PlaylistExportAnswer, TrackExportAnswer } from './utils/musicExport';
@@ -2221,6 +2221,14 @@ export function getMusicLyricsTranscriptRaw(trackId: string): Promise<MusicAnswe
 /** Save the person's LRC as `source: manual` (refused while a line has no stamp). */
 export function saveMusicLyrics(trackId: string, lrcText: string): Promise<MusicAnswer<LyricsAnswer>> {
     return callMusic(sendCommand, 'save_music_lyrics', { track_id: trackId, lrc_text: lrcText });
+}
+
+/** Force-align known/unsynced lyrics of `trackId` against audio using Whisper word timestamps. */
+export function alignMusicLyrics(
+    trackId: string,
+    opts: { overwriteManual?: boolean } = {},
+): Promise<MusicAnswer<LyricsAnswer>> {
+    return callMusic<LyricsAnswer>(sendCommand, 'align_music_lyrics', alignLyricsPayload(trackId, opts));
 }
 
 // --- Music jobs, takes and the engine (ADR-051 D30-D33; music/commands.py) ---

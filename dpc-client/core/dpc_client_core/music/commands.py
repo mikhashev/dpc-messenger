@@ -127,7 +127,7 @@ import math
 import os
 import wave
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -149,6 +149,7 @@ from .qa import qa_summary
 from .lineage import LineageError, build_lineage, write_lineage_files
 from .store import music_dir_of
 from .lyrics import MusicLyrics
+from . import lyrics_align
 from . import lyrics_prep
 from . import provenance as mp_provenance
 from .peaks import PeaksError, get_peaks
@@ -545,25 +546,52 @@ class MusicCommandsMixin:
                 "duration": result.get("duration"), "provider": result.get("provider") or alias,
                 "model": None, "segments": [], "fallback_reason": result.get("fallback_reason")}
 
-    async def _music_transcribe_with_whisper(self, provider: Any, path: Path) -> Dict[str, Any]:
+    async def _music_run_local_whisper(
+        self,
+        provider: Any,
+        path: Path,
+        *,
+        purpose: str = "music Transcribe",
+        bound_s: Optional[float] = None,
+        trigger_download: bool = True,
+        respect_size_limit: bool = True,
+    ) -> Dict[str, Any]:
         alias = getattr(provider, "alias", None) or LOCAL_WHISPER_TYPE
         try:
             size_mb = path.stat().st_size / (1024 * 1024)
         except OSError as exc:
             raise MusicLibraryError("no_file", f"the track's file cannot be read: {exc}") from exc
-        decision = await asyncio.to_thread(evaluate_local_transcription_limit, self.settings, path, size_mb)
-        if not decision["allowed"]:
-            raise MusicLibraryError(decision["code"], decision["message"])
-        from ..providers.whisper_provider import card_ask, card_wait_words, transcribe_with_route
+        ask_audio_s: Optional[float] = None
+        if respect_size_limit:
+            decision = await asyncio.to_thread(evaluate_local_transcription_limit, self.settings, path, size_mb)
+            if not decision["allowed"]:
+                raise MusicLibraryError(decision["code"], decision["message"])
+            # Reuse the probe from `evaluate_local_transcription_limit` so `audio_seconds` runs at most once.
+            ask_audio_s = (
+                (decision["probed_s"] if decision["probed_s"] is not None else 0.0)
+                if decision["probed_once"]
+                else None
+            )
+        from ..providers.whisper_provider import LocalWhisperProvider, card_ask, card_wait_words, transcribe_with_route
         from .lyrics import show_card_wait
-        # ADR-052 L4: a person's click with no bound of its own; it waits until cancelled.
-        # Reuse the probe from `evaluate_local_transcription_limit` so `audio_seconds` runs at most once.
-        ask_audio_s = (
-            (decision["probed_s"] if decision["probed_s"] is not None else 0.0)
-            if decision["probed_once"]
-            else None
+
+        if (
+            not trigger_download
+            and isinstance(provider, LocalWhisperProvider)
+            and not getattr(provider, "model_loaded", False)
+        ):
+            from ..providers.model_sizes import is_model_cached
+
+            if not await asyncio.to_thread(is_model_cached, getattr(provider, "model_name", "")):
+                raise MusicLibraryError(
+                    "model_not_downloaded",
+                    f"Model '{provider.model_name}' is not downloaded yet.",
+                )
+
+        # ADR-052 L4: explicit click (`bound_s=None`) waits until cancelled; background auto-align uses a bound.
+        ask = await asyncio.to_thread(
+            card_ask, provider, purpose, str(path), bound_s=bound_s, audio_s=ask_audio_s
         )
-        ask = await asyncio.to_thread(card_ask, provider, "music Transcribe", str(path), audio_s=ask_audio_s)
         ask["on_wait"] = lambda estimate: show_card_wait({
             "text": card_wait_words(estimate), "behind": list(estimate.get("behind") or []),
             "wait_s": estimate.get("wait_s"), "known": bool(estimate.get("known"))})
@@ -577,14 +605,15 @@ class MusicCommandsMixin:
             missing = exc if isinstance(exc, ModelNotCachedError) else (
                 exc.__cause__ if isinstance(exc.__cause__, ModelNotCachedError) else None)
             if missing is not None:
-                downloads = getattr(self, "model_download_service", None)
-                if downloads is not None:
-                    try:
-                        await downloads.maybe_emit_required(
-                            missing.model_name, revision=missing.revision, purpose="Lyrics transcription",
-                            consequence_if_declined="Lyrics will not be transcribed.", provider_alias=alias)
-                    except Exception:
-                        logger.exception("music: asking for the Whisper download failed")
+                if trigger_download:
+                    downloads = getattr(self, "model_download_service", None)
+                    if downloads is not None:
+                        try:
+                            await downloads.maybe_emit_required(
+                                missing.model_name, revision=missing.revision, purpose="Lyrics transcription",
+                                consequence_if_declined="Lyrics will not be transcribed.", provider_alias=alias)
+                        except Exception:
+                            logger.exception("music: asking for the Whisper download failed")
                 raise MusicLibraryError(
                     "model_not_downloaded",
                     f"Model '{missing.model_name}' is not downloaded yet. Confirm the download in the "
@@ -594,6 +623,75 @@ class MusicCommandsMixin:
             raise MusicLibraryError("transcription_failed", f"local Whisper ({alias}) gave no result")
         return {**result, "provider": result.get("provider") or LOCAL_WHISPER_TYPE,
                 "model": getattr(provider, "model_name", None) or result.get("model")}
+
+    async def _music_transcribe_with_whisper(self, provider: Any, path: Path) -> Dict[str, Any]:
+        return await self._music_run_local_whisper(provider, path)
+
+    def _music_auto_align_enabled(self) -> bool:
+        fn = getattr(self.settings, "get_music_auto_align_lyrics", None)
+        if callable(fn):
+            try:
+                return bool(fn())
+            except Exception:
+                logger.warning("music: reading get_music_auto_align_lyrics failed; defaulting to True")
+                return True
+        raw = str(self._music_config_value("auto_align_lyrics", "true")).strip().lower()
+        return raw not in _FALSE
+
+    async def _music_auto_align_take(
+        self,
+        *,
+        track_id: str,
+        path: Path,
+        lyrics: Any,
+        duration_s: Optional[float] = None,
+        replay: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Best-effort forced alignment after a vocal take finishes and exits its engine card lease.
+        Never fails or blocks take storage if Whisper is absent, uncached, busy, or low-match."""
+        try:
+            if not self._music_auto_align_enabled():
+                return
+            lines = MusicLyrics._known_lines_from_input(lyrics)
+            if not lyrics_align.has_alignable_words(lines):
+                return
+            whisper, _alias = self._music_pick_transcriber()
+            if whisper is None:
+                logger.debug("music: auto-align skipped for %s (no local Whisper provider)", track_id)
+                return
+            anchors = lyrics_align.anchors_from_yue2_result(replay) if isinstance(replay, Mapping) else None
+
+            async def _run_whisper(audio_path: Path) -> Dict[str, Any]:
+                return await self._music_run_local_whisper(
+                    whisper,
+                    audio_path,
+                    purpose="music Auto-align",
+                    bound_s=30.0,
+                    trigger_download=False,
+                    respect_size_limit=False,
+                )
+
+            lyr = await self._music_lyrics()
+            res = await lyr.align(
+                track_id,
+                lyrics_text=lines,
+                section_anchors=anchors,
+                duration_s=duration_s,
+                transcriber=_run_whisper,
+                min_matches_required=True,
+            )
+            stats = res.get("alignment") or {}
+            logger.info(
+                "music: auto-aligned generated take %s (%s/%s words matched, sidecar=%s)",
+                track_id,
+                stats.get("matched_words"),
+                stats.get("total_lyric_words"),
+                res.get("sidecar_written"),
+            )
+        except MusicLibraryError as exc:
+            logger.info("music: auto-align skipped for %s (%s: %s)", track_id, exc.code, exc.message)
+        except Exception as exc:
+            logger.warning("music: auto-align failed for %s (%s); keeping unsynced lyrics", track_id, exc)
 
     async def start_music_library(self) -> None:
         """Load the library and start watching its folders; called at service start."""
@@ -839,7 +937,8 @@ class MusicCommandsMixin:
                 self._music_runner_instance = MusicJobRunner(
                     store, self._music_engine_set(), self._music, dpc_home=self.settings.dpc_home_dir,
                     on_job_change=self._music_job_changed, lyrics_get=self._music_stored_lyrics,
-                    lyrics_save=self._music_save_take_lyrics, describer=self._music_describe_for_job)
+                    lyrics_save=self._music_save_take_lyrics, describer=self._music_describe_for_job,
+                    auto_align=self._music_auto_align_take)
             self._music_runner_instance.start()
         except Exception:
             logger.exception("music: the job runner did not start")
@@ -1788,6 +1887,18 @@ class MusicCommandsMixin:
         except Exception as exc:
             return _error(exc)
 
+    @slow_command
+    async def align_music_lyrics(self, track_id: str, overwrite_manual: bool = False) -> Dict[str, Any]:
+        """Force-align existing known/unsynced lyrics of `track_id` against its audio using Whisper
+        word timestamps, keeping the exact verbatim lyric text, storing `source: "aligned"`,
+        writing `<track>.lrc`, and returning `{status: "ok", lyrics, applied, lrc, alignment}`."""
+        try:
+            lyrics = await self._music_lyrics()
+            answer = await lyrics.align(track_id, overwrite_manual=overwrite_manual is True)
+            return {"status": "ok", **answer}
+        except Exception as exc:
+            return _error(exc)
+
     # -- MP3 export (music/export.py, Mike #210) -----------------------------------------
 
     _music_exporter_instance: Optional[MusicExporter] = None
@@ -1852,6 +1963,8 @@ class MusicCommandsMixin:
             raise ExportError("not_hashed", f"{title!r} is still being identified; try again in a moment")
         lyrics_text: Optional[str] = None
         lyrics_lang: Optional[str] = None
+        synced_lines: Optional[List[Dict[str, Any]]] = None
+        lyrics_source: Optional[str] = None
         try:
             stored = await (await self._music_lyrics()).load_stored(entry["id"])
         except Exception:
@@ -1860,6 +1973,12 @@ class MusicCommandsMixin:
             lines = [str(line.get("text") or "") for line in stored.get("lines") or []]
             lyrics_text = "\n".join(lines).strip() or None
             lyrics_lang = stored.get("language")
+            lyrics_source = stored.get("source")
+            if stored.get("synced") is not False:
+                timed = [ln for ln in (stored.get("lines") or [])
+                         if isinstance(ln, dict) and ln.get("t_start") is not None]
+                if timed:
+                    synced_lines = list(stored.get("lines") or [])
         take, job = await self._music_take_of(entry)
         take_record = await asyncio.to_thread(read_take_sidecar, path) if entry.get("origin") == "generated" else None
         tp = basis = None
@@ -1873,7 +1992,8 @@ class MusicCommandsMixin:
         return ExportSource(
             track_id=entry["id"], path=path, content_hash=entry["content_hash"], title=title,
             artist=entry.get("artist"), album=entry.get("album"), lyrics=lyrics_text, lyrics_language=lyrics_lang,
-            true_peak_dbtp=tp, true_peak_basis=basis, take_record=take_record, origin=entry.get("origin"))
+            true_peak_dbtp=tp, true_peak_basis=basis, take_record=take_record, origin=entry.get("origin"),
+            synced_lines=synced_lines, lyrics_source=lyrics_source)
 
     @staticmethod
     def _music_watched_folder_of(library: MusicLibrary, root: Path) -> Optional[str]:
@@ -2043,6 +2163,7 @@ MUSIC_COMMANDS = (
     "save_music_lyrics",
     "lookup_music_lyrics_lrclib",
     "transcribe_music_lyrics",
+    "align_music_lyrics",
     "get_music_stream_info",
     "list_music_comments",
     "add_music_comment",

@@ -398,10 +398,13 @@ async def run_song_job(runner: Any, job: dict) -> None:
                 await _on_the_card(runner, job, prepared, engine)
         except _Cancelled:
             await shown.settled()
+            runner._clear_deferred_align(job_id)
             logger.info("music: %s job %s cancelled while it waited for the card", job["type"], job_id)
         finally:
             engine.card_lease.release_when_empty("its job ended with no engine running", holds=engine.alive)
+        await runner._finalize_deferred(job_id)
     finally:
+        runner._clear_deferred_align(job_id)
         runner._song_dress.pop(job_id, None)
         for p in (out_dir / name for name in TEMP_PARTS):
             try:
@@ -666,7 +669,7 @@ async def _cover_on_acestep(runner: Any, job: dict, prepared: _Prepared, engine:
                   "engine": identity.get("engine") or "acestep.cpp", "lm_seed": None})
         await runner._progress(job_id, round(0.8 + 0.2 * variant / variants, 4))
     await runner._check(job_id)
-    await runner._change(runner.store.finish_job, job_id)
+    await runner._complete_generation(job_id)
 
 
 async def _transcribe(runner: Any, job_id: str, engine: Any, wav: Path, melody_only: bool,

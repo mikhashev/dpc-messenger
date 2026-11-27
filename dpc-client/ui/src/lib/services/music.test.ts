@@ -22,7 +22,7 @@ const h = vi.hoisted(() => {
 vi.mock('$lib/coreService', () => {
     const unavailable = async () => ({ ok: false, unavailable: true, message: '' });
     return {
-        addMusicFolder: unavailable, createMusicPlaylist: unavailable, deleteMusicPlaylist: unavailable,
+        addMusicFolder: unavailable, alignMusicLyrics: unavailable, createMusicPlaylist: unavailable, deleteMusicPlaylist: unavailable,
         listMusicFolders: unavailable, listMusicLibrary: unavailable, listMusicPlaylists: unavailable,
         removeMusicFolder: unavailable, rescanMusicFolder: unavailable, updateMusicPlaylist: unavailable,
     };

@@ -155,9 +155,9 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "describe_music_track",
     "list_music_discard_reasons", "set_music_discard_reason_class",
     "list_music_playlists", "create_music_playlist", "update_music_playlist", "delete_music_playlist",
-    # The lyrics chain (ADR-051 D6): .lrc sidecar, tags, LRCLIB; transcribe; manual edits
+    # The lyrics chain (ADR-051 D6): .lrc sidecar, tags, LRCLIB; transcribe; align; manual edits
     "get_music_lyrics", "save_music_lyrics", "lookup_music_lyrics_lrclib", "transcribe_music_lyrics",
-    "get_music_lyrics_transcript_raw",
+    "align_music_lyrics", "get_music_lyrics_transcript_raw",
     # The track stream (ADR-051 N8): its loopback base URL and token, for the <audio> element
     "get_music_stream_info",
     # Timecoded listening notes on a library track (mp.comment/1)

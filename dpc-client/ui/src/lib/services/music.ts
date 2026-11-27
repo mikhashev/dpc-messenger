@@ -25,6 +25,7 @@
 import { derived, get, writable } from 'svelte/store';
 import {
     addMusicFolder,
+    alignMusicLyrics as coreAlignMusicLyrics,
     createMusicPlaylist,
     deleteGeneratedMusicFile,
     deleteMusicPlaylist,
@@ -910,6 +911,14 @@ export function transcribeMusicLyrics(
     opts: { overwriteManual?: boolean } = {},
 ): Promise<MusicAnswer<LyricsAnswer>> {
     return callMusic<LyricsAnswer>(sendCommand, 'transcribe_music_lyrics', transcribeLyricsPayload(trackId, opts));
+}
+
+/** "Align to audio": aligns existing unsynced lyrics to Whisper word timestamps while keeping their text verbatim. */
+export function alignMusicLyrics(
+    trackId: string,
+    opts: { overwriteManual?: boolean } = {},
+): Promise<MusicAnswer<LyricsAnswer>> {
+    return coreAlignMusicLyrics(trackId, opts);
 }
 
 export function clearNotice(): void {

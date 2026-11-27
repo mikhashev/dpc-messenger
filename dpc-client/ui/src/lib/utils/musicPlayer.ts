@@ -895,7 +895,7 @@ export interface LyricsLine {
 export interface Lyrics {
     schema?: string;
     track_hash: string;
-    source: 'lrc' | 'tags' | 'lrclib' | 'transcribe' | 'manual' | string;
+    source: 'lrc' | 'tags' | 'lrclib' | 'transcribe' | 'aligned' | 'manual' | string;
     language?: string | null;
     /** Absent means synced; false only for plain (untimed) lines. */
     synced?: boolean;
@@ -1002,6 +1002,18 @@ export const TRANSCRIBE_NOTE_TEXT =
     "Runs DPC's speech-to-text (your voice transcription provider) on this track's file. "
     + 'With local Whisper the audio stays on this machine; a cloud or peer provider receives it. '
     + 'Sung words over music are often misheard: check the lines.';
+
+/** The note on the "Align to audio" button: aligns existing unsynced lyric lines against
+ *  Whisper word timestamps while preserving the exact lyric text. */
+export const ALIGN_NOTE_TEXT =
+    'Uses local Whisper word timestamps to time these existing lyric lines without changing their wording.';
+
+/** The payload of `align_music_lyrics`: `overwrite_manual` only when confirmed over existing synced edits. */
+export function alignLyricsPayload(trackId: string, opts: { overwriteManual?: boolean } = {}): Record<string, any> {
+    const payload: Record<string, any> = { track_id: trackId };
+    if (opts.overwriteManual === true) payload.overwrite_manual = true;
+    return payload;
+}
 
 /** The payload of `transcribe_music_lyrics`: `overwrite_manual` only when the person
  *  confirmed replacing their own lyrics. */

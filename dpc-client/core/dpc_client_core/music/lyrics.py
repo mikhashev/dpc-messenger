@@ -106,7 +106,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
-from . import id3_sylt, lyrics_filter, schemas
+from . import id3_sylt, lyrics_align, lyrics_filter, schemas
 from .identity import FFPROBE_TIMEOUT_S, MediaTools
 from .library import MusicLibraryError
 from .store import atomic_write_json, atomic_write_text, music_dir_of
@@ -137,6 +137,8 @@ CACHEABLE_RESULTS = FOUND_RESULTS + NEGATIVE_RESULTS
 
 # The stored source of transcribed lyrics: SPEC §4's word, already in schemas.LYRICS_SOURCES.
 TRANSCRIBE_SOURCE = "transcribe"
+# The stored source of forced-aligned lyrics (verbatim known lines aligned to Whisper word timestamps).
+ALIGNED_SOURCE = "aligned"
 
 # What the transcribe action is handed: the track's file in, a result out shaped like
 # `LocalWhisperProvider.transcribe`'s: `text`, `language`, `duration`, `provider`,
@@ -278,6 +280,16 @@ def format_lrc(lyrics: Optional[dict]) -> str:
         end = f" <{lrc_stamp(line['t_end'])}>" if line.get("t_end") is not None else ""
         out.append(f"[{lrc_stamp(line['t_start'])}] {line['text']}{end}")
     return "\n".join(out)
+
+
+def write_lrc(audio: Path, lyrics: dict) -> Path:
+    """Write `lyrics` atomically as `<audio>.lrc` next to `audio` and return the sidecar path."""
+    text = format_lrc(lyrics)
+    if not text.strip():
+        raise ValueError("no lyrics lines to write to .lrc sidecar")
+    sidecar = Path(audio).with_suffix(".lrc")
+    atomic_write_text(sidecar, text + "\n")
+    return sidecar
 
 
 def plain_lines(text: str) -> List[dict]:
@@ -1275,6 +1287,144 @@ class MusicLyrics:
         self._transcribe_runs[track_id] = {"state": "done", "applied": answer["applied"],
                                            "transcription": copy.deepcopy(info), "finished_at": _now_iso()}
         return answer
+
+    @staticmethod
+    def _has_timed_lines(record: Optional[dict]) -> bool:
+        return (record is not None
+                and record.get("synced") is not False
+                and any(isinstance(ln, dict) and ln.get("t_start") is not None
+                        for ln in (record.get("lines") or [])))
+
+    @staticmethod
+    def _known_lines_from_input(lyrics_text: Any) -> List[str]:
+        if isinstance(lyrics_text, str):
+            return [ln.strip() for ln in lyrics_text.splitlines() if ln.strip()]
+        if isinstance(lyrics_text, (list, tuple)):
+            out: List[str] = []
+            for item in lyrics_text:
+                txt = item.get("text") if isinstance(item, dict) else item
+                s = str(txt or "").strip()
+                if s:
+                    out.append(s)
+            return out
+        return []
+
+    async def align(
+        self,
+        track_id: str,
+        *,
+        overwrite_manual: bool = False,
+        lyrics_text: Any = None,
+        section_anchors: Optional[List[Any]] = None,
+        duration_s: Optional[float] = None,
+        transcriber: Optional[Transcriber] = None,
+        min_matches_required: bool = True,
+    ) -> Dict[str, Any]:
+        """Force-align existing unsynced (or explicit known) lyrics against audio using Whisper word
+        timestamps, preserving exact verbatim text, saving `source: "aligned"` in `music/lyrics/`
+        and writing a synced `.lrc` sidecar beside the audio file."""
+        lyrics_file = self.lyrics_path(track_id)
+        async with self._lock(track_id):
+            entry = self.library.get_entry(track_id)
+            path = self.library.get_track_path(track_id)
+            if path is None or not Path(path).is_file():
+                raise MusicLibraryError(
+                    "no_file", "the track has no local file now (missing, or a web track); "
+                               "alignment needs the audio on this machine")
+            stored = await asyncio.to_thread(self._read_stored, lyrics_file)
+            use_transcriber = transcriber if transcriber is not None else self.transcriber
+            if use_transcriber is None:
+                raise MusicLibraryError("transcription_unavailable",
+                                        "transcription is not available in this build of the core")
+            if lyrics_text is not None:
+                raw_lines = self._known_lines_from_input(lyrics_text)
+                existing_lang: Optional[str] = stored.get("language") if stored else None
+                if not overwrite_manual and self._own_edit(stored) and self._has_timed_lines(stored):
+                    raise MusicLibraryError(
+                        "overwrite_manual_required",
+                        "the stored lyrics are your own synced edits; replacing their times needs overwrite_manual",
+                    )
+            else:
+                source_rec = stored
+                if source_rec is None:
+                    found, _chain, _lrclib = await self._run_chain(
+                        entry, self.lrclib_enabled(), stored=None, run=self.transcribe_run(track_id))
+                    source_rec = found
+                if source_rec is None:
+                    raise MusicLibraryError(
+                        "no_lyrics", "no lyrics found for this track to align; add or transcribe lyrics first")
+                if not overwrite_manual and self._own_edit(stored) and self._has_timed_lines(stored):
+                    raise MusicLibraryError(
+                        "overwrite_manual_required",
+                        "the stored lyrics are your own synced edits; replacing their times needs overwrite_manual",
+                    )
+                raw_lines = self._known_lines_from_input(source_rec.get("lines") or [])
+                existing_lang = source_rec.get("language")
+
+            if not raw_lines or not lyrics_align.has_alignable_words(raw_lines):
+                raise MusicLibraryError("no_lyrics", "lyrics have no sung words to align")
+            track_dur = duration_s if duration_s is not None else await self._duration(entry, Path(path), None)
+
+        try:
+            result = await use_transcriber(Path(path))
+        except MusicLibraryError:
+            raise
+        except Exception as exc:
+            logger.warning("music: aligning %s failed during transcription: %s", track_id, exc)
+            raise MusicLibraryError("transcription_failed", f"transcription failed: {exc}") from exc
+
+        if not isinstance(result, dict):
+            raise MusicLibraryError("transcription_failed", "the transcription gave no result")
+        effective_dur = track_dur if track_dur is not None else _finite(result.get("duration"))
+        aligned = lyrics_align.align_result_to_lyrics(
+            raw_lines, result, duration_s=effective_dur, section_anchors=section_anchors)
+        if aligned.whisper_words == 0:
+            raise MusicLibraryError(
+                "no_speech", "no timed speech was detected to align these lyrics (track may be instrumental)")
+        if min_matches_required and not aligned.sufficient:
+            raise MusicLibraryError(
+                "alignment_failed",
+                f"could not align lyrics reliably to the audio ({aligned.matched_words}/"
+                f"{aligned.total_lyric_words} words matched)",
+            )
+
+        res_lang = result.get("language")
+        cleaned_lang = res_lang.strip() if isinstance(res_lang, str) and res_lang.strip() not in ("", "unknown") else None
+        lang = existing_lang or cleaned_lang
+
+        async with self._lock(track_id):
+            now_entry = self.library.get_entry(track_id)
+            if now_entry.get("source_hash") != entry["source_hash"]:
+                raise MusicLibraryError(
+                    "track_changed", "the track's file changed while it was aligned; align it again")
+            stored_now = await asyncio.to_thread(self._read_stored, lyrics_file)
+            record = make_lyrics(entry["source_hash"], ALIGNED_SOURCE, aligned.lines, synced=True, language=lang)
+            if not overwrite_manual and self._own_edit(stored_now) and self._has_timed_lines(stored_now):
+                return {
+                    "lyrics": stored_now,
+                    "applied": False,
+                    "candidate": record,
+                    "lrc": format_lrc(record),
+                    "kept": "you saved synced lyrics while alignment ran, so they are kept",
+                    "alignment": aligned.stats(),
+                }
+            await self._store(track_id, record)
+            sidecar_written = False
+            sidecar_path: Optional[Path] = None
+            try:
+                sidecar_path = await asyncio.to_thread(write_lrc, Path(path), record)
+                sidecar_written = True
+            except OSError as exc:
+                logger.warning("music: could not write .lrc sidecar beside %s: %s", path, exc)
+            return {
+                "lyrics": record,
+                "applied": True,
+                "candidate": None,
+                "lrc": format_lrc(record),
+                "lrc_path": str(sidecar_path) if sidecar_path is not None else None,
+                "sidecar_written": sidecar_written,
+                "alignment": aligned.stats(),
+            }
 
     async def save_manual(self, track_id: str, lrc_text: str) -> Dict[str, Any]:
         """Store the person's LRC as `source: "manual"`. Refused while a line has no

@@ -147,7 +147,8 @@ _FEATURES: Dict[str, Dict[str, str]] = {
     "transcribe": {"status": SUPPORTED, "reason": "DPC local Whisper through transcribe_music_lyrics; segment timestamps"},
     "lyrics_tags": {"status": SUPPORTED, "reason": "sidecar .lrc and file tags through ffprobe; ID3 SYLT is not read"},
     "lyrics_lrclib": {"status": SUPPORTED, "reason": "lrclib.net from core, on the person's explicit lookup"},
-    "word_timings": {"status": PLANNED, "reason": "no forced aligner installed"},
+    "word_timings": {"status": SUPPORTED, "reason": "forced line alignment from Whisper word timestamps "
+                                                   "(music/lyrics_align.py, align_music_lyrics)"},
     "qc": {"status": SUPPORTED, "reason": "mp.qc/1 on every take with stage 1 (qc.py, take.qc); the stage-2 audio judge runs only on judge_music_take when [music] qc_judge_alias names an audio llama-server alias; ranking by scores.overall is off by default ([music] qc_ranking, decision 26)"},
 }
 

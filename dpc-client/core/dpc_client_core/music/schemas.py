@@ -261,7 +261,7 @@ def validate_track(track: Any) -> None:
             _expect(s, _is_str(track[key]), f"'{key}' must be a string")
 
 
-LYRICS_SOURCES = ("lrc", "tags", "lrclib", "transcribe", "manual")
+LYRICS_SOURCES = ("lrc", "tags", "lrclib", "transcribe", "manual", "aligned")
 _LYRICS_REQUIRED = ("schema", "track_hash", "source", "lines")
 _LYRICS_KEYS = set(_LYRICS_REQUIRED) | {"language", "synced", "edited", "job_id", "lrclib", "transcription",
                                         "updated_at"}

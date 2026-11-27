@@ -342,3 +342,32 @@ describe('Transcribe (the explicit step 4 of the chain)', () => {
         expect(musicService).toContain("'transcribe_music_lyrics'");
     });
 });
+
+import coreServiceRaw from '../coreService.ts?raw';
+import { ALIGN_NOTE_TEXT, alignLyricsPayload } from './musicPlayer';
+
+describe('Align to audio (forced alignment for unsynced lyrics)', () => {
+    it('formats the badge as "aligned", with edited/unsynced suffixes', () => {
+        expect(lyricsBadge({ track_hash: 'h', source: 'aligned', lines: LINES })).toBe('aligned');
+        expect(lyricsBadge({ track_hash: 'h', source: 'aligned', edited: true, lines: LINES })).toBe('aligned · edited');
+    });
+
+    it('builds the align_music_lyrics payload cleanly', () => {
+        expect(alignLyricsPayload('trk_1')).toEqual({ track_id: 'trk_1' });
+        expect(alignLyricsPayload('trk_1', { overwriteManual: false })).toEqual({ track_id: 'trk_1' });
+        expect(alignLyricsPayload('trk_1', { overwriteManual: true })).toEqual({ track_id: 'trk_1', overwrite_manual: true });
+        expect(ALIGN_NOTE_TEXT).toContain('Whisper');
+    });
+
+    it('wires alignMusicLyrics in coreService.ts and services/music.ts and shows Align to audio on unsynced lyrics', () => {
+        expect(coreServiceRaw).toContain("'align_music_lyrics'");
+        expect(coreServiceRaw).toContain('export function alignMusicLyrics(');
+        expect(musicService).toContain('alignMusicLyrics');
+        expect(lyricsPanel).toContain('async function alignToAudio(');
+        expect(lyricsPanel).toContain('onclick={alignToAudio}');
+        expect(lyricsPanel).toContain("busy === 'align' ? 'Aligning…' : 'Align to audio'");
+        const effect = lyricsPanel.slice(lyricsPanel.indexOf('// Another track: start over'), lyricsPanel.indexOf('let synced = $derived'));
+        const load = lyricsPanel.slice(lyricsPanel.indexOf('async function load('), lyricsPanel.indexOf('// Another track: start over'));
+        for (const part of [effect, load]) expect(part).not.toMatch(/alignToAudio|alignMusicLyrics|align_music_lyrics/);
+    });
+});

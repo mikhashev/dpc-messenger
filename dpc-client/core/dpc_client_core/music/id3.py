@@ -12,11 +12,19 @@ compressed, encrypted or unsynchronised frame, and never raises.
 
 from __future__ import annotations
 
+import struct
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 ID3_READ_MAX_BYTES = 1024 * 1024
 ID3_PADDING = 1024
+
+_ISO639_1_TO_2 = {
+    "en": "eng", "ru": "rus", "uk": "ukr", "de": "deu", "fr": "fra", "es": "spa",
+    "it": "ita", "pt": "por", "pl": "pol", "nl": "nld", "sv": "swe", "no": "nor",
+    "da": "dan", "fi": "fin", "cs": "ces", "tr": "tur", "ar": "ara", "he": "heb",
+    "hi": "hin", "ja": "jpn", "ko": "kor", "zh": "zho", "id": "ind", "vi": "vie",
+}
 
 
 def _syncsafe(n: int) -> bytes:
@@ -47,6 +55,8 @@ def txxx_frame(desc: str, value: str) -> bytes:
 
 def _lang3(language: Optional[str]) -> bytes:
     lang = (language or "").strip().lower()
+    if len(lang) == 2 and lang in _ISO639_1_TO_2:
+        lang = _ISO639_1_TO_2[lang]
     return lang.encode("ascii") if len(lang) == 3 and lang.isascii() and lang.isalpha() else b"xxx"
 
 
@@ -56,6 +66,30 @@ def comm_frame(text: str, language: Optional[str] = None) -> bytes:
 
 def uslt_frame(text: str, language: Optional[str] = None) -> bytes:
     return _frame("USLT", b"\x03" + _lang3(language) + b"\x00" + _clean(text).encode("utf-8"))
+
+
+def sylt_frame(lines: Sequence[Mapping[str, Any]], language: Optional[str] = None,
+               content_type: int = 1, descriptor: str = "") -> bytes:
+    """ID3v2.4 SYLT frame (UTF-8, millisecond timestamps) matching `id3_sylt.parse_sylt_frame`."""
+    entries: List[Tuple[int, str]] = []
+    for line in lines or ():
+        if not isinstance(line, Mapping):
+            continue
+        t = line.get("t_start")
+        text = _clean(line.get("text") or "").strip()
+        if isinstance(t, bool) or not isinstance(t, (int, float)) or not text:
+            continue
+        ms = max(0, int(round(float(t) * 1000)))
+        entries.append((ms, text))
+    entries.sort(key=lambda item: item[0])
+    payload = bytearray([3])
+    payload.extend(_lang3(language))
+    payload.append(2)  # timestamp format: milliseconds
+    payload.append(int(content_type) & 0xFF)
+    payload.extend(_clean(descriptor).encode("utf-8") + b"\x00")
+    for ms, text in entries:
+        payload.extend(text.encode("utf-8") + b"\x00" + struct.pack(">I", ms))
+    return _frame("SYLT", bytes(payload))
 
 
 def build_id3v24(frames: Sequence[bytes], padding: int = ID3_PADDING) -> bytes:

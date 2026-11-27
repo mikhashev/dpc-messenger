@@ -129,7 +129,7 @@ from . import provenance as mp_provenance
 from .audio_tags import (WAV_INFO_PROVENANCE_KEY, WAV_RECORD_READ_MAX, _build_vorbis, _parse_vorbis,
                          flac_read_comments, wav_read_id3, wav_read_provenance)
 from .id3 import (ID3_PADDING, ID3_READ_MAX_BYTES, _clean, _frame, _syncsafe, _unsyncsafe,  # noqa: F401 (re-exported)
-                  build_id3v24, comm_frame, read_id3_txxx, text_frame, txxx_frame, uslt_frame)
+                  build_id3v24, comm_frame, read_id3_txxx, sylt_frame, text_frame, txxx_frame, uslt_frame)
 from .identity import MediaTools, file_sha256, read_flac_streaminfo
 from .loudness import LoudnessError, measure_loudness
 from .store import atomic_write_text
@@ -601,6 +601,8 @@ class ExportSource:
     album: Optional[str] = None
     lyrics: Optional[str] = None
     lyrics_language: Optional[str] = None
+    synced_lines: Optional[List[Dict[str, Any]]] = None
+    lyrics_source: Optional[str] = None
     true_peak_dbtp: Optional[float] = None
     true_peak_basis: Optional[str] = None
     take_record: Optional[Dict[str, Any]] = None
@@ -1262,6 +1264,33 @@ class MusicExporter:
                     collected[key] = val
         return list(collected.items())
 
+    @staticmethod
+    def _synced_lines_for_tag(source: ExportSource, lyrics: Optional[str]) -> List[Dict[str, Any]]:
+        """Timed lyrics lines for ID3 SYLT / Vorbis SYNCEDLYRICS from `source.synced_lines` or LRC `lyrics`."""
+        raw = source.synced_lines
+        if raw:
+            out: List[Dict[str, Any]] = []
+            for ln in raw:
+                if not isinstance(ln, dict):
+                    continue
+                t = ln.get("t_start")
+                text = str(ln.get("text") or "").strip()
+                if not isinstance(t, bool) and isinstance(t, (int, float)) and t >= 0 and text:
+                    item: Dict[str, Any] = {"t_start": float(t), "text": text}
+                    t_end = ln.get("t_end")
+                    if not isinstance(t_end, bool) and isinstance(t_end, (int, float)) and t_end > t:
+                        item["t_end"] = float(t_end)
+                    out.append(item)
+            if out:
+                return out
+        if lyrics:
+            from .lyrics import parse_lrc
+
+            parsed = parse_lrc(lyrics)
+            if parsed.lines:
+                return parsed.lines
+        return []
+
     def _frames(self, source: ExportSource, preset: str, tags: Dict[str, str], record: Dict[str, Any],
                 limit: bool = True) -> List[bytes]:
         frames = [text_frame("TIT2", source.title or source.path.stem)]
@@ -1282,6 +1311,9 @@ class MusicExporter:
         lyrics = self._lyrics_for_tag(source, tags, record)
         if lyrics:
             frames.append(uslt_frame(lyrics, source.lyrics_language))
+        synced = self._synced_lines_for_tag(source, lyrics)
+        if synced:
+            frames.append(sylt_frame(synced, source.lyrics_language))
         frames.append(text_frame("TSSE", f"DPC MP3 export, {PRESETS[preset]['label']}, "
                                          f"{self._ffmpeg_version or 'ffmpeg'} libmp3lame"))
         frames.append(txxx_frame(MARKER_TAG, source.content_hash))
@@ -1314,6 +1346,13 @@ class MusicExporter:
         lyrics = self._lyrics_for_tag(source, tags, record)
         if lyrics:
             out.append(("LYRICS", lyrics))
+        synced = self._synced_lines_for_tag(source, lyrics)
+        if synced:
+            from .lyrics import format_lrc
+
+            lrc_text = format_lrc({"language": source.lyrics_language, "lines": synced})
+            if lrc_text:
+                out.append(("SYNCEDLYRICS", lrc_text))
         out.append(("ENCODER", f"DPC export, {PRESETS[preset]['label']}, {self._ffmpeg_version or 'ffmpeg'} libopus"))
         out.append((MARKER_TAG, source.content_hash))
         out.append((PRESET_TAG, preset))

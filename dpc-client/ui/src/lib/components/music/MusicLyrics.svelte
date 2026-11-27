@@ -30,10 +30,11 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { getMusicLyrics, getMusicLyricsTranscriptRaw, saveMusicLyrics } from '$lib/coreService';
-  import { lookupLyricsOnLrclib, seekTo, transcribeMusicLyrics } from '$lib/services/music';
+  import { alignMusicLyrics, lookupLyricsOnLrclib, seekTo, transcribeMusicLyrics } from '$lib/services/music';
   import { confirmAsync } from '$lib/utils/dialog';
   import { filterNote, filterReportOf, type RawTranscriptAnswer } from '$lib/utils/musicLyricsFilter';
   import {
+    ALIGN_NOTE_TEXT,
     LRCLIB_EGRESS_TEXT,
     LYRICS_OVERWRITE_CONFIRM_TEXT,
     TRANSCRIBE_NOTE_TEXT,
@@ -81,7 +82,7 @@
   let draft = $state('');
   let draftEl = $state<HTMLTextAreaElement | null>(null);
   let editMessage = $state('');
-  let busy = $state<'' | 'lookup' | 'save' | 'refresh' | 'transcribe'>('');
+  let busy = $state<'' | 'lookup' | 'save' | 'refresh' | 'transcribe' | 'align'>('');
   let transcribeRun = $state<TranscribeRun | null>(null);
   let transcribed = $state<TranscriptionInfo | null>(null);
   // The kept raw transcript's report (get_music_lyrics_transcript_raw): keeps the dropped lines visible after the run.
@@ -315,9 +316,41 @@
   }
 
   function stepText(s: LyricsChainStep): string {
-    const names: Record<string, string> = { lrc: '.lrc sidecar', tags: 'File tags', lrclib: 'LRCLIB', transcribe: 'Transcribe', manual: 'Manual edit' };
+    const names: Record<string, string> = { lrc: '.lrc sidecar', tags: 'File tags', lrclib: 'LRCLIB', transcribe: 'Transcribe', aligned: 'Aligned', manual: 'Manual edit' };
     const state = s.state.replace(/_/g, ' ');
     return `${names[s.step] ?? s.step}: ${state}${s.detail ? ` (${s.detail})` : ''}`;
+  }
+
+  async function alignToAudio() {
+    const id = trackId;
+    if (!id || busy) return;
+    busy = 'align';
+    message = '';
+    note = '';
+    let a = await alignMusicLyrics(id);
+    if (!a.ok && a.code === 'overwrite_manual_required') {
+      const yes = await confirmAsync(
+        'Replace your existing synced times with newly aligned times? Your lyric text will be kept verbatim.',
+        { title: 'Align lyrics', kind: 'warning' },
+      );
+      if (yes && trackId === id) a = await alignMusicLyrics(id, { overwriteManual: true });
+      else {
+        busy = '';
+        return;
+      }
+    }
+    busy = '';
+    if (trackId !== id) return;
+    if (!a.ok) {
+      message = a.unavailable
+        ? 'Align to audio is not available on this backend yet.'
+        : `Align to audio: ${a.message}`;
+      return;
+    }
+    lyrics = a.data.lyrics ?? null;
+    candidate = null;
+    if (a.data.kept) note = a.data.kept;
+    status = 'ready';
   }
 
   // What transcribed the stored lyrics (`mp.lyrics/1` `transcription`, only on source
@@ -371,7 +404,18 @@
         <p class="line next">{win.next >= 0 ? lyrics.lines[win.next].text : ''}</p>
       </div>
     {:else if lyrics}
-      <p class="muted small">Unsynced lyrics ({lyrics.lines.length} lines, no times): no highlight or seek. Edit and stamp each line while it plays to sync them.</p>
+      <p class="muted small">Unsynced lyrics ({lyrics.lines.length} lines, no times): no highlight or seek. Align to audio with Whisper, or edit and stamp each line while it plays.</p>
+      <div class="unsynced-actions">
+        <button
+          type="button"
+          class="small-btn primary"
+          onclick={alignToAudio}
+          disabled={!!busy}
+          aria-busy={busy === 'align'}
+          title={ALIGN_NOTE_TEXT}
+        >{busy === 'align' ? 'Aligning…' : 'Align to audio'}</button>
+      </div>
+      {#if busy === 'align'}<p class="muted tiny" role="status">Aligning lyrics to audio with Whisper…</p>{/if}
       {#if !expanded}<p class="line">{lyrics.lines[0]?.text ?? ''}</p>{/if}
     {:else if status === 'ready'}
       <p class="muted small" role="status">{emptyText}</p>
@@ -552,7 +596,7 @@
   .t { flex: 0 0 auto; font-size: 12px; color: var(--text-secondary, #a9b0bb); font-variant-numeric: tabular-nums; }
   .x { overflow-wrap: anywhere; }
 
-  .candidate, .lookup, .row-btns { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .candidate, .lookup, .row-btns, .unsynced-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .text-input {
     flex: 1 1 120px;
     min-width: 0;

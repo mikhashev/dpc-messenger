@@ -1636,6 +1636,7 @@ class MusicLibrary:
             raise MusicLibraryError("unknown_track", f"no track {track_id}")
         target = self._owned_file(e)
         sidecar = target.with_suffix(".json")
+        lrc_sidecar = target.with_suffix(".lrc")
         try:
             if not target.is_file():
                 raise MusicLibraryError("file_missing", "the file is not there: use Remove from library")
@@ -1644,6 +1645,9 @@ class MusicLibrary:
             if sidecar.is_file() and sidecar.resolve().is_relative_to(self._generated_root()):
                 sidecar.unlink()
                 deleted.append(str(sidecar))
+            if lrc_sidecar.is_file() and lrc_sidecar.resolve().is_relative_to(self._generated_root()):
+                lrc_sidecar.unlink()
+                deleted.append(str(lrc_sidecar))
         except OSError as exc:
             raise MusicLibraryError("delete_failed", f"could not delete {target.name}: {exc}")
         title = e.get("title")
