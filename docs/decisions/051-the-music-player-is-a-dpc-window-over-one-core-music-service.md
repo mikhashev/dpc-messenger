@@ -312,8 +312,16 @@ timestamps lie outside them and are worth one read by Mike before acceptance.
   Rights are the user's responsibility. What stays off is technical: a web file cannot be
   edited in place (SPEC §7 "Rights").
 - **D17. It is a research project, so non-commercial weights are acceptable**: YuE2
-  (CC BY-NC), SheetSage2 (CC BY-NC-4.0) and the NVIDIA Flamingo family. They block
-  anything published or sold.
+  (CC BY-NC), SheetSage2 (CC BY-NC-4.0) and the NVIDIA Flamingo family. ~~They block
+  anything published or sold.~~
+  *Amended 2026-11-27 (the owner, AI Studio group #66 and #90):* nothing in DPC blocks
+  publishing or selling. A take's licence (`licence` in its provenance record,
+  `music/provenance.py` `licence_record`) is a **warning shown to the person**, "like a
+  kitchen knife": DPC says what the take was made with and under which licence, and the
+  person decides. It goes into every format's standard tags as well as the provenance
+  record, survives export size limits, and is shown on the take card and in the export
+  dialog, with no blocking "are you sure" step (backlog card
+  A-TAKES-LICENCE-IS-WRITTEN-ONLY-INSIDE-THE-PROVENANCE-JSON-SO-PEOPLE-AND-OTHER-SOFTWARE-NEVER-SEE-IT).
 - **D18. Strata is switched through the existing swap.** For processes DPC did not start,
   that is the mechanism the GPU card adds (the epic's note of 2026-11-19 on
   EXTERNAL-GPU-JOBS-CANNOT-JOIN-THE-CARD-QUEUE-SO-AN-IDLE-ENGINE-KEEPS-THE-CARD-THEY-NEED).

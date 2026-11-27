@@ -187,10 +187,8 @@ provenance; the take lands in the peer's library as the peer's own track.**
   kind named, never the match.
 - **What must stay:** the `licence` block exactly as `licence_record` wrote it
   (`music/provenance.py:170-192`, docs `:54-61`), so the peer's library can tell
-  non-commercial takes apart. It is shown as a warning, never as a block. ADR-051 D17 still
-  reads "They block anything published or sold" (`051:314-316`); the export code has no
-  such block (grep of `non_commercial` in `music/export.py`: none). Aligning D17's text with
-  the owner's 2026-11-27 statement is outside this ADR.
+  non-commercial takes apart. It is shown as a warning, never as a block (ADR-051 D17 as
+  amended 2026-11-27 on the owner's word, #90).
 - **What the peer sees of the owner:** the capability report filtered to the allowed
   engines and adapters, by name and status only; never the owner's library, other jobs,
   queue contents or who holds the card. Default: **no library access**, and nothing in
@@ -200,11 +198,14 @@ provenance; the take lands in the peer's library as the peer's own track.**
 
 - The peer may pick any engine the owner lists in `music.engines` and the capability
   report marks available.
-- **Voice adapters: not offered by default.** They are trained on real readers' voices
+- **The owner grants adapters himself** (the owner, #89): a **"Share to peers"** option in
+  the music player's settings, per adapter, plus the `music` section of the firewall
+  (`music.adapters`). Nothing is shared until the owner ticks it.
+- **Voice adapters stay unticked by default.** They are trained on real readers' voices
   without stated consent and are marked "for local listening only"
-  (`music/yue2.py:67-69`, `ADAPTER_NOTE` `:147-148`). Purpose adapters (the instrumental
-  one, chosen by the job's kind) may be offered. `music.adapters` lists the names the
-  owner opens. **Open (owner decides).**
+  (`music/yue2.py:67-69`, `ADAPTER_NOTE` `:147-148`); the option shows that note next to
+  them. Purpose adapters (the instrumental one, chosen by the job's kind) can be ticked
+  like any other.
 
 ### D5. Where the take lives
 
@@ -214,10 +215,12 @@ provenance; the take lands in the peer's library as the peer's own track.**
   `computed_on: {kind: "remote_node", node_id}`. `_withhold_for_export`
   (`music/provenance.py:433-454`) must learn that field so the peer's own export withholds
   it too.
-- **On the owner:** the take is not registered in the owner's library. Its files and job
-  record are kept only until the peer confirms the file, or until `[music]
-  peer_result_hold_h` (proposed 24 h) passes, then removed. The ledger row (counts only, no
-  content) stays. Whether the owner may keep a copy: **Open (owner decides)**, default no.
+- **On the owner: no copy** (the owner, #86: "my node just provides remote inference, as
+  for text LLMs"). The take is not registered in the owner's library and nobody on the
+  owner's side auditions it. Its files and job record are removed as soon as the peer
+  confirms the file; only if the peer is offline are they held, for `[music]
+  peer_result_hold_h` (proposed 24 h), then removed. The ledger row (counts only, no
+  content) stays.
 
 ### D6. Ledger
 
@@ -368,14 +371,15 @@ All **Open (owner decides)**:
   (proposed 1), `peer_wait_s`, `peer_result_hold_h` (proposed 24 h).
 - **Q2. Approval default:** per job for every peer, or standing for the owner's own node
   group (proposed) and per job for others.
-- **Q3. Copies:** may the owner keep or audition a peer's take (proposed: no copy beyond
-  the hold)?
+- ~~Q3. Copies~~ **Decided 2026-11-27 (#86):** no copy, no audition; removed once the
+  peer confirms.
 - **Q4. Economy:** charge or credit peer music jobs; if so, per job or per GPU second, and
   which ledger columns (the token tariff does not fit).
-- **Q5. Adapters:** may a peer use the owner's adapters? Proposed: voice adapters never by
-  default; purpose adapters (instrumental) yes when the engine is allowed.
-- **Q6. ADR-051 D17 wording:** amend "They block anything published or sold" to the
-  warning reading of 2026-11-27, in ADR-051 itself.
+- ~~Q5. Adapters~~ **Decided 2026-11-27 (#89):** the owner grants each adapter through a
+  "Share to peers" option in the music player plus firewall settings; voice adapters
+  unticked by default.
+- ~~Q6. ADR-051 D17 wording~~ **Decided 2026-11-27 (#90):** amended in ADR-051 to the
+  warning reading.
 
 ## Authors
 
