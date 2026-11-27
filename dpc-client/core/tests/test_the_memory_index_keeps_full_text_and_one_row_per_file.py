@@ -40,6 +40,7 @@ class FakeProvider:
     model_name = "fake-embed"
     dimensions = DIMS
     max_tokens = 4096
+    device = "cpu"
     _model = None
 
     def __init__(self):
@@ -53,7 +54,7 @@ class FakeProvider:
         self.embedded.append(text)
         return self._vec(text)
 
-    def embed_batch(self, texts):
+    def embed_batch(self, texts, counters=None):
         self.embedded.extend(texts)
         return [self._vec(t) for t in texts]
 

@@ -584,6 +584,18 @@ _EMBEDDER_MOVE_S = 3.0
 _EMBEDDER_VRAM_MIB = {"BAAI/bge-m3": 2600}
 
 
+@dataclass
+class EmbeddingCacheCounters:
+    """The disk-cache outcomes of one caller's `embed_batch` calls, for that caller's own summary.
+
+    The provider is one per process and every agent's writer thread runs its pass on it, so the
+    counts live on a per-pass object the caller creates and hands to each call — never on the
+    provider, or two concurrent passes read each other's totals."""
+
+    hits: int = 0
+    misses: int = 0
+
+
 class EmbeddingProvider:
     """Lazy-loading embedding provider. BGE-M3 via sentence-transformers + PyTorch.
 
@@ -911,7 +923,12 @@ class EmbeddingProvider:
             _release_device_memory()
             return self._encode_within_memory(texts[:half]) + self._encode_within_memory(texts[half:])
 
-    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+    def embed_batch(self, texts: List[str],
+                    counters: Optional["EmbeddingCacheCounters"] = None) -> List[List[float]]:
+        """Embed `texts` cache-first: a hit is handed back as stored, a miss encoded and put.
+        `counters`, when the caller hands one in, leaves this call's real cache hits and misses
+        on the caller's object; the debug line below keeps saying nothing about an all-miss
+        batch, which is why the pass summary reads the counters, not the log."""
         self._load_model()
         import numpy as np
         cache = _get_disk_cache()
@@ -935,6 +952,9 @@ class EmbeddingProvider:
                 cache.put(text, self.model_name, window, vec)
                 results[idx] = vec.tolist()
         hits = len(texts) - len(misses)
+        if counters is not None:
+            counters.hits += hits
+            counters.misses += len(misses)
         if hits > 0:
             log.debug("Embedding cache: %d hits, %d misses out of %d texts", hits, len(misses), len(texts))
         return results

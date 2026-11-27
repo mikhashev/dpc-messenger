@@ -519,7 +519,7 @@ class DpcAgentManager:
                             import time
                             from pathlib import Path
                             import os
-                            from dpc_client_core.dpc_agent.memory import get_embedding_provider
+                            from dpc_client_core.dpc_agent.memory import EmbeddingCacheCounters, get_embedding_provider
                             from dpc_client_core.dpc_agent.retrieval import (
                                 TextAddItem, VectorAddItem, make_backend_for_agent,
                             )
@@ -701,6 +701,18 @@ class DpcAgentManager:
                             removed_files = [f for f in old_hashes if f not in new_hashes]
 
                             t_start = time.monotonic()
+                            # The pass's own counters and device, for the summary below: the
+                            # provider is a process-wide singleton shared with every other
+                            # agent's pass, so anything per-pass lives here, never on it.
+                            cache_counters = EmbeddingCacheCounters()
+                            embed_device = provider.device
+                            # Said at the start, not only at the end: a pass killed mid-flight
+                            # never reaches the summary, and its scale is what the kill was
+                            # about. One embedding per file, so documents are the whole count.
+                            log.info(
+                                "[%s] Per-file index update: %d documents to embed this pass",
+                                self.agent_id, len(to_embed),
+                            )
 
                             from dpc_client_core.dpc_agent.indexing_pipeline import (
                                 IndexRepair, repair_before_embedding,
@@ -731,7 +743,13 @@ class DpcAgentManager:
                                     # One card lease use for the whole pass on a lease-gated model
                                     # (ADR-052 3.4): the card when it is free, the CPU otherwise.
                                     with bulk_embedding(provider, [t for _, t, _ in to_embed],
-                                                        "index rebuild" if needs_full_rebuild else "index update"):
+                                                        "index rebuild" if needs_full_rebuild else "index update") as stint_device:
+                                        # What the stint yields is where this pass's bulk work
+                                        # starts — cuda only when the lease was actually
+                                        # granted, cpu otherwise. A provider that is not an
+                                        # EmbeddingProvider yields nothing and the resolved
+                                        # setting stands in.
+                                        embed_device = stint_device or embed_device
                                         for batch_start in range(0, len(to_embed), BATCH_SIZE):
                                             if self._stop_event.is_set():
                                                 log.info("Per-file indexing interrupted by shutdown at batch %d/%d", batch_start, len(to_embed))
@@ -739,7 +757,7 @@ class DpcAgentManager:
                                             batch = to_embed[batch_start:batch_start + BATCH_SIZE]
                                             batch_texts = [t for _, t, _ in batch]
                                             batch_metas = [m for _, _, m in batch]
-                                            vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
+                                            vectors = np.array(provider.embed_batch(batch_texts, counters=cache_counters), dtype=np.float32)
                                             backend.vector.add([
                                                 VectorAddItem(vector=vec.reshape(1, -1), meta=meta)
                                                 for vec, meta in zip(vectors, batch_metas)
@@ -805,10 +823,17 @@ class DpcAgentManager:
                                     log.debug("Failed to save file_hashes meta: %s", _e)
 
                             elapsed = time.monotonic() - t_start
+                            # The counters, not the "Embedding cache:" debug line in
+                            # embed_batch, are the source here: that line is printed only
+                            # when a batch had hits, so an all-miss pass — the one whose
+                            # minutes the card is about — would otherwise log no numbers
+                            # at all. Zero hits prints as zero.
                             log.info(
-                                "Per-file index update: %d unchanged, %d modified+new, %d removed → re-embed %d docs (%.1fs) [L5:%d L6:%d EXT:%d]",
+                                "Per-file index update: %d unchanged, %d modified+new, %d removed → re-embed %d docs "
+                                "(%.1fs, on %s, cache %d hits / %d misses) [L5:%d L6:%d EXT:%d]",
                                 len(unchanged), len(to_embed), len(removed_files),
-                                embedded, elapsed, l5_count, l6_count, ext_count,
+                                embedded, elapsed, embed_device, cache_counters.hits,
+                                cache_counters.misses, l5_count, l6_count, ext_count,
                             )
 
                             # ADR-024: Build knowledge graph (nodes + structural edges)
