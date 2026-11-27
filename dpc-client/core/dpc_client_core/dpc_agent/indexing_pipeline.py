@@ -9,6 +9,7 @@ Full rebuild if model/dimensions change (detected by backend.vector.needs_rebuil
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import os
@@ -33,6 +34,17 @@ _last_index_time: Dict[str, float] = {}
 
 
 
+
+
+def bulk_embedding(embedding_provider, items: int, what: str = "index rebuild"):
+    """The card lease stint for a bulk pass of `items` documents (ADR-052 3.4): one lease use for the
+    pass on a lease-gated `EmbeddingProvider`, which lets go when an owner's request waits and when the
+    pass ends; nothing for any other provider (a CPU setting, a fake, a remote one). `what` names the
+    use in the card queue."""
+    from .memory import EmbeddingProvider
+    if isinstance(embedding_provider, EmbeddingProvider):
+        return embedding_provider.card_stint(what, items)
+    return contextlib.nullcontext()
 
 
 def should_index(filepath: str) -> bool:
@@ -529,21 +541,22 @@ def full_rebuild(
 
     BATCH_SIZE = 4
     indexed_count = 0
-    for batch_start in range(0, len(all_doc_texts), BATCH_SIZE):
-        if stop_event and stop_event.is_set():
-            log.info("Indexing interrupted by shutdown at batch %d/%d", batch_start, len(all_doc_texts))
-            return indexed_count
-        batch_texts = all_doc_texts[batch_start:batch_start + BATCH_SIZE]
-        batch_metas = all_metas[batch_start:batch_start + BATCH_SIZE]
-        vectors = np.array(embedding_provider.embed_batch(batch_texts), dtype=np.float32)
-        if stop_event and stop_event.is_set():
-            log.info("Indexing interrupted by shutdown after embedding batch %d/%d", batch_start, len(all_doc_texts))
-            return indexed_count
-        backend.vector.add([
-            VectorAddItem(vector=vec.reshape(1, -1), meta=meta)
-            for vec, meta in zip(vectors, batch_metas)
-        ])
-        indexed_count += len(batch_texts)
+    with bulk_embedding(embedding_provider, len(all_doc_texts)):
+        for batch_start in range(0, len(all_doc_texts), BATCH_SIZE):
+            if stop_event and stop_event.is_set():
+                log.info("Indexing interrupted by shutdown at batch %d/%d", batch_start, len(all_doc_texts))
+                return indexed_count
+            batch_texts = all_doc_texts[batch_start:batch_start + BATCH_SIZE]
+            batch_metas = all_metas[batch_start:batch_start + BATCH_SIZE]
+            vectors = np.array(embedding_provider.embed_batch(batch_texts), dtype=np.float32)
+            if stop_event and stop_event.is_set():
+                log.info("Indexing interrupted by shutdown after embedding batch %d/%d", batch_start, len(all_doc_texts))
+                return indexed_count
+            backend.vector.add([
+                VectorAddItem(vector=vec.reshape(1, -1), meta=meta)
+                for vec, meta in zip(vectors, batch_metas)
+            ])
+            indexed_count += len(batch_texts)
 
     if stop_event and stop_event.is_set():
         log.info("Indexing interrupted by shutdown before BM25 build")

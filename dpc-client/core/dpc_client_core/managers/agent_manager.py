@@ -525,7 +525,7 @@ class DpcAgentManager:
                             )
                             from dpc_client_core.dpc_agent.text_extract import extract_text, is_binary
                             from dpc_client_core.dpc_agent.indexing_pipeline import (
-                                document_meta, doc_hash, _BACKFILL_SKIP, read_file_meta,
+                                document_meta, doc_hash, _BACKFILL_SKIP, read_file_meta, bulk_embedding,
                             )
                             from dpc_client_core.dpc_agent.index_keys import (
                                 KEY_FORMAT, build_ext_roots, ext_key, l5_key, l6_key,
@@ -728,23 +728,27 @@ class DpcAgentManager:
                                     # Text rows only, from the document: no embedding.
                                     backend.text.add([TextAddItem(text=t, meta=m)
                                                       for t, m in text_only_docs])
-                                    for batch_start in range(0, len(to_embed), BATCH_SIZE):
-                                        if self._stop_event.is_set():
-                                            log.info("Per-file indexing interrupted by shutdown at batch %d/%d", batch_start, len(to_embed))
-                                            break
-                                        batch = to_embed[batch_start:batch_start + BATCH_SIZE]
-                                        batch_texts = [t for _, t, _ in batch]
-                                        batch_metas = [m for _, _, m in batch]
-                                        vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
-                                        backend.vector.add([
-                                            VectorAddItem(vector=vec.reshape(1, -1), meta=meta)
-                                            for vec, meta in zip(vectors, batch_metas)
-                                        ])
-                                        backend.text.add([
-                                            TextAddItem(text=t, meta=m)
-                                            for t, m in zip(batch_texts, batch_metas)
-                                        ])
-                                        embedded += len(batch)
+                                    # One card lease use for the whole pass on a lease-gated model
+                                    # (ADR-052 3.4): the card when it is free, the CPU otherwise.
+                                    with bulk_embedding(provider, len(to_embed),
+                                                        "index rebuild" if needs_full_rebuild else "index update"):
+                                        for batch_start in range(0, len(to_embed), BATCH_SIZE):
+                                            if self._stop_event.is_set():
+                                                log.info("Per-file indexing interrupted by shutdown at batch %d/%d", batch_start, len(to_embed))
+                                                break
+                                            batch = to_embed[batch_start:batch_start + BATCH_SIZE]
+                                            batch_texts = [t for _, t, _ in batch]
+                                            batch_metas = [m for _, _, m in batch]
+                                            vectors = np.array(provider.embed_batch(batch_texts), dtype=np.float32)
+                                            backend.vector.add([
+                                                VectorAddItem(vector=vec.reshape(1, -1), meta=meta)
+                                                for vec, meta in zip(vectors, batch_metas)
+                                            ])
+                                            backend.text.add([
+                                                TextAddItem(text=t, meta=m)
+                                                for t, m in zip(batch_texts, batch_metas)
+                                            ])
+                                            embedded += len(batch)
                                 finally:
                                     if hasattr(backend.text, "end_batch"):
                                         backend.text.end_batch()
