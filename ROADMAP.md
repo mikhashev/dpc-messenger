@@ -27,15 +27,15 @@ measured both from git and found the number had no source.
 
 | axis | decisions | board entries | awaiting observation |
 |---|---|---|---|
-| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 accepted · ADR-048 accepted · ADR-050 proposed · ADR-051 accepted · ADR-053 accepted | 270 | 92 |
+| **collective** | ADR-031 accepted · ADR-032 accepted · ADR-036 accepted · ADR-037 accepted · ADR-038 accepted · ADR-042 accepted · ADR-047 accepted · ADR-048 accepted · ADR-050 proposed · ADR-051 accepted · ADR-053 accepted · ADR-054 proposed | 270 | 92 |
 | **knowledge** | ADR-028 accepted · ADR-029 accepted · ADR-030 implemented · ADR-033 implemented · ADR-034 accepted · ADR-043 proposed · ADR-045 accepted · ADR-046 accepted · ADR-048 accepted · ADR-051 accepted | 257 | 59 |
-| **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 accepted · ADR-046 accepted · ADR-047 accepted · ADR-050 proposed · ADR-052 implemented · ADR-053 accepted | 417 | 99 |
+| **network** | ADR-040 accepted · ADR-041 accepted · ADR-044 implemented · ADR-045 accepted · ADR-046 accepted · ADR-047 accepted · ADR-050 proposed · ADR-052 implemented · ADR-053 accepted · ADR-054 proposed | 418 | 99 |
 | **honesty** | ADR-027 proposed · ADR-039 accepted · ADR-041 accepted · ADR-042 accepted | 400 | 90 |
-| **reach** | ADR-035 accepted · ADR-043 proposed | 120 | 36 |
+| **reach** | ADR-035 accepted · ADR-043 proposed | 121 | 36 |
 
 **Observation debt: 346 under an axis + 19 in entries that carry none = 365.** Work finished and never seen working; per axis it says which direction is running ahead of its evidence.
 
-Not yet placed: 130 of 1466 board entries carry no axis, and a guessed one would report coverage this does not have.
+Not yet placed: 130 of 1468 board entries carry no axis, and a guessed one would report coverage this does not have.
 
 Rendered from `docs/decisions/*.md` front matter and `backlog.md`. Nothing here is written by hand; correct it at the source and re-run `uv run python tools/backlog/build.py --roadmap`.
 
