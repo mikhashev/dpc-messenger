@@ -301,9 +301,9 @@ def test_edit_and_cover_tags_copy_while_export_own_and_private_tags_are_withheld
             "DPC_CONVERSATION_ID": "conv_secret_chat_1",
             "DPC_TURN_ID": "20261126T110533Z-41c8aba5",
             "DPC_AGENT_ID": "agent_forge",
-            "DPC_API_KEY": "sk-secretkey1234567890",
-            "DPC_RAW_DIR": "C:\\Users\\alice\\secret",
-            "DPC_CUSTOM_PATH": "/home/alice/secret.wav",
+            "DPC_API_KEY": "token-secret-value-0001",
+            "DPC_RAW_DIR": "C:\\Users\\user\\secret",
+            "DPC_CUSTOM_PATH": "/home/user/secret.wav",
             "DPC_OPAQUE_NODE": "dpc-node-hidden999",
         },
     )
@@ -353,9 +353,9 @@ def test_edit_and_cover_tags_copy_while_export_own_and_private_tags_are_withheld
         b"conv_secret_chat_1",
         b"20261126T110533Z-41c8aba5",
         b"agent_forge",
-        b"sk-secretkey1234567890",
-        b"C:\\Users\\alice",
-        b"/home/alice",
+        b"token-secret-value-0001",
+        b"C:\\Users\\user",
+        b"/home/user",
         b"dpc-node-hidden999",
     ):
         assert secret not in mp3_bytes
