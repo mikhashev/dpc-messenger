@@ -196,7 +196,7 @@ describe('the audio diagnostics in the log', () => {
     });
 });
 
-describe('a read error under the player reloads the same source once', () => {
+describe('a read error under the player reloads the same source once per failure', () => {
     /** A failing element that still holds a position (the log's t=67.91). */
     const readError = (audio: FakeAudio, at: number) => {
         audio.duration = 100; // the seek after the reload needs the duration at once
@@ -227,6 +227,42 @@ describe('a read error under the player reloads the same source once', () => {
         await settle();
         expect(get(m.musicPlayback).playing).toBe(true); // the reload took playback back
         readError(audio, 12);
+        await settle();
+        expect(h.logLines.filter(l => l.startsWith('error reload'))).toHaveLength(1);
+        expect(get(m.musicPlayback).playing).toBe(false);
+        expect(get(m.musicPlayback).notice).toContain('Could not play');
+    });
+
+    it('a code 2 after playback has run past the earlier failure reloads again (the align ran a second time)', async () => {
+        const m = await freshService(['a'], 0);
+        const audio = FakeAudio.last!;
+        h.logLines.length = 0;
+        readError(audio, 60);
+        await settle();
+        expect(get(m.musicPlayback).playing).toBe(true); // the first reload recovered playback
+        // It plays on: a timeupdate lands at least ERROR_RELOAD_RECOVER_S past the failure.
+        audio.currentTime = 60 + m.ERROR_RELOAD_RECOVER_S;
+        audio.fire('timeupdate');
+        readError(audio, 80); // the file is rewritten under the player a second time
+        await settle();
+        expect(h.logLines.filter(l => l.startsWith('error reload'))).toHaveLength(2);
+        expect(h.logLines.some(l => /^error reload #\d+ a at=80\.00: the source is loaded again$/.test(l))).toBe(true);
+        expect(audio.currentTime).toBe(80);
+        expect(get(m.musicPlayback).playing).toBe(true);
+        expect(get(m.musicPlayback).notice).toBe('');
+    });
+
+    it('progress short of the threshold keeps the guard: a broken file is not reloaded in a loop', async () => {
+        const m = await freshService(['a'], 0);
+        const audio = FakeAudio.last!;
+        h.logLines.length = 0;
+        readError(audio, 50);
+        await settle();
+        expect(get(m.musicPlayback).playing).toBe(true);
+        // The reloaded source fails again before playing the threshold past the failure.
+        audio.currentTime = 50 + m.ERROR_RELOAD_RECOVER_S - 1;
+        audio.fire('timeupdate');
+        readError(audio, audio.currentTime);
         await settle();
         expect(h.logLines.filter(l => l.startsWith('error reload'))).toHaveLength(1);
         expect(get(m.musicPlayback).playing).toBe(false);

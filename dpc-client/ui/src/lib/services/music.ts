@@ -432,10 +432,19 @@ let loadToken = 0;
 let audioToken = -1;
 const current = () => audioToken === loadToken;
 /** The load whose source was already reloaded once after a media error (a read failure
- *  while the file changed under the player). One reload per load: when the reloaded
- *  source fails too, the error falls through to the notice and nothing is reloaded
- *  again until a new load (a track change, a row picked) takes the element. */
-let errorReloadToken = -1;
+ *  while the file changed under the player), with the position that failure hit. One
+ *  reload per failure: the guard is cleared only when the reloaded source has played
+ *  ERROR_RELOAD_RECOVER_S past the remembered position — the file was rewritten again
+ *  under the player after it had recovered (the align pipeline run a second time), so
+ *  the next failure is a fresh one — never on the load itself. Until then a second
+ *  error of the same load falls through to the notice, so a genuinely broken source
+ *  (it fails again before playing that far) is never reloaded in a loop. A new load
+ *  (a track change, a row picked) takes the element with a token the guard does not
+ *  match: the remembered position of the old load never reaches its decisions. */
+let errorReload: { token: number; from: number } | null = null;
+/** How far past the position of a read error the reloaded source must have played
+ *  (seen on `timeupdate`) before that load's error-reload guard is cleared. */
+export const ERROR_RELOAD_RECOVER_S = 5;
 const DURATION_WAIT_MS = 4000;
 
 /** Who holds the audio element: the queue, or a review of a music job's takes. */
@@ -536,6 +545,12 @@ function ensureAudio(): HTMLAudioElement | null {
             dlogEvent('loop', `loop-restart #${audioToken} ${get(musicPlayback).loadedId ?? '-'} from=${lastUpdate.toFixed(2)} to=${a.currentTime.toFixed(2)} ${playerState()}`);
         }
         lastUpdate = a.currentTime;
+        // The reloaded source has played ERROR_RELOAD_RECOVER_S past where its read error
+        // hit: that failure is behind the player, so the guard is cleared and a later
+        // rewrite of the file (the align run again) is reloaded once more.
+        if (errorReload && audioToken === errorReload.token && a.currentTime >= errorReload.from + ERROR_RELOAD_RECOVER_S) {
+            errorReload = null;
+        }
         if (owner === 'review') musicReview.update(r => ({ ...r, currentTime: a.currentTime }));
         else musicPlayback.update(s => ({ ...s, currentTime: a.currentTime }));
     });
@@ -571,14 +586,15 @@ function ensureAudio(): HTMLAudioElement | null {
         // pipeline stopped playback this way, 2026-11-27). Whoever rewrote it: the player
         // only sees its source fail, so it loads the same source once more and goes on
         // from where it stood (a short audible gap). When the reloaded source fails too,
-        // the notice below stands and nothing is reloaded until a new load begins.
-        if (code === 2 && s.loadedId && audioToken !== errorReloadToken) {
+        // the notice below stands and nothing is reloaded again until playback has run
+        // past the failure (see `errorReload`) or a new load takes the element.
+        if (code === 2 && s.loadedId && audioToken !== errorReload?.token) {
             const at = Number.isFinite(a.currentTime) ? a.currentTime : s.currentTime;
             const q = freshQueueAt(s.loadedId);
             if (currentId(q) === s.loadedId) {
                 dlogEvent('error', `error reload #${audioToken} ${s.loadedId} at=${at.toFixed(2)}: the source is loaded again`);
                 void startAt(q, q.index, s.playing, at);
-                errorReloadToken = loadToken; // the token startAt has just taken
+                errorReload = { token: loadToken, from: at }; // the token startAt has just taken
                 return;
             }
         }
