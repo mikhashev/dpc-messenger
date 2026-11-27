@@ -10,15 +10,19 @@ never builds one of these and never asks for the card. `cuda`, and auto on a mac
 lease use. Nothing computes on the card outside one.
 
 **A stint is bulk work** (the start-up index pass, a sleep pass's entity extraction): one use for the
-batch, asked with an honest `expected_s` (items times a per-item card figure, measured as it runs and
-conservative before, plus the two moves). It waits in the lease line as any owner's request does, but
-never longer than the CPU would take to do the whole batch itself, and at most `BULK_WAIT_CAP_S`; a
-refusal, a closed line or no owner loop (a script, a test) leaves the batch on the CPU. A batch too
-small to repay the two moves (under `MIN_GPU_WORTH_S` of CPU time) never asks.
+batch, asked as a background call (`background=True`, `wait_s=0`; ADR-052 2.1, "granted only if the
+card is free, otherwise CPU"), with an honest `expected_s` (items times a per-item card figure,
+measured as it runs and conservative before, plus the two moves). It takes the card only when nothing
+holds it and nobody waits: it never stands in the line, so it never asks an idle holder (a warm
+Whisper, an idle music engine) to let go (L6) and never stands ahead of a later owner's request (L5a).
+`LeaseSkipped`, any other refusal, a closed line, an error on the way or no owner loop (a script, a
+test) leaves the batch on the CPU. A batch too small to repay the two moves (under `MIN_GPU_WORTH_S`
+of CPU time) never asks.
 
 **Yield.** A busy holder is never asked to let go (L6), so a stint lets go of its own accord: before
 each compute call it reads whether an owner's request stands in either line
-(`card_lease.an_owner_waits_for_the_card`); when one does, the model is moved to the CPU under the
+(`card_lease.an_owner_waits_for_the_card`; a background lease never waits in the line, so every waiter
+it sees is a foreground request: Whisper, music, a local engine's start); when one does, the model is moved to the CPU under the
 device lock, the use is closed and the grant released, and the rest of the batch continues on the CPU.
 That is simpler than queueing again and never worse than the steady state. `eta_s` says the same in
 numbers: a waiter has the card at the latest when the compute call running now ends and the model is
@@ -32,7 +36,10 @@ lock, which every compute call takes.
 
 **Moves are serialised with compute** by the device lock (an RLock the client holds around every
 compute call), so no compute runs mid-move; and the lease is never asked for while the device lock
-is held (ADR-052 Risks, "locks inside a client").
+is held (ADR-052 Risks, "locks inside a client"). Taking the card at a stint's start and letting it
+go at a stint's end are serialised by a second lock (`_gate`), so a stint that opens while the last
+one closes asks for a new use only after the old one was closed and released (both are handed to the
+owner loop in that order).
 
 Pure Python and the same on Windows, Linux and macOS; torch is the client's concern, through its
 `to_gpu` and `to_cpu` callbacks. A node without CUDA never builds one, so its path is unchanged.
@@ -50,17 +57,6 @@ logger = logging.getLogger(__name__)
 # A bulk batch asks for the card only when the CPU would spend at least this long on it: below it, the
 # two moves (onto the card and back) cost about as much as they save.
 MIN_GPU_WORTH_S = 10.0
-# The longest a bulk batch waits in the lease line before it runs on the CPU instead. Never longer
-# than its own CPU time either: waiting for the card longer than the CPU takes to do the work is a loss.
-BULK_WAIT_CAP_S = 60.0
-
-
-def _a_local_engine_holds_the_card() -> bool:
-    """Whether a supervised local engine (llama-server, Strata) holds the card and is not stopping.
-    Read from a worker thread: a copy of the claims' marks, nothing written."""
-    from . import llama_server_supervisor as _sup
-
-    return any(mark != "stopping" for mark in list(_sup._CARD_CLAIMS.values()))
 
 
 class BackgroundModelLease:
@@ -68,7 +64,7 @@ class BackgroundModelLease:
     card only for bulk work. `to_gpu` and `to_cpu` move the client's loaded model and raise when they
     cannot; both are called under `device_lock`. The figures are seconds per item: `gpu_s_per_item`
     (a conservative start, replaced by what each compute call on the card measures),
-    `cpu_s_per_item` (for the worth and the wait bound), and `move_s` for one move."""
+    `cpu_s_per_item` (for the worth), and `move_s` for one move."""
 
     def __init__(self, holder: str, *, kind: str, engine: str, display: str, vram_mib: Optional[int],
                  to_gpu: Callable[[], None], to_cpu: Callable[[], None],
@@ -87,6 +83,8 @@ class BackgroundModelLease:
         self.device_lock = threading.RLock()
         # Guards the stint count; never held across a wait.
         self._state = threading.Lock()
+        # Serialises taking the card at a stint's start with letting it go at a stint's end.
+        self._gate = threading.Lock()
         self._on_gpu = False
         self._stints = 0
         # The open lease use (an ExitStack over `use_blocking`), or None.
@@ -157,43 +155,47 @@ class BackgroundModelLease:
         the batch starts on. `what` names the use in the card queue ("index rebuild"); it never carries
         chat content."""
         items = max(0, int(items))
-        with self._state:
-            self._stints += 1
-            first = self._stints == 1
-        try:
+        with self._gate:
+            with self._state:
+                self._stints += 1
+                first = self._stints == 1
             if first and self.worth_the_card(items):
                 self._take_the_card(what, items)
+        try:
             yield self.device
         finally:
-            with self._state:
-                self._stints -= 1
-                last = self._stints == 0
-            if last:
-                with self.device_lock:
-                    if self._held is not None or self._on_gpu:
-                        self._let_go_locked(f"{what} done")
+            with self._gate:
+                with self._state:
+                    self._stints -= 1
+                    last = self._stints == 0
+                if last:
+                    with self.device_lock:
+                        if self._held is not None or self._on_gpu:
+                            self._let_go_locked(f"{what} done")
 
     def _take_the_card(self, what: str, items: int) -> None:
+        """Called under `_gate` by the first stint: the card when it is free right now, else nothing."""
         from .llama_server_supervisor import CardQueueRefusal
         from .card_lease import an_owner_waits_for_the_card
 
-        lease = self.lease()
-        wait_s = min(BULK_WAIT_CAP_S, items * self.cpu_s_per_item)
-        if _a_local_engine_holds_the_card():
-            # A llama-server or Strata on the card does not go by itself soon, and this lease never
-            # swaps one out; waiting would only stand in the way of a later Whisper or music request
-            # that may (L5a: nobody overtakes a waiter). Asked without a wait: refused at once.
-            wait_s = 0.0
         expected = self.expected_s(items)
         held = contextlib.ExitStack()
         try:
-            held.enter_context(lease.use_blocking(what, wait_s=wait_s, expected_s=expected))
-        except RuntimeError as exc:
-            logger.info("%s: %s of %d items on the CPU, the card lease cannot be asked here (%s)",
-                        self.display, what, items, exc)
-            return
+            lease = self.lease()
+            held.enter_context(lease.use_blocking(what, wait_s=0, background=True, expected_s=expected))
         except CardQueueRefusal as exc:
             logger.info("%s: %s of %d items on the CPU: %s", self.display, what, items, exc)
+            return
+        except Exception as exc:
+            # No owner loop (a script), its own thread, a cancel at shutdown: no card for this batch.
+            logger.info("%s: %s of %d items on the CPU, the card lease could not be asked (%s: %s)",
+                        self.display, what, items, type(exc).__name__, exc)
+            return
+        if not lease.granted or self._held is not None:
+            # Not expected under `_gate`; the model never goes to the card without a grant of its own.
+            held.close()
+            logger.warning("%s: %s found the lease %s; it runs on the CPU", self.display, what,
+                           "already held" if self._held is not None else "not granted")
             return
         if an_owner_waits_for_the_card(lease):
             # Granted, but an owner's request arrived meanwhile: let it go before moving anything.
@@ -240,6 +242,12 @@ class BackgroundModelLease:
                     measured = (time.monotonic() - since) / items
                     # Half the last figure, half the new: a stable estimate that follows the card.
                     self._gpu_s_per_item = 0.5 * self._gpu_s_per_item + 0.5 * measured
+
+    def model_dropped(self) -> None:
+        """The client unloaded the model: nothing is on the card any more. A stint that holds the card
+        keeps its use until it ends, and computes on the CPU meanwhile."""
+        with self.device_lock:
+            self._on_gpu = False
 
     # -- letting go --
 

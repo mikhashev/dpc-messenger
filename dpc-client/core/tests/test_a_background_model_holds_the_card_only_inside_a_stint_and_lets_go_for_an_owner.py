@@ -13,13 +13,12 @@ import threading
 
 import pytest
 
-from dpc_client_core.managers import background_model_lease as bml
 from dpc_client_core.managers import card_lease
 from dpc_client_core.managers import llama_server_supervisor as base_mod
 from dpc_client_core.managers.background_model_lease import BackgroundModelLease
 from dpc_client_core.managers.card_lease import CardLease
 
-from tests._card_lease_helpers import BOUND, fast, hold_open, holding, nothing_left, until, waiting, whisper  # noqa: F401
+from tests._card_lease_helpers import BOUND, fast, hold_open, holding, music, nothing_left, until, waiting, whisper  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("fast")
 
@@ -83,7 +82,8 @@ async def test_a_batch_too_small_to_repay_the_moves_never_asks():
 
 
 @pytest.mark.asyncio
-async def test_a_bulk_stint_waits_with_its_expected_s_then_holds_one_use_on_the_card_and_releases():
+async def test_a_stint_never_waits_for_a_card_another_holds_and_runs_on_the_cpu():
+    """A background call (ADR-052 2.1): the card only when it is free right now."""
     base_mod.bind_owner_loop(asyncio.get_running_loop())
     model = FakeModel()
     c = client(model)
@@ -92,6 +92,31 @@ async def test_a_bulk_stint_waits_with_its_expected_s_then_holds_one_use_on_the_
     holder = asyncio.create_task(hold_open(w.lease, "dictation", release))
     await until(lambda: holding() == ["whisper:turbo"])
 
+    def work():
+        with c.stint("index rebuild", 40) as device:
+            with c.compute(4) as d:
+                return device, d
+
+    assert await asyncio.wait_for(asyncio.to_thread(work), 1.0) == ("cpu", "cpu")
+    assert waiting() == [] and model.moves == [] and w.yields == []
+    release.set()
+    await asyncio.wait_for(holder, BOUND)
+    await nothing_left()
+
+
+@pytest.mark.asyncio
+async def test_a_stint_on_a_free_card_holds_one_use_with_its_expected_s_and_releases(monkeypatch):
+    base_mod.bind_owner_loop(asyncio.get_running_loop())
+    model = FakeModel()
+    c = client(model)
+    asked = []
+    real = card_lease.CardLease.use_blocking
+
+    def recording(self, what, **kw):
+        asked.append((what, kw))
+        return real(self, what, **kw)
+
+    monkeypatch.setattr(card_lease.CardLease, "use_blocking", recording)
     inside = threading.Event()
     done = threading.Event()
     seen = {}
@@ -106,15 +131,9 @@ async def test_a_bulk_stint_waits_with_its_expected_s_then_holds_one_use_on_the_
             assert done.wait(BOUND)
 
     thread = asyncio.create_task(asyncio.to_thread(work))
-    await until(lambda: waiting() == ["embedder:BAAI/bge-m3"])
-    (waiter,) = [x for x in card_lease._LEASE_LINE if x.lease.holder == "embedder:BAAI/bge-m3"]
-    assert waiter.expected_s == pytest.approx(40 * 0.01 + 2 * 1.0)
-    assert waiter.wait_s == pytest.approx(min(bml.BULK_WAIT_CAP_S, 40 * 1.0))
-    assert model.moves == []
-
-    release.set()
-    await asyncio.wait_for(holder, BOUND)
     await asyncio.wait_for(asyncio.to_thread(inside.wait, BOUND), BOUND)
+    assert asked == [("index rebuild", {"wait_s": 0, "background": True,
+                                        "expected_s": pytest.approx(40 * 0.01 + 2 * 1.0)})]
     assert seen == {"device": "cuda", "compute": "cuda", "uses": ["index rebuild"]}
     row = lease_row()
     assert row["busy"] and row["display"] == "Embedding model (bge-m3)" and row["kind"] == "embedding"
@@ -384,35 +403,160 @@ def test_use_blocking_gives_up_on_an_owner_loop_that_does_not_answer(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_a_stint_does_not_wait_behind_a_local_engine_on_the_card(monkeypatch):
-    """A llama-server or Strata does not go by itself soon and this lease never swaps one out, so the
-    stint asks without a wait (refused at once, the CPU) rather than stand in the line, where it would
-    keep a later Whisper or music request from swapping the engine out (L5a)."""
+@pytest.mark.parametrize("make", [whisper, music], ids=["whisper", "music"])
+async def test_a_stint_never_asks_an_idle_warm_holder_to_let_go(make):
+    """ADR-052 2.1: the embedder and GLiNER take the card only when it is free; an idle Whisper or
+    music grant on the card is not asked to yield for them (the coordinator's probe, 2026-11-27)."""
     base_mod.bind_owner_loop(asyncio.get_running_loop())
-    monkeypatch.setattr(bml, "_a_local_engine_holds_the_card", lambda: True)
+    other = make()
+    await other.lease.acquire("warm", wait_s=BOUND)  # granted with no use: an idle holder
     model = FakeModel()
     c = client(model)
+
+    def work():
+        with c.stint("index update", 12) as device:
+            return device
+
+    assert await asyncio.wait_for(asyncio.to_thread(work), BOUND) == "cpu"
+    await asyncio.sleep(0.05)
+    assert other.yields == [] and other.lease.granted and model.moves == []
+    assert waiting() == []
+    other.lease.release("test done")
+    await nothing_left()
+
+
+@pytest.mark.asyncio
+async def test_a_stint_never_stands_ahead_of_a_later_owner_request():
+    base_mod.bind_owner_loop(asyncio.get_running_loop())
     w = whisper()
     release = asyncio.Event()
     holder = asyncio.create_task(hold_open(w.lease, "dictation", release))
     await until(lambda: holding() == ["whisper:turbo"])
-
-    def work():
-        with c.stint("index rebuild", 40) as device:
-            return device
-
-    assert await asyncio.wait_for(asyncio.to_thread(work), 1.0) == "cpu"
-    assert waiting() == [] and model.moves == []
+    c = client(FakeModel())
+    stint = asyncio.create_task(asyncio.to_thread(lambda: c.stint("index rebuild", 40).__enter__()))
+    assert await asyncio.wait_for(stint, 1.0) == "cpu"
+    assert waiting() == [], "nothing of the stint is left in the line"
     release.set()
     await asyncio.wait_for(holder, BOUND)
+
+
+@pytest.mark.asyncio
+async def test_a_stint_that_opens_while_the_last_one_lets_go_waits_and_then_takes_a_use_of_its_own():
+    """The close/open race (review, 2026-11-27): A has left its body and is moving off the card; B
+    opens meanwhile. B must not join A's dying use nor move the model onto an ungranted lease."""
+    base_mod.bind_owner_loop(asyncio.get_running_loop())
+    model = FakeModel()
+    c = client(model)
+    in_move_off = threading.Event()
+    let_off = threading.Event()
+    real_to_cpu = c._to_cpu
+
+    def slow_to_cpu():
+        if not in_move_off.is_set():
+            in_move_off.set()
+            assert let_off.wait(BOUND)
+        real_to_cpu()
+
+    c._to_cpu = slow_to_cpu
+    b_entered = threading.Event()
+    seen = {}
+
+    def a():
+        with c.stint("pass A", 40):
+            pass
+
+    def b():
+        assert in_move_off.wait(BOUND)
+        with c.stint("pass B", 40):
+            b_entered.set()
+            with c.compute(4) as d:
+                seen["device"] = d
+                seen["granted"] = c._lease.granted
+                seen["uses"] = [u.what for u in c._lease._uses]
+
+    ta = asyncio.create_task(asyncio.to_thread(a))
+    tb = asyncio.create_task(asyncio.to_thread(b))
+    await asyncio.wait_for(asyncio.to_thread(in_move_off.wait, BOUND), BOUND)
+    await asyncio.sleep(0.1)
+    assert not b_entered.is_set(), "B waits until A has let go"
+    let_off.set()
+    await asyncio.wait_for(ta, BOUND)
+    await asyncio.wait_for(tb, BOUND)
+    assert seen == {"device": "cuda", "granted": True, "uses": ["pass B"]}
+    assert model.moves == ["cuda", "cpu", "cuda", "cpu"]
+    await until(lambda: not c._lease.granted and c._lease._uses == [])
     await nothing_left()
 
 
-def test_a_local_engine_on_the_card_is_read_from_the_claims_and_a_stopping_one_does_not_count(monkeypatch):
-    engine = object()
-    monkeypatch.setattr(base_mod, "_CARD_CLAIMS", {engine: "claimed"})
-    assert bml._a_local_engine_holds_the_card()
-    monkeypatch.setattr(base_mod, "_CARD_CLAIMS", {engine: "stopping"})
-    assert not bml._a_local_engine_holds_the_card()
-    monkeypatch.setattr(base_mod, "_CARD_CLAIMS", {})
-    assert not bml._a_local_engine_holds_the_card()
+@pytest.mark.asyncio
+async def test_a_stint_that_opens_while_another_runs_joins_it_and_the_last_to_close_lets_go():
+    base_mod.bind_owner_loop(asyncio.get_running_loop())
+    model = FakeModel()
+    c = client(model)
+    a_in, b_in, a_out = threading.Event(), threading.Event(), threading.Event()
+    seen = {}
+
+    def a():
+        with c.stint("pass A", 40):
+            a_in.set()
+            assert b_in.wait(BOUND)
+        a_out.set()
+
+    def b():
+        assert a_in.wait(BOUND)
+        with c.stint("pass B", 40):
+            b_in.set()
+            assert a_out.wait(BOUND)
+            with c.compute(4) as d:
+                seen["after_a"] = (d, c._lease.granted, [u.what for u in c._lease._uses])
+
+    await asyncio.wait_for(asyncio.gather(asyncio.to_thread(a), asyncio.to_thread(b)), BOUND)
+    assert seen["after_a"] == ("cuda", True, ["pass A"]), "B rode A's one use, kept after A closed"
+    assert model.moves == ["cuda", "cpu"]
+    await until(lambda: not c._lease.granted and c._lease._uses == [])
+    await nothing_left()
+
+
+@pytest.mark.asyncio
+async def test_an_error_on_the_way_to_the_lease_leaves_the_batch_on_the_cpu(monkeypatch):
+    """A cancel at shutdown surfaces as concurrent.futures.CancelledError: the CPU, never a crash."""
+    import concurrent.futures
+
+    base_mod.bind_owner_loop(asyncio.get_running_loop())
+    model = FakeModel()
+    c = client(model)
+
+    def cancelled(self, what, **kw):
+        raise concurrent.futures.CancelledError()
+
+    monkeypatch.setattr(card_lease.CardLease, "use_blocking", cancelled)
+
+    def work():
+        with c.stint("index rebuild", 40) as device:
+            with c.compute(2) as d:
+                return device, d
+
+    assert await asyncio.wait_for(asyncio.to_thread(work), BOUND) == ("cpu", "cpu")
+    assert model.moves == []
+
+
+@pytest.mark.asyncio
+async def test_a_model_dropped_mid_stint_computes_on_the_cpu_and_the_use_closes_at_the_end():
+    base_mod.bind_owner_loop(asyncio.get_running_loop())
+    model = FakeModel()
+    c = client(model)
+    seen = []
+
+    def work():
+        with c.stint("index rebuild", 40):
+            with c.compute(1) as d:
+                seen.append(d)
+            c.model_dropped()
+            with c.compute(1) as d:
+                seen.append(d)
+            seen.append([u.what for u in c._lease._uses])
+
+    await asyncio.wait_for(asyncio.to_thread(work), BOUND)
+    assert seen == ["cuda", "cpu", ["index rebuild"]]
+    await until(lambda: not c._lease.granted and c._lease._uses == [])
+    assert model.moves == ["cuda"], "nothing left to move back"

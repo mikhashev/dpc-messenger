@@ -753,7 +753,9 @@ def an_owner_waits_for_the_card(lease: Optional[CardLease] = None) -> bool:
     For a holder that keeps a use open through bulk work (the embedder's index pass, GLiNER's entity
     pass, section 3.4): a busy holder is never asked to let go (L6), so it reads this between its
     batches and lets go of its own accord. A peer's waiter does not count: the owner's own work does
-    not give way to a guest (ADR-044 point 3)."""
+    not give way to a guest (ADR-044 point 3). Any other lease waiter counts, the other background
+    model's included: those ask as background calls (`background=True`) and never stand in the line,
+    so in practice every waiter seen here is a foreground request."""
     if list(_sup._CARD_QUEUE):
         return True
     return any(not waiter.granted and waiter.out is None and not waiter.for_a_peer
