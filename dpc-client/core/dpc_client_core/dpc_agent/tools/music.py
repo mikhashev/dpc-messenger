@@ -755,7 +755,7 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
         return "⚠️ music_propose_job runs only inside an agent turn; nothing was proposed."
     scoped = _chat_scoped_music(ctx)
     effective_lyrics_mode = params.get("lyrics_mode") or js.SONG_DEFAULT_LYRICS_MODE.get(type)
-    if (type in js.SONG_TYPES and not owner_asked and effective_lyrics_mode == "reuse"
+    if (type in js.SONG_TYPES and scoped and effective_lyrics_mode == "reuse"
             and params.get("lyrics") is not None):
         # Lines given under `reuse` are compared with the track's stored lyrics (core's
         # `reuse_lyrics_differ`): an answer either way would tell someone other than the owner

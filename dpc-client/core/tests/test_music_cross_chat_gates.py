@@ -1324,3 +1324,75 @@ async def test_owner_turn_in_multi_node_group_masks_taken_1to1_key_repeat_and_id
         solo_ctx, params=from_text(), idempotency_key="k") == music_tools.KEY_NOT_YOURS_REFUSAL
 
 
+@pytest.mark.asyncio
+async def test_owner_turn_in_multi_node_group_cannot_probe_stored_lyrics_with_reuse_mode(
+        tmp_path, monkeypatch):
+    _user_home, dpc_home = await _seed_world(tmp_path, monkeypatch)
+    async with Rig(dpc_home, start_runner=False) as rig:
+        entry = await base_track(rig, dpc_home, seconds=12.0)
+        person = Person(True)
+        service = _MultiChatService(dpc_home, rig, person)
+        await (await service._music_lyrics()).save_manual(
+            entry["id"], "[00:01.00]secret verse\n[00:05.00]secret chorus")
+
+        owner_dm = _multi_ctx(dpc_home, service, ONE_TO_ONE, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+        out_dm_seed = await _exec(registry_for(owner_dm), owner_dm, "music_propose_job", turn="turn-dm1",
+                                  params=from_text(style="seed"), idempotency_key="taken-dm-key")
+        assert out_dm_seed.startswith("Proposed (approved by the person)."), out_dm_seed
+        person.asked.clear()
+
+        # Owner turn in a multi-node group (or fail-closed missing roster) must hit the pre-card
+        # reuse+lyrics refusal before list_music_jobs/check_music_job, never leaking reuse_lyrics_differ.
+        for conv, cls in (
+            (FRIENDS_GROUP, OTHER_NODE_TURN),
+            (FRIENDS_GROUP, OWNER_TURN),
+            ("group-missing", OWNER_TURN),
+        ):
+            ctx_multi = _multi_ctx(dpc_home, service, conv, asker=OWNER_ASKER, turn_class=cls)
+            reg_multi = registry_for(ctx_multi)
+            for i, (job_type, params, key) in enumerate((
+                (js.GENERATE_SIMILAR, {
+                    "track_id": entry["id"], "caption": "synthwave", "engine": "acestep",
+                    "lyrics_mode": "reuse", "lyrics": "wrong guess",
+                }, None),
+                (js.GENERATE_SIMILAR, {
+                    "track_id": entry["id"], "caption": "synthwave", "engine": "acestep",
+                    "lyrics_mode": "reuse", "lyrics": "secret verse\nsecret chorus",
+                }, None),
+                (js.COVER, {
+                    "track_id": entry["id"], "caption": "rock", "lyrics": "wrong guess",
+                }, "taken-dm-key"),
+                (js.GENERATE_FROM_LYRICS, {
+                    "track_id": entry["id"], "caption": "rock",
+                    "lyrics": "secret verse\nsecret chorus",
+                }, "free-key"),
+            )):
+                out = await _exec(reg_multi, ctx_multi, "music_propose_job",
+                                  turn=f"turn-{conv}-{cls}-{i}",
+                                  type=job_type, params=params, idempotency_key=key)
+                assert out.startswith("⚠️ music_propose_job: with lyrics_mode reuse") and "leave lyrics out" in out, (
+                    conv, cls, i, out)
+                assert "reuse_lyrics_differ" not in out
+        assert person.asked == [] and len(rig.store.list_jobs()) == 1
+
+        # Control: 1:1 owner turn and verified 1-node group owner turn are not chat-scoped, so core
+        # still evaluates reuse lyrics (rejects mismatch with reuse_lyrics_differ, accepts match).
+        for conv in (ONE_TO_ONE, SOLO_GROUP):
+            ctx_ok = _multi_ctx(dpc_home, service, conv, asker=OWNER_ASKER, turn_class=OWNER_TURN)
+            reg_ok = registry_for(ctx_ok)
+            out_differ = await _exec(
+                reg_ok, ctx_ok, "music_propose_job", turn=f"turn-{conv}-differ",
+                type=js.GENERATE_SIMILAR,
+                params={"track_id": entry["id"], "caption": "synthwave", "engine": "acestep",
+                        "lyrics_mode": "reuse", "lyrics": "wrong guess"})
+            assert "reuse_lyrics_differ" in out_differ, (conv, out_differ)
+
+        out_match = await _exec(
+            registry_for(owner_dm), owner_dm, "music_propose_job", turn="turn-dm-match",
+            type=js.GENERATE_SIMILAR,
+            params={"track_id": entry["id"], "caption": "synthwave", "engine": "acestep",
+                    "lyrics_mode": "reuse", "lyrics": "secret verse\nsecret chorus"})
+        assert out_match.startswith("Proposed (approved by the person)."), out_match
+
+
+
