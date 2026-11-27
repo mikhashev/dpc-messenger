@@ -223,8 +223,8 @@ class TestALocalTranscriptionSave:
         out = await CoreService.save_local_transcription_config(
             host, config={"model": "openai/whisper-small"})
         assert out["status"] == "error" and "model" in out["message"]
-        assert Settings(home).get("local_transcription", "model") == \
-            "openai/whisper-large-v3-turbo", "a dead key was not written through the back door"
+        assert Settings(home).get("local_transcription", "model", "absent") == "absent", \
+            "a dead key was not written through the back door"
 
     @pytest.mark.asyncio
     async def test_a_save_broadcasts_the_stored_values(self, home, host):

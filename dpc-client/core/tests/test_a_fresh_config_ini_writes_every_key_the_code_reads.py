@@ -98,7 +98,7 @@ def _keys_a_fresh_install_writes(tmp_path):
 def test_the_scan_sees_the_reads_it_is_meant_to_see():
     """Guards the instrument: a scan that matched nothing would pass below."""
     reads = _keys_the_code_reads()
-    assert ("local_transcription", "device") in reads
+    assert ("local_transcription", "queue_wait_s") in reads
     assert ("system", "shell_memory_limit_mb") in reads  # via module constants in process.py
     assert ("discord.guardrails", "url_whitelist") in reads  # outside settings.py
     assert ("hf", "offline_mode") in reads
@@ -128,7 +128,6 @@ def test_the_background_model_devices_are_written_as_auto(tmp_path):
     assert written[("memory", "embedding_device")] == "auto"
     assert written[("knowledge_graph", "gliner_device")] == "auto"
     assert written[("knowledge_graph", "backend")] == "sqlite"
-    assert written[("local_transcription", "device")] == "auto"
 
 
 def test_secrets_are_written_empty(tmp_path):

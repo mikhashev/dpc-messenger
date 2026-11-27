@@ -281,8 +281,6 @@ class Settings:
 
         self._config['system'] = {
             'auto_collect_device_info': 'true',  # Automatically collect device/system info for AI context
-            'collect_hardware_specs': 'true',    # Collect hardware tiers (RAM, CPU, disk, GPU)
-            'collect_dev_tools': 'true',         # Collect installed dev tools and versions
             'collect_ai_models': 'false',        # Collect locally available AI models (opt-in for compute-sharing)
             'shell_memory_limit_mb': '8192'      # Memory ceiling for an agent command and everything it started, summed, in MB; 0 = off. Read at each command, no restart; DPC_SHELL_MEMORY_LIMIT_MB overrides it
         }
@@ -301,12 +299,7 @@ class Settings:
 
         self._config['connection'] = {
             # Enable/disable individual connection strategies
-            'enable_ipv6': 'true',  # Try IPv6 direct connections (Priority 1)
-            'enable_ipv4': 'true',  # Try IPv4 direct connections (Priority 2)
-            'enable_hub_webrtc': 'false',  # Try Hub WebRTC with STUN/TURN (Priority 3) - requires Hub connection
             'enable_hole_punching': 'false',  # Try DHT-coordinated UDP hole punching (Priority 4) - DISABLED: lacks DTLS encryption (v0.10.0)
-            'enable_relays': 'true',  # Try volunteer relay nodes (Priority 5)
-            'enable_gossip': 'true',  # Use gossip store-and-forward fallback (Priority 6)
             # Timeouts per strategy (seconds) - increased for high-latency networks (mobile, CGNAT)
             'ipv6_timeout': '60',  # Includes 30s pre-flight check + 30s SSL handshake
             'ipv4_timeout': '60',  # Includes 30s pre-flight check + 30s SSL handshake
@@ -332,25 +325,17 @@ class Settings:
 
         self._config['hole_punch'] = {
             'udp_punch_port': '8890',  # UDP port for hole punching
-            'nat_detection_enabled': 'true',  # Detect NAT type (cone vs symmetric)
-            'stun_timeout': '5',  # Endpoint discovery timeout (seconds)
-            'punch_attempts': '3',  # Number of punch attempts before giving up
             # DTLS encryption settings (v0.10.1+)
-            'enable_dtls': 'true',  # Enable DTLS encryption for hole-punched connections
-            'dtls_handshake_timeout': '3',  # DTLS handshake timeout (seconds)
-            'dtls_version': '1.2'  # DTLS protocol version (1.2 or 1.3)
+            'dtls_handshake_timeout': '3'  # DTLS handshake timeout (seconds)
         }
 
         self._config['relay'] = {
             # Client mode (use relays for outbound connections)
             'enabled': 'true',  # Enable relay client mode
-            'prefer_region': 'global',  # Preferred region: us-west, eu-central, global, etc.
-            'cache_timeout': '300',  # Relay discovery cache timeout (5 minutes)
             # Server mode (volunteer as relay for others)
             'volunteer': 'false',  # Volunteer this node as relay (opt-in)
             'max_peers': '10',  # Max concurrent relay sessions (server mode)
-            'bandwidth_limit_mbps': '10.0',  # Bandwidth limit for relaying
-            'region': 'global'  # Geographic region for relay announcements
+            'bandwidth_limit_mbps': '10.0'  # Bandwidth limit for relaying
         }
 
         self._config['gossip'] = {
@@ -358,14 +343,10 @@ class Settings:
             'max_hops': '5',  # Maximum hops for message forwarding
             'fanout': '3',  # Number of random peers to forward to
             'ttl_seconds': '86400',  # Message TTL (24 hours)
-            'sync_interval': '300',  # Anti-entropy sync interval (5 minutes)
-            'cleanup_interval': '600',  # Expired message cleanup interval (10 minutes)
-            'priority': 'normal'  # Default message priority: low, normal, high
+            'sync_interval': '300'  # Anti-entropy sync interval (5 minutes)
         }
 
         self._config['knowledge'] = {
-            'token_warning_threshold': '0.8',  # Warn when context window reaches 80%
-            'auto_extraction_enabled': 'true',  # Automatically suggest knowledge extraction
             'cultural_perspectives_enabled': 'false',  # Include cultural perspective analysis in knowledge extraction
             # Which provider extracts a conversation nobody has answered in yet.
             # Empty means the first local provider in the registry; extraction
@@ -375,9 +356,8 @@ class Settings:
         }
 
         # Background models and where they run. Each keeps its own device key, so
-        # embeddings can sit on the CPU while Whisper ([local_transcription] device)
-        # takes the card. Written so a new user can see them; until 2026-10-27 only
-        # Whisper's was.
+        # embeddings can sit on the CPU while Whisper takes the card. Written so a
+        # new user can see them; until 2026-10-27 only Whisper's was.
         self._config['memory'] = {
             'embedding_device': 'auto'  # Where the embedding model (indexing, Active Recall) runs for every agent: auto, cpu, cuda or mps. auto = an agent profile's memory.embedding_device, else cuda, then mps, then cpu; any other value overrides the profiles
         }
@@ -399,12 +379,7 @@ class Settings:
             'background_threshold_mb': '50',  # Background transfer threshold in MB
             'direct_tls_only_threshold_mb': '100',  # Direct TLS preference threshold in MB
             'max_concurrent_transfers': '3',  # Max concurrent file transfers
-            'verify_hash': 'true',  # Verify file hash after transfer (SHA256)
-            # Preparation timeout configuration (v0.11.2+)
-            'preparation_timeout_base': '60',  # **Inert: nothing reads it.** The UI's own wait is in `ui/src/lib/fileSendTimeout.ts` (60 s + 40 s per GB + 20 s margin)
-            'preparation_timeout_per_gb': '40',  # **Inert**, as above
-            'preparation_progress_interval_mb': '100',  # **Inert: nothing reads it.** Preparation progress is throttled by time, `PREPARATION_PROGRESS_MIN_INTERVAL_S` (0.5 s) in `file_transfer_manager.py`
-            'preparation_progress_interval_chunks': '10000'  # **Inert**, as above
+            'verify_hash': 'true'  # Verify file hash after transfer (SHA256)
         }
 
         self._config['music'] = {
@@ -433,12 +408,10 @@ class Settings:
         self._config['conversations'] = {
             # Per-conversation storage settings (v0.21.0)
             'default_persist_p2p_history': 'false',  # Persist P2P chat history by default (false = ephemeral, synced from peer)
-            'default_persist_telegram_history': 'true',  # Persist Telegram chat history by default
-            'storage_version': '2'  # Storage schema version (1 = legacy groups/, 2 = unified conversations/)
+            'default_persist_telegram_history': 'true'  # Persist Telegram chat history by default
         }
 
         self._config['voice_messages'] = {
-            'enabled': 'true',  # Enable voice message recording and playback (v0.13.0+)
             'max_duration_seconds': '300',  # Maximum recording duration in seconds (5 minutes)
             'max_size_mb': '10',  # Maximum voice message file size in MB
             'mime_types': 'audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav',  # Supported audio formats (includes WAV for Tauri/Rust backend)
@@ -463,18 +436,9 @@ class Settings:
 
         self._config['local_transcription'] = {
             'enabled': 'true',  # Enable local Whisper transcription (v0.13.1+)
-            'model': 'openai/whisper-large-v3-turbo',  # Model name (HuggingFace)
-            'device': 'auto',  # Device: 'cuda', 'cpu', or 'auto' (auto-detects CUDA)
-            'compile_model': 'true',  # Use torch.compile for 4.5x speedup (PyTorch 2.4+)
-            'use_flash_attention': 'false',  # Use Flash Attention 2 (requires flash-attn package)
-            'chunk_length_s': '30',  # Chunk length for long-form transcription (speed vs accuracy)
-            'batch_size': '16',  # Batch size for chunked transcription (higher = faster, more VRAM)
-            'language': 'auto',  # Language: 'auto' (detect) or ISO 639-1 code (e.g., 'en', 'es')
-            'task': 'transcribe',  # Task: 'transcribe' or 'translate' (to English)
             'fallback_to_openai': 'true',  # Fallback to OpenAI API if local fails
             'max_file_size_mb': '25',  # Deprecated fallback when max_duration_seconds is empty: max audio file size in MB for local transcription
             'max_duration_seconds': _SEEDED_KEYS[('local_transcription', 'max_duration_seconds')][0],  # Max audio duration in seconds for local Whisper; 0 = unlimited, empty = legacy max_file_size_mb
-            'lazy_loading': 'true',  # Load model on first use (faster startup)
             'idle_unload_s': _SEEDED_KEYS[('local_transcription', 'idle_unload_s')][0],  # Unload the model (frees VRAM) after this many idle seconds; 0 = never
             'queue_wait_s': _SEEDED_KEYS[('local_transcription', 'queue_wait_s')][0],  # How long a person's transcription may wait in line for the GPU; 0 = do not wait
             'cpu_max_s': _SEEDED_KEYS[('local_transcription', 'cpu_max_s')][0],  # The CPU takes a transcription only when its estimate is within this many seconds; 0 = never use the CPU
@@ -483,10 +447,7 @@ class Settings:
         }
 
         self._config['vision'] = {
-            'enabled': 'true',  # Enable vision API features (screenshot paste, image analysis)
-            'default_provider': 'openai',  # Default AI provider for vision: 'openai' or 'anthropic'
-            'max_image_size_mb': '5',  # Maximum image size in MB (clipboard paste and uploads)
-            'thumbnail_quality': '85'  # Thumbnail JPEG quality (0-100)
+            'max_image_size_mb': '5'  # Maximum image size in MB (clipboard paste and uploads)
         }
 
         self._config['telegram'] = {
@@ -501,44 +462,16 @@ class Settings:
             'transcription_enabled': 'true',  # Auto-transcribe Telegram voice messages (uses default voice provider)
             'bridge_to_p2p': 'false',  # Forward Telegram messages to P2P peers (see NOTE below)
             'conversation_links': '{}',  # JSON map of telegram_chat_id -> conversation_id
-            # Historical message fetching (v0.15.0+)
-            'fetch_history_on_startup': 'true',  # Fetch historical messages on bot startup
-            'history_fetch_limit': '100',  # Max messages to fetch per chat (Telegram limit: 100)
-            'history_max_age_hours': '24',  # Maximum age of messages to fetch (Telegram limit: 24 hours)
-            'history_message_types': 'text,voice,photo,document,video',  # Comma-separated message types
-            'drop_pending_updates': 'false',  # Drop pending updates on startup
             'last_update_id': '{}'  # Track last processed update_id per chat (JSON object)
         }
         # NOTE: bridge_to_p2p currently forwards as N separate 1:1 messages (v0.15.0).
         # Future: Will support group chat bridging (single message to DPC group).
         # See telegram_coordinator.py:_forward_to_p2p_peers() for implementation details.
 
-        # DPC Agent runtime settings (security/permission settings are in privacy_rules.json)
-        # Note: enabled and tools settings are configured via Firewall Rules UI
-        self._config['dpc_agent'] = {
-            'budget_usd': '50',  # Maximum budget per task in USD
-            'max_rounds': '200',  # Maximum LLM rounds before stopping
-            'context_window': '200000',  # Agent context window size (tokens)
-            'enable_task_queue': 'true',  # Enable background task scheduling
-            'billing_model': 'subscription',  # 'subscription' or 'pay_per_use'
-        }
-        # NOTE: The agent is sandboxed to ~/.dpc/agent/ directory.
-        # Security settings (enabled, tools) are configured via Firewall Rules UI
-        # which writes to ~/.dpc/privacy_rules.json.
-
         # NOTE: [dpc_agent_telegram] section removed in v0.15.0 — deprecated.
         # Agent Telegram linking is now per-agent via ~/.dpc/agents/{id}/config.json.
         # Use the main [telegram] bot (same token) and link agents via the UI.
         # See docs/DPC_AGENT_TELEGRAM.md for migration guide.
-
-        # Agent-Telegram Chat Linking (v0.15.0+)
-        self._config['agent_telegram'] = {
-            'auto_link_on_create': 'false',  # Auto-link Telegram chat when creating agents
-            'require_confirmation': 'true',  # Require user confirmation before linking
-            'default_enabled': 'false'  # Default telegram_enabled state for new agents
-        }
-        # NOTE: This section controls agent-Telegram chat linking behavior
-        # Uses the main Telegram bot (from [telegram] section), not a separate bot
 
         self._config['agent_chat'] = {
             'cc_display_name': 'CC'  # The name an external agent (Claude Code, ZCode or another harness) goes by in 1:1 agent chats without --as, and in groups where this node registered no tag (mentions match it)
@@ -711,21 +644,6 @@ class Settings:
     def get_auto_collect_device_info(self) -> bool:
         """Check if automatic device/system info collection is enabled."""
         value = self.get('system', 'auto_collect_device_info', 'true')
-        return value.lower() in ('true', '1', 'yes')
-
-    def get_token_warning_threshold(self) -> float:
-        """Get the token warning threshold (0.0-1.0)."""
-        value = self.get('knowledge', 'token_warning_threshold', '0.8')
-        try:
-            threshold = float(value)
-            # Clamp to valid range
-            return max(0.0, min(1.0, threshold))
-        except ValueError:
-            return 0.8  # Default to 80%
-
-    def get_auto_extraction_enabled(self) -> bool:
-        """Check if automatic knowledge extraction is enabled."""
-        value = self.get('knowledge', 'auto_extraction_enabled', 'true')
         return value.lower() in ('true', '1', 'yes')
 
     def get_cultural_perspectives_enabled(self) -> bool:
@@ -1308,44 +1226,14 @@ class Settings:
         """Get UDP port for hole punching."""
         return int(self.get('hole_punch', 'udp_punch_port', '8890'))
 
-    def get_hole_punch_nat_detection_enabled(self) -> bool:
-        """Check if NAT type detection is enabled."""
-        value = self.get('hole_punch', 'nat_detection_enabled', 'true')
-        return value.lower() in ('true', '1', 'yes')
-
-    def get_hole_punch_stun_timeout(self) -> float:
-        """Get STUN endpoint discovery timeout in seconds."""
-        return float(self.get('hole_punch', 'stun_timeout', '5'))
-
-    def get_hole_punch_attempts(self) -> int:
-        """Get number of hole punch attempts before giving up."""
-        return int(self.get('hole_punch', 'punch_attempts', '3'))
-
-    def get_hole_punch_dtls_enabled(self) -> bool:
-        """Check if DTLS encryption is enabled for hole-punched connections."""
-        value = self.get('hole_punch', 'enable_dtls', 'true')
-        return value.lower() in ('true', '1', 'yes')
-
     def get_hole_punch_dtls_handshake_timeout(self) -> float:
         """Get DTLS handshake timeout in seconds."""
         return float(self.get('hole_punch', 'dtls_handshake_timeout', '3'))
-
-    def get_hole_punch_dtls_version(self) -> str:
-        """Get DTLS protocol version (1.2 or 1.3)."""
-        return self.get('hole_punch', 'dtls_version', '1.2')
 
     def get_relay_enabled(self) -> bool:
         """Check if relay client mode is enabled."""
         value = self.get('relay', 'enabled', 'true')
         return value.lower() in ('true', '1', 'yes')
-
-    def get_relay_prefer_region(self) -> str:
-        """Get preferred relay region."""
-        return self.get('relay', 'prefer_region', 'global')
-
-    def get_relay_cache_timeout(self) -> int:
-        """Get relay discovery cache timeout in seconds."""
-        return int(self.get('relay', 'cache_timeout', '300'))
 
     def get_relay_volunteer(self) -> bool:
         """Check if this node volunteers as relay (server mode)."""
@@ -1359,10 +1247,6 @@ class Settings:
     def get_relay_bandwidth_limit(self) -> float:
         """Get bandwidth limit for relaying in Mbps."""
         return float(self.get('relay', 'bandwidth_limit_mbps', '10.0'))
-
-    def get_relay_region(self) -> str:
-        """Get geographic region for relay announcements."""
-        return self.get('relay', 'region', 'global')
 
     def get_gossip_enabled(self) -> bool:
         """Check if gossip protocol is enabled."""
@@ -1385,14 +1269,6 @@ class Settings:
         """Get anti-entropy sync interval in seconds."""
         return int(self.get('gossip', 'sync_interval', '300'))
 
-    def get_gossip_cleanup_interval(self) -> int:
-        """Get expired message cleanup interval in seconds."""
-        return int(self.get('gossip', 'cleanup_interval', '600'))
-
-    def get_gossip_priority(self) -> str:
-        """Get default gossip message priority."""
-        return self.get('gossip', 'priority', 'normal')
-
     # Convenience methods for connection strategies
     def get_enable_hole_punching(self) -> bool:
         """Get whether UDP hole punching is enabled."""
@@ -1403,21 +1279,9 @@ class Settings:
         return self.get_connection_timeout('hole_punch')
 
     # Vision API settings (Phase 2.6: Screenshot + Vision Integration)
-    def get_vision_enabled(self) -> bool:
-        """Get whether vision API features are enabled."""
-        return self.get('vision', 'enabled', 'true').lower() == 'true'
-
-    def get_vision_default_provider(self) -> str:
-        """Get default AI provider for vision analysis ('openai' or 'anthropic')."""
-        return self.get('vision', 'default_provider', 'openai')
-
     def get_vision_max_image_size_mb(self) -> int:
         """Get maximum image size in MB for clipboard paste and uploads."""
         return int(self.get('vision', 'max_image_size_mb', '5'))
-
-    def get_vision_thumbnail_quality(self) -> int:
-        """Get thumbnail JPEG quality (0-100)."""
-        return int(self.get('vision', 'thumbnail_quality', '85'))
 
     # Voice Transcription Settings (v0.13.2+)
 
@@ -1470,40 +1334,6 @@ class Settings:
         value = self.get('local_transcription', 'enabled', 'true')
         return value.lower() in ('true', '1', 'yes')
 
-    def get_local_transcription_model(self) -> str:
-        """Get the Whisper model name for local transcription."""
-        return self.get('local_transcription', 'model', 'openai/whisper-large-v3-turbo')
-
-    def get_local_transcription_device(self) -> str:
-        """Get the device for local transcription ('cuda', 'cpu', or 'auto')."""
-        return self.get('local_transcription', 'device', 'auto')
-
-    def get_local_transcription_compile_model(self) -> bool:
-        """Check if torch.compile is enabled for local transcription."""
-        value = self.get('local_transcription', 'compile_model', 'true')
-        return value.lower() in ('true', '1', 'yes')
-
-    def get_local_transcription_use_flash_attention(self) -> bool:
-        """Check if Flash Attention 2 is enabled for local transcription."""
-        value = self.get('local_transcription', 'use_flash_attention', 'false')
-        return value.lower() in ('true', '1', 'yes')
-
-    def get_local_transcription_chunk_length_s(self) -> int:
-        """Get chunk length for long-form transcription in seconds."""
-        return int(self.get('local_transcription', 'chunk_length_s', '30'))
-
-    def get_local_transcription_batch_size(self) -> int:
-        """Get batch size for chunked transcription."""
-        return int(self.get('local_transcription', 'batch_size', '16'))
-
-    def get_local_transcription_language(self) -> str:
-        """Get language for transcription ('auto' for auto-detect)."""
-        return self.get('local_transcription', 'language', 'auto')
-
-    def get_local_transcription_task(self) -> str:
-        """Get transcription task ('transcribe' or 'translate')."""
-        return self.get('local_transcription', 'task', 'transcribe')
-
     def get_local_transcription_fallback_to_openai(self) -> bool:
         """Check if fallback to OpenAI API is enabled when local fails."""
         value = self.get('local_transcription', 'fallback_to_openai', 'true')
@@ -1546,11 +1376,6 @@ class Settings:
                            "falling back to legacy max_file_size_mb", raw)
             return None
         return 0.0 if value == 0 else value
-
-    def get_local_transcription_lazy_loading(self) -> bool:
-        """Check if lazy model loading is enabled (load on first use)."""
-        value = self.get('local_transcription', 'lazy_loading', 'true')
-        return value.lower() in ('true', '1', 'yes')
 
     def get_music_auto_align_lyrics(self) -> bool:
         """`[music] auto_align_lyrics`: automatically align known lyrics of generated vocal takes
@@ -1916,31 +1741,6 @@ class Settings:
             'bridge_to_p2p': self.get_telegram_bridge_to_p2p()
         }
 
-    # Historical message fetching settings (v0.15.0+)
-
-    def get_telegram_fetch_history_on_startup(self) -> bool:
-        """Check if historical message fetching is enabled on startup."""
-        value = self.get('telegram', 'fetch_history_on_startup', 'true')
-        return value.lower() in ('true', '1', 'yes')
-
-    def get_telegram_history_fetch_limit(self) -> int:
-        """Get maximum number of historical messages to fetch per chat."""
-        return int(self.get('telegram', 'history_fetch_limit', '100'))
-
-    def get_telegram_history_max_age_hours(self) -> int:
-        """Get maximum age of messages to fetch (hours)."""
-        return int(self.get('telegram', 'history_max_age_hours', '24'))
-
-    def get_telegram_history_message_types(self) -> list:
-        """Get list of message types to fetch during history sync."""
-        types_str = self.get('telegram', 'history_message_types', 'text,voice,photo,document,video')
-        return [t.strip() for t in types_str.split(',') if t.strip()]
-
-    def get_telegram_drop_pending_updates(self) -> bool:
-        """Check if pending updates should be dropped on startup."""
-        value = self.get('telegram', 'drop_pending_updates', 'false')
-        return value.lower() in ('true', '1', 'yes')
-
     def get_telegram_last_update_id(self, chat_id: str) -> int:
         """Get last processed update_id for a specific chat."""
         import json
@@ -1980,34 +1780,6 @@ class Settings:
         except Exception as e:
             logger.error(f"Failed to remove last_update_id for chat {chat_id}: {e}")
 
-    # DPC Agent Runtime Settings
-    # Note: Security/permission settings (enabled, tools) are in privacy_rules.json
-    # Configure via Firewall Rules UI in the desktop app.
-
-    # NOTE: Tool control is now handled via privacy_rules.json firewall only
-    # See: dpc_agent.tools in ~/.dpc/privacy_rules.json
-
-    def get_dpc_agent_budget_usd(self) -> float:
-        """Get maximum budget per task in USD."""
-        return float(self.get('dpc_agent', 'budget_usd', '50'))
-
-    def get_dpc_agent_max_rounds(self) -> int:
-        """Get maximum LLM rounds before stopping."""
-        return int(self.get('dpc_agent', 'max_rounds', '200'))
-
-    def get_dpc_agent_context_window(self) -> int:
-        """Get agent context window size in tokens."""
-        return int(self.get('dpc_agent', 'context_window', '200000'))
-
-    def get_dpc_agent_enable_task_queue(self) -> bool:
-        """Check if task queue (background scheduling) is enabled."""
-        value = self.get('dpc_agent', 'enable_task_queue', 'true')
-        return value.lower() in ('true', '1', 'yes')
-
-    def get_dpc_agent_billing_model(self) -> str:
-        """Get billing model ('subscription' or 'pay_per_use')."""
-        return self.get('dpc_agent', 'billing_model', 'subscription')
-
     # DPC Agent Telegram Settings
 
     def get_dpc_agent_telegram_enabled(self) -> bool:
@@ -2038,23 +1810,6 @@ class Settings:
         """Check if voice message transcription is enabled for agent Telegram bot."""
         value = self.get('dpc_agent_telegram', 'transcription_enabled', 'true')
         return value.lower() in ('true', '1', 'yes')
-
-    def get_dpc_agent_config(self) -> dict:
-        """Get DPC agent runtime configuration as a dict.
-
-        Note: Security/permission settings (enabled, tools) are
-        configured via the Firewall Rules UI (privacy_rules.json), not here.
-        """
-        return {
-            # Runtime settings from config.ini
-            'budget_usd': self.get_dpc_agent_budget_usd(),
-            'max_rounds': self.get_dpc_agent_max_rounds(),
-            'context_window': self.get_dpc_agent_context_window(),
-            'enable_task_queue': self.get_dpc_agent_enable_task_queue(),
-            'billing_model': self.get_dpc_agent_billing_model(),
-            # Security settings configured via Firewall Rules UI (privacy_rules.json):
-            # - enabled, tools
-        }
 
     def get_dpc_agent_telegram_config(self) -> dict:
         """Get all DPC agent Telegram configuration as a dict."""

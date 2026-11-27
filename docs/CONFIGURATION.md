@@ -750,7 +750,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **34 sections, 203 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **32 sections, 153 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -759,14 +759,6 @@ An empty default means the key is written blank and the feature stays off until 
 | Key | Default | Notes |
 |---|---|---|
 | `cc_display_name` | `CC` | The name an external agent (Claude Code, ZCode or another harness) goes by in 1:1 agent chats without --as, and in groups where this node registered no tag (mentions match it) |
-
-#### `[agent_telegram]`
-
-| Key | Default | Notes |
-|---|---|---|
-| `auto_link_on_create` | `false` | Auto-link Telegram chat when creating agents |
-| `require_confirmation` | `true` | Require user confirmation before linking |
-| `default_enabled` | `false` | Default telegram_enabled state for new agents |
 
 #### `[api]`
 
@@ -779,12 +771,7 @@ An empty default means the key is written blank and the feature stays off until 
 
 | Key | Default | Notes |
 |---|---|---|
-| `enable_ipv6` | `true` | Try IPv6 direct connections (Priority 1) |
-| `enable_ipv4` | `true` | Try IPv4 direct connections (Priority 2) |
-| `enable_hub_webrtc` | `false` | Try Hub WebRTC with STUN/TURN (Priority 3) - requires Hub connection |
 | `enable_hole_punching` | `false` | Try DHT-coordinated UDP hole punching (Priority 4) - DISABLED: lacks DTLS encryption (v0.10.0) |
-| `enable_relays` | `true` | Try volunteer relay nodes (Priority 5) |
-| `enable_gossip` | `true` | Use gossip store-and-forward fallback (Priority 6) |
 | `ipv6_timeout` | `60` | Includes 30s pre-flight check + 30s SSL handshake |
 | `ipv4_timeout` | `60` | Includes 30s pre-flight check + 30s SSL handshake |
 | `webrtc_timeout` | `30` |  |
@@ -804,7 +791,6 @@ An empty default means the key is written blank and the feature stays off until 
 |---|---|---|
 | `default_persist_p2p_history` | `false` | Persist P2P chat history by default (false = ephemeral, synced from peer) |
 | `default_persist_telegram_history` | `true` | Persist Telegram chat history by default |
-| `storage_version` | `2` | Storage schema version (1 = legacy groups/, 2 = unified conversations/) |
 
 #### `[dht]`
 
@@ -851,16 +837,6 @@ An empty default means the key is written blank and the feature stays off until 
 | `response_delay_seconds` | `3` | Pause before the bot answers |
 | `url_whitelist` | *(empty)* | Comma-separated domains whose links are kept in user text, others removed; empty = no filtering |
 
-#### `[dpc_agent]`
-
-| Key | Default | Notes |
-|---|---|---|
-| `budget_usd` | `50` | Maximum budget per task in USD |
-| `max_rounds` | `200` | Maximum LLM rounds before stopping |
-| `context_window` | `200000` | Agent context window size (tokens) |
-| `enable_task_queue` | `true` | Enable background task scheduling |
-| `billing_model` | `subscription` | 'subscription' or 'pay_per_use' |
-
 #### `[file_transfer]`
 
 | Key | Default | Notes |
@@ -871,10 +847,6 @@ An empty default means the key is written blank and the feature stays off until 
 | `direct_tls_only_threshold_mb` | `100` | Direct TLS preference threshold in MB |
 | `max_concurrent_transfers` | `3` | Max concurrent file transfers |
 | `verify_hash` | `true` | Verify file hash after transfer (SHA256) |
-| `preparation_timeout_base` | `60` | **Inert: nothing reads it.** The UI's own wait is in `ui/src/lib/fileSendTimeout.ts` (60 s + 40 s per GB + 20 s margin) |
-| `preparation_timeout_per_gb` | `40` | **Inert**, as above |
-| `preparation_progress_interval_mb` | `100` | **Inert: nothing reads it.** Preparation progress is throttled by time, `PREPARATION_PROGRESS_MIN_INTERVAL_S` (0.5 s) in `file_transfer_manager.py` |
-| `preparation_progress_interval_chunks` | `10000` | **Inert**, as above |
 
 #### `[gateway]`
 
@@ -893,8 +865,6 @@ An empty default means the key is written blank and the feature stays off until 
 | `fanout` | `3` | Number of random peers to forward to |
 | `ttl_seconds` | `86400` | Message TTL (24 hours) |
 | `sync_interval` | `300` | Anti-entropy sync interval (5 minutes) |
-| `cleanup_interval` | `600` | Expired message cleanup interval (10 minutes) |
-| `priority` | `normal` | Default message priority: low, normal, high |
 
 #### `[history]`
 
@@ -907,12 +877,7 @@ An empty default means the key is written blank and the feature stays off until 
 | Key | Default | Notes |
 |---|---|---|
 | `udp_punch_port` | `8890` | UDP port for hole punching |
-| `nat_detection_enabled` | `true` | Detect NAT type (cone vs symmetric) |
-| `stun_timeout` | `5` | Endpoint discovery timeout (seconds) |
-| `punch_attempts` | `3` | Number of punch attempts before giving up |
-| `enable_dtls` | `true` | Enable DTLS encryption for hole-punched connections |
 | `dtls_handshake_timeout` | `3` | DTLS handshake timeout (seconds) |
-| `dtls_version` | `1.2` | DTLS protocol version (1.2 or 1.3) |
 
 #### `[hub]`
 
@@ -925,8 +890,6 @@ An empty default means the key is written blank and the feature stays off until 
 
 | Key | Default | Notes |
 |---|---|---|
-| `token_warning_threshold` | `0.8` | Warn when context window reaches 80% |
-| `auto_extraction_enabled` | `true` | Automatically suggest knowledge extraction |
 | `cultural_perspectives_enabled` | `false` | Include cultural perspective analysis in knowledge extraction |
 | `cold_fallback_provider` | *(empty)* |  |
 
@@ -951,18 +914,8 @@ An empty default means the key is written blank and the feature stays off until 
 | Key | Default | Notes |
 |---|---|---|
 | `enabled` | `true` | Enable local Whisper transcription (v0.13.1+) |
-| `model` | `openai/whisper-large-v3-turbo` | Model name (HuggingFace) |
-| `device` | `auto` | Device: 'cuda', 'cpu', or 'auto' (auto-detects CUDA) |
-| `compile_model` | `true` | Use torch.compile for 4.5x speedup (PyTorch 2.4+) |
-| `use_flash_attention` | `false` | Use Flash Attention 2 (requires flash-attn package) |
-| `chunk_length_s` | `30` | Chunk length for long-form transcription (speed vs accuracy) |
-| `batch_size` | `16` | Batch size for chunked transcription (higher = faster, more VRAM) |
-| `language` | `auto` | Language: 'auto' (detect) or ISO 639-1 code (e.g., 'en', 'es') |
-| `task` | `transcribe` | Task: 'transcribe' or 'translate' (to English) |
 | `fallback_to_openai` | `true` | Fallback to OpenAI API if local fails |
-| `max_file_size_mb` | `25` | Deprecated legacy fallback when `max_duration_seconds` is empty: max audio file size in MB for local transcription (25 MB is the OpenAI Whisper API upload limit, not a local VRAM limit) |
-| `max_duration_seconds` | *(empty)* | Max audio duration in seconds for local Whisper; empty = legacy byte-size limit (`max_file_size_mb` / `[voice_messages] max_size_mb`), `0` = unlimited, positive seconds = duration cap |
-| `lazy_loading` | `true` | Load model on first use (faster startup) |
+| `max_file_size_mb` | `25` | Deprecated fallback when max_duration_seconds is empty: max audio file size in MB for local transcription |
 
 #### `[logging]`
 
@@ -1037,20 +990,15 @@ An empty default means the key is written blank and the feature stays off until 
 | Key | Default | Notes |
 |---|---|---|
 | `enabled` | `true` | Enable relay client mode |
-| `prefer_region` | `global` | Preferred region: us-west, eu-central, global, etc. |
-| `cache_timeout` | `300` | Relay discovery cache timeout (5 minutes) |
 | `volunteer` | `false` | Volunteer this node as relay (opt-in) |
 | `max_peers` | `10` | Max concurrent relay sessions (server mode) |
 | `bandwidth_limit_mbps` | `10.0` | Bandwidth limit for relaying |
-| `region` | `global` | Geographic region for relay announcements |
 
 #### `[system]`
 
 | Key | Default | Notes |
 |---|---|---|
 | `auto_collect_device_info` | `true` | Automatically collect device/system info for AI context |
-| `collect_hardware_specs` | `true` | Collect hardware tiers (RAM, CPU, disk, GPU) |
-| `collect_dev_tools` | `true` | Collect installed dev tools and versions |
 | `collect_ai_models` | `false` | Collect locally available AI models (opt-in for compute-sharing) |
 | `shell_memory_limit_mb` | `8192` | Memory ceiling for an agent command and everything it started, summed, in MB; 0 = off. Read at each command, no restart; DPC_SHELL_MEMORY_LIMIT_MB overrides it |
 
@@ -1069,11 +1017,6 @@ An empty default means the key is written blank and the feature stays off until 
 | `transcription_enabled` | `true` | Auto-transcribe Telegram voice messages (uses default voice provider) |
 | `bridge_to_p2p` | `false` | Forward Telegram messages to P2P peers (see NOTE below) |
 | `conversation_links` | `{}` | JSON map of telegram_chat_id -> conversation_id |
-| `fetch_history_on_startup` | `true` | Fetch historical messages on bot startup |
-| `history_fetch_limit` | `100` | Max messages to fetch per chat (Telegram limit: 100) |
-| `history_max_age_hours` | `24` | Maximum age of messages to fetch (Telegram limit: 24 hours) |
-| `history_message_types` | `text,voice,photo,document,video` | Comma-separated message types |
-| `drop_pending_updates` | `false` | Drop pending updates on startup |
 | `last_update_id` | `{}` | Track last processed update_id per chat (JSON object) |
 
 #### `[turn]`
@@ -1091,16 +1034,12 @@ An empty default means the key is written blank and the feature stays off until 
 
 | Key | Default | Notes |
 |---|---|---|
-| `enabled` | `true` | Enable vision API features (screenshot paste, image analysis) |
-| `default_provider` | `openai` | Default AI provider for vision: 'openai' or 'anthropic' |
 | `max_image_size_mb` | `5` | Maximum image size in MB (clipboard paste and uploads) |
-| `thumbnail_quality` | `85` | Thumbnail JPEG quality (0-100) |
 
 #### `[voice_messages]`
 
 | Key | Default | Notes |
 |---|---|---|
-| `enabled` | `true` | Enable voice message recording and playback (v0.13.0+) |
 | `max_duration_seconds` | `300` | Maximum recording duration in seconds (5 minutes) |
 | `max_size_mb` | `10` | Maximum voice message file size in MB |
 | `mime_types` | `audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav` | Supported audio formats (includes WAV for Tauri/Rust backend) |
