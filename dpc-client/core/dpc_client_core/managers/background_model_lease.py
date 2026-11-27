@@ -55,6 +55,14 @@ MIN_GPU_WORTH_S = 10.0
 BULK_WAIT_CAP_S = 60.0
 
 
+def _a_local_engine_holds_the_card() -> bool:
+    """Whether a supervised local engine (llama-server, Strata) holds the card and is not stopping.
+    Read from a worker thread: a copy of the claims' marks, nothing written."""
+    from . import llama_server_supervisor as _sup
+
+    return any(mark != "stopping" for mark in list(_sup._CARD_CLAIMS.values()))
+
+
 class BackgroundModelLease:
     """One in-process model's standing on the card, for a model that lives on the CPU and goes to the
     card only for bulk work. `to_gpu` and `to_cpu` move the client's loaded model and raise when they
@@ -171,6 +179,11 @@ class BackgroundModelLease:
 
         lease = self.lease()
         wait_s = min(BULK_WAIT_CAP_S, items * self.cpu_s_per_item)
+        if _a_local_engine_holds_the_card():
+            # A llama-server or Strata on the card does not go by itself soon, and this lease never
+            # swaps one out; waiting would only stand in the way of a later Whisper or music request
+            # that may (L5a: nobody overtakes a waiter). Asked without a wait: refused at once.
+            wait_s = 0.0
         expected = self.expected_s(items)
         held = contextlib.ExitStack()
         try:

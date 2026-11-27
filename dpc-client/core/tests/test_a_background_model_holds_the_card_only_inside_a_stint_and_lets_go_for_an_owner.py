@@ -381,3 +381,38 @@ def test_use_blocking_gives_up_on_an_owner_loop_that_does_not_answer(monkeypatch
         with lease.use_blocking("entity extraction", wait_s=0.05):
             pass
     assert never.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_stint_does_not_wait_behind_a_local_engine_on_the_card(monkeypatch):
+    """A llama-server or Strata does not go by itself soon and this lease never swaps one out, so the
+    stint asks without a wait (refused at once, the CPU) rather than stand in the line, where it would
+    keep a later Whisper or music request from swapping the engine out (L5a)."""
+    base_mod.bind_owner_loop(asyncio.get_running_loop())
+    monkeypatch.setattr(bml, "_a_local_engine_holds_the_card", lambda: True)
+    model = FakeModel()
+    c = client(model)
+    w = whisper()
+    release = asyncio.Event()
+    holder = asyncio.create_task(hold_open(w.lease, "dictation", release))
+    await until(lambda: holding() == ["whisper:turbo"])
+
+    def work():
+        with c.stint("index rebuild", 40) as device:
+            return device
+
+    assert await asyncio.wait_for(asyncio.to_thread(work), 1.0) == "cpu"
+    assert waiting() == [] and model.moves == []
+    release.set()
+    await asyncio.wait_for(holder, BOUND)
+    await nothing_left()
+
+
+def test_a_local_engine_on_the_card_is_read_from_the_claims_and_a_stopping_one_does_not_count(monkeypatch):
+    engine = object()
+    monkeypatch.setattr(base_mod, "_CARD_CLAIMS", {engine: "claimed"})
+    assert bml._a_local_engine_holds_the_card()
+    monkeypatch.setattr(base_mod, "_CARD_CLAIMS", {engine: "stopping"})
+    assert not bml._a_local_engine_holds_the_card()
+    monkeypatch.setattr(base_mod, "_CARD_CLAIMS", {})
+    assert not bml._a_local_engine_holds_the_card()
