@@ -108,8 +108,6 @@ NETWORK_FORM = {
     "file_transfer": {
         "chunk_size": "1MiB",
         "chunk_delay": 0,
-        "background_threshold_mb": 100,
-        "direct_tls_only_threshold_mb": 200,
         "max_concurrent_transfers": 2,
         "verify_hash": False,
     },
@@ -448,6 +446,10 @@ class TestANetworkSave:
         ({"p2p": {"listen_port": 9000}}, "listen_port"),
         # The gateway binds 127.0.0.1 only (ADR-041 D1): not a setting.
         ({"gateway": {"host": "0.0.0.0"}}, "host"),
+        # Read by FileTransferManager into attributes nothing then reads: a control
+        # would promise routing that does not exist.
+        ({"file_transfer": {"background_threshold_mb": 200}}, "background_threshold_mb"),
+        ({"file_transfer": {"direct_tls_only_threshold_mb": 200}}, "direct_tls_only_threshold_mb"),
         # The dead keys of these sections (1cc35220).
         ({"connection": {"enable_ipv6": False}}, "enable_ipv6"),
         ({"connection": {"enable_gossip": False}}, "enable_gossip"),

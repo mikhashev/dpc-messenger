@@ -2475,10 +2475,6 @@ class Settings:
             "file_transfer": {
                 "chunk_size": self.get('file_transfer', 'chunk_size', 'auto'),
                 "chunk_delay": float(self.get('file_transfer', 'chunk_delay', '0')),
-                "background_threshold_mb": int(self.get(
-                    'file_transfer', 'background_threshold_mb', '50')),
-                "direct_tls_only_threshold_mb": int(self.get(
-                    'file_transfer', 'direct_tls_only_threshold_mb', '100')),
                 "max_concurrent_transfers": int(self.get(
                     'file_transfer', 'max_concurrent_transfers', '3')),
                 "verify_hash": self.get(
@@ -2554,8 +2550,6 @@ class Settings:
         )
         figures_zero_or_more = (
             ('relay', 'bandwidth_limit_mbps'),
-            ('file_transfer', 'background_threshold_mb'),
-            ('file_transfer', 'direct_tls_only_threshold_mb'),
         )
         counts_one_or_more = (
             ('dht', 'k'), ('dht', 'alpha'),

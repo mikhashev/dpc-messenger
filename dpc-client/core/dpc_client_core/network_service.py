@@ -39,7 +39,9 @@ logger = logging.getLogger(__name__)
 # What each section of the form may write. p2p.listen_port is knowingly absent
 # (read-only display, no writer); gateway.host is knowingly absent (ADR-041 D1);
 # the dead keys of these sections (removed from the template by 1cc35220) are
-# knowingly absent; [api] belongs to its own card.
+# knowingly absent; [api] belongs to its own card. The two [file_transfer]
+# thresholds are knowingly absent too: FileTransferManager reads them into
+# attributes nothing then reads, so a control for them would turn nothing.
 _P2P_KEYS = frozenset({
     "listen_host", "connection_timeout", "auto_connect_node_groups",
     "auto_connect_delay",
@@ -67,8 +69,7 @@ _HUB_KEYS = frozenset({"url", "auto_connect"})
 _OAUTH_KEYS = frozenset({"callback_host", "callback_port", "default_provider"})
 _GATEWAY_KEYS = frozenset({"enabled", "port"})
 _FILE_TRANSFER_KEYS = frozenset({
-    "chunk_size", "chunk_delay", "background_threshold_mb",
-    "direct_tls_only_threshold_mb", "max_concurrent_transfers", "verify_hash",
+    "chunk_size", "chunk_delay", "max_concurrent_transfers", "verify_hash",
 })
 
 _SECTION_KEYS = {

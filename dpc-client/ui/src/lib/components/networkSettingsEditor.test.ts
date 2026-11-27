@@ -37,14 +37,17 @@ describe('the Network and Gateway form groups its keys by when they apply', () =
       'nw-udp-punch-port', 'nw-hub-url', 'nw-hub-auto-connect',
       'nw-oauth-callback-host', 'nw-oauth-callback-port', 'nw-oauth-provider',
       'nw-gateway-enabled', 'nw-gateway-port',
-      'nw-ft-chunk-size', 'nw-ft-chunk-delay', 'nw-ft-background-mb',
-      'nw-ft-direct-tls-mb', 'nw-ft-max-concurrent', 'nw-ft-verify-hash']) {
+      'nw-ft-chunk-size', 'nw-ft-chunk-delay', 'nw-ft-max-concurrent', 'nw-ft-verify-hash']) {
       expect(editor).toContain(`id="${id}"`);
     }
     // [api] host/port belong to the API-port card; gateway.host is refused by
-    // the gateway itself (ADR-041 D1), so neither is a field here.
+    // the gateway itself (ADR-041 D1), so neither is a field here. The two
+    // [file_transfer] thresholds are read by FileTransferManager into attributes
+    // nothing then reads: a field would promise routing that does not exist.
     expect(editor).not.toContain('id="nw-api-');
     expect(editor).not.toContain('id="nw-gateway-host"');
+    expect(editor).not.toContain('id="nw-ft-background-mb"');
+    expect(editor).not.toContain('id="nw-ft-direct-tls-mb"');
   });
 });
 

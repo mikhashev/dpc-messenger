@@ -91,10 +91,6 @@
       words: 'Gateway port must be a whole number from 1 to 65535.', parse: aPort },
     { id: 'ftChunkDelay', section: 'file_transfer', key: 'chunk_delay',
       words: 'Chunk delay must be a number of seconds, 0 or more (0 = none).', parse: zeroOrMore },
-    { id: 'ftBackgroundMb', section: 'file_transfer', key: 'background_threshold_mb',
-      words: 'Background threshold must be a number of MB, 0 or more.', parse: zeroOrMore },
-    { id: 'ftDirectTlsMb', section: 'file_transfer', key: 'direct_tls_only_threshold_mb',
-      words: 'Direct TLS threshold must be a number of MB, 0 or more.', parse: zeroOrMore },
     { id: 'ftMaxConcurrent', section: 'file_transfer', key: 'max_concurrent_transfers',
       words: 'Max concurrent transfers must be a whole number of 1 or more.', parse: oneOrMore },
   ];
@@ -170,8 +166,6 @@
           gatewayPort: field(r, 'gateway', 'port', '9997'),
           ftChunkSize: field(r, 'file_transfer', 'chunk_size', 'auto'),
           ftChunkDelay: field(r, 'file_transfer', 'chunk_delay', '0'),
-          ftBackgroundMb: field(r, 'file_transfer', 'background_threshold_mb', '50'),
-          ftDirectTlsMb: field(r, 'file_transfer', 'direct_tls_only_threshold_mb', '100'),
           ftMaxConcurrent: field(r, 'file_transfer', 'max_concurrent_transfers', '3'),
         };
         flags = {
@@ -843,18 +837,6 @@
             <input id="nw-ft-chunk-delay" type="number" min="0" step="any"
               bind:value={draft.ftChunkDelay} disabled={startBusy || loading} />
             <span class="field-hint">Pause after each window of chunks; 0 = none. Applies after the next backend start.</span>
-          </div>
-          <div class="form-row">
-            <label for="nw-ft-background-mb">Background threshold (MB)</label>
-            <input id="nw-ft-background-mb" type="number" min="0" step="any"
-              bind:value={draft.ftBackgroundMb} disabled={startBusy || loading} />
-            <span class="field-hint">Transfers above this go to the background. Applies after the next backend start.</span>
-          </div>
-          <div class="form-row">
-            <label for="nw-ft-direct-tls-mb">Direct TLS threshold (MB)</label>
-            <input id="nw-ft-direct-tls-mb" type="number" min="0" step="any"
-              bind:value={draft.ftDirectTlsMb} disabled={startBusy || loading} />
-            <span class="field-hint">Above this a direct TLS link is the only acceptable route. Applies after the next backend start.</span>
           </div>
           <div class="form-row">
             <label for="nw-ft-max-concurrent">Max concurrent transfers</label>
