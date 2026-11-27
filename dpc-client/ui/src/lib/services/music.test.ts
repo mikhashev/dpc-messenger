@@ -196,6 +196,106 @@ describe('the audio diagnostics in the log', () => {
     });
 });
 
+describe('a read error under the player reloads the same source once', () => {
+    /** A failing element that still holds a position (the log's t=67.91). */
+    const readError = (audio: FakeAudio, at: number) => {
+        audio.duration = 100; // the seek after the reload needs the duration at once
+        audio.currentTime = at;
+        audio.error = { code: 2, message: 'PIPELINE_ERROR_READ: FFmpegDemuxer: data source error' };
+        audio.fire('error');
+    };
+
+    it('code 2 while playing loads the same track again where it stood and plays on', async () => {
+        const m = await freshService(['a', 'b'], 0);
+        const audio = FakeAudio.last!;
+        h.logLines.length = 0;
+        readError(audio, 67.91);
+        await settle();
+        expect(state(m)).toMatchObject({ current: 'a', loadedId: 'a' });
+        expect(audio.getAttribute('src')).toBe('blob:a');
+        expect(audio.currentTime).toBe(67.91);
+        expect(get(m.musicPlayback).playing).toBe(true);
+        expect(get(m.musicPlayback).notice).toBe('');
+        expect(h.logLines.some(l => /^error reload #\d+ a at=67\.91: the source is loaded again$/.test(l))).toBe(true);
+    });
+
+    it('a second code 2 of the reloaded source falls through to the notice, and nothing is reloaded again', async () => {
+        const m = await freshService(['a'], 0);
+        const audio = FakeAudio.last!;
+        h.logLines.length = 0;
+        readError(audio, 10);
+        await settle();
+        expect(get(m.musicPlayback).playing).toBe(true); // the reload took playback back
+        readError(audio, 12);
+        await settle();
+        expect(h.logLines.filter(l => l.startsWith('error reload'))).toHaveLength(1);
+        expect(get(m.musicPlayback).playing).toBe(false);
+        expect(get(m.musicPlayback).notice).toContain('Could not play');
+    });
+
+    it('after a track change a read error is reloaded once again', async () => {
+        const m = await freshService(['a', 'b'], 0);
+        const audio = FakeAudio.last!;
+        h.logLines.length = 0;
+        readError(audio, 20);
+        await settle();
+        audio.fire('error'); // the reloaded source fails too: only the notice
+        await settle();
+        expect(get(m.musicPlayback).notice).toContain('Could not play');
+        await m.playQueueAt(1); // the track change that always recovered it
+        await settle();
+        expect(state(m).loadedId).toBe('b');
+        readError(audio, 5);
+        await settle();
+        expect(h.logLines.filter(l => l.startsWith('error reload'))).toHaveLength(2);
+        expect(get(m.musicPlayback).playing).toBe(true);
+    });
+
+    it("an error of a source the person has navigated away from does not reload it", async () => {
+        const m = await freshService(['a', 'b'], 0);
+        const audio = FakeAudio.last!;
+        h.logLines.length = 0;
+        const gate = deferred();
+        h.gates.set('b', gate.promise);
+        const next = m.nextTrack(); // begins loading B; A's load is superseded
+        await settle();
+        readError(audio, 40); // A's error arrives while B is still loading
+        await settle();
+        gate.open();
+        await next;
+        await settle();
+        expect(state(m)).toMatchObject({ current: 'b', loadedId: 'b' });
+        expect(h.logLines.filter(l => l.startsWith('error reload'))).toHaveLength(0);
+    });
+
+    it("with the element's position unknown it resumes from the store's last timeupdate", async () => {
+        const m = await freshService(['a'], 0);
+        const audio = FakeAudio.last!;
+        audio.duration = 100;
+        audio.currentTime = 33;
+        audio.fire('timeupdate'); // the store's last known position
+        audio.currentTime = NaN; // the failed element reports nothing usable
+        audio.error = { code: 2, message: 'PIPELINE_ERROR_READ' };
+        audio.fire('error');
+        await settle();
+        expect(state(m).loadedId).toBe('a');
+        expect(audio.currentTime).toBe(33);
+    });
+
+    it('a read error of a review take is not reloaded (the review keeps its notice)', async () => {
+        const m = await freshService(['a'], 0);
+        const audio = FakeAudio.last!;
+        audio.duration = 100;
+        await m.reviewPlay('a', { autoplay: true });
+        await settle();
+        h.logLines.length = 0;
+        readError(audio, 8);
+        await settle();
+        expect(h.logLines.filter(l => l.startsWith('error reload'))).toHaveLength(0);
+        expect(get(m.musicReview).notice).toContain('could not open the take');
+    });
+});
+
 describe('Next steps from the queue as it is after its await', () => {
     it('a row removed above the current track while Next waits does not make it skip one', async () => {
         const m = await freshService(['a', 'b', 'c', 'd'], 1);

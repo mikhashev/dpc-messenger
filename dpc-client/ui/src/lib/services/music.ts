@@ -431,6 +431,11 @@ let loadToken = 0;
  *  queue a second time, and a late `timeupdate` would show the old track's time. */
 let audioToken = -1;
 const current = () => audioToken === loadToken;
+/** The load whose source was already reloaded once after a media error (a read failure
+ *  while the file changed under the player). One reload per load: when the reloaded
+ *  source fails too, the error falls through to the notice and nothing is reloaded
+ *  again until a new load (a track change, a row picked) takes the element. */
+let errorReloadToken = -1;
 const DURATION_WAIT_MS = 4000;
 
 /** Who holds the audio element: the queue, or a review of a music job's takes. */
@@ -560,6 +565,23 @@ function ensureAudio(): HTMLAudioElement | null {
             return;
         }
         const code = a.error?.code;
+        const s = get(musicPlayback);
+        // Code 2 (a read/source failure) on the loaded track is most often the file being
+        // rewritten under the player (a tag upsert moves the audio data; the lyrics align
+        // pipeline stopped playback this way, 2026-11-27). Whoever rewrote it: the player
+        // only sees its source fail, so it loads the same source once more and goes on
+        // from where it stood (a short audible gap). When the reloaded source fails too,
+        // the notice below stands and nothing is reloaded until a new load begins.
+        if (code === 2 && s.loadedId && audioToken !== errorReloadToken) {
+            const at = Number.isFinite(a.currentTime) ? a.currentTime : s.currentTime;
+            const q = freshQueueAt(s.loadedId);
+            if (currentId(q) === s.loadedId) {
+                dlogEvent('error', `error reload #${audioToken} ${s.loadedId} at=${at.toFixed(2)}: the source is loaded again`);
+                void startAt(q, q.index, s.playing, at);
+                errorReloadToken = loadToken; // the token startAt has just taken
+                return;
+            }
+        }
         musicPlayback.update(s => ({ ...s, playing: false, loadingTrack: false }));
         say(`Could not play "${titleOf(get(musicPlayback).loadedId)}": the webview could not open the file${code ? ` (media error ${code})` : ''}.`);
     });
