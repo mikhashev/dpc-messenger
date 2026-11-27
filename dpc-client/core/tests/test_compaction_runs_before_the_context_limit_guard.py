@@ -16,7 +16,7 @@ import asyncio
 import pytest
 
 from dpc_client_core.dpc_agent import loop as loop_module
-from dpc_client_core.dpc_agent.context import estimate_messages_tokens
+from dpc_client_core.dpc_agent.context import estimate_messages_tokens, tool_output_of
 from dpc_client_core.dpc_agent.guards import ContextLimitGuard
 from dpc_client_core.dpc_agent.loop import run_llm_loop
 
@@ -131,10 +131,10 @@ def test_the_projection_is_the_measured_size_plus_what_the_round_appended(tmp_pa
     _, _, events = _run(tmp_path, monkeypatch, llm, tools)
 
     cuts = [e[1] for e in events if e[0] == "cut"]
-    # The reply and the result of round one; the context line after them is appended once the
-    # projection is made (it is counted in the next measured prompt).
-    appended = llm.requests[1][len(llm.requests[0]):-1]
-    assert llm.requests[1][-1].get("_context_budget")
+    # The reply and the result of round one, as projected: the context line the loop then put
+    # at the end of that result is counted in the next measured prompt, not in the projection.
+    appended = [dict(m, content=tool_output_of(m)) for m in llm.requests[1][len(llm.requests[0]):]]
+    assert llm.requests[1][-1].get("_context_line")
     assert cuts[0] == 0, "round one has no measured size and is not projected"
     assert cuts[1] == MEASURED + estimate_messages_tokens(appended)
     assert cuts[1] > MEASURED

@@ -1789,6 +1789,8 @@ class DpcLlmAdapter:
                             peer_id, exc_info=True)
                 replaced = PEER_CONTEXT_WITHHELD
             log.info("get_dpc_context result re-cut for inference peer %s", peer_id)
+            if msg.get("_context_line"):  # the loop's line rides on the result, not in it
+                replaced = f"{replaced}\n\n{msg['_context_line']}"
             out.append({**msg, "content": replaced})
         return out
 

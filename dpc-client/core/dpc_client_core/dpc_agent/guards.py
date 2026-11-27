@@ -429,6 +429,16 @@ __all__ = [
 CONTEXT_LIMIT_RATIO = 0.95
 
 
+def context_stop_at(window: int, reserve: int = 0, ratio: float = CONTEXT_LIMIT_RATIO) -> int:
+    """The projected prompt size from which `ContextLimitGuard.between_rounds` stops: the window
+    less the answer reserve when the loop set one (a local engine), else `ratio` of the window;
+    0 for an unknown window. The loop's per-round context line warns before it."""
+    if window <= 0:
+        return 0
+    reserve = max(0, min(int(reserve or 0), window))
+    return window - reserve if reserve else int(window * ratio)
+
+
 class ContextLimitGuard(GuardMiddleware):
     """Stop before a round the window cannot hold.
 

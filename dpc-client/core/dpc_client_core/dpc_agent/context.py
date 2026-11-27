@@ -440,7 +440,8 @@ def _build_budget(
 
 
 # Beside a turn-start context figure in the runtime section: it is never the current one.
-STALE_TURN_START_NOTE = "measured before this turn; the per-round context line is the live number"
+STALE_TURN_START_NOTE = ("measured before this turn; after each tool round a live context line follows "
+                         "when the window is known")
 
 
 def _build_runtime_section(
@@ -1746,6 +1747,17 @@ def cut_placeholder(tool: str, arguments: Any, chars: int, address: Optional[str
             f"Full output: {address} (read_file reads it). {again}]")
 
 
+def tool_output_of(msg: Dict[str, Any]) -> str:
+    """A tool message's text without the context line the loop put at its end (`_context_line`,
+    loop.context_budget_line): what a cut measures, summarises or heads its placeholder with."""
+    content = str(msg.get("content") or "")
+    line = msg.get("_context_line")
+    suffix = f"\n\n{line}" if line else ""
+    if suffix and content.endswith(suffix):
+        return content[:-len(suffix)]
+    return content
+
+
 def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
     """
     Compress old tool call/result message pairs into compact summaries.
@@ -1784,11 +1796,12 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
                     break
             if parent_round is not None and parent_round in rounds_to_compact:
                 content = str(msg.get("content") or "")
-                if len(content) > _KEEP_ASIS_CHARS:
+                output = tool_output_of(msg)
+                if len(output) > _KEEP_ASIS_CHARS:  # the placeholder takes an old context line with it
                     tool, arguments = _call_of(messages, parent_round, msg.get("tool_call_id"))
                     content = cut_placeholder(
-                        tool, arguments, int(msg.get("_output_chars") or len(content)),
-                        msg.get("_output_at"), head=content[:200],
+                        tool, arguments, int(msg.get("_output_chars") or len(output)),
+                        msg.get("_output_at"), head=output[:200],
                     )
                 result.append({**msg, "content": content, "_compacted": True})
                 continue
@@ -1895,7 +1908,7 @@ async def compact_tool_history_llm(
                     parent_round = rs
                     break
             if parent_round in rounds_to_compact:
-                content = str(msg.get("content") or "")
+                content = tool_output_of(msg)  # a summary of the output, not of an old context line
                 if len(content) > _KEEP_ASIS_CHARS:
                     if failure is not None:  # no more paid calls after a failure, and no marks
                         unfinished.add(parent_round)
@@ -2028,7 +2041,7 @@ def _evictable(messages: List[Dict[str, Any]], keep_recent: int):
             parent = i
             continue
         if (msg.get("role") != "tool" or parent not in cut or msg.get("_compacted")
-                or len(str(msg.get("content") or "")) <= _KEEP_ASIS_CHARS):
+                or len(tool_output_of(msg)) <= _KEEP_ASIS_CHARS):
             continue
         yield parent, msg
 

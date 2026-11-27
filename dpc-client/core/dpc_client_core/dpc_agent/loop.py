@@ -58,6 +58,7 @@ from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
 from .guards import (
     CONTEXT_LIMIT_RATIO,
     ContextLimitGuard,
+    context_stop_at,
     BudgetLimitGuard,
     LoopGuard,
     ResearchLimitGuard,
@@ -256,33 +257,54 @@ def unmeasured_task_cost() -> Dict[str, Any]:
     return {name: None for name in task_cost_fields({})}
 
 
-# From this share of the window the per-round context line warns the model, so it hears of
-# the edge before ContextLimitGuard stops the turn at CONTEXT_LIMIT_RATIO (0.95, guards.py).
-# The 95 % stop is unchanged; this only speaks earlier.
-CONTEXT_BUDGET_WARN_RATIO = 0.80
+# The share of the way to ContextLimitGuard's stop (`guards.context_stop_at`) from which the
+# per-round context line warns. Relative to the stop, not the window: a small local window's
+# answer reserve puts the stop at 80 % of it, where a fixed 80 % warning would never be seen.
+CONTEXT_BUDGET_WARN_SHARE = 0.85
+CONTEXT_BUDGET_WARNING = " Nearing the context limit: finish the task or summarise before reading more."
 
 
-def context_budget_line(after_round: int, tokens: int, window: int) -> Optional[str]:
+def context_budget_line(after_round: int, tokens: int, window: int,
+                        stop_at: Optional[int] = None) -> Optional[str]:
     """The one line the model reads after each tool round: what the context of this turn
     holds now, by the loop's own projection (the last measured prompt plus what was appended
-    since, less a cut), against the window the guard enforces. None when either number is
-    unknown: nothing is said rather than a guess.
+    since, less a cut), against the window the guard enforces. `stop_at` is where the guard
+    stops (the ratio's stop when not given); the warning comes at CONTEXT_BUDGET_WARN_SHARE
+    of it. None when either number is unknown: nothing is said rather than a guess.
 
-    It is appended as a message of its own after the round's tool results and never edited
-    afterwards, so every earlier message of the next request is byte for byte the one the
-    engine already holds (ADR-045). The turn-start runtime section carries the figure from
-    before the turn; this one is the live number, and it says so in words."""
+    The loop puts it at the end of the round's last tool result, which no request has carried
+    yet (`_with_context_line`): every earlier message of the next request stays byte for byte
+    the one the engine holds (ADR-045), and no user turn joins the round, so the turn base a
+    KV snapshot hashes does not move (ADR-044)."""
     if after_round <= 0 or tokens <= 0 or window <= 0:
         return None
-    # Rounded half up, and the warning reads the rounded figure, so a line that says 80% warns.
-    percent = int(tokens * 100 / window + 0.5)
-    warn_at = int(CONTEXT_BUDGET_WARN_RATIO * 100 + 0.5)
+    percent = int(tokens * 100 / window + 0.5)  # rounded half up
     line = (f"[Context budget, this turn, after round {after_round}: "
             f"{tokens:,} of {window:,} tokens in use ({percent}%).]")
-    if percent >= warn_at:
-        line += (f" Nearing the limit ({warn_at}% or more): "
-                 f"finish the task or summarise before reading more.")
+    stop = stop_at if stop_at and stop_at > 0 else context_stop_at(window)
+    if tokens >= CONTEXT_BUDGET_WARN_SHARE * stop:
+        line += CONTEXT_BUDGET_WARNING
     return line
+
+
+def _with_context_line(messages: List[Dict[str, Any]], line: str) -> bool:
+    """Put `line` at the end of the last tool result after the last call, in place, marked
+    with `_context_line` so a cut can tell it from the output. The message is replaced by a
+    copy, never edited. False when there is no such result."""
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        role = msg.get("role")
+        if role == "tool":
+            content = msg.get("content")
+            if isinstance(content, list):
+                content = list(content) + [{"type": "text", "text": f"\n\n{line}"}]
+            else:
+                content = f"{content or ''}\n\n{line}"
+            messages[i] = {**msg, "content": content, "_context_line": line}
+            return True
+        if role == "assistant":
+            return False
+    return False
 
 
 def round_progress_payload(
@@ -2982,20 +3004,18 @@ async def run_llm_loop(
                     window=ctx.state.context_window,
                 ))
 
-            # The context line for the model, after the tool results of the round just run: the
-            # size the guard has just read (after the cut) against the window it enforces. A
-            # window nobody resolved (the compaction state's generic fallback, no engine, no
-            # caller's figure) says nothing. Appended, never edited later: the earlier messages
-            # stay the prefix the engine holds, and the line is counted in the measured prompt.
+            # The context line, at the end of the round's last tool result: the size the guard has
+            # just read against the window it enforces. Said only when that window was resolved
+            # (the engine's, the config's or the alias's), never for the compaction state's fallback.
             if budget_line_due:
                 budget_line_due = False
+                _window_known = on_the_engine or bool(_compaction_cfg.get("context_window"))
                 _line = context_budget_line(
                     round_idx - 1, next_prompt_tokens,
-                    ctx.state.context_window if (on_the_engine or _compaction_cfg.get("context_window"))
-                    else int(context_window or 0))
+                    ctx.state.context_window if _window_known else 0,
+                    stop_at=context_stop_at(ctx.state.context_window, ctx.state.context_reserve))
                 if _line:
-                    messages.append({"role": "user", "content": _line,
-                                     "_runtime_note": True, "_context_budget": True})
+                    _with_context_line(messages, _line)
 
             # --- LLM call ---
             messages_sent = len(messages)
