@@ -11,6 +11,7 @@ vi.mock('$lib/coreService', () => {
     // Only the QC read is scripted; every other call the service imports is unavailable.
     return {
         backfillMusicQa: unavailable, cancelMusicJob: unavailable, discardMusicTake: unavailable, getMusicCapabilities: unavailable, getMusicEngineStatus: unavailable, getMusicJob: unavailable, judgeMusicTake: unavailable, keepMusicTake: unavailable, listMusicDiscardReasons: unavailable, listMusicJobs: unavailable, listMusicTakes: unavailable, measureMusicTakeLoudness: unavailable, proposeMusicEdit: unavailable, proposeMusicJob: unavailable, proposeMusicSong: unavailable, rejectAllMusicTakes: unavailable, startMusicEngine: unavailable, stopLocalEngine: unavailable, stopMusicEngine: unavailable,
+        getMusicSettings: unavailable, saveMusicSettings: unavailable,
         getMusicJobQc: async () => { const a = h.answers.shift(); return typeof a === 'function' ? a() : a; },
     };
 });
@@ -19,6 +20,7 @@ vi.mock('$lib/coreService', () => {
 vi.mock('$lib/utils/musicPlayer', () => vi.importActual('../utils/musicPlayer'));
 vi.mock('$lib/utils/musicQc', () => vi.importActual('../utils/musicQc'));
 vi.mock('$lib/utils/musicCreate', () => vi.importActual('../utils/musicCreate'));
+vi.mock('$lib/utils/musicSettings', () => vi.importActual('../utils/musicSettings'));
 vi.mock('$lib/services/music', () => ({ loadMusicLibrary: async () => {}, noteTracksHidden: () => {} }));
 
 import { fetchJobQc, musicJobQc, musicJobQcError } from './musicJobs';

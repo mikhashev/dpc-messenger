@@ -172,6 +172,7 @@ from .utils.image_utils import screenshot_attachment, screenshot_target
 from .voice_service import VoiceService
 from .background_models_service import BackgroundModelsService
 from .network_service import NetworkService
+from .feature_settings_service import FeatureSettingsService
 from .privacy_logging_service import PrivacyLoggingService
 from .telegram_discord_service import TelegramDiscordService
 from .knowledge_service import KnowledgeService
@@ -1253,6 +1254,16 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         self.network_service = NetworkService(
             settings=self.settings,
             local_api=self.local_api,
+        )
+        # The config-parity feature keys that belong to their feature views, not to
+        # a settings form (the music/file-transfer/vision/knowledge card): the
+        # composer's image cap, the Extract Knowledge keys, the synced-history
+        # gate and the HuggingFace offline mode — same small shape, own file so
+        # the commits split cleanly from the Network form's.
+        self.feature_settings_service = FeatureSettingsService(
+            settings=self.settings,
+            local_api=self.local_api,
+            llm_manager=self.llm_manager,
         )
         # Alias state refs for backward compat: methods that stay in CoreService
         # (_maybe_transcribe_voice_message, _retroactively_transcribe_conversation)
@@ -7079,6 +7090,38 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
     async def save_network_config(self, config: dict) -> dict:
         """Delegated to NetworkService."""
         return await self.network_service.save_network_config(config)
+
+    async def get_vision_config(self) -> dict:
+        """Delegated to FeatureSettingsService."""
+        return await self.feature_settings_service.get_vision_config()
+
+    async def save_vision_config(self, config: dict) -> dict:
+        """Delegated to FeatureSettingsService."""
+        return await self.feature_settings_service.save_vision_config(config)
+
+    async def get_knowledge_extraction_config(self) -> dict:
+        """Delegated to FeatureSettingsService."""
+        return await self.feature_settings_service.get_knowledge_extraction_config()
+
+    async def save_knowledge_extraction_config(self, config: dict) -> dict:
+        """Delegated to FeatureSettingsService."""
+        return await self.feature_settings_service.save_knowledge_extraction_config(config)
+
+    async def get_history_sync_config(self) -> dict:
+        """Delegated to FeatureSettingsService."""
+        return await self.feature_settings_service.get_history_sync_config()
+
+    async def save_history_sync_config(self, config: dict) -> dict:
+        """Delegated to FeatureSettingsService."""
+        return await self.feature_settings_service.save_history_sync_config(config)
+
+    async def get_hf_config(self) -> dict:
+        """Delegated to FeatureSettingsService."""
+        return await self.feature_settings_service.get_hf_config()
+
+    async def save_hf_config(self, config: dict) -> dict:
+        """Delegated to FeatureSettingsService."""
+        return await self.feature_settings_service.save_hf_config(config)
 
     async def get_local_transcription_config(self) -> dict:
         """Delegated to VoiceService."""

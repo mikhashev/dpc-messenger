@@ -9,6 +9,8 @@
   import { transferRowLabel } from '$lib/utils/transferRowLabel';
   import { formatMegabytes, pendingFileTypeLabel, type PendingFile } from '$lib/utils/pendingAttachment';
   import { voiceSendButton } from '$lib/utils/groupRecording';
+  import { getVisionConfig, saveVisionConfig } from '$lib/coreService';
+  import { imageMbOr } from '$lib/utils/featureKeys';
 
   // Props (Svelte 5 runes mode)
   let {
@@ -224,6 +226,49 @@
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   });
+
+  // ── The composer's image cap ([vision] max_image_size_mb, config-parity card order 7) ──
+  // Shown beside the image a paste just held, because that is where the cap bites. Read
+  // once per pending image; a save applies to every image at once, with one caveat the
+  // note says: the gateway's HTTP body limit is fixed when the gateway is built.
+  let maxImageMb = $state(5);
+  let capLoaded = $state(false);
+  let capEditing = $state(false);
+  let capDraft = $state(5);
+  let capBusy = $state(false);
+  let capError = $state('');
+  let capSaved = $state(false);
+
+  $effect(() => {
+    if (pendingImage && !capLoaded) void loadCap();
+  });
+
+  async function loadCap(): Promise<void> {
+    capLoaded = true;
+    try {
+      const r = await getVisionConfig();
+      if (r?.status === 'success') maxImageMb = imageMbOr(r.max_image_size_mb, 5);
+    } catch { /* the cap line simply keeps the default */ }
+  }
+
+  async function saveCap(): Promise<void> {
+    capBusy = true;
+    capError = '';
+    capSaved = false;
+    try {
+      const r = await saveVisionConfig({ config: { max_image_size_mb: imageMbOr(capDraft, maxImageMb) } });
+      if (r?.status === 'success') {
+        maxImageMb = imageMbOr(r.max_image_size_mb, maxImageMb);
+        capSaved = true;
+      } else {
+        capError = r?.message || 'Could not save the image size cap';
+      }
+    } catch (error) {
+      capError = `Error: ${error}`;
+    } finally {
+      capBusy = false;
+    }
+  }
 </script>
 
 <!-- Image Preview Chip -->
@@ -236,6 +281,33 @@
     </div>
     <button class="preview-remove" onclick={onClearPendingImage} aria-label="Remove image">✕</button>
   </div>
+  <div class="image-cap-line">
+    <span>Images are checked against a {maxImageMb} MB cap.</span>
+    <button
+      type="button"
+      class="image-cap-change"
+      onclick={() => { capDraft = maxImageMb; capSaved = false; capError = ''; capEditing = !capEditing; }}
+      aria-expanded={capEditing}
+    >Change</button>
+  </div>
+  {#if capEditing}
+    <div class="image-cap-editor">
+      <label for="image-cap-mb">Max image size (MB)</label>
+      <input id="image-cap-mb" class="image-cap-input" type="number" min="1" step="1" bind:value={capDraft} />
+      <button type="button" class="image-cap-save" onclick={saveCap} disabled={capBusy}>
+        {capBusy ? 'Saving…' : 'Save'}
+      </button>
+      {#if capError}
+        <span class="image-cap-error" role="alert">{capError}</span>
+      {:else if capSaved}
+        <span class="image-cap-saved" role="status">Saved.</span>
+      {/if}
+      <span class="image-cap-note">
+        Checked for every image at once; the gateway's HTTP body limit is fixed when the
+        gateway is built and follows the new value only after the next backend start.
+      </span>
+    </div>
+  {/if}
   {#if isGroupChat}
     <label style="display: flex; align-items: center; gap: 8px; margin: 6px 4px 0; font-size: 13px; cursor: pointer;">
       <input type="checkbox" checked={describeForAgents ?? false} onchange={(e) => onToggleDescribeForAgents?.((e.currentTarget as HTMLInputElement).checked)} />
@@ -434,6 +506,78 @@
     border: 1px solid #ddd;
     border-radius: 8px;
     transition: all 0.2s ease;
+  }
+
+  /* The image cap line under the chip ([vision] max_image_size_mb, config-parity card
+     order 7): one sentence and a small editor, matching the chip's own shapes. */
+  .image-cap-line {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: -0.15rem 0 0.5rem;
+    font-size: 0.8rem;
+    color: #666;
+  }
+
+  .image-cap-change {
+    padding: 0.1rem 0.6rem;
+    background: transparent;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    color: #1976d2;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+
+  .image-cap-change:hover {
+    background: #ebebeb;
+  }
+
+  .image-cap-editor {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin: -0.15rem 0 0.5rem;
+    font-size: 0.85rem;
+    color: #333;
+  }
+
+  .image-cap-input {
+    width: 5.5rem;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 0.9rem;
+  }
+
+  .image-cap-save {
+    padding: 0.25rem 0.75rem;
+    background: #1976d2;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+
+  .image-cap-save:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .image-cap-error {
+    color: #dc3545;
+  }
+
+  .image-cap-saved {
+    color: #155724;
+  }
+
+  .image-cap-note {
+    flex-basis: 100%;
+    font-size: 0.75rem;
+    color: #888;
   }
 
   .image-preview-chip:hover {

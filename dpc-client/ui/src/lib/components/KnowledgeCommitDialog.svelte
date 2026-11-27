@@ -4,6 +4,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import type { KnowledgeCommitProposal, KnowledgeEntry } from '$lib/types.js';
+  import { getKnowledgeExtractionConfig, saveKnowledgeExtractionConfig } from '$lib/coreService';
 
   // Props
   export let proposal: KnowledgeCommitProposal | null = null;
@@ -120,6 +121,57 @@
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
       close();
+    }
+  }
+
+  // The [knowledge] keys of the Extract Knowledge action (config-parity card, order 7).
+  // They are read at every extraction, so a save here applies to the next one — this
+  // dialog opens when an extraction is done, which is when the person sees what the
+  // next one would use. Loaded once per proposal.
+  let exLoadedFor = '';
+  let culturalDraft = false;
+  let coldDraft = '';
+  let exBusy = false;
+  let exError = '';
+  let exSaved = false;
+
+  $: if (open && proposal && (proposal.proposal_id ?? '') !== exLoadedFor) {
+    exLoadedFor = proposal.proposal_id ?? '';
+    void loadExtractionSettings();
+  }
+
+  async function loadExtractionSettings() {
+    exSaved = false;
+    exError = '';
+    try {
+      const r = await getKnowledgeExtractionConfig();
+      if (r?.status === 'success') {
+        culturalDraft = r.cultural_perspectives_enabled === true;
+        coldDraft = typeof r.cold_fallback_provider === 'string' ? r.cold_fallback_provider : '';
+      }
+    } catch { /* the defaults stand; saving still works */ }
+  }
+
+  async function saveExtractionSettings() {
+    exBusy = true;
+    exError = '';
+    exSaved = false;
+    try {
+      const r = await saveKnowledgeExtractionConfig({
+        config: {
+          cultural_perspectives_enabled: culturalDraft,
+          cold_fallback_provider: coldDraft,
+        },
+      });
+      if (r?.status === 'success') {
+        exSaved = true;
+      } else {
+        exError = r?.message || 'Could not save the extraction settings';
+      }
+    } catch (error) {
+      exError = `Error: ${error}`;
+    } finally {
+      exBusy = false;
     }
   }
 </script>
@@ -287,6 +339,33 @@
         <div class="section participants">
           <strong>Participants:</strong> {proposal.participants.join(', ')}
         </div>
+
+        <!-- Extraction settings ([knowledge] keys, config-parity card order 7) -->
+        <details class="section extraction-settings">
+          <summary>Extraction settings</summary>
+          <label class="ex-check">
+            <input type="checkbox" bind:checked={culturalDraft} />
+            <span>Cultural perspectives — ask the extractor to flag cultural context and assumptions</span>
+          </label>
+          <label class="ex-alias" for="ex-cold-fallback">
+            <span>Cold fallback provider</span>
+            <input id="ex-cold-fallback" type="text" placeholder="(auto — the first local provider)" bind:value={coldDraft} />
+          </label>
+          <p class="ex-note">
+            Both are read at every extraction, so a save applies to the next one. The fallback
+            names who extracts a conversation nobody has answered in yet: an alias of a loaded
+            provider, or empty for auto. Mind what it names — that provider receives the whole
+            conversation.
+          </p>
+          {#if exError}
+            <p class="ex-error" role="alert">{exError}</p>
+          {:else if exSaved}
+            <p class="ex-saved" role="status">Saved.</p>
+          {/if}
+          <button class="btn-ex-save" on:click={saveExtractionSettings} disabled={exBusy}>
+            {exBusy ? 'Saving…' : 'Save extraction settings'}
+          </button>
+        </details>
 
         <!-- Comment -->
         <div class="section">
@@ -709,6 +788,81 @@
   .participants {
     font-size: 0.9rem;
     color: #666;
+  }
+
+  /* Extraction settings ([knowledge] keys, config-parity card order 7): a folded
+     section, so the vote stays the dialog's main act. */
+  .extraction-settings summary {
+    cursor: pointer;
+    color: #1976d2;
+    font-weight: 500;
+  }
+
+  .extraction-settings .ex-check {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin: 0.75rem 0 0;
+    font-size: 0.9rem;
+    color: #333;
+  }
+
+  .extraction-settings .ex-alias {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin: 0.75rem 0 0;
+    font-size: 0.9rem;
+    color: #333;
+  }
+
+  .extraction-settings .ex-alias input {
+    padding: 0.45rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.95rem;
+  }
+
+  .extraction-settings .ex-note {
+    margin: 0.75rem 0 0;
+    font-size: 0.8rem;
+    color: #888;
+  }
+
+  .extraction-settings .ex-error {
+    margin: 0.75rem 0 0;
+    padding: 0.5rem 0.8rem;
+    border-radius: 6px;
+    background: rgba(220, 53, 69, 0.12);
+    border: 1px solid rgba(220, 53, 69, 0.45);
+    color: #dc3545;
+    font-size: 0.85rem;
+  }
+
+  .extraction-settings .ex-saved {
+    margin: 0.75rem 0 0;
+    padding: 0.5rem 0.8rem;
+    border-radius: 6px;
+    background: #d4edda;
+    border: 1px solid #c3e6cb;
+    color: #155724;
+    font-size: 0.85rem;
+  }
+
+  .extraction-settings .btn-ex-save {
+    margin-top: 0.75rem;
+    padding: 0.5rem 1rem;
+    background: #1976d2;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+
+  .extraction-settings .btn-ex-save:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   textarea {

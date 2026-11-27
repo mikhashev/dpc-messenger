@@ -70,6 +70,12 @@
     musicExportStatus,
   } from '$lib/services/musicExports';
   import {
+    loadMusicSettings,
+    musicSettings,
+    saveMusicSettingsForm,
+  } from '$lib/services/musicJobs';
+  import { emptyMusicSettings, type MusicSettings } from '$lib/utils/musicSettings';
+  import {
     EXPORT_PRESETS,
     exportChip,
     exportCopyDetail,
@@ -217,6 +223,49 @@
   let view = $state<'listen' | 'create'>('listen');
   // The generate-similar dialog's mode while it is open on the current track (null: closed).
   let similarMode = $state<SongMode | null>(null);
+
+  // -- the player's settings (config-parity card, order 7) --------------------------------
+  //
+  // A small affordance in the header (beside minimise and close — the window's own
+  // controls, the least intrusive spot; the ⋯ menus are per-track and wrong for node-level
+  // keys) opening one card of the player's [music] keys: the export folder and the Linux
+  // stream question are live, the stream port and the library poll apply after the next
+  // backend start. The draft and the save are the music jobs service's, shared with the
+  // Create panel's engine form, so the two never rewrite each other's keys.
+  let settingsOpen = $state(false);
+  let settingsDraft = $state<MusicSettings>(emptyMusicSettings());
+  let settingsBusy = $state(false);
+  let settingsError = $state('');
+  let settingsSaved = $state(false);
+  let settingsLoadedRef: MusicSettings | null = null;
+
+  $effect(() => {
+    const loaded = $musicSettings;
+    if (loaded !== settingsLoadedRef) {
+      settingsLoadedRef = loaded;
+      settingsDraft = { ...loaded };
+      settingsSaved = false;
+      settingsError = '';
+    }
+  });
+
+  function toggleSettings() {
+    settingsOpen = !settingsOpen;
+    if (settingsOpen) void loadMusicSettings();
+  }
+
+  async function savePlayerSettings() {
+    settingsBusy = true;
+    settingsError = '';
+    settingsSaved = false;
+    try {
+      const a = await saveMusicSettingsForm(settingsDraft);
+      if (!a.ok) settingsError = a.message;
+      else settingsSaved = true;
+    } finally {
+      settingsBusy = false;
+    }
+  }
 
   // Each opening takes the remembered boxes, fitted to the viewport as it is now.
   $effect(() => {
@@ -972,6 +1021,16 @@
             >Listen</button>
           {/if}
         {/if}
+        {#if !minimised}
+          <button
+            type="button"
+            class="mp-button"
+            onclick={toggleSettings}
+            aria-label="Music player settings (export folder, track stream, library poll)"
+            title="Player settings: export folder, track stream, library poll"
+            aria-pressed={settingsOpen}
+          >⚙</button>
+        {/if}
         <button
           type="button"
           class="mp-button"
@@ -1005,6 +1064,49 @@
         <div class="notice" role="status" aria-live="polite">
           {#if p.notice}<span>{p.notice}</span><button type="button" class="link-btn" onclick={clearNotice}>×</button>{/if}
         </div>
+
+        {#if settingsOpen}
+          <section class="card player-settings" aria-labelledby="mp-settings-label">
+            <div class="section-head">
+              <span id="mp-settings-label" class="section-label">PLAYER SETTINGS</span>
+              <button type="button" class="small-btn" onclick={() => (settingsOpen = false)} aria-label="Close the player settings">Close</button>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label class="field-label" for="mps-export-dir">Export folder</label>
+                <input id="mps-export-dir" class="text-input" type="text" placeholder="(<DPC home>/exports/music)" bind:value={settingsDraft.export_dir} />
+                <span class="muted tiny">where Export writes its MP3/Opus copies — an absolute path, never a drive root; empty = the default folder. Applies at once: the next export uses it</span>
+              </div>
+              <div class="field">
+                <label class="field-label" for="mps-stream-port">Stream port</label>
+                <input id="mps-stream-port" class="text-input num" type="number" min="0" max="65535" step="1" bind:value={settingsDraft.stream_port} />
+                <span class="muted tiny">the loopback port the player reads track bytes from — applies after the next backend start, and the app's CSP media-src names 9996, so another port also needs tauri.conf.json changed and the app rebuilt</span>
+              </div>
+              <div class="field">
+                <label class="field-label" for="mps-poll">Library poll (s)</label>
+                <input id="mps-poll" class="text-input num" type="number" min="1" step="1" bind:value={settingsDraft.poll_interval_s} />
+                <span class="muted tiny">how often the music library re-reads its watched folders — applies after the next backend start</span>
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="check">
+                <input type="checkbox" bind:checked={settingsDraft.stream_ranges_linux} />
+                <span class="small">Track stream: byte ranges on Linux</span>
+              </label>
+              <span class="muted tiny">applies at once: on, the Linux player asks the stream for HTTP Range; off (the default), a plain whole-file answer — WebKitGTK 2.50 reports no duration and refuses forward seeks on a Range source, so off is right there; turn on only to test. Windows and macOS always use Range whatever this says</span>
+            </div>
+            {#if settingsError}
+              <p class="field-error" role="alert">{settingsError}</p>
+            {:else if settingsSaved}
+              <p class="muted tiny" role="status">Saved. The export folder and the Linux stream question apply at once; the stream port and the library poll after the next backend start.</p>
+            {/if}
+            <div class="form-row">
+              <button type="button" class="small-btn primary" onclick={savePlayerSettings} disabled={settingsBusy}>
+                {settingsBusy ? 'Saving…' : 'Save player settings'}
+              </button>
+            </div>
+          </section>
+        {/if}
 
         {#if view === 'create'}
           <MusicCreate />
@@ -1687,6 +1789,16 @@
   .small { font-size: 13px; }
   .tiny { font-size: 12px; }
   p.muted { margin: 0; }
+
+  /* The player-settings card (config-parity card, order 7): the Create panel's form-row
+     shapes, local to this card so the listening columns' own rows are untouched. */
+  .player-settings { gap: 8px; }
+  .player-settings .form-row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  .player-settings .field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 200px; min-width: 0; }
+  .player-settings .field-label { font-size: 13px; color: #c9d1d9; }
+  .player-settings .field-error { margin: 0; font-size: 12px; color: #f5a5a5; }
+  .player-settings .check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .player-settings p { margin: 0; }
 
   .sr-only {
     position: absolute;

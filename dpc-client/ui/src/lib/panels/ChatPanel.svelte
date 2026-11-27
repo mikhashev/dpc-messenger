@@ -49,6 +49,7 @@
   import { offerOpensDialog, offerQuestion } from '$lib/fileTransferPermission';
   import { untrack, onDestroy } from 'svelte';
   import { confirmAsync } from '$lib/utils/dialog';
+  import HistorySyncSettings from './HistorySyncSettings.svelte';
   import { appendToChatDraft, switchChatDraft } from '$lib/utils/chatDraftInputs';
   import { chatInstructionSet } from '$lib/utils/aiChatStore';
   import { agentAliasToSend } from '$lib/utils/rememberedProvider';
@@ -1436,6 +1437,9 @@
 
 <!-- Context toggle + file transfer UI + input row -->
 <div class="chat-input">
+  <!-- The synced-history gate ([history] reject_unsigned, config-parity card, order 7):
+       node-level, so every chat shows it, not only the AI chats' Context Settings row. -->
+  <HistorySyncSettings />
   {#if $aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')}
     <div class="context-toggle">
       <button

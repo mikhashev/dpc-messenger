@@ -156,7 +156,7 @@ from .peaks import PeaksError, get_peaks
 from .runner import MusicJobRunner
 from . import describe as mp_describe
 from .stream import DEFAULT_STREAM_PORT, MusicStreamServer
-from .yue2 import Yue2Server, read_config as read_yue2_config
+from .yue2 import Yue2Server, read_config as read_yue2_config, scan_adapters
 
 LOCAL_WHISPER_TYPE = "local_whisper"
 DEFAULT_LOCAL_TRANSCRIPTION_MAX_MB = 25
@@ -1190,6 +1190,119 @@ class MusicCommandsMixin:
                 "default_engine_fallback_reason": report.get("default_engine_fallback_reason"),
                 "capabilities": report,
             }
+        except Exception as exc:
+            return _error(exc)
+
+    # -- the [music] settings of the two music forms (config-parity card ----------------------
+    # THE-MUSIC-FILE-TRANSFER-VISION-AND-KNOWLEDGE-KEYS-HAVE-NO-CONTROL-IN-THE-UI): the Create
+    # panel's engine-start keys, job limits, describer alias and live lyrics keys, and the
+    # player's export/stream/poll keys. `default_engine` keeps its own command above (its
+    # answer carries the capability report). Two checks only this layer can do run before the
+    # settings writer: `describe_alias` against the loaded providers, and
+    # `yue2_instrumental_adapter` against the adapters folders the reader scans.
+
+    def _music_settings_describe_providers(self) -> Dict[str, Any]:
+        """The loaded providers, as `_music_describe_alias` reads them ({} when none)."""
+        return dict(getattr(getattr(self, "llm_manager", None), "providers", None) or {})
+
+    def _music_settings_check_describe_alias(self, config: Mapping[str, Any]) -> None:
+        """Refuse a `describe_alias` no loaded provider answers to. The reader treats an
+        unknown alias as "no describer" and Same style skips the description, so the form
+        stops the typo here instead; `auto` and the off words pass (they name no alias)."""
+        if "describe_alias" not in config:
+            return
+        text = str(config.get("describe_alias") or "").strip()
+        if text.lower() in mp_describe.DESCRIBE_OFF_WORDS or text.lower() == "auto":
+            return
+        providers = self._music_settings_describe_providers()
+        if text not in providers:
+            raise MusicJobError(
+                "invalid_params",
+                f"music.describe_alias names {text!r}, which is not a loaded provider "
+                f"(loaded: {', '.join(sorted(providers)) or 'none'}); use auto or none.",
+                field="describe_alias")
+
+    def _music_settings_check_instrumental_adapter(self, config: Mapping[str, Any]) -> None:
+        """Refuse a `yue2_instrumental_adapter` the adapters folders do not hold. The reader
+        takes any name — an absent one means the engine's `missing` state and Instrumental
+        jobs fall back to acestep.cpp — so the form stops a typo here; empty (the default
+        adapter) and `none` (no adapter) pass. The folders are read the way
+        `Yue2Server.adapter_dirs` reads them (yue2.py): `yue2_adapters_dir`, then the loras
+        folder of the models folder."""
+        if "yue2_instrumental_adapter" not in config:
+            return
+        text = str(config.get("yue2_instrumental_adapter") or "").strip()
+        if not text or text.lower() == "none":
+            return
+        home = Path(self.settings.dpc_home_dir)
+        models_dir = (self._music_config_value("yue2_models_dir", "") or "").strip()
+        models_dir = Path(os.path.expanduser(models_dir)) if models_dir else home / "models" / "music" / "yue2"
+        folders = []
+        adapters = (self._music_config_value("yue2_adapters_dir", "") or "").strip()
+        if adapters:
+            folders.append(Path(os.path.expanduser(adapters)))
+        loras = models_dir / "loras"
+        if loras not in folders:
+            folders.append(loras)
+        # The pending save's own value of the folders, when it changes them in the same command.
+        if "yue2_adapters_dir" in config and str(config.get("yue2_adapters_dir") or "").strip():
+            pending = Path(os.path.expanduser(str(config["yue2_adapters_dir"]).strip()))
+            if pending not in folders:
+                folders.append(pending)
+        if "yue2_models_dir" in config and str(config.get("yue2_models_dir") or "").strip():
+            pending = Path(os.path.expanduser(str(config["yue2_models_dir"]).strip())) / "loras"
+            if pending not in folders:
+                folders.append(pending)
+        known = {a["name"] for folder in folders for a in scan_adapters(folder)}
+        if text not in known:
+            where = ", ".join(str(f) for f in folders) or "nowhere"
+            raise MusicJobError(
+                "invalid_params",
+                f"music.yue2_instrumental_adapter names {text!r}, which is not in the adapters "
+                f"folders ({where}); use an installed adapter's name, or none.",
+                field="yue2_instrumental_adapter")
+
+    @slow_command
+    async def get_music_settings(self) -> Dict[str, Any]:
+        """The `[music]` settings the Create panel's and the player's settings form show, as
+        their readers resolve them now (`settings.get_music_settings` says when each written
+        value is in force)."""
+        try:
+            getter = getattr(self.settings, "get_music_settings", None)
+            if not callable(getter):
+                raise MusicJobError("unavailable", "the backend build has no music settings form support")
+            return {"status": "ok", **await asyncio.to_thread(getter)}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
+    async def save_music_settings(self, config: Any = None) -> Dict[str, Any]:
+        """Write the `[music]` settings the two music forms save: `config` names the keys
+        `get_music_settings` answers; a key left out keeps its stored value. A key this form
+        does not own, or a value its reader would silently replace, is refused with the key
+        named and nothing is written — the two checks this layer can do (`describe_alias`
+        against the loaded providers, `yue2_instrumental_adapter` against the adapters
+        folders) run before `settings.set_music_settings` validates the rest."""
+        try:
+            if not isinstance(config, dict):
+                raise _bad("invalid_params", "config", "an object of [music] keys")
+            getter = getattr(self.settings, "get_music_settings", None)
+            if not callable(getter):
+                raise MusicJobError("unavailable", "the backend build has no music settings form support")
+            unknown = set(config) - set(getter()) - {"status"}
+            if unknown:
+                raise MusicJobError("invalid_params", f"unknown [music] key(s): {', '.join(sorted(unknown))}",
+                                    field="config")
+            self._music_settings_check_describe_alias(config)
+            await asyncio.to_thread(self._music_settings_check_instrumental_adapter, config)
+            try:
+                await asyncio.to_thread(
+                    self.settings.set_music_settings,
+                    **{k: v for k, v in config.items() if k != "status"})
+            except (ValueError, TypeError) as exc:
+                raise MusicJobError("invalid_params", str(exc), field="config") from exc
+            return {"status": "ok", "message": "Music settings saved.",
+                    **await asyncio.to_thread(getter)}
         except Exception as exc:
             return _error(exc)
 

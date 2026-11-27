@@ -1850,6 +1850,41 @@ export async function saveNetworkConfig(config: any): Promise<any> {
     return sendCommand('save_network_config', { config });
 }
 
+// The config-parity feature keys that belong to their feature views, not to a
+// settings form (card order 7): the composer's image cap, the Extract Knowledge
+// keys, the synced-history gate, and the HuggingFace offline mode (auto/on/off)
+export async function getVisionConfig(): Promise<any> {
+    return sendCommand('get_vision_config', {});
+}
+
+export async function saveVisionConfig(config: any): Promise<any> {
+    return sendCommand('save_vision_config', { config });
+}
+
+export async function getKnowledgeExtractionConfig(): Promise<any> {
+    return sendCommand('get_knowledge_extraction_config', {});
+}
+
+export async function saveKnowledgeExtractionConfig(config: any): Promise<any> {
+    return sendCommand('save_knowledge_extraction_config', { config });
+}
+
+export async function getHistorySyncConfig(): Promise<any> {
+    return sendCommand('get_history_sync_config', {});
+}
+
+export async function saveHistorySyncConfig(config: any): Promise<any> {
+    return sendCommand('save_history_sync_config', { config });
+}
+
+export async function getHfConfig(): Promise<any> {
+    return sendCommand('get_hf_config', {});
+}
+
+export async function saveHfConfig(config: any): Promise<any> {
+    return sendCommand('save_hf_config', { config });
+}
+
 // Per-conversation transcription control (v0.13.2+ checkbox)
 export async function setConversationTranscription(nodeId: string, enabled: boolean): Promise<any> {
     return sendCommand('set_conversation_transcription', { node_id: nodeId, enabled });
@@ -2307,6 +2342,18 @@ export function setMusicDefaultEngine(engine: string): Promise<MusicAnswer<{
     capabilities: MusicCapabilities;
 }>> {
     return callMusic(sendCommand, 'set_music_default_engine', { engine });
+}
+
+/** The `[music]` settings the Create panel's engine form and the player's settings form show
+ *  (config-parity card, order 7): every key as its reader resolves it now. */
+export function getMusicSettings(): Promise<MusicAnswer<Record<string, any>>> {
+    return callMusic(sendCommand, 'get_music_settings', {});
+}
+
+/** Save the `[music]` settings: `config` names the keys `getMusicSettings` answers; a key left
+ *  out keeps its stored value, and a value its reader would replace is refused with its reason. */
+export function saveMusicSettings(config: Record<string, unknown>): Promise<MusicAnswer<Record<string, any>>> {
+    return callMusic(sendCommand, 'save_music_settings', { config });
 }
 
 /** Queue a job (`queued`), or get it back `unsupported` with the reason. */

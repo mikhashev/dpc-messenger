@@ -173,6 +173,10 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "prepare_music_lyrics",
     # MP3 export (music/export.py, Mike #210): one root, an index against duplicates
     "export_music_track", "export_music_playlist", "get_music_export_info", "delete_music_export",
+    # The [music] settings the Create panel's and the player's settings form write
+    # (config-parity card, order 7): engine-start keys, job limits, describer alias,
+    # the live lyrics keys and the export/stream/poll keys
+    "get_music_settings", "save_music_settings",
     "list_strata_models",
     "install_strata_model",
     # The process registry (ADR-046 point 8): what runs now, who started it
@@ -271,6 +275,17 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # credential_set, never as text
     "get_network_config",
     "save_network_config",
+    # The config-parity feature keys that belong to their feature views (same card,
+    # order 7): the composer's image cap, the Extract Knowledge keys, the synced-
+    # history gate, and the HuggingFace offline mode (three states)
+    "get_vision_config",
+    "save_vision_config",
+    "get_knowledge_extraction_config",
+    "save_knowledge_extraction_config",
+    "get_history_sync_config",
+    "save_history_sync_config",
+    "get_hf_config",
+    "save_hf_config",
     "set_conversation_transcription",
     "get_conversation_transcription",
     "transcribe_audio",

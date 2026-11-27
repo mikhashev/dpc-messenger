@@ -472,7 +472,11 @@ class Settings:
             'yue2_adapters_dir': '',  # The LoRA adapters folder (one level: .safetensors files, or folders holding one). Empty = <yue2_models_dir>/loras/ruach-voices/voices. DPC splits each into music and sound halves under <yue2_models_dir>/loras/.split
             'yue2_instrumental_adapter': '',  # The adapter an Instrumental job on YuE2 runs with (a name in the adapters folder or <yue2_models_dir>/loras, read after it). Empty = YuE2-instrumental-cot-full-loras; none = no adapter. Without it Instrumental jobs go to acestep.cpp
             'yue2_device': '',  # Passed to yue2.cpp as --device (CUDA0, Vulkan0, MTL0, CPU). Empty = the engine picks the best device
-            'yue2_max_seq': '0'  # Passed as --max-seq when above 0 (KV cache size; less VRAM, shorter songs). 0 = the model context
+            'yue2_max_seq': '0',  # Passed as --max-seq when above 0 (KV cache size; less VRAM, shorter songs). 0 = the model context
+            'agent_queue_max': '2',  # An agent's music jobs queued or running at once, read at every propose
+            'turn_jobs_max': '1',  # An agent's music jobs per turn, read at every propose
+            'describe_alias': 'auto',  # The provider that describes a same-style song's source (auto = music_flamingo when loaded; none = off)
+            'export_dir': ''  # The MP3/Opus export root. Empty = <DPC home>/exports/music; an absolute path, never a filesystem root
         }
 
         self._config['conversations'] = {
@@ -1495,6 +1499,340 @@ class Settings:
             )
         self.set('music', 'default_engine', chosen)
         return chosen
+
+    # -- the [music] keys of the two music forms (config-parity card --------------------------
+    # THE-MUSIC-FILE-TRANSFER-VISION-AND-KNOWLEDGE-KEYS-HAVE-NO-CONTROL-IN-THE-UI): the Create
+    # panel's engine-start keys, job limits and describer alias, the live lyrics keys, and the
+    # player's export/stream/poll keys, in one read and one validate-then-write. Every rule
+    # mirrors the reader the key answers to (named per key below); every reader replaces a bad
+    # stored value silently, so the writer is where a typo is stopped. `default_engine` keeps
+    # its own pair above, whose answer carries the capability report.
+
+    def _music_form_text(self, key: str, default: str = '') -> str:
+        """`[music] key` as text (the `SettingsReader.text` rule: stripped, '' when unset)."""
+        raw = self.get('music', key, '')
+        return str(raw).strip() if raw is not None else default
+
+    def _music_form_port(self, key: str, default: int) -> int:
+        """`[music] key` as a port, else `default` — the `SettingsReader.port` rule
+        (engine_base.py: 0..65535, 0 = a free port at each start; the form does not offer
+        that, and the writer below refuses it)."""
+        try:
+            port = int(self._music_form_text(key))
+        except ValueError:
+            return default
+        return port if 0 <= port <= 65535 else default
+
+    def _music_form_seconds(self, key: str, default: float) -> float:
+        """`[music] key` as a number of at least 0, else `default` (the `SettingsReader.seconds`
+        rule)."""
+        try:
+            value = float(self._music_form_text(key))
+        except ValueError:
+            return default
+        return value if math.isfinite(value) and value >= 0 else default
+
+    def _music_form_whole(self, key: str, default: int) -> int:
+        """`[music] key` as a whole number of at least 0, else `default` (the
+        `SettingsReader.whole` rule)."""
+        try:
+            value = int(self._music_form_text(key))
+        except ValueError:
+            return default
+        return value if value >= 0 else default
+
+    def _music_form_flag(self, key: str, default: bool) -> bool:
+        """`[music] key` as a boolean, else `default` (the `_music_lrclib_enabled` /
+        `_music_stream_ranges_linux` rule: 1/true/yes/on are true, the rest false)."""
+        text = self._music_form_text(key).lower()
+        if not text:
+            return default
+        return text in ('1', 'true', 'yes', 'on')
+
+    def _music_form_positive(self, key: str, default: int) -> int:
+        """`[music] key` as an integer of at least 1, else `default` (the
+        `_music_positive_int` rule the agent job limits are read through)."""
+        try:
+            value = int(self._music_form_text(key))
+        except ValueError:
+            return default
+        return value if value >= 1 else default
+
+    def get_music_settings(self) -> Dict[str, Any]:
+        """The `[music]` keys the two music forms show, as their readers resolve them now.
+        Empty strings are the readers' defaults (the built-in binary and model folders, the
+        default instrumental adapter, the default export folder); the numbers are the values
+        a start, a job or a request would use. When a written value is in force, per key:
+        the engine keys are re-read at every engine start (`read_config`, music/acestep.py,
+        music/yue2.py) — a resident engine keeps its current value until it is stopped;
+        `agent_queue_max` and `turn_jobs_max` are read at every propose; `describe_alias`
+        at every describe; `auto_align_lyrics` at every take; `lrclib_enabled` per lyrics
+        chain run; `export_dir` and `stream_ranges_linux` per export / stream-info request;
+        `stream_port` and `poll_interval_s` only at backend start (the stream server is a
+        singleton that early-returns while running, the library holds its poll figure)."""
+        from .music.job_schemas import YUE2_BACKBONES, YUE2_BACKBONE_DEFAULT
+        backbone = self._music_form_text('yue2_backbone') or YUE2_BACKBONE_DEFAULT
+        return {
+            # acestep.cpp (read at each start of that engine)
+            "acestep_binary": self._music_form_text('acestep_binary'),
+            "acestep_models_dir": self._music_form_text('acestep_models_dir'),
+            "acestep_port": self._music_form_port('acestep_port', 9995),
+            "acestep_idle_stop_s": self._music_form_seconds('acestep_idle_stop_s', 300.0),
+            "acestep_device": self._music_form_text('acestep_device'),
+            # yue2.cpp (read at each start of that engine)
+            "yue2_binary": self._music_form_text('yue2_binary'),
+            "yue2_models_dir": self._music_form_text('yue2_models_dir'),
+            "yue2_backbone": backbone if backbone in YUE2_BACKBONES else YUE2_BACKBONE_DEFAULT,
+            "yue2_port": self._music_form_port('yue2_port', 9994),
+            "yue2_idle_stop_s": self._music_form_seconds('yue2_idle_stop_s', 300.0),
+            "yue2_adapters_dir": self._music_form_text('yue2_adapters_dir'),
+            "yue2_instrumental_adapter": self._music_form_text('yue2_instrumental_adapter'),
+            "yue2_device": self._music_form_text('yue2_device'),
+            "yue2_max_seq": self._music_form_whole('yue2_max_seq', 0),
+            # the agent job limits (read at every propose; `_music_positive_int`: at least 1)
+            "agent_queue_max": self._music_form_positive('agent_queue_max', 2),
+            "turn_jobs_max": self._music_form_positive('turn_jobs_max', 1),
+            # the describer of a same-style song ('auto', 'none', or a loaded provider alias)
+            "describe_alias": self._music_form_text('describe_alias') or 'auto',
+            # live lyrics keys
+            "auto_align_lyrics": self._music_form_flag('auto_align_lyrics', True),
+            "lrclib_enabled": self._music_form_flag('lrclib_enabled', True),
+            # the player's keys
+            "export_dir": self._music_form_text('export_dir'),
+            "stream_ranges_linux": self._music_form_flag('stream_ranges_linux', False),
+            "stream_port": self._music_form_port('stream_port', 9996),
+            "poll_interval_s": self._music_form_seconds('poll_interval_s', 60.0),
+        }
+
+    def set_music_settings(
+        self, acestep_binary: Optional[str] = None, acestep_models_dir: Optional[str] = None,
+        acestep_port: Optional[int] = None, acestep_idle_stop_s: Optional[float] = None,
+        acestep_device: Optional[str] = None, yue2_binary: Optional[str] = None,
+        yue2_models_dir: Optional[str] = None, yue2_backbone: Optional[str] = None,
+        yue2_port: Optional[int] = None, yue2_idle_stop_s: Optional[float] = None,
+        yue2_adapters_dir: Optional[str] = None, yue2_instrumental_adapter: Optional[str] = None,
+        yue2_device: Optional[str] = None, yue2_max_seq: Optional[int] = None,
+        agent_queue_max: Optional[int] = None, turn_jobs_max: Optional[int] = None,
+        describe_alias: Optional[str] = None, auto_align_lyrics: Optional[bool] = None,
+        lrclib_enabled: Optional[bool] = None, export_dir: Optional[str] = None,
+        stream_ranges_linux: Optional[bool] = None, stream_port: Optional[int] = None,
+        poll_interval_s: Optional[float] = None,
+    ) -> None:
+        """Write the `[music]` keys the two music forms cover; a left-out key keeps its
+        stored value.
+
+        ValueError, one sentence naming `music.key`, and nothing written, unless each given
+        value is one its reader takes: the ports whole numbers 0..65535, 0 being a free port
+        at each start (the engine readers take it, and the stream server binds 0 and then
+        keeps the port it was given); the idle/poll figures numbers of at least 0 (the poll
+        figure above 0: the reader takes any number, but a poll of 0 or less is a busy
+        loop); `yue2_backbone` stock or rs-tw and the
+        devices CUDA0, Vulkan0, MTL0 or CPU (the readers' own sets — empty lets the engine
+        pick); `yue2_max_seq` a whole number of at least 0; the queue limits at least 1
+        (`_music_positive_int` replaces a smaller figure with the default, so 0 is refused
+        here rather than silently undone); the booleans booleans; `export_dir` empty (the
+        default export folder) or an absolute path that is not a filesystem root — the two
+        checks `_music_export_root` applies at each export, applied at save instead. The
+        alias checks the command that calls this does (it can see the loaded providers and
+        the adapters folders)."""
+        from .music.job_schemas import YUE2_BACKBONES
+        values: Dict[str, str] = {}
+        for key, given in (('acestep_binary', acestep_binary), ('acestep_models_dir', acestep_models_dir),
+                           ('yue2_binary', yue2_binary), ('yue2_models_dir', yue2_models_dir),
+                           ('yue2_adapters_dir', yue2_adapters_dir)):
+            if given is not None:
+                if not isinstance(given, str):
+                    raise ValueError(f"music.{key} must be a path (empty = the default).")
+                values[key] = given.strip().replace('%', '%%')
+        for key, given in (('acestep_port', acestep_port), ('yue2_port', yue2_port),
+                           ('stream_port', stream_port)):
+            if given is not None:
+                if isinstance(given, bool) or not isinstance(given, int) or not 0 <= given <= 65535:
+                    raise ValueError(f"music.{key} must be a whole number from 0 to 65535 "
+                                     f"(0 = a free port at each start).")
+                values[key] = str(given)
+        for key, given in (('acestep_idle_stop_s', acestep_idle_stop_s),
+                           ('yue2_idle_stop_s', yue2_idle_stop_s)):
+            if given is not None:
+                if (isinstance(given, bool) or not isinstance(given, (int, float))
+                        or not math.isfinite(given) or given < 0):
+                    raise ValueError(f"music.{key} must be a number of idle seconds of at least 0.")
+                values[key] = _figure_text(given)
+        if poll_interval_s is not None:
+            if (isinstance(poll_interval_s, bool) or not isinstance(poll_interval_s, (int, float))
+                    or not math.isfinite(poll_interval_s) or poll_interval_s <= 0):
+                raise ValueError("music.poll_interval_s must be a number of seconds above 0.")
+            values['poll_interval_s'] = _figure_text(poll_interval_s)
+        for key, given in (('acestep_device', acestep_device), ('yue2_device', yue2_device)):
+            if given is not None:
+                if not isinstance(given, str) or given.strip() not in ('', 'CUDA0', 'Vulkan0', 'MTL0', 'CPU'):
+                    raise ValueError(f"music.{key} must be one of CUDA0, Vulkan0, MTL0, CPU, or empty "
+                                     "(the engine picks).")
+                values[key] = given.strip()
+        if yue2_backbone is not None:
+            if not isinstance(yue2_backbone, str) or yue2_backbone.strip() not in YUE2_BACKBONES:
+                raise ValueError(f"music.yue2_backbone must be one of {', '.join(YUE2_BACKBONES)}.")
+            values['yue2_backbone'] = yue2_backbone.strip()
+        if yue2_instrumental_adapter is not None:
+            if not isinstance(yue2_instrumental_adapter, str):
+                raise ValueError("music.yue2_instrumental_adapter must be an adapter name, 'none', or empty "
+                                 "(the default adapter).")
+            values['yue2_instrumental_adapter'] = yue2_instrumental_adapter.strip().replace('%', '%%')
+        if yue2_max_seq is not None:
+            if isinstance(yue2_max_seq, bool) or not isinstance(yue2_max_seq, int) or yue2_max_seq < 0:
+                raise ValueError("music.yue2_max_seq must be a whole number of at least 0 (0 = the model "
+                                 "context).")
+            values['yue2_max_seq'] = str(yue2_max_seq)
+        for key, given in (('agent_queue_max', agent_queue_max), ('turn_jobs_max', turn_jobs_max)):
+            if given is not None:
+                if isinstance(given, bool) or not isinstance(given, int) or given < 1:
+                    raise ValueError(f"music.{key} must be a whole number of at least 1.")
+                values[key] = str(given)
+        if describe_alias is not None:
+            if not isinstance(describe_alias, str) or not describe_alias.strip():
+                raise ValueError("music.describe_alias must be 'auto', 'none', or a provider alias.")
+            values['describe_alias'] = describe_alias.strip()
+        for key, given in (('auto_align_lyrics', auto_align_lyrics), ('lrclib_enabled', lrclib_enabled),
+                           ('stream_ranges_linux', stream_ranges_linux)):
+            if given is not None:
+                if not isinstance(given, bool):
+                    raise ValueError(f"music.{key} must be true or false.")
+                values[key] = 'true' if given else 'false'
+        if export_dir is not None:
+            if not isinstance(export_dir, str):
+                raise ValueError("music.export_dir must be an absolute path (empty = the default export "
+                                 "folder).")
+            raw = export_dir.strip()
+            if raw:
+                # The two checks _music_export_root (music/commands.py) applies at each export,
+                # applied at save so a bad value is refused here, not at the next export.
+                chosen = Path(os.path.expandvars(os.path.expanduser(raw)))
+                if not chosen.is_absolute():
+                    raise ValueError(f"music.export_dir must be an absolute path: {raw}")
+                chosen = Path(os.path.normpath(chosen))
+                if chosen.parent == chosen:
+                    raise ValueError(f"music.export_dir cannot be a filesystem root: {chosen}")
+                raw = str(chosen).replace('%', '%%')
+            values['export_dir'] = raw
+        for key, text in values.items():
+            self.set('music', key, text)
+
+    # -- the feature keys of their own views (same config-parity card): the image size at the
+    # composer, the knowledge extraction keys at the commit dialog, the history gate at the
+    # conversation view, and the HuggingFace offline mode at the background-models form. The
+    # same shape as the [music] block above; `get_hf_offline_mode` above stays what it was
+    # (no caller): the three-state pair here mirrors run_service's own parse instead.
+
+    def get_vision_settings(self) -> Dict[str, Any]:
+        """`[vision] max_image_size_mb` as the composer's image cap (default 5, the getter's
+        own). Checked for every image at once; the gateway's HTTP body cap is four times it,
+        fixed when the gateway is built, so that side follows a new figure only after the
+        next backend start."""
+        try:
+            figure = int(str(self.get('vision', 'max_image_size_mb', '5')).strip())
+        except (TypeError, ValueError):
+            figure = 5
+        return {"max_image_size_mb": figure if figure > 0 else 5}
+
+    def set_vision_settings(self, max_image_size_mb: Optional[int] = None) -> None:
+        """Write `[vision] max_image_size_mb`; a left-out key keeps its stored value.
+
+        ValueError, one sentence, and nothing written, unless `max_image_size_mb` is a whole
+        number of MB above 0 (the getter casts through int, so anything smaller never
+        applies)."""
+        if max_image_size_mb is not None:
+            if isinstance(max_image_size_mb, bool) or not isinstance(max_image_size_mb, int) \
+                    or max_image_size_mb <= 0:
+                raise ValueError("vision.max_image_size_mb must be a whole number of MB above 0.")
+            self.set('vision', 'max_image_size_mb', str(max_image_size_mb))
+
+    def get_knowledge_extraction_settings(self) -> Dict[str, Any]:
+        """The two `[knowledge]` keys of the Extract Knowledge action, as their readers
+        resolve them now: `cultural_perspectives_enabled` is read at every extraction
+        (both prompt builders), `cold_fallback_provider` per extraction of a conversation
+        with no provenance — '' is auto (the first local provider)."""
+        return {
+            "cultural_perspectives_enabled": self.get_cultural_perspectives_enabled(),
+            "cold_fallback_provider": self.get_knowledge_cold_fallback_provider(),
+        }
+
+    def set_knowledge_extraction_settings(
+        self, cultural_perspectives_enabled: Optional[bool] = None,
+        cold_fallback_provider: Optional[str] = None,
+    ) -> None:
+        """Write the two `[knowledge]` keys; a left-out key keeps its stored value.
+
+        ValueError, one sentence, and nothing written, unless
+        `cultural_perspectives_enabled` is a bool and `cold_fallback_provider` is '' (auto)
+        or a non-empty alias. Whether the alias is one the loaded providers know is the
+        command's check (knowledge_routing.cold_fallback refuses an unknown one at
+        extraction time; the settings object cannot see the providers)."""
+        values: Dict[str, str] = {}
+        if cultural_perspectives_enabled is not None:
+            if not isinstance(cultural_perspectives_enabled, bool):
+                raise ValueError("knowledge.cultural_perspectives_enabled must be true or false.")
+            values['cultural_perspectives_enabled'] = 'true' if cultural_perspectives_enabled else 'false'
+        if cold_fallback_provider is not None:
+            if not isinstance(cold_fallback_provider, str):
+                raise ValueError("knowledge.cold_fallback_provider must be an alias, or empty for auto.")
+            alias = cold_fallback_provider.strip()
+            if not alias:
+                values['cold_fallback_provider'] = ''
+            else:
+                values['cold_fallback_provider'] = alias.replace('%', '%%')
+        for key, text in values.items():
+            self.set('knowledge', key, text)
+
+    def get_history_sync_settings(self) -> Dict[str, Any]:
+        """`[history] reject_unsigned`, as the synced-record gate reads it now (per synced
+        record, conversation_monitor's `_reject_unsigned`)."""
+        return {"reject_unsigned": self.get_reject_unsigned_history()}
+
+    def set_history_sync_settings(self, reject_unsigned: Optional[bool] = None) -> None:
+        """Write `[history] reject_unsigned`; a left-out key keeps its stored value.
+
+        ValueError, one sentence, and nothing written, unless `reject_unsigned` is a bool.
+        Off is the safe default for records written before ADR-036 (they carry no
+        signature; see `get_reject_unsigned_history`)."""
+        if reject_unsigned is not None:
+            if not isinstance(reject_unsigned, bool):
+                raise ValueError("history.reject_unsigned must be true or false.")
+            self.set('history', 'reject_unsigned', 'true' if reject_unsigned else 'false')
+
+    def get_hf_settings(self) -> Dict[str, Any]:
+        """`[hf] offline_mode` as run_service reads it at process start (its own
+        configparser, before huggingface loads): 'on' when the key parses true, 'off' when
+        it parses false, 'auto' when it is absent or does not parse — with 'auto' the
+        on-disk cache detection decides per start. An explicit HF_HUB_OFFLINE in the
+        environment wins over every state; that is not this key's to show."""
+        if not self._config.has_option('hf', 'offline_mode'):
+            state = 'auto'
+        else:
+            try:
+                state = 'on' if self._config.getboolean('hf', 'offline_mode') else 'off'
+            except (ValueError, configparser.Error):
+                state = 'auto'
+        return {"offline_mode": state}
+
+    def set_hf_settings(self, offline_mode: Any = None) -> None:
+        """Write `[hf] offline_mode`; a left-out value keeps the stored state.
+
+        ValueError, one sentence, and nothing written, unless `offline_mode` is 'on'
+        (written `true`), 'off' (written `false`) or 'auto' — the spellings run_service's
+        `getboolean` takes, and 'auto' removes the key, because with it absent run_service
+        goes offline by itself exactly when every model it needs is already cached."""
+        if offline_mode is None:
+            return
+        if not isinstance(offline_mode, str) or offline_mode.strip().lower() not in ('auto', 'on', 'off'):
+            raise ValueError("hf.offline_mode must be one of auto, on or off.")
+        state = offline_mode.strip().lower()
+        if state == 'auto':
+            if self._config.has_section('hf') and self._config.has_option('hf', 'offline_mode'):
+                self._config.remove_option('hf', 'offline_mode')
+                with open(self.config_file, 'w') as f:
+                    self._config.write(f)
+            return
+        self.set('hf', 'offline_mode', 'true' if state == 'on' else 'false')
 
     def get_local_transcription_idle_unload_s(self) -> float:
         """`[local_transcription] idle_unload_s`: seconds after the last transcription

@@ -66,17 +66,26 @@
   import {
     cancelJob,
     loadMusicJobs,
+    loadMusicSettings,
     musicCreateDraft,
     musicJobs,
     musicReviewJobId,
+    musicSettings,
     noteDraftEngineChosen,
     proposeFromText,
+    saveMusicSettingsForm,
     setDefaultEngine,
     startEngine,
     startJobWatch,
     stopCardHolder,
     stopEngine,
   } from '$lib/services/musicJobs';
+  import {
+    ENGINE_DEVICES,
+    YUE2_BACKBONES,
+    emptyMusicSettings,
+    type MusicSettings,
+  } from '$lib/utils/musicSettings';
   import MusicReview from './MusicReview.svelte';
   import { editJobLine } from '$lib/utils/musicEdit';
   import MusicLyricsPrep from './MusicLyricsPrep.svelte';
@@ -109,6 +118,7 @@
   let stopWatch: (() => void) | null = null;
   onMount(() => {
     void loadMusicJobs();
+    void loadMusicSettings();
     stopWatch = startJobWatch();
   });
   onDestroy(() => stopWatch?.());
@@ -151,6 +161,43 @@
       if (!a.ok && !/timed out/i.test(a.message)) engineError = a.message;
     } finally {
       engineBusy = false;
+    }
+  }
+
+  // -- the [music] engine settings (config-parity card, order 7) ----------------------
+  //
+  // Beside the engine line, like the default engine above it: the config.ini keys each
+  // engine start reads, the agent job limits, the describer alias and the two live lyrics
+  // keys. The draft follows the shared loaded copy (services/musicJobs.ts), and a save
+  // sends only the changed keys — a key left alone keeps its stored value.
+
+  let settingsOpen = $state(false);
+  let settingsDraft = $state<MusicSettings>(emptyMusicSettings());
+  let settingsBusy = $state(false);
+  let settingsError = $state('');
+  let settingsSaved = $state(false);
+  let settingsLoadedRef: MusicSettings | null = null;
+
+  $effect(() => {
+    const loaded = $musicSettings;
+    if (loaded !== settingsLoadedRef) {
+      settingsLoadedRef = loaded;
+      settingsDraft = { ...loaded };
+      settingsSaved = false;
+      settingsError = '';
+    }
+  });
+
+  async function saveEngineSettings() {
+    settingsBusy = true;
+    settingsError = '';
+    settingsSaved = false;
+    try {
+      const a = await saveMusicSettingsForm(settingsDraft);
+      if (!a.ok) settingsError = a.message;
+      else settingsSaved = true;
+    } finally {
+      settingsBusy = false;
     }
   }
 
@@ -317,6 +364,127 @@
     </div>
     {#if fallbackNotice}<p class="warn-text" role="status">{fallbackNotice}</p>{/if}
     <p id="mc-default-engine-error" class="field-error" role="alert">{defaultEngineError}</p>
+
+    <div class="form-row">
+      <button type="button" class="small-btn" onclick={() => (settingsOpen = !settingsOpen)} aria-expanded={settingsOpen}
+        title="The [music] keys of config.ini the engine line owns">Engine settings…</button>
+      <span class="muted tiny">binary, folders, port, idle stop and device of each engine — applied the next time that engine starts; a running engine keeps its current value until it is stopped</span>
+    </div>
+    {#if settingsOpen}
+      <div class="form-row">
+        <div class="field">
+          <label class="field-label" for="ms-yue2-binary">YuE2 binary</label>
+          <input id="ms-yue2-binary" class="text-input" type="text" placeholder="(the build folder's yue-server)" bind:value={settingsDraft.yue2_binary} />
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-yue2-models">YuE2 weights folder</label>
+          <input id="ms-yue2-models" class="text-input" type="text" placeholder="(the models folder)" bind:value={settingsDraft.yue2_models_dir} />
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-yue2-backbone">Backbone</label>
+          <select id="ms-yue2-backbone" class="list-select" bind:value={settingsDraft.yue2_backbone}>
+            {#each YUE2_BACKBONES as b (b)}
+              <option value={b}>{b}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-yue2-port">Port</label>
+          <input id="ms-yue2-port" class="text-input num" type="number" min="0" max="65535" step="1" bind:value={settingsDraft.yue2_port} />
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-yue2-idle">Idle stop (s)</label>
+          <input id="ms-yue2-idle" class="text-input num" type="number" min="0" step="1" bind:value={settingsDraft.yue2_idle_stop_s} />
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-yue2-device">Device</label>
+          <select id="ms-yue2-device" class="list-select" bind:value={settingsDraft.yue2_device}>
+            {#each ENGINE_DEVICES as d (d)}
+              <option value={d}>{d === '' ? '(the engine picks)' : d}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-yue2-max-seq">Max sequence</label>
+          <input id="ms-yue2-max-seq" class="text-input num" type="number" min="0" step="1" bind:value={settingsDraft.yue2_max_seq}
+            aria-describedby="ms-yue2-max-seq-note" />
+          <span id="ms-yue2-max-seq-note" class="muted tiny">0 = the model context (24576); lower trades song length for VRAM</span>
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-yue2-adapters">Voice adapters folder</label>
+          <input id="ms-yue2-adapters" class="text-input" type="text" placeholder="(the models folder's loras)" bind:value={settingsDraft.yue2_adapters_dir} />
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-yue2-instrumental">Instrumental adapter</label>
+          <input id="ms-yue2-instrumental" class="text-input" type="text" placeholder="(YuE2-instrumental-cot-full-loras)" bind:value={settingsDraft.yue2_instrumental_adapter} />
+          <span class="muted tiny">a name in the adapters folders, or none; empty = the default adapter</span>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="field">
+          <label class="field-label" for="ms-ace-binary">ACE-Step binary</label>
+          <input id="ms-ace-binary" class="text-input" type="text" placeholder="(the build folder's ace-server)" bind:value={settingsDraft.acestep_binary} />
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-ace-models">ACE-Step GGUF folder</label>
+          <input id="ms-ace-models" class="text-input" type="text" placeholder="(the models folder)" bind:value={settingsDraft.acestep_models_dir} />
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-ace-port">Port</label>
+          <input id="ms-ace-port" class="text-input num" type="number" min="0" max="65535" step="1" bind:value={settingsDraft.acestep_port} />
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-ace-idle">Idle stop (s)</label>
+          <input id="ms-ace-idle" class="text-input num" type="number" min="0" step="1" bind:value={settingsDraft.acestep_idle_stop_s} />
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-ace-device">Device</label>
+          <select id="ms-ace-device" class="list-select" bind:value={settingsDraft.acestep_device}>
+            {#each ENGINE_DEVICES as d (d)}
+              <option value={d}>{d === '' ? '(the engine picks)' : d}</option>
+            {/each}
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="field">
+          <label class="field-label" for="ms-agent-queue">Agent queue max</label>
+          <input id="ms-agent-queue" class="text-input num" type="number" min="1" step="1" bind:value={settingsDraft.agent_queue_max} />
+          <span class="muted tiny">an agent's jobs queued or running at once — applies to the next job</span>
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-turn-jobs">Jobs per turn max</label>
+          <input id="ms-turn-jobs" class="text-input num" type="number" min="1" step="1" bind:value={settingsDraft.turn_jobs_max} />
+          <span class="muted tiny">applies to the next job</span>
+        </div>
+        <div class="field">
+          <label class="field-label" for="ms-describe-alias">Describe provider</label>
+          <input id="ms-describe-alias" class="text-input" type="text" placeholder="auto" bind:value={settingsDraft.describe_alias} />
+          <span class="muted tiny">the alias that describes a same-style song's source: auto, none, or a loaded provider</span>
+        </div>
+        <div class="field">
+          <label class="check">
+            <input type="checkbox" bind:checked={settingsDraft.auto_align_lyrics} />
+            <span class="small">Auto-align lyrics</span>
+          </label>
+          <label class="check">
+            <input type="checkbox" bind:checked={settingsDraft.lrclib_enabled} />
+            <span class="small">LRCLIB lookup</span>
+          </label>
+          <span class="muted tiny">both apply at once</span>
+        </div>
+      </div>
+      {#if settingsError}
+        <p class="field-error" role="alert">{settingsError}</p>
+      {:else if settingsSaved}
+        <p class="muted tiny" role="status">Saved. Engine keys apply the next time each engine starts; the job limits to the next job; the lyrics keys at once.</p>
+      {/if}
+      <div class="form-row">
+        <button type="button" class="small-btn primary" onclick={saveEngineSettings} disabled={settingsBusy}>
+          {settingsBusy ? 'Saving…' : 'Save engine settings'}
+        </button>
+      </div>
+    {/if}
   </section>
 
   {#if reviewJob}

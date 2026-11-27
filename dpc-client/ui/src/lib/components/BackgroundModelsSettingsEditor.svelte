@@ -4,11 +4,14 @@
 <!-- BACKGROUND-MODELS-OFF-THE-GPU, audit/config_ui_parity_2026-11-27.md). Unlike the voice -->
 <!-- form's keys, not all of these are live: each field's hint says when a save takes -->
 <!-- effect, as the readers say it (settings.get_background_model_settings). -->
+<!-- Also [hf] offline_mode (config-parity card, order 7): three states, because with the -->
+<!-- key absent run_service's own cache check decides per start. -->
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { sendCommand } from '$lib/coreService';
   import { allowedValue, EMBEDDING_DEVICES, GLINER_DEVICES, KG_BACKENDS } from '$lib/utils/backgroundModels';
+  import { hfStateOf } from '$lib/utils/featureKeys';
 
   export let open: boolean = false;
 
@@ -24,6 +27,14 @@
   let bmBusy = false;
   let bmError = '';
   let bmSaved = false;
+
+  // [hf] offline_mode (config-parity card, order 7): three states, because with the
+  // key absent run_service goes offline by itself exactly when every model it needs
+  // is already cached — so "auto" means "remove the key", not "false".
+  let hfDraft = 'auto';
+  let hfBusy = false;
+  let hfError = '';
+  let hfSaved = false;
 
   // Loads the section each time the editor opens (the only dependency named is
   // `open`, so the statement runs exactly when it flips).
@@ -43,8 +54,16 @@
       } else if (bm?.status === 'error') {
         loadError = bm.message || 'Could not read the background model settings';
       }
+      const hf = await sendCommand('get_hf_config', {});
+      if (hf?.status === 'success') {
+        hfDraft = hfStateOf(hf.offline_mode);
+      } else if (hf?.status === 'error' && !loadError) {
+        loadError = hf.message || 'Could not read the HuggingFace offline mode';
+      }
       bmSaved = false;
       bmError = '';
+      hfSaved = false;
+      hfError = '';
     } catch (error) {
       loadError = `Error: ${error}`;
     } finally {
@@ -82,6 +101,25 @@
       bmSaved = false;
     } finally {
       bmBusy = false;
+    }
+  }
+
+  async function saveHf() {
+    hfBusy = true;
+    hfError = '';
+    try {
+      const r = await sendCommand('save_hf_config', { config: { offline_mode: hfDraft } });
+      if (r?.status === 'success') {
+        hfSaved = true;
+      } else {
+        hfError = r?.message || 'Could not save the HuggingFace offline mode';
+        hfSaved = false;
+      }
+    } catch (error) {
+      hfError = `Error: ${error}`;
+      hfSaved = false;
+    } finally {
+      hfBusy = false;
     }
   }
 </script>
@@ -154,6 +192,37 @@
           </div>
           <button class="btn-save" on:click={saveBackgroundModels} disabled={bmBusy || loading}>
             {bmBusy ? 'Saving...' : 'Save background models'}
+          </button>
+        </section>
+
+        <section class="settings-section">
+          <h3>Hugging Face offline mode</h3>
+          <p class="section-hint">
+            Read once at process start, before huggingface loads: with it on, transformers,
+            sentence-transformers and GLiNER skip the HF Hub HEAD requests and read the cache
+            directly. Takes effect after the next backend start; an HF_HUB_OFFLINE variable
+            already in the environment wins over this key whatever it says.
+          </p>
+          {#if hfError}
+            <p class="section-error">{hfError}</p>
+          {:else if hfSaved}
+            <p class="section-saved">Saved.</p>
+          {/if}
+          <div class="form-row">
+            <label for="bm-hf-offline">Offline mode</label>
+            <select id="bm-hf-offline" bind:value={hfDraft} disabled={hfBusy || loading}>
+              <option value="auto">auto — go offline only when every model this install needs is already cached</option>
+              <option value="on">on — always offline, never contact huggingface.co</option>
+              <option value="off">off — always online, refresh the caches</option>
+            </select>
+            <span class="field-hint">
+              auto removes the key from config.ini, so the per-start cache check decides; on
+              writes true and off writes false. A first install needs offline off or auto
+              until the models are downloaded.
+            </span>
+          </div>
+          <button class="btn-save" on:click={saveHf} disabled={hfBusy || loading}>
+            {hfBusy ? 'Saving...' : 'Save offline mode'}
           </button>
         </section>
       </div>

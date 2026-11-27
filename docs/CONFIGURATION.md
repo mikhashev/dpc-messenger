@@ -750,7 +750,7 @@ As of schema version **1.1**, device context includes a `special_instructions` b
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 
-Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **32 sections, 153 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
+Every section and key `_create_default_config` writes into a fresh `~/.dpc/config.ini`: **32 sections, 157 keys**. Generated from `settings.py` by `tools/config_reference.py` — edit the code, then re-run it; do not hand-edit between the markers.
 
 An empty default means the key is written blank and the feature stays off until you fill it in. Every key also accepts an environment variable named `DPC_<SECTION>_<KEY>` in upper case.
 
@@ -966,6 +966,10 @@ An empty default means the key is written blank and the feature stays off until 
 | `yue2_instrumental_adapter` | *(empty)* | The adapter an Instrumental job on YuE2 runs with (a name in the adapters folder or <yue2_models_dir>/loras, read after it). Empty = YuE2-instrumental-cot-full-loras; none = no adapter. Without it Instrumental jobs go to acestep.cpp |
 | `yue2_device` | *(empty)* | Passed to yue2.cpp as --device (CUDA0, Vulkan0, MTL0, CPU). Empty = the engine picks the best device |
 | `yue2_max_seq` | `0` | Passed as --max-seq when above 0 (KV cache size; less VRAM, shorter songs). 0 = the model context |
+| `agent_queue_max` | `2` | An agent's music jobs queued or running at once, read at every propose |
+| `turn_jobs_max` | `1` | An agent's music jobs per turn, read at every propose |
+| `describe_alias` | `auto` | The provider that describes a same-style song's source (auto = music_flamingo when loaded; none = off) |
+| `export_dir` | *(empty)* | The MP3/Opus export root. Empty = <DPC home>/exports/music; an absolute path, never a filesystem root |
 
 #### `[oauth]`
 

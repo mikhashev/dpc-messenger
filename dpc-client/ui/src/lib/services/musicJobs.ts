@@ -23,6 +23,7 @@ import {
     getMusicEngineStatus,
     getMusicJob,
     getMusicJobQc,
+    getMusicSettings as getMusicSettingsCommand,
     judgeMusicTake,
     keepMusicTake,
     listMusicDiscardReasons,
@@ -34,6 +35,7 @@ import {
     proposeMusicSong,
     describeMusicTrack,
     rejectAllMusicTakes,
+    saveMusicSettings as saveMusicSettingsCommand,
     setMusicDefaultEngine,
     startMusicEngine,
     stopLocalEngine,
@@ -41,6 +43,12 @@ import {
 } from '$lib/coreService';
 import { MUSIC_UNAVAILABLE_TEXT, type MusicAnswer } from '$lib/utils/musicPlayer';
 import { backfillProblem, type JobQc } from '$lib/utils/musicQc';
+import {
+    emptyMusicSettings,
+    musicSettingsPayload,
+    normaliseMusicSettings,
+    type MusicSettings,
+} from '$lib/utils/musicSettings';
 import {
     JOB_POLL_TICK_MS,
     askAgain,
@@ -187,6 +195,32 @@ export async function setDefaultEngine(engine: EngineKey): Promise<MusicAnswer<{
         musicJobs.update(x => ({ ...x, capabilities: nextCaps }));
         musicCreateDraft.update(f => syncDraftDefaultEngine(f, nextCaps, draftEngineChosen));
     }
+    return a;
+}
+
+// -- the [music] settings of the Create panel's engine form and the player's settings form
+// (config-parity card, order 7). One loaded copy both forms share, so a save in one never
+// rewrites a key the other just wrote (the payload carries only the changed keys).
+
+/** The `[music]` settings as their readers resolve them now (the defaults while unloaded). */
+export const musicSettings = writable<MusicSettings>(emptyMusicSettings());
+
+/** Read the settings again (a form opens, or the backend came back). */
+export async function loadMusicSettings(): Promise<void> {
+    const a = await getMusicSettingsCommand();
+    if (a.ok) musicSettings.set(normaliseMusicSettings(a.data));
+}
+
+/** Save `draft`: only the keys it changed are sent, so a key left alone keeps its stored
+ *  value. A refusal names its key and writes nothing; the answer's stored shape reloads
+ *  the shared copy. */
+export async function saveMusicSettingsForm(draft: MusicSettings): Promise<MusicAnswer<Record<string, any>>> {
+    const payload = musicSettingsPayload(get(musicSettings), draft);
+    if (!Object.keys(payload).length) {
+        return { ok: true, data: {} } as MusicAnswer<Record<string, any>>;
+    }
+    const a = await saveMusicSettingsCommand(payload);
+    if (a.ok) musicSettings.set(normaliseMusicSettings(a.data));
     return a;
 }
 
