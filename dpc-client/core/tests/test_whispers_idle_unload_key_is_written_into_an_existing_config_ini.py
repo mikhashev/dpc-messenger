@@ -24,13 +24,18 @@ def _read(home):
     return parser
 
 
-def _old_config(home, local_transcription=None):
+def _old_config(home, local_transcription=None, extra_sections=None):
     """A config.ini written before the key existed."""
     lines = ["[hub]", "url = http://localhost:8000", ""]
     if local_transcription is not None:
         lines.append("[local_transcription]")
         lines += [f"{k} = {v}" for k, v in local_transcription.items()]
         lines.append("")
+    if extra_sections:
+        for section, items in extra_sections.items():
+            lines.append(f"[{section}]")
+            lines += [f"{k} = {v}" for k, v in items.items()]
+            lines.append("")
     (home / "config.ini").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -57,11 +62,17 @@ class TestQueueWaitS:
         assert Settings(tmp_path).get_local_transcription_queue_wait_s() == 0
 
 
-def _every_seeded_key() -> dict:
+def _every_seeded_key() -> tuple[dict, dict]:
     from dpc_client_core.settings import _SEEDED_KEYS
 
-    return {key: value for (section, key), (value, _comment) in _SEEDED_KEYS.items()
-            if section == "local_transcription"}
+    local_transcription: dict[str, str] = {}
+    extra_sections: dict[str, dict[str, str]] = {}
+    for (section, key), (value, _comment) in _SEEDED_KEYS.items():
+        if section == "local_transcription":
+            local_transcription[key] = value
+        else:
+            extra_sections.setdefault(section, {})[key] = value
+    return local_transcription, extra_sections
 
 
 class TestIdleUnloadSIsWrittenForTheOwner:
@@ -90,8 +101,9 @@ class TestIdleUnloadSIsWrittenForTheOwner:
         assert s.get_local_transcription_idle_unload_s() == 45.0
 
     def test_a_file_that_has_the_key_is_not_rewritten(self, tmp_path):
-        # Every seeded key present (S3d added L12's three): nothing is missing, nothing is written.
-        _old_config(tmp_path, _every_seeded_key())
+        # Every seeded key across all sections present: nothing is missing, nothing is written.
+        local_keys, extra_sections = _every_seeded_key()
+        _old_config(tmp_path, local_keys, extra_sections=extra_sections)
         before = (tmp_path / "config.ini").read_bytes()
         Settings(tmp_path)
         assert (tmp_path / "config.ini").read_bytes() == before
@@ -182,7 +194,12 @@ class TestQueueWaitSIsWrittenForTheOwnerToo:
         assert section["idle_unload_s"] == "300"
 
     def test_the_owners_value_is_never_touched_and_wins(self, tmp_path):
-        _old_config(tmp_path, {**_every_seeded_key(), "queue_wait_s": "45", "idle_unload_s": "30"})
+        local_keys, extra_sections = _every_seeded_key()
+        _old_config(
+            tmp_path,
+            {**local_keys, "queue_wait_s": "45", "idle_unload_s": "30"},
+            extra_sections=extra_sections,
+        )
         before = (tmp_path / "config.ini").read_bytes()
         s = Settings(tmp_path)
         assert (tmp_path / "config.ini").read_bytes() == before
