@@ -555,6 +555,7 @@ class MusicCommandsMixin:
         bound_s: Optional[float] = None,
         trigger_download: bool = True,
         respect_size_limit: bool = True,
+        non_evicting: bool = False,
     ) -> Dict[str, Any]:
         alias = getattr(provider, "alias", None) or LOCAL_WHISPER_TYPE
         try:
@@ -572,7 +573,13 @@ class MusicCommandsMixin:
                 if decision["probed_once"]
                 else None
             )
-        from ..providers.whisper_provider import LocalWhisperProvider, card_ask, card_wait_words, transcribe_with_route
+        from ..providers.whisper_provider import (
+            LocalWhisperProvider,
+            asks_for_the_card,
+            card_ask,
+            card_wait_words,
+            transcribe_with_route,
+        )
         from .lyrics import show_card_wait
 
         if (
@@ -588,7 +595,20 @@ class MusicCommandsMixin:
                     f"Model '{provider.model_name}' is not downloaded yet.",
                 )
 
-        # ADR-052 L4: explicit click (`bound_s=None`) waits until cancelled; background auto-align uses a bound.
+        if non_evicting:
+            if isinstance(provider, LocalWhisperProvider) and await asyncio.to_thread(asks_for_the_card, provider):
+                from ..managers import card_lease
+
+                snap = card_lease.queue_snapshot()
+                if not snap.get("free") or snap.get("waiters"):
+                    raise MusicLibraryError(
+                        "card_busy",
+                        "the GPU card is held or waited on; skipping background auto-align to avoid evicting warm engines",
+                    )
+            # Zero wait prevents Lease.use from asking any idle music engine to yield on a race.
+            bound_s = 0.0
+
+        # ADR-052 L4: explicit click (`bound_s=None`) waits until cancelled; background auto-align uses zero wait.
         ask = await asyncio.to_thread(
             card_ask, provider, purpose, str(path), bound_s=bound_s, audio_s=ask_audio_s
         )
@@ -627,6 +647,24 @@ class MusicCommandsMixin:
     async def _music_transcribe_with_whisper(self, provider: Any, path: Path) -> Dict[str, Any]:
         return await self._music_run_local_whisper(provider, path)
 
+    async def _music_transcribe_for_align(self, path: Path) -> Dict[str, Any]:
+        """Local-Whisper-only transcription for manual `align_music_lyrics`: never uploads to a
+        remote or cloud provider, and bypasses the 25 MB cloud-API file size gate."""
+        whisper, _alias = self._music_pick_transcriber()
+        if whisper is None:
+            raise MusicLibraryError(
+                "transcription_unavailable",
+                "alignment requires a local Whisper provider (remote or cloud providers are not used)",
+            )
+        return await self._music_run_local_whisper(
+            whisper,
+            path,
+            purpose="music Align",
+            bound_s=None,
+            trigger_download=True,
+            respect_size_limit=False,
+        )
+
     def _music_auto_align_enabled(self) -> bool:
         fn = getattr(self.settings, "get_music_auto_align_lyrics", None)
         if callable(fn):
@@ -646,11 +684,16 @@ class MusicCommandsMixin:
         lyrics: Any,
         duration_s: Optional[float] = None,
         replay: Optional[Mapping[str, Any]] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         """Best-effort forced alignment after a vocal take finishes and exits its engine card lease.
-        Never fails or blocks take storage if Whisper is absent, uncached, busy, or low-match."""
+        Never fails or blocks take storage, skips when queued jobs exist, and never evicts warm engines."""
         try:
             if not self._music_auto_align_enabled():
+                return
+            runner = self._music_runner_instance
+            if runner is not None and await asyncio.to_thread(runner.has_pending_jobs, exclude_job_id=job_id):
+                logger.debug("music: auto-align skipped for %s (queued/running music jobs present)", track_id)
                 return
             lines = MusicLyrics._known_lines_from_input(lyrics)
             if not lyrics_align.has_alignable_words(lines):
@@ -666,9 +709,10 @@ class MusicCommandsMixin:
                     whisper,
                     audio_path,
                     purpose="music Auto-align",
-                    bound_s=30.0,
+                    bound_s=0.0,
                     trigger_download=False,
                     respect_size_limit=False,
+                    non_evicting=True,
                 )
 
             lyr = await self._music_lyrics()
@@ -682,11 +726,12 @@ class MusicCommandsMixin:
             )
             stats = res.get("alignment") or {}
             logger.info(
-                "music: auto-aligned generated take %s (%s/%s words matched, sidecar=%s)",
+                "music: auto-aligned generated take %s (%s/%s words matched, sidecar=%s, synced_tag=%s)",
                 track_id,
                 stats.get("matched_words"),
                 stats.get("total_lyric_words"),
                 res.get("sidecar_written"),
+                res.get("synced_tag_written"),
             )
         except MusicLibraryError as exc:
             logger.info("music: auto-align skipped for %s (%s: %s)", track_id, exc.code, exc.message)
@@ -1896,12 +1941,21 @@ class MusicCommandsMixin:
 
     @slow_command
     async def align_music_lyrics(self, track_id: str, overwrite_manual: bool = False) -> Dict[str, Any]:
-        """Force-align existing known/unsynced lyrics of `track_id` against its audio using Whisper
-        word timestamps, keeping the exact verbatim lyric text, storing `source: "aligned"`,
-        writing `<track>.lrc`, and returning `{status: "ok", lyrics, applied, lrc, alignment}`."""
+        """Force-align existing known/unsynced lyrics of `track_id` against its audio using local
+        Whisper word timestamps, keeping exact verbatim lyric text, storing `source: "aligned"`
+        in DPC home, and returning `{status: "ok", lyrics, applied, lrc, alignment}`."""
         try:
             lyrics = await self._music_lyrics()
-            answer = await lyrics.align(track_id, overwrite_manual=overwrite_manual is True)
+            use_transcriber = (
+                self._music_transcribe_for_align
+                if getattr(lyrics.transcriber, "__func__", None) is MusicCommandsMixin._music_transcribe_audio
+                else lyrics.transcriber
+            )
+            answer = await lyrics.align(
+                track_id,
+                overwrite_manual=overwrite_manual is True,
+                transcriber=use_transcriber,
+            )
             return {"status": "ok", **answer}
         except Exception as exc:
             return _error(exc)

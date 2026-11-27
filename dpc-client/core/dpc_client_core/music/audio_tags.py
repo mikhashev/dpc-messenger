@@ -177,12 +177,14 @@ def _flac_audio_digest(path: Path) -> Tuple[str, str]:
     return h.hexdigest(), md5
 
 
-def flac_add_comments(path: Path, comments: Mapping[str, str], *, once_key: str = "DPC_PROVENANCE") -> None:
-    """Add Vorbis comments to a FLAC file, keeping everything else byte for byte.
-
-    Raises `AlreadyTagged` when `once_key` is among the names being added and the file already
-    has it (write once). Comments whose value is empty are not written. The audio is verified
-    equal before the result replaces the file."""
+def _flac_write_comments(
+    path: Path,
+    comments: Mapping[str, str],
+    *,
+    once_key: str = "DPC_PROVENANCE",
+    replace_existing: bool = False,
+) -> None:
+    """Write or update Vorbis comments in a FLAC file while preserving audio frames byte for byte."""
     path = Path(path)
     add = [(k.upper(), v) for k, v in comments.items() if isinstance(v, str) and v != ""]
     if not add:
@@ -201,8 +203,25 @@ def flac_add_comments(path: Path, comments: Mapping[str, str], *, once_key: str 
     names = {k.upper() for k, _ in existing}
     if once_key and once_key.upper() in {k for k, _ in add} and once_key.upper() in names:
         raise AlreadyTagged(f"{path.name} already holds {once_key}")
-    # A name already present keeps its value (first writer wins); only new names are added.
-    merged = list(existing) + [(k, v) for k, v in add if k not in names]
+    if replace_existing:
+        add_map = {k: v for k, v in add}
+        merged: List[Tuple[str, str]] = []
+        seen_replaced: set[str] = set()
+        for k, v in existing:
+            ku = k.upper()
+            if ku in add_map:
+                if ku not in seen_replaced:
+                    merged.append((ku, add_map[ku]))
+                    seen_replaced.add(ku)
+            else:
+                merged.append((k, v))
+        for k, v in add:
+            if k not in seen_replaced:
+                merged.append((k, v))
+                seen_replaced.add(k)
+    else:
+        # A name already present keeps its value (first writer wins); only new names are added.
+        merged = list(existing) + [(k, v) for k, v in add if k not in names]
     body = _build_vorbis(vendor, merged)
     if len(body) >= 1 << 24:
         raise TagError("the comment block would be over 16 MB")
@@ -234,6 +253,25 @@ def flac_add_comments(path: Path, comments: Mapping[str, str], *, once_key: str 
             tmp.unlink()
         except FileNotFoundError:
             pass
+
+
+def flac_add_comments(path: Path, comments: Mapping[str, str], *, once_key: str = "DPC_PROVENANCE") -> None:
+    """Add Vorbis comments to a FLAC file, keeping everything else byte for byte.
+
+    Raises `AlreadyTagged` when `once_key` is among the names being added and the file already
+    has it (write once). Comments whose value is empty are not written. The audio is verified
+    equal before the result replaces the file."""
+    _flac_write_comments(path, comments, once_key=once_key, replace_existing=False)
+
+
+def flac_upsert_comments(path: Path, comments: Mapping[str, str]) -> None:
+    """Set or replace non-provenance Vorbis comments in a FLAC file safely.
+
+    Refuses to modify `DPC_PROVENANCE` (write once). Audio frames and STREAMINFO MD5 are
+    verified identical before replacing the file."""
+    if any(k.upper() == PROVENANCE_TAG for k in comments):
+        raise AlreadyTagged(f"{PROVENANCE_TAG} is write-once and cannot be overwritten")
+    _flac_write_comments(path, comments, once_key="", replace_existing=True)
 
 
 # -- WAV ----------------------------------------------------------------------------------------

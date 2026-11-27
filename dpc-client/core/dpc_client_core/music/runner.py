@@ -622,7 +622,9 @@ class MusicJobRunner:
         # job id -> `similar.SongDress` while a song job's takes are made (`_store_take` wears it)
         self._song_dress: Dict[str, Any] = {}
         self._pending_align: Dict[str, List[Dict[str, Any]]] = {}
-        self._deferred_finish: set = set()
+        self._bg_align_tasks: set[asyncio.Task] = set()
+        self._bg_align_lock: Optional[asyncio.Lock] = None
+        self._stopping = False
 
     @property
     def engine(self) -> Any:
@@ -638,6 +640,7 @@ class MusicJobRunner:
     def start(self) -> None:
         if self.running:
             return
+        self._stopping = False
         self._wake = asyncio.Event()
         self._task = asyncio.ensure_future(self._work())
 
@@ -649,6 +652,7 @@ class MusicJobRunner:
             self._wake.set()
 
     async def stop(self) -> None:
+        self._stopping = True
         task, self._task = self._task, None
         if task is not None and not task.done():
             task.cancel()
@@ -656,6 +660,34 @@ class MusicJobRunner:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+        bg = list(self._bg_align_tasks)
+        self._bg_align_tasks.clear()
+        for t in bg:
+            if not t.done():
+                t.cancel()
+        for t in bg:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def wait_auto_align(self) -> None:
+        """Await any detached background auto-align tasks currently in flight (primarily for tests)."""
+        while True:
+            pending = [t for t in self._bg_align_tasks if not t.done()]
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def has_pending_jobs(self, *, exclude_job_id: Optional[str] = None) -> bool:
+        """True when another runnable music job is queued or currently running on the runner."""
+        if self.current_job_id is not None and self.current_job_id != exclude_job_id:
+            return True
+        for job in self.store.list_jobs(states=[js.QUEUED, js.RUNNING]):
+            jid = job.get("id")
+            if jid != exclude_job_id and self.runs(job) and jid not in self._skipped:
+                return True
+        return False
 
     @staticmethod
     def runs(job: Mapping[str, Any]) -> bool:
@@ -1642,36 +1674,48 @@ class MusicJobRunner:
 
     def _clear_deferred_align(self, job_id: str) -> None:
         self._pending_align.pop(job_id, None)
-        self._deferred_finish.discard(job_id)
 
     async def _complete_generation(self, job_id: str) -> None:
-        """Move `job_id` to `review` now unless vocal takes are queued for post-lease auto-alignment."""
-        if self._auto_align is not None and self._pending_align.get(job_id):
-            self._deferred_finish.add(job_id)
-            return
+        """Move `job_id` to `review` immediately once takes are stored (never blocked on auto-align)."""
         await self._change(self.store.finish_job, job_id)
 
     async def _finalize_deferred(self, job_id: str) -> None:
-        """Run queued post-take lyrics alignment after the engine's card lease is released, then finish."""
+        """Spawn detached background auto-alignment outside the runner loop after `finish_job` and lease release."""
         pending = self._pending_align.pop(job_id, None)
-        deferred = job_id in self._deferred_finish
-        self._deferred_finish.discard(job_id)
-        if not deferred:
+        if not pending or self._auto_align is None or self._stopping:
             return
-        try:
-            await self._check(job_id)
-            if pending and self._auto_align is not None:
-                for item in pending:
-                    await self._check(job_id)
-                    try:
-                        await self._auto_align(**item)
-                    except Exception:
-                        logger.warning("music: auto-align failed for track %s of job %s; keeping unsynced lyrics",
-                                       item.get("track_id"), job_id, exc_info=True)
-            await self._check(job_id)
-            await self._change(self.store.finish_job, job_id)
-        except _Cancelled:
-            logger.info("music: job %s cancelled during post-take lyrics alignment", job_id)
+        job = await self._get(job_id)
+        if job is None or job["state"] != js.REVIEW:
+            return
+        task = asyncio.get_running_loop().create_task(self._run_background_align(job_id, pending))
+        self._bg_align_tasks.add(task)
+        task.add_done_callback(self._bg_align_tasks.discard)
+
+    async def _run_background_align(self, job_id: str, pending: List[Dict[str, Any]]) -> None:
+        if self._bg_align_lock is None:
+            self._bg_align_lock = asyncio.Lock()
+        async with self._bg_align_lock:
+            for item in pending:
+                if self._stopping or self._auto_align is None:
+                    return
+                try:
+                    busy = await asyncio.to_thread(self.has_pending_jobs, exclude_job_id=job_id)
+                except Exception:
+                    busy = False
+                if busy:
+                    logger.info("music: skipping background auto-align for job %s (queued/running jobs present)", job_id)
+                    return
+                try:
+                    await self._auto_align(**item, job_id=job_id)
+                except TypeError:
+                    await self._auto_align(**item)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "music: auto-align failed for track %s of job %s; keeping unsynced lyrics",
+                        item.get("track_id"), job_id, exc_info=True,
+                    )
 
     # -- a take, whichever engine made it ---------------------------------------------------
 
@@ -1837,7 +1881,7 @@ class MusicJobRunner:
                     "path": flac,
                     "lyrics": raw_lyrics,
                     "duration_s": info.duration_s,
-                    "replay": align_replay,
+                    "replay": None if cut_s else align_replay,
                 })
         await asyncio.to_thread(atomic_write_text, sidecar, json.dumps(sidecar_record, ensure_ascii=False, indent=1))
 

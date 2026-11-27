@@ -44,7 +44,8 @@ _STRESS_MARKS = "\u0301\u0300\u0341\u00b4\u02ca\u0384"
 _STRESS_TRANS = str.maketrans("", "", _STRESS_MARKS)
 _APOSTROPHES = re.compile(r"[’ʼ‘`]")
 _HYPHENS = re.compile(r"[-–—]+")
-_SECTION_HEADER = re.compile(r"^\s*\[([^\[\]:]+)\]\s*$")
+_SECTION_HEADER = re.compile(r"^\s*\[([^\[\]]+)\]\s*$")
+_LRC_TIME_INNER = re.compile(r"^\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?$")
 _WORD_CHARS = re.compile(r"[^\W_]+(?:'[^\W_]+)*", re.UNICODE)
 
 # Minimum size / DP bounds to avoid quadratic blowup on pathological long inputs.
@@ -52,8 +53,12 @@ _DP_MAX_CELLS = 100_000
 _BAND_HALF = 64
 
 # Thresholds determining whether an alignment found enough real matches.
-_MIN_COVERAGE = 0.15
+_MIN_COVERAGE = 0.30
+_MIN_COVERAGE_SHORT = 0.50
+_MIN_LINE_COVERAGE = 0.30
 _MIN_MATCHED_WORDS_LONG = 2
+_MIN_AVG_CONFIDENCE = 0.80
+_FUZZY_SIM_THRESHOLD = 0.72
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,7 @@ class AlignmentResult:
     coverage: float
     sufficient: bool
     used_segment_fallback: bool = False
+    avg_confidence: float = 0.0
 
     def stats(self) -> Dict[str, Any]:
         return {
@@ -87,6 +93,7 @@ class AlignmentResult:
             "total_sung_lines": self.total_sung_lines,
             "whisper_words": self.whisper_words,
             "coverage": round(self.coverage, 4),
+            "avg_confidence": round(self.avg_confidence, 4),
             "sufficient": self.sufficient,
             "used_segment_fallback": self.used_segment_fallback,
         }
@@ -100,17 +107,19 @@ def _finite(value: Any) -> Optional[float]:
 
 
 def is_section_header(line: str) -> bool:
-    """True for bracketed section markers such as `[Verse 1]`, `[Chorus]`, `[Bridge]`, `[Outro]`."""
-    return _SECTION_HEADER.match(str(line or "")) is not None
+    """True for bracketed section markers such as `[Verse 1]`, `[Verse 1: Lead]`, `[Chorus - Choir]`, `[Bridge (Acoustic)]`."""
+    return extract_section_label(line) is not None
 
 
 def extract_section_label(line: str) -> Optional[str]:
-    """Normalized lower-case section label (e.g., `'verse 1'` -> `'verse 1'`), or None."""
+    """Normalized lower-case section label (e.g., `'Verse 1: Lead'` -> `'verse 1: lead'`), or None."""
     m = _SECTION_HEADER.match(str(line or ""))
     if not m:
         return None
-    label = " ".join(m.group(1).strip().casefold().split())
-    return label or None
+    inner = " ".join(m.group(1).strip().split())
+    if not inner or _LRC_TIME_INNER.match(inner) or not any(ch.isalpha() for ch in inner):
+        return None
+    return inner.casefold()
 
 
 def normalize_token(word: str) -> str:
@@ -369,7 +378,8 @@ def _map_section_headers(parsed: Sequence[_ParsedLine], anchors: Sequence[Mappin
         return {}
 
     def _base(lbl: str) -> str:
-        return re.sub(r"[\s_\d-]+$", "", lbl).strip() or lbl
+        head = re.split(r"[:(\[]|\s+[-–—]\s+", lbl, maxsplit=1)[0]
+        return re.sub(r"[\s_\d-]+$", "", head).strip() or head.strip() or lbl
 
     # Match labels first; fall back to positional alignment if anchors are unlabeled.
     mapped: Dict[int, float] = {}
@@ -400,9 +410,9 @@ def _token_similarity(a: str, b: str) -> float:
         return 1.0
     if not a or not b:
         return 0.0
-    # Fast length pre-check before edit ratio.
+    # Length pre-check before edit ratio so short prefix overlaps cannot score high.
     la, lb = len(a), len(b)
-    if min(la, lb) / max(la, lb) < 0.45:
+    if min(la, lb) / max(la, lb) < 0.55:
         return 0.0
     return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
 
@@ -410,12 +420,12 @@ def _token_similarity(a: str, b: str) -> float:
 def _token_match_score(a: str, b: str) -> float:
     if a == b:
         return 3.0
+    # Short 1-2 character tokens require exact matches to avoid cross-matching stop words.
+    if min(len(a), len(b)) < 3:
+        return -1.5
     sim = _token_similarity(a, b)
-    if sim >= 0.60:
-        return round(2.8 * sim - 0.5, 4)
-    # Single-char words only match on exact match to avoid 'a' == 'i'.
-    if len(a) > 1 and len(b) > 1 and (a[:3] == b[:3] and min(len(a), len(b)) >= 3):
-        return 0.9
+    if sim >= _FUZZY_SIM_THRESHOLD:
+        return round(3.0 * sim - 1.1, 4)
     return -1.5
 
 
@@ -764,6 +774,23 @@ def align_lyrics(
             matched_word_set.add(li)
             last_l, last_w = li, wi
 
+    # Compute per-pair confidence (1.0 exact, 0.95 compound split/merge, else edit similarity).
+    pair_confidences: List[float] = []
+    for idx_p, (li, wi) in enumerate(clean_pairs):
+        lt, wt = l_tokens[li], w_tokens[wi]
+        if lt == wt:
+            pair_confidences.append(1.0)
+        elif (idx_p > 0 and clean_pairs[idx_p - 1][1] == wi
+              and l_tokens[clean_pairs[idx_p - 1][0]] + lt == wt):
+            pair_confidences.append(0.95)
+        elif (idx_p + 1 < len(clean_pairs) and clean_pairs[idx_p + 1][1] == wi
+              and lt + l_tokens[clean_pairs[idx_p + 1][0]] == wt):
+            pair_confidences.append(0.95)
+        elif wi + 1 < len(w_tokens) and wt + w_tokens[wi + 1] == lt:
+            pair_confidences.append(0.95)
+        else:
+            pair_confidences.append(_token_similarity(lt, wt))
+
     # Map each sung line to its first matched Whisper word timestamp.
     first_match_for_line: Dict[int, float] = {}
     for li, wi in clean_pairs:
@@ -774,11 +801,21 @@ def align_lyrics(
     matched_words = len(matched_word_set)
     matched_lines = len(first_match_for_line)
     coverage = matched_words / max(1, total_lyric_words)
+    avg_confidence = (sum(pair_confidences) / len(pair_confidences)) if pair_confidences else 0.0
+    total_sung_with_words = len(sung_lines)
     if total_lyric_words <= 4:
-        sufficient = matched_words >= 1
+        sufficient = (
+            matched_words >= 1
+            and coverage >= _MIN_COVERAGE_SHORT
+            and avg_confidence >= _MIN_AVG_CONFIDENCE
+        )
     else:
-        sufficient = matched_words >= _MIN_MATCHED_WORDS_LONG and (
-            coverage >= _MIN_COVERAGE or matched_lines >= 2
+        min_lines = 1 if total_sung_with_words <= 1 else max(2, math.ceil(_MIN_LINE_COVERAGE * total_sung_with_words))
+        sufficient = (
+            matched_words >= _MIN_MATCHED_WORDS_LONG
+            and coverage >= _MIN_COVERAGE
+            and matched_lines >= min_lines
+            and avg_confidence >= _MIN_AVG_CONFIDENCE
         )
 
     if not matched_lines:
@@ -792,12 +829,12 @@ def align_lyrics(
             coverage=0.0,
             sufficient=False,
             used_segment_fallback=used_segment_fallback,
+            avg_confidence=0.0,
         )
 
-    raw_cap = float(duration_s) if duration_s is not None and math.isfinite(duration_s) and duration_s >= 0 else None
-    max_w_end = max((float(w["end"]) for w in w_list), default=0.0)
-    # Never crush actual Whisper word timestamps below their decoded timestamps if container/stub length is shorter.
-    dur_cap = max(raw_cap, max_w_end) if raw_cap is not None else None
+    # Cap timestamps at the true known positive track duration (preventing hallucinated Whisper tails);
+    # only leave uncapped when duration_s is missing or non-positive.
+    dur_cap = float(duration_s) if duration_s is not None and math.isfinite(duration_s) and duration_s > 0 else None
 
     # Build monotonic timestamps for sung lines (`times[line_index]`).
     sung_indices = [ln.index for ln in all_sung]
@@ -915,6 +952,7 @@ def align_lyrics(
         coverage=coverage,
         sufficient=sufficient,
         used_segment_fallback=used_segment_fallback,
+        avg_confidence=avg_confidence,
     )
 
 

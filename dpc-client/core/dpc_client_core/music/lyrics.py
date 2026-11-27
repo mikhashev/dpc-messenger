@@ -106,7 +106,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
-from . import id3_sylt, lyrics_align, lyrics_filter, schemas
+from . import audio_tags, id3_sylt, lyrics_align, lyrics_filter, schemas
 from .identity import FFPROBE_TIMEOUT_S, MediaTools
 from .library import MusicLibraryError
 from .store import atomic_write_json, atomic_write_text, music_dir_of
@@ -139,6 +139,8 @@ CACHEABLE_RESULTS = FOUND_RESULTS + NEGATIVE_RESULTS
 TRANSCRIBE_SOURCE = "transcribe"
 # The stored source of forced-aligned lyrics (verbatim known lines aligned to Whisper word timestamps).
 ALIGNED_SOURCE = "aligned"
+# Existing synced lyrics sources protected from silent overwrite without `overwrite_manual=True` (ADR-051).
+_PROTECTED_SYNCED_SOURCES = frozenset({"lrc", "lrclib", "tags", "manual", ALIGNED_SOURCE})
 
 # What the transcribe action is handed: the track's file in, a result out shaped like
 # `LocalWhisperProvider.transcribe`'s: `text`, `language`, `duration`, `provider`,
@@ -1309,6 +1311,46 @@ class MusicLyrics:
             return out
         return []
 
+    @classmethod
+    def _is_protected_synced(cls, record: Optional[dict]) -> bool:
+        """True when `record` holds user edits or synced lyrics that must not be overwritten silently."""
+        return record is not None and (
+            cls._own_edit(record)
+            or (cls._has_timed_lines(record) and record.get("source") in _PROTECTED_SYNCED_SOURCES)
+        )
+
+    def _generated_audio_target(self, path: Path) -> Optional[Path]:
+        """Return canonical `path` only when it is a non-symlink file strictly inside `library._generated_root()`
+        whose `<stem>.lrc` sidecar path also stays inside that directory (ADR-051 Q4)."""
+        raw = Path(path)
+        if not raw.is_absolute():
+            return None
+        gen_fn = getattr(self.library, "_generated_root", None)
+        try:
+            owned = Path(gen_fn()).resolve() if callable(gen_fn) else (self.root.parent / "generated").resolve()
+            if raw.is_symlink():
+                return None
+            target = raw.resolve()
+            if target == owned or not target.is_relative_to(owned):
+                return None
+            sidecar = target.with_suffix(".lrc")
+            if sidecar.is_symlink():
+                return None
+            sidecar_resolved = sidecar.resolve()
+            if sidecar_resolved == owned or not sidecar_resolved.is_relative_to(owned):
+                return None
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return target
+
+    @staticmethod
+    def _write_generated_flac_synced_lyrics(flac_path: Path, lrc_text: str) -> bool:
+        """Best-effort embed/update `SYNCEDLYRICS` Vorbis comment in a DPC-owned generated FLAC."""
+        if not lrc_text.strip():
+            return False
+        audio_tags.flac_upsert_comments(flac_path, {"SYNCEDLYRICS": lrc_text})
+        return True
+
     async def align(
         self,
         track_id: str,
@@ -1322,7 +1364,8 @@ class MusicLyrics:
     ) -> Dict[str, Any]:
         """Force-align existing unsynced (or explicit known) lyrics against audio using Whisper word
         timestamps, preserving exact verbatim text, saving `source: "aligned"` in `music/lyrics/`
-        and writing a synced `.lrc` sidecar beside the audio file."""
+        and writing a synced `.lrc` sidecar (and FLAC `SYNCEDLYRICS` tag) only for DPC-owned
+        generated tracks under `library._generated_root()` (ADR-051 Q4)."""
         lyrics_file = self.lyrics_path(track_id)
         async with self._lock(track_id):
             entry = self.library.get_entry(track_id)
@@ -1339,11 +1382,22 @@ class MusicLyrics:
             if lyrics_text is not None:
                 raw_lines = self._known_lines_from_input(lyrics_text)
                 existing_lang: Optional[str] = stored.get("language") if stored else None
-                if not overwrite_manual and self._own_edit(stored) and self._has_timed_lines(stored):
-                    raise MusicLibraryError(
-                        "overwrite_manual_required",
-                        "the stored lyrics are your own synced edits; replacing their times needs overwrite_manual",
-                    )
+                if not overwrite_manual:
+                    if self._is_protected_synced(stored):
+                        raise MusicLibraryError(
+                            "overwrite_manual_required",
+                            "the track already has synced lyrics; replacing their times needs overwrite_manual",
+                        )
+                    if stored is None:
+                        try:
+                            sidecar = await asyncio.to_thread(read_sidecar, Path(path))
+                        except (OSError, ValueError):
+                            sidecar = None
+                        if sidecar is not None and parse_lrc(sidecar[1]).lines:
+                            raise MusicLibraryError(
+                                "overwrite_manual_required",
+                                "the track already has a synced .lrc sidecar; replacing its times needs overwrite_manual",
+                            )
             else:
                 source_rec = stored
                 if source_rec is None:
@@ -1353,10 +1407,12 @@ class MusicLyrics:
                 if source_rec is None:
                     raise MusicLibraryError(
                         "no_lyrics", "no lyrics found for this track to align; add or transcribe lyrics first")
-                if not overwrite_manual and self._own_edit(stored) and self._has_timed_lines(stored):
+                if not overwrite_manual and (
+                    self._is_protected_synced(stored) or self._is_protected_synced(source_rec)
+                ):
                     raise MusicLibraryError(
                         "overwrite_manual_required",
-                        "the stored lyrics are your own synced edits; replacing their times needs overwrite_manual",
+                        "the track already has synced lyrics; replacing their times needs overwrite_manual",
                     )
                 raw_lines = self._known_lines_from_input(source_rec.get("lines") or [])
                 existing_lang = source_rec.get("language")
@@ -1375,9 +1431,19 @@ class MusicLyrics:
 
         if not isinstance(result, dict):
             raise MusicLibraryError("transcription_failed", "the transcription gave no result")
-        effective_dur = track_dur if track_dur is not None else _finite(result.get("duration"))
-        aligned = lyrics_align.align_result_to_lyrics(
-            raw_lines, result, duration_s=effective_dur, section_anchors=section_anchors)
+        res_dur = _finite(result.get("duration"))
+        # Use real track duration when known and positive; if track_dur is absent/non-positive or a tiny
+        # test stub (<0.5s) paired with a full Whisper result duration, prefer the Whisper audio duration.
+        if track_dur is not None and track_dur > 0 and not (
+            track_dur < 0.5 and res_dur is not None and res_dur >= 1.0
+        ):
+            effective_dur: Optional[float] = float(track_dur)
+        else:
+            effective_dur = res_dur if (res_dur is not None and res_dur > 0) else None
+        aligned = await asyncio.to_thread(
+            lyrics_align.align_result_to_lyrics,
+            raw_lines, result, duration_s=effective_dur, section_anchors=section_anchors,
+        )
         if aligned.whisper_words == 0:
             raise MusicLibraryError(
                 "no_speech", "no timed speech was detected to align these lyrics (track may be instrumental)")
@@ -1399,30 +1465,42 @@ class MusicLyrics:
                     "track_changed", "the track's file changed while it was aligned; align it again")
             stored_now = await asyncio.to_thread(self._read_stored, lyrics_file)
             record = make_lyrics(entry["source_hash"], ALIGNED_SOURCE, aligned.lines, synced=True, language=lang)
-            if not overwrite_manual and self._own_edit(stored_now) and self._has_timed_lines(stored_now):
+            lrc_text = format_lrc(record)
+            if not overwrite_manual and self._is_protected_synced(stored_now):
                 return {
                     "lyrics": stored_now,
                     "applied": False,
                     "candidate": record,
-                    "lrc": format_lrc(record),
-                    "kept": "you saved synced lyrics while alignment ran, so they are kept",
+                    "lrc": lrc_text,
+                    "kept": "synced lyrics were already saved while alignment ran, so they are kept",
                     "alignment": aligned.stats(),
                 }
             await self._store(track_id, record)
             sidecar_written = False
             sidecar_path: Optional[Path] = None
-            try:
-                sidecar_path = await asyncio.to_thread(write_lrc, Path(path), record)
-                sidecar_written = True
-            except OSError as exc:
-                logger.warning("music: could not write .lrc sidecar beside %s: %s", path, exc)
+            synced_tag_written = False
+            gen_target = await asyncio.to_thread(self._generated_audio_target, Path(path))
+            if gen_target is not None:
+                try:
+                    sidecar_path = await asyncio.to_thread(write_lrc, gen_target, record)
+                    sidecar_written = True
+                except OSError as exc:
+                    logger.warning("music: could not write .lrc sidecar beside %s: %s", gen_target, exc)
+                if gen_target.suffix.lower() == ".flac":
+                    try:
+                        synced_tag_written = await asyncio.to_thread(
+                            self._write_generated_flac_synced_lyrics, gen_target, lrc_text
+                        )
+                    except (audio_tags.TagError, audio_tags.AlreadyTagged, OSError) as exc:
+                        logger.warning("music: could not embed SYNCEDLYRICS into %s: %s", gen_target, exc)
             return {
                 "lyrics": record,
                 "applied": True,
                 "candidate": None,
-                "lrc": format_lrc(record),
+                "lrc": lrc_text,
                 "lrc_path": str(sidecar_path) if sidecar_path is not None else None,
                 "sidecar_written": sidecar_written,
+                "synced_tag_written": synced_tag_written,
                 "alignment": aligned.stats(),
             }
 
