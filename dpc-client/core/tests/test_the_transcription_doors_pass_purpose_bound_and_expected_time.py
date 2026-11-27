@@ -22,6 +22,7 @@ import pytest
 
 from dpc_client_core.managers import llama_server_supervisor as base_mod
 from dpc_client_core.service import CoreService
+from tests.test_p2p_coordinator import ProvedConnection
 
 ESTIMATE_S = 7.5
 
@@ -137,6 +138,7 @@ async def test_a_peers_request_passes_its_purpose_no_bound_and_runs_as_served_to
 
     provider = RecordingWhisper()
     service = MagicMock()
+    service.p2p_manager.peers = {"node-guest": ProvedConnection("node-guest")}
     service.p2p_manager.send_message_to_peer = AsyncMock()
     service.llm_manager.providers = {"w": provider}
     service.firewall.can_request_transcription.return_value = True

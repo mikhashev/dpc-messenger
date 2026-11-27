@@ -18,6 +18,7 @@ import pytest
 from dpc_client_core.p2p_coordinator import P2PCoordinator
 from dpc_client_core.providers import whisper_provider
 from dpc_client_core.providers.whisper_provider import LocalWhisperProvider
+from tests.test_p2p_coordinator import ProvedConnection
 
 
 @pytest.fixture(autouse=True)
@@ -138,6 +139,7 @@ class _FakeWhisper:
 async def _peer_request(language, task=None):
     provider = _FakeWhisper()
     service = MagicMock()
+    service.p2p_manager.peers = {"peer-1": ProvedConnection("peer-1")}
     service.p2p_manager.send_message_to_peer = AsyncMock()
     service.llm_manager.providers = {"w": provider}
     service.firewall.can_request_transcription.return_value = True

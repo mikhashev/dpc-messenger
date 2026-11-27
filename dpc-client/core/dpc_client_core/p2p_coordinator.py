@@ -14,7 +14,12 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import websockets
-from dpc_protocol.protocol import REFUSAL_PROVIDER_LOADING, REFUSAL_PROVIDER_UNAVAILABLE, PeerRefused
+from dpc_protocol.protocol import (
+    REFUSAL_IDENTITY_UNPROVED,
+    REFUSAL_PROVIDER_LOADING,
+    REFUSAL_PROVIDER_UNAVAILABLE,
+    PeerRefused,
+)
 
 from .firewall import (
     FILE_TRANSFER_PROVED_CONNECTION_DEFAULT,
@@ -790,6 +795,40 @@ class P2PCoordinator:
         (self._ledger or default_ledger()).append(row)
         return billing, tariff, tariff_amount
 
+    async def _refuse_unproved_peer(
+        self, peer_id: str, request_id: str, *, door: str, build_response,
+    ) -> bool:
+        """Refuse a peer whose key the transport has not proved (ADR-041 D2).
+
+        Returns True when refused (the caller must return before reading any
+        firewall rule, alias, or provider); False when `peer_proof` confirms
+        the peer's key was proved on direct TLS.
+        """
+        from .p2p_manager import peer_proof
+
+        proved, connection_type = peer_proof(getattr(self.p2p_manager, "peers", None), peer_id)
+        if proved is True:
+            return False
+        over = "no connection of record" if connection_type is None else repr(connection_type)
+        logger.warning(
+            "Peer %s refused for %s: the request arrived over %s, and the peer's "
+            "key is proved only on direct TLS (ADR-041 D2)", door, peer_id, over,
+        )
+        error_response = build_response(
+            request_id=request_id,
+            error=(
+                f"This node serves peer {door} only over a connection whose key is "
+                "proved — direct TLS, where the peer's key has been proved (ADR-041 D2). "
+                f"This request arrived over {over}."
+            ),
+            code=REFUSAL_IDENTITY_UNPROVED,
+        )
+        try:
+            await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+        except Exception as e:
+            logger.error("Error sending %s error response to %s: %s", door, peer_id, e, exc_info=True)
+        return True
+
     async def handle_inference_request(
         self, peer_id: str, request_id: str, prompt: str, model: str = None,
         provider: str = None, images: list = None, reasoning_effort: str = None,
@@ -819,7 +858,6 @@ class P2PCoordinator:
         no per-call length, so a conversation is served at the alias's ceiling.
         """
         from dpc_protocol.protocol import (
-            REFUSAL_IDENTITY_UNPROVED,
             REFUSAL_INVALID_VALUE,
             REFUSAL_MODEL_NOT_FOUND,
             REFUSAL_NOT_ALLOWED,
@@ -828,7 +866,6 @@ class P2PCoordinator:
             create_remote_inference_chunk,
             create_remote_inference_response,
         )
-        from .p2p_manager import peer_proof
 
         # Counted, never quoted: the flat field and the blocks in the turns are
         # one number, because either is a picture this call carries.
@@ -842,36 +879,10 @@ class P2PCoordinator:
             peer_id, request_id, image_count, tool_count,
         )
 
-        # Identity before every other gate (ADR-041 D2). `peer_id` is the name
-        # the firewall admits on, the ledger writes under and a quota counts
-        # against, and only the direct tier proved it: WebRTC takes it from the
-        # Hub's signal, relay from our own intention, gossip from an envelope
-        # field. This request reaches here over any of them, so the tier is
-        # asked here — before `can_request_inference`, before the serving alias
-        # is read, before any provider call. The order matters beyond the cost:
-        # a sender the transport could not prove must learn nothing about this
-        # node's alias list, and both gates below answer about aliases (D7
-        # part 1, D4-0). No usage row either — a refused call is not a call.
-        proved, connection_type = peer_proof(getattr(self.p2p_manager, "peers", None), peer_id)
-        if proved is not True:
-            over = "no connection of record" if connection_type is None else repr(connection_type)
-            logger.warning(
-                "Peer inference refused for %s: the request arrived over %s, and the peer's "
-                "key is proved only on direct TLS (ADR-041 D2)", peer_id, over,
-            )
-            error_response = create_remote_inference_response(
-                request_id=request_id,
-                error=(
-                    "This node serves peer inference only over a connection whose key is "
-                    "proved — direct TLS, where the peer's key has been proved (ADR-041 D2). "
-                    f"This request arrived over {over}."
-                ),
-                code=REFUSAL_IDENTITY_UNPROVED,
-            )
-            try:
-                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
-            except Exception as e:
-                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
+        # Identity before every other gate (ADR-041 D2).
+        if await self._refuse_unproved_peer(
+            peer_id, request_id, door="inference", build_response=create_remote_inference_response,
+        ):
             return
 
         # The alias the peer named is evidence for the gate, never an instruction
@@ -1357,6 +1368,14 @@ class P2PCoordinator:
 
         logger.debug("Handling transcription request from %s (request_id: %s, mime_type: %s)", peer_id, request_id, mime_type)
 
+        # Identity before every other gate (ADR-041 D2): a peer's claimed
+        # node_id is proved only on direct TLS; an unproved transport must
+        # neither query the firewall nor decode audio or run Whisper on the card.
+        if await self._refuse_unproved_peer(
+            peer_id, request_id, door="transcription", build_response=create_remote_transcription_response,
+        ):
+            return
+
         if not self.service.firewall.can_request_transcription(peer_id, model):
             logger.warning("Access denied: %s cannot request transcription%s", peer_id, f" for model {model}" if model else "")
             error_response = create_remote_transcription_response(
@@ -1720,6 +1739,12 @@ class P2PCoordinator:
                 raise TimeoutError(f"Transcription request to {peer_id} timed out after {timeout}s")
             finally:
                 self.service._pending_transcription_requests.pop(request_id, None)
+        except PeerRefused as e:
+            logger.info(
+                "Host %s refused the transcription request: %s (code %s)",
+                peer_id, e, e.code or "none",
+            )
+            raise
         except Exception as e:
             logger.error("Error requesting transcription from %s: %s", peer_id, e, exc_info=True)
             raise

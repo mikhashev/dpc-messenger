@@ -17,6 +17,7 @@ from dpc_client_core.providers import whisper_provider
 
 from tests._card_lease_helpers import BOUND, fast  # noqa: F401
 from tests._whisper_lease_helpers import gpu_whisper
+from tests.test_p2p_coordinator import ProvedConnection
 
 pytestmark = pytest.mark.usefixtures("fast")
 
@@ -42,7 +43,7 @@ async def test_the_length_probe_runs_under_the_peer_mark(monkeypatch):
 
     monkeypatch.setattr(whisper_provider, "audio_seconds", probe)
     p = gpu_whisper(monkeypatch)
-    coordinator, service = _coordinator(p, peers={"node-guest": object()})
+    coordinator, service = _coordinator(p, peers={"node-guest": ProvedConnection("node-guest")})
     await asyncio.wait_for(
         coordinator.handle_transcription_request("node-guest", "req-1", _AUDIO, "audio/wav", provider="w"),
         BOUND)
@@ -62,7 +63,7 @@ async def test_the_ask_still_carries_the_guest_check(monkeypatch):
         return await real(path, *args, **kw)
 
     monkeypatch.setattr(p, "transcribe", spy)
-    coordinator, _ = _coordinator(p, peers={"node-guest": object()})
+    coordinator, _ = _coordinator(p, peers={"node-guest": ProvedConnection("node-guest")})
     await asyncio.wait_for(
         coordinator.handle_transcription_request("node-guest", "req-1", _AUDIO, "audio/wav", provider="w"),
         BOUND)

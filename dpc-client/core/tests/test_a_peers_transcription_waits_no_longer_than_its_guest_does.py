@@ -35,6 +35,7 @@ from tests._card_lease_helpers import (  # noqa: F401
     whisper,
 )
 from tests._whisper_lease_helpers import gpu_whisper, lease_of
+from tests.test_p2p_coordinator import ProvedConnection
 
 pytestmark = pytest.mark.usefixtures("fast")
 
@@ -111,9 +112,16 @@ _AUDIO = base64.b64encode(b"RIFF....WAVEfmt fake").decode()
 @pytest.mark.asyncio
 async def test_a_guest_that_left_before_the_grant_is_dropped_and_nothing_loads(monkeypatch, caplog):
     # A known length: an unknown one is refused before the grant (S3 follow-up 3, Johnny #30-4).
-    monkeypatch.setattr(whisper_provider, "audio_seconds", lambda path: 10.0)
+    peers = {"node-guest": ProvedConnection("node-guest")}
+
+    def probe_while_disconnecting(path):
+        # Guest disconnects after passing the door and before the lease grant.
+        peers.clear()
+        return 10.0
+
+    monkeypatch.setattr(whisper_provider, "audio_seconds", probe_while_disconnecting)
     p = gpu_whisper(monkeypatch)
-    coordinator, service = _coordinator(p, peers={})
+    coordinator, service = _coordinator(p, peers=peers)
     with caplog.at_level("INFO"):
         await asyncio.wait_for(
             coordinator.handle_transcription_request("node-guest", "req-1", _AUDIO, "audio/wav", provider="w"),
@@ -131,7 +139,7 @@ async def test_a_guest_that_leaves_during_the_wait_leaves_the_line(monkeypatch):
     other = whisper("other", eta=3.0)
     over, task = await _busy(other)
     p = gpu_whisper(monkeypatch)
-    peers = {"node-guest": object()}
+    peers = {"node-guest": ProvedConnection("node-guest")}
     coordinator, service = _coordinator(p, peers)
     handling = asyncio.create_task(
         coordinator.handle_transcription_request("node-guest", "req-1", _AUDIO, "audio/wav", provider="w"))
@@ -149,7 +157,7 @@ async def test_a_guest_that_leaves_during_the_wait_leaves_the_line(monkeypatch):
 async def test_a_guest_still_there_is_answered(monkeypatch):
     monkeypatch.setattr(whisper_provider, "audio_seconds", lambda path: 10.0)
     p = gpu_whisper(monkeypatch)
-    coordinator, service = _coordinator(p, peers={"node-guest": object()})
+    coordinator, service = _coordinator(p, peers={"node-guest": ProvedConnection("node-guest")})
     await asyncio.wait_for(
         coordinator.handle_transcription_request("node-guest", "req-1", _AUDIO, "audio/wav", provider="w"),
         BOUND)

@@ -1,6 +1,7 @@
 """Handlers for remote transcription commands."""
 
 from typing import Dict, Any, Optional
+from dpc_protocol.protocol import PeerRefused
 from . import MessageHandler
 
 
@@ -57,6 +58,9 @@ class RemoteTranscriptionResponseHandler(MessageHandler):
         status = payload.get("status")
         text = payload.get("text")
         error = payload.get("error")
+        code = payload.get("code")
+        if not isinstance(code, str):
+            code = ""
 
         # Extract metadata
         language = payload.get("language")
@@ -76,6 +80,8 @@ class RemoteTranscriptionResponseHandler(MessageHandler):
                     }
                     future.set_result(result_data)
                 else:
-                    future.set_exception(RuntimeError(error or "Remote transcription failed"))
+                    future.set_exception(
+                        PeerRefused(error or "Remote transcription failed", code=code)
+                    )
 
         return None

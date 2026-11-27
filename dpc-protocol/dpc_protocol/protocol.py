@@ -395,7 +395,8 @@ def create_remote_transcription_response(
     error: str = None,
     language: str = None,
     duration_seconds: float = None,
-    provider: str = None
+    provider: str = None,
+    code: str = None,
 ) -> Dict[str, Any]:
     """Creates a remote transcription response message with optional metadata."""
     payload = {"request_id": request_id}
@@ -412,6 +413,8 @@ def create_remote_transcription_response(
     else:
         payload["error"] = error or "Unknown error"
         payload["status"] = "error"
+        if code:
+            payload["code"] = code
     return {"command": "REMOTE_TRANSCRIPTION_RESPONSE", "payload": payload}
 
 def create_get_providers_message() -> Dict[str, Any]:
