@@ -122,6 +122,9 @@ def _settings_never_open_the_real_home(tmp_path, monkeypatch):
     real_home = (Path.home() / ".dpc").resolve()
     stand_in = tmp_path / "home-stand-in" / ".dpc"
     monkeypatch.setattr(dpc_paths, "_TEST_STAND_INS", dpc_paths._TEST_STAND_INS | {stand_in})
+    monkeypatch.setattr(
+        dpc_paths, "_TEST_PROTECTED_HOMES", dpc_paths._TEST_PROTECTED_HOMES | {real_home}
+    )
     original_init = settings_module.Settings.__init__
 
     def init(self, dpc_home_dir, *args, **kwargs):

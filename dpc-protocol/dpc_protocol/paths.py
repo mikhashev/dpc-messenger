@@ -8,8 +8,10 @@ from typing import Optional
 
 # Populated only by test isolation fixtures (such as dpc-client/core/tests/conftest.py)
 # so tests with DPC_HOME unset do not touch the real ~/.dpc while explicit per-test
-# DPC_HOME env overrides or module-attribute monkeypatches continue to take precedence.
+# DPC_HOME env overrides, Path.home() monkeypatches, or module-attribute monkeypatches
+# continue to take precedence.
 _TEST_STAND_INS: set[Path] = set()
+_TEST_PROTECTED_HOMES: set[Path] = set()
 
 
 def _normalize_home_path(raw: str) -> Path:
@@ -66,11 +68,18 @@ def resolve_module_home(
     )
     if current_path != initial and not is_stand_in:
         return current_path
+    base = dpc_home()
+    dynamic = base / child if child else base
     raw = os.environ.get("DPC_HOME")
     if raw is not None and raw.strip():
-        base = dpc_home()
-        return base / child if child else base
+        return dynamic
+    if is_stand_in and dynamic != initial:
+        try:
+            is_protected = base.resolve() in _TEST_PROTECTED_HOMES
+        except OSError:
+            is_protected = base in _TEST_PROTECTED_HOMES
+        if not is_protected:
+            return dynamic
     if current_path != initial:
         return current_path
-    base = dpc_home()
-    return base / child if child else base
+    return dynamic

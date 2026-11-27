@@ -106,3 +106,38 @@ def test_protocol_modules_follow_dynamic_dpc_home(monkeypatch, tmp_path):
     commit_hash = "a" * 64
     sig = signer.sign_commit(commit_hash)
     assert commit_integrity.CommitSigner.verify_signature(node_id, commit_hash, sig) is True
+
+
+def test_resolve_module_home_honors_path_home_monkeypatch_over_stand_in(monkeypatch, tmp_path):
+    from dpc_protocol import paths
+
+    real_home = (Path.home() / ".dpc").resolve()
+    stand_in = tmp_path / "stand-in" / ".dpc"
+    monkeypatch.setattr(paths, "_TEST_STAND_INS", paths._TEST_STAND_INS | {stand_in})
+    monkeypatch.setattr(paths, "_TEST_PROTECTED_HOMES", paths._TEST_PROTECTED_HOMES | {real_home})
+    monkeypatch.delenv("DPC_HOME", raising=False)
+
+    real_initial = Path.home() / ".dpc"
+    # With neither DPC_HOME nor Path.home patched, stand-in protects real ~/.dpc.
+    assert paths.resolve_module_home(stand_in, real_initial) == stand_in
+    assert paths.resolve_module_home(stand_in / "node.key", real_initial / "node.key", child="node.key") == stand_in / "node.key"
+
+    # Even if import-time initial differed from real ~/.dpc (e.g. DPC_HOME was set at import),
+    # deleting DPC_HOME without patching Path.home must still land on stand-in, never real ~/.dpc.
+    other_initial = tmp_path / "import-time-dpc"
+    assert paths.resolve_module_home(stand_in, other_initial) == stand_in
+
+    # Once a test monkeypatches Path.home() away from the real home, dynamic Path.home()/.dpc wins.
+    fake_home = tmp_path / "fake-home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    assert paths.resolve_module_home(stand_in, real_initial) == fake_home / ".dpc"
+    assert paths.resolve_module_home(stand_in / "node.key", real_initial / "node.key", child="node.key") == fake_home / ".dpc" / "node.key"
+
+    # Explicit DPC_HOME still beats Path.home() and stand-in.
+    explicit = tmp_path / "explicit-dpc"
+    monkeypatch.setenv("DPC_HOME", str(explicit))
+    assert paths.resolve_module_home(stand_in, real_initial) == explicit
+
+    # Explicit module-attribute monkeypatch (not a stand-in) still wins over all.
+    direct = tmp_path / "direct-attr"
+    assert paths.resolve_module_home(direct, real_initial) == direct
