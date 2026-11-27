@@ -271,7 +271,8 @@ def _local_node_id_from_disk() -> Optional[str]:
     earlier test hands the next one the wrong identity.
     """
     try:
-        path = Path.home() / ".dpc" / "node.id"
+        from dpc_protocol.paths import dpc_home
+        path = dpc_home() / "node.id"
         if not path.exists():
             return None
         return path.read_text(encoding="utf-8").strip() or None
@@ -389,7 +390,8 @@ def accepted_peer_boundary(value: Any, conversation_id: str = "",
 
 def live_history_boundary_of(conversation_id: str) -> Optional[str]:
     """This node's own boundary for a conversation, read from disk without a monitor."""
-    base = Path.home() / ".dpc" / "conversations"
+    from dpc_protocol.paths import dpc_home
+    base = dpc_home() / "conversations"
     try:
         store_dir = conversation_paths.resolve_store_dir(base, conversation_id)
     except (OSError, ValueError) as exc:
@@ -3050,8 +3052,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             tool_durations: Dict[str, list] = {}
             if timestamps and self.conversation_id.startswith("agent_"):
                 try:
+                    from dpc_protocol.paths import dpc_home
                     tools_path = (
-                        Path.home() / ".dpc" / "agents"
+                        dpc_home() / "agents"
                         / self.conversation_id / "logs" / "tools.jsonl"
                     )
                     if tools_path.exists():
@@ -3650,7 +3653,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             Path to ~/.dpc/conversations/{conversation_id}-{slug}/ or
             ~/.dpc/conversations/{conversation_id}/ — created by the caller.
         """
-        base = Path.home() / ".dpc" / "conversations"
+        from dpc_protocol.paths import dpc_home
+        base = dpc_home() / "conversations"
         chosen = conversation_paths.resolve_store_dir(
             base, self.conversation_id, self.display_name
         )
@@ -3672,7 +3676,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         split can also be created by a peer's node on a version that still has
         the old resolver.
         """
-        base = Path.home() / ".dpc" / "conversations"
+        from dpc_protocol.paths import dpc_home
+        base = dpc_home() / "conversations"
         try:
             summary = consolidate_conversation_stores(
                 base, self.conversation_id, self.display_name
@@ -3877,7 +3882,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
     @staticmethod
     def peek_group_messages(conversation_id: str) -> List[Dict[str, Any]]:
         """A group's stored messages, straight from disk, without a monitor."""
-        base = Path.home() / ".dpc" / "conversations"
+        from dpc_protocol.paths import dpc_home
+        base = dpc_home() / "conversations"
         path = conversation_paths.resolve_store_dir(base, conversation_id) / "history.json"
         if not path.exists():
             return []
@@ -3973,7 +3979,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         path = self._get_history_path()
 
         # Check for legacy path (migration support)
-        legacy_path = Path.home() / ".dpc" / "groups" / f"{self.conversation_id}_history.json"
+        from dpc_protocol.paths import dpc_home
+        legacy_path = dpc_home() / "groups" / f"{self.conversation_id}_history.json"
         if not path.exists() and legacy_path.exists():
             logger.info(f"Migrating history from legacy path: {legacy_path}")
             try:

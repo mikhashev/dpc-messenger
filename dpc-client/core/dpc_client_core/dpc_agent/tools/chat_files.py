@@ -356,8 +356,9 @@ def _chat_files_dir(ctx: ToolContext, conversation_id: str) -> Path:
     monitor = getattr(ctx, "conversation_monitor", None)
     if monitor is not None and getattr(monitor, "conversation_id", None) == conversation_id:
         return monitor._get_conversation_dir() / "files"
+    from dpc_protocol.paths import dpc_home
     from dpc_client_core import conversation_paths
-    base = Path.home() / ".dpc" / "conversations"
+    base = dpc_home() / "conversations"
     return conversation_paths.resolve_store_dir(base, conversation_id) / "files"
 
 
@@ -406,7 +407,7 @@ def post_file(ctx: ToolContext, source: Path, caption: Optional[str] = None,
             kept = service_mod.keep_agent_chat_attachment(
                 files_dir, {"kind": "file", "file_path": str(source)},
                 voice_mime_types=[], max_voice_seconds=service_mod.AGENT_CHAT_VOICE_DEFAULT_MAX_SECONDS,
-                temp_dir=service_mod.DPC_HOME_DIR / "temp", max_file_mb=max_mb,
+                temp_dir=service_mod._dpc_home() / "temp", max_file_mb=max_mb,
                 measure_seconds=service_mod.measure_recording_seconds, reuse_same_bytes=True,
             )
         except ValueError as e:
@@ -527,7 +528,7 @@ def _checked_temp_copy(
     and its hash come from one read of the whole copy (Zcode #176), and the send checks the
     file it offers against that hash."""
     from dpc_client_core import service as service_mod
-    folder = Path(service_mod.DPC_HOME_DIR) / "temp" / f"chat_post_file_{uuid.uuid4().hex[:12]}"
+    folder = service_mod._dpc_home() / "temp" / f"chat_post_file_{uuid.uuid4().hex[:12]}"
     try:
         folder.mkdir(parents=True, exist_ok=False)
         copy = folder / source.name

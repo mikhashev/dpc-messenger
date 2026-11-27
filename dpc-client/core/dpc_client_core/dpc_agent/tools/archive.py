@@ -160,8 +160,9 @@ def reads_own_chat_files(ctx: ToolContext, resolved: Path) -> bool:
     `resolved` is a resolved path, so a link inside `files/` that leads elsewhere
     is judged by where it leads. Read access only: the caller never asks this for a write.
     """
+    from dpc_protocol.paths import dpc_home
     from dpc_client_core import conversation_paths
-    base = (Path.home() / ".dpc" / "conversations").resolve()
+    base = (dpc_home() / "conversations").resolve()
     try:
         rel = resolved.relative_to(base).parts
     except ValueError:

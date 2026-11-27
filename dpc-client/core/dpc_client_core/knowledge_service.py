@@ -2299,7 +2299,8 @@ class KnowledgeService:
                     del self.conversation_monitors[conversation_id]
                 else:
                     import shutil
-                    base = Path.home() / ".dpc" / "conversations"
+                    from dpc_protocol.paths import dpc_home
+                    base = dpc_home() / "conversations"
                     # Every folder that holds this conversation, a slugged one included.
                     for conv_dir in conversation_paths.existing_store_dirs(base, conversation_id):
                         shutil.rmtree(conv_dir)

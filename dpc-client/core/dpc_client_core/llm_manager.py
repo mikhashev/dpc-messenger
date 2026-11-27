@@ -347,12 +347,19 @@ def _read_of(call: Any, key: str) -> Any:
     return call.get(key) if isinstance(call, dict) else getattr(call, key, None)
 
 
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
+_INITIAL_PROVIDERS_CONFIG = dpc_home() / "providers.json"
+
+
 class LLMManager:
     """
     Manages all configured AI providers.
     """
-    def __init__(self, config_path: Path = Path.home() / ".dpc" / "providers.json"):
-        self.config_path = config_path
+    def __init__(self, config_path: Path = _INITIAL_PROVIDERS_CONFIG):
+        self.config_path = resolve_module_home(
+            config_path, _INITIAL_PROVIDERS_CONFIG, child="providers.json"
+        )
         self.providers: Dict[str, AIProvider] = {}
         self.default_provider: str | None = None
         self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
@@ -1305,7 +1312,7 @@ async def main_test():
         ]
     }
 
-    dpc_dir = Path.home() / ".dpc"
+    dpc_dir = dpc_home()
     dpc_dir.mkdir(exist_ok=True)
     test_config_path = dpc_dir / "providers.json"
     with open(test_config_path, 'w') as f:

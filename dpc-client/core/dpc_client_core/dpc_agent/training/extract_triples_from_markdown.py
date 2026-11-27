@@ -39,7 +39,9 @@ from typing import List
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+from dpc_protocol.paths import dpc_home
+
+DPC_HOME = dpc_home()
 REPO_ROOT = Path(__file__).resolve().parents[5]
 
 ZAI_BASE_URL = "https://api.z.ai/api/anthropic"

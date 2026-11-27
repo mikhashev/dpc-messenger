@@ -9,13 +9,22 @@ import logging
 import platform
 import socket as _socket_module
 import time
+from pathlib import Path
 from typing import Dict, Any, Callable, Tuple, Union, Optional
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 import websockets
 
-from dpc_protocol.crypto import DPC_HOME_DIR, generate_node_id, is_valid_node_id, load_identity, generate_identity
+from dpc_protocol.crypto import generate_node_id, is_valid_node_id, load_identity, generate_identity
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME_DIR = _INITIAL_DPC_HOME
+
+
+def _dpc_home() -> Path:
+    return resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME)
 from dpc_protocol.protocol import (
     MAX_HELLO_FRAME_BYTES, encode_message, read_message, write_message, create_hello_message,
 )
@@ -272,7 +281,7 @@ def load_persisted_peer_certificate(
     if not is_valid_node_id(peer_node_id):
         return None  # the id names the file: nothing else is read under it
     if peers_dir is None:
-        peers_dir = DPC_HOME_DIR / "peers"
+        peers_dir = _dpc_home() / "peers"
     cert_path = peers_dir / f"{peer_node_id}.crt"
     try:
         if not cert_path.is_file():
@@ -374,7 +383,7 @@ class P2PManager:
         self._link_silence_timeout = settings.get_link_silence_timeout() if settings else 90.0
 
         # Peer cache for faster reconnection (stores last known IP/port)
-        cache_file = Path.home() / ".dpc" / "peer_cache.json"
+        cache_file = _dpc_home() / "peer_cache.json"
         self.peer_cache = PeerCache(cache_file)
         logger.info("Peer cache initialized with %d cached peers", len(self.peer_cache.get_all_peers()))
 

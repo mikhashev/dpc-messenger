@@ -2236,7 +2236,8 @@ Send a voice message and it will be transcribed and processed\\.
         image, so this logs and returns None rather than raising.
         """
         try:
-            files_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "files"
+            from dpc_protocol.paths import dpc_home
+            files_dir = dpc_home() / "conversations" / conversation_id / "files"
             files_dir.mkdir(parents=True, exist_ok=True)
             filename = f"telegram_photo_{message_id}.jpg"
             path = files_dir / filename

@@ -12,7 +12,10 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional
 
-DEFAULT_LOCK = Path.home() / ".dpc" / "run_service.pid"
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
+_INITIAL_LOCK = dpc_home() / "run_service.pid"
+DEFAULT_LOCK = _INITIAL_LOCK
 
 
 def is_dpc_backend_pid(pid: int) -> bool:
@@ -46,6 +49,7 @@ def find_running_instance(
 
 def acquire(lock_path: Path = DEFAULT_LOCK) -> None:
     """Refuse to start if another backend is running; otherwise claim the lock."""
+    lock_path = resolve_module_home(lock_path, _INITIAL_LOCK, child="run_service.pid")
     existing = find_running_instance(lock_path, is_dpc_backend_pid)
     if existing is not None:
         print(f"[startup] Another D-PC backend is already running (PID {existing}).")
@@ -61,6 +65,7 @@ def acquire(lock_path: Path = DEFAULT_LOCK) -> None:
 
 def release(lock_path: Path = DEFAULT_LOCK) -> None:
     """Remove the lock if it is ours (no-op for a stale/foreign lock)."""
+    lock_path = resolve_module_home(lock_path, _INITIAL_LOCK, child="run_service.pid")
     try:
         if lock_path.exists() and lock_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
             lock_path.unlink()

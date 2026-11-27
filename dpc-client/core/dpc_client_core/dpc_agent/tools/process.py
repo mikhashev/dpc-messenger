@@ -74,7 +74,8 @@ def _config_ceiling_raw() -> Optional[str]:
     never writes; an unreadable file keeps the last value it read.
     """
     global _config_cache
-    path = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "config.ini"
+    from dpc_protocol.paths import dpc_home
+    path = dpc_home() / "config.ini"
     try:
         st = path.stat()
     except OSError:

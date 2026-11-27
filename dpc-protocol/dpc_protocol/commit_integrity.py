@@ -21,7 +21,11 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 
-from .crypto import DPC_HOME_DIR, is_valid_node_id
+from .crypto import is_valid_node_id
+from .paths import dpc_home, resolve_module_home
+
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME_DIR = _INITIAL_DPC_HOME
 
 logger = logging.getLogger(__name__)
 
@@ -260,15 +264,16 @@ class CommitSigner:
         if not is_valid_node_id(node_id):
             logger.warning("Signature claims a malformed node id %r; refused", str(node_id)[:80])
             return False
+        home = resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME)
         if peers_dir is None:
-            peers_dir = DPC_HOME_DIR / "peers"
+            peers_dir = home / "peers"
 
         # Load peer's public key from certificate.
         # For our own node_id the cert lives at ~/.dpc/node.crt (not in peers/).
         cert_path = peers_dir / f"{node_id}.crt"
 
         if not cert_path.exists():
-            own_cert_path = DPC_HOME_DIR / "node.crt"
+            own_cert_path = home / "node.crt"
             if own_cert_path.exists():
                 # Only use own cert when verifying our own node's signature.
                 # Using it for a *peer* would always fail (different key pair) and
@@ -460,7 +465,7 @@ def verify_markdown_integrity(
         }
     """
     if knowledge_dir is None:
-        knowledge_dir = DPC_HOME_DIR / "knowledge"
+        knowledge_dir = resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME) / "knowledge"
 
     result = {
         'valid': True,

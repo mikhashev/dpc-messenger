@@ -2537,7 +2537,9 @@ class LlamaServerSupervisor:
         # Why the next stop is being asked for, set by the path that asks and
         # consumed by `_stop_child` (the process registry's stop word).
         self._stop_why: Optional[str] = None
-        self._log_path = DPC_HOME / "logs" / f"llama-server-{alias}.log"
+        from dpc_protocol.paths import resolve_module_home
+        from . import local_engine_pin_fetcher as _base
+        self._log_path = resolve_module_home(DPC_HOME, _base._INITIAL_DPC_HOME) / "logs" / f"llama-server-{alias}.log"
         self._log_fh = None
         self._draining = False
         # Set with `_draining` while an owner's start of a rival alias is freeing the

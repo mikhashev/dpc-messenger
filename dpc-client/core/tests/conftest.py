@@ -116,10 +116,12 @@ def _settings_never_open_the_real_home(tmp_path, monkeypatch):
     the real file is never opened. Guarded by
     test_a_test_run_never_writes_the_real_config_ini."""
     from pathlib import Path
+    from dpc_protocol import paths as dpc_paths
     from dpc_client_core import settings as settings_module
 
     real_home = (Path.home() / ".dpc").resolve()
     stand_in = tmp_path / "home-stand-in" / ".dpc"
+    monkeypatch.setattr(dpc_paths, "_TEST_STAND_INS", dpc_paths._TEST_STAND_INS | {stand_in})
     original_init = settings_module.Settings.__init__
 
     def init(self, dpc_home_dir, *args, **kwargs):
@@ -255,12 +257,15 @@ def _engine_pins_in_tmp(tmp_path, monkeypatch):
     """A passed start writes its pin's marker and may prune the older pins (B2 step 3).
     The pins folders default to this machine's ~/.dpc/bin, so every test gets its own
     under tmp_path, and starts with no rollback or pass recorded by another test."""
+    from dpc_protocol import paths as dpc_paths
     from dpc_client_core.managers import (
         llama_server_fetcher, llama_server_supervisor, local_engine_pin_fetcher, strata_fetcher,
     )
 
+    pins_stand_in = tmp_path / "dpc-pins-home"
+    monkeypatch.setattr(dpc_paths, "_TEST_STAND_INS", dpc_paths._TEST_STAND_INS | {pins_stand_in})
     for mod in (local_engine_pin_fetcher, llama_server_fetcher, strata_fetcher):
-        monkeypatch.setattr(mod, "DPC_HOME", tmp_path / "dpc-pins-home")
+        monkeypatch.setattr(mod, "DPC_HOME", pins_stand_in)
     llama_server_supervisor._ROLLBACKS.clear()
     llama_server_supervisor._PASSES_NOTED.clear()
     yield

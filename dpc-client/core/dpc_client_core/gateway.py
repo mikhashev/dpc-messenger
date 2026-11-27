@@ -632,7 +632,8 @@ UNEXECUTED_KEPT = 20
 
 def _unexecuted_dir() -> Path:
     """Beside the ledger, under the same home rule (`node_ledger.ledger_dir`)."""
-    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "gateway" / "unexecuted"
+    from dpc_protocol.paths import dpc_home
+    return dpc_home() / "gateway" / "unexecuted"
 
 
 def _keep_unexecuted(request_id: str, written: List[Tuple[str, str]]) -> Optional[str]:
@@ -2460,9 +2461,10 @@ class GatewayServer:
                 f"[gateway] host is {host!r}; the gateway listens on {GATEWAY_HOST} only and the "
                 "value is not configurable (ADR-041 D1)"
             )
+        from dpc_protocol.paths import dpc_home
         self.host = host
         self.port = port
-        self.key_path = Path(key_path) if key_path is not None else Path.home() / ".dpc" / GATEWAY_KEY_NAME
+        self.key_path = Path(key_path) if key_path is not None else dpc_home() / GATEWAY_KEY_NAME
         self.gateway = Gateway(core_service, ledger=ledger, inference_lock=inference_lock)
         self._key = ""
         self._runner: Optional[web.AppRunner] = None

@@ -1137,7 +1137,8 @@ class AgentService:
     async def get_session_archive_info(self, conversation_id: str) -> Dict[str, Any]:
         """Return archive metadata for a conversation's session archive folder."""
         try:
-            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
+            from dpc_protocol.paths import dpc_home
+            archive_dir = dpc_home() / "conversations" / conversation_id / "archive"
             if self.firewall:
                 _, max_sessions = self.firewall.get_history_settings(conversation_id)
             else:
@@ -1182,7 +1183,8 @@ class AgentService:
     async def clear_session_archives(self, conversation_id: str, keep_latest: int = 0) -> Dict[str, Any]:
         """Delete archived sessions, optionally keeping the most recent N."""
         try:
-            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
+            from dpc_protocol.paths import dpc_home
+            archive_dir = dpc_home() / "conversations" / conversation_id / "archive"
 
             if not archive_dir.exists():
                 return {"status": "success", "deleted_count": 0, "remaining": 0}

@@ -17,10 +17,18 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 
-DPC_HOME_DIR = Path.home() / ".dpc"
+from .paths import dpc_home, resolve_module_home
+
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME_DIR = _INITIAL_DPC_HOME
 KEY_FILE = DPC_HOME_DIR / "node.key"
 CERT_FILE = DPC_HOME_DIR / "node.crt"
 NODE_ID_FILE = DPC_HOME_DIR / "node.id"
+
+
+def dpc_home_dir() -> Path:
+    """Return the active DPC home directory, honoring DPC_HOME and test monkeypatches."""
+    return resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME)
 
 # A node id exactly as `generate_node_id` writes it: `dpc-node-` and the first
 # 32 lowercase hex characters of the SHA-256 of the public key, nothing else.
@@ -89,9 +97,14 @@ def generate_identity():
         private_key=private_key, algorithm=hashes.SHA256(),
     )
 
-    DPC_HOME_DIR.mkdir(exist_ok=True)
+    home = dpc_home_dir()
+    key_file = home / "node.key"
+    cert_file = home / "node.crt"
+    node_id_file = home / "node.id"
 
-    with open(KEY_FILE, "wb") as f:
+    home.mkdir(parents=True, exist_ok=True)
+
+    with open(key_file, "wb") as f:
         f.write(private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
@@ -101,25 +114,29 @@ def generate_identity():
     # On Windows os.chmod only controls the read-only flag (ACLs govern access),
     # but setting it is still a best-practice signal.
     try:
-        os.chmod(KEY_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+        os.chmod(key_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
     except OSError as e:
         logger.warning("Could not set private key file permissions: %s", e)
-    logger.info("Private key saved to %s", KEY_FILE)
+    logger.info("Private key saved to %s", key_file)
 
-    with open(CERT_FILE, "wb") as f:
+    with open(cert_file, "wb") as f:
         f.write(certificate.public_bytes(serialization.Encoding.PEM))
-    logger.info("Certificate saved to %s", CERT_FILE)
+    logger.info("Certificate saved to %s", cert_file)
 
-    with open(NODE_ID_FILE, "w") as f:
+    with open(node_id_file, "w") as f:
         f.write(node_id)
-    logger.info("Node ID saved to %s", NODE_ID_FILE)
+    logger.info("Node ID saved to %s", node_id_file)
 
 def load_identity() -> Tuple[str, Path, Path]:
-    if not all([DPC_HOME_DIR.exists(), KEY_FILE.exists(), CERT_FILE.exists(), NODE_ID_FILE.exists()]):
+    home = dpc_home_dir()
+    key_file = home / "node.key"
+    cert_file = home / "node.crt"
+    node_id_file = home / "node.id"
+    if not all([home.exists(), key_file.exists(), cert_file.exists(), node_id_file.exists()]):
         raise FileNotFoundError("Identity not found. Please run 'dpc init' first.")
 
-    node_id = NODE_ID_FILE.read_text().strip()
-    return node_id, KEY_FILE, CERT_FILE
+    node_id = node_id_file.read_text().strip()
+    return node_id, key_file, cert_file
 
 
 def encrypt_with_public_key(data: bytes, public_key) -> bytes:

@@ -61,17 +61,26 @@ def _get_registered_tool_names() -> frozenset:
             _REGISTERED_TOOL_NAMES = CORE_TOOL_NAMES | RESTRICTED_TOOL_NAMES
     return _REGISTERED_TOOL_NAMES
 
-DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
-CONFIG_PATH = DPC_HOME / "config.ini"
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME = _INITIAL_DPC_HOME
+_INITIAL_CONFIG_PATH = DPC_HOME / "config.ini"
+CONFIG_PATH = _INITIAL_CONFIG_PATH
 POLL_INTERVAL = 5
+
+
+def _dpc_home() -> Path:
+    return resolve_module_home(DPC_HOME, _INITIAL_DPC_HOME)
 
 
 def _read_config():
     """Read config.ini once, return configparser object."""
     import configparser
     config = configparser.ConfigParser()
-    if CONFIG_PATH.exists():
-        config.read(CONFIG_PATH, encoding="utf-8")
+    cfg_path = CONFIG_PATH if CONFIG_PATH != _INITIAL_CONFIG_PATH else _dpc_home() / "config.ini"
+    if cfg_path.exists():
+        config.read(cfg_path, encoding="utf-8")
     return config
 
 
@@ -81,7 +90,7 @@ def _list_agents() -> list:
     Sorted by folder id. Skips folders without a readable config.json.
     """
     agents = []
-    agents_dir = DPC_HOME / "agents"
+    agents_dir = _dpc_home() / "agents"
     if not agents_dir.exists():
         return agents
     for d in sorted(agents_dir.iterdir()):
@@ -177,7 +186,7 @@ def _get_history_path(conversation_id: str = None) -> Path:
     """Get history.json path for a conversation."""
     if conversation_id is None:
         conversation_id = _get_default_conversation_id()
-    return DPC_HOME / "conversations" / conversation_id / "history.json"
+    return _dpc_home() / "conversations" / conversation_id / "history.json"
 WRITE_SETTLE_MS = 200  # wait after mtime change before reading (let backend finish writing)
 
 _last_mtime = 0.0
@@ -251,7 +260,7 @@ def check_backend_status(conversation_id: str = None) -> dict:
         status["history_age_seconds"] = round(age_seconds)
     # Check backend by log file freshness (more reliable than history.json
     # which only updates on new messages)
-    log_path = DPC_HOME / "logs" / "dpc-client.log"
+    log_path = _dpc_home() / "logs" / "dpc-client.log"
     if log_path.exists():
         log_age = time.time() - log_path.stat().st_mtime
         status["log_age_seconds"] = round(log_age)
@@ -296,7 +305,7 @@ async def send_response(text: str, conversation_id: str = None, name: str = None
     # The bridge is a privileged local helper running as the same user, so it
     # has read access to ~/.dpc/.ws_token and presents it as the first message
     # — same protocol as the Tauri frontend. See local_api.py:_authenticate.
-    ws_token_path = DPC_HOME / ".ws_token"
+    ws_token_path = _dpc_home() / ".ws_token"
     try:
         auth_token = ws_token_path.read_text(encoding="utf-8").strip()
     except OSError as e:

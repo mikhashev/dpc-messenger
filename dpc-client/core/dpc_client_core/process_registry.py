@@ -2592,7 +2592,8 @@ def reset_registry() -> ProcessRegistry:
 
 def registry_path() -> Path:
     """`<DPC_HOME>/process_registry.json`; `DPC_HOME` is honoured as elsewhere."""
-    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / REGISTRY_FILE
+    from dpc_protocol.paths import dpc_home
+    return dpc_home() / REGISTRY_FILE
 
 
 def start_persistent(path: Optional[Path] = None) -> SweepOutcome:

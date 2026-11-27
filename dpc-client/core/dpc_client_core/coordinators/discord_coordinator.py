@@ -24,9 +24,16 @@ if TYPE_CHECKING:
     from ..managers.discord_manager import DiscordBotManager
     from ..service import CoreService
 
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
 logger = logging.getLogger(__name__)
 
-DPC_HOME = Path.home() / ".dpc"
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME = _INITIAL_DPC_HOME
+
+
+def _dpc_home() -> Path:
+    return resolve_module_home(DPC_HOME, _INITIAL_DPC_HOME)
 
 
 class DiscordCoordinator:
@@ -42,7 +49,7 @@ class DiscordCoordinator:
         self._load_links()
 
     def _links_path(self) -> Path:
-        return DPC_HOME / "discord_conversation_links.json"
+        return _dpc_home() / "discord_conversation_links.json"
 
     def _load_links(self):
         path = self._links_path()
@@ -93,7 +100,7 @@ class DiscordCoordinator:
             agent_id = settings.get("discord", "agent_id", fallback=None)
             if agent_id:
                 return agent_id
-        agents_dir = DPC_HOME / "agents"
+        agents_dir = _dpc_home() / "agents"
         if agents_dir.exists():
             dirs = sorted(agents_dir.iterdir())
             if dirs:

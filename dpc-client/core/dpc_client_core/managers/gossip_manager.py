@@ -339,7 +339,9 @@ class GossipManager:
             logger.debug(f"Decrypting payload ({len(encrypted_bytes)} bytes)")
 
             # Load own private key
-            dpc_dir = Path(os.getenv("DPC_DIR", Path.home() / ".dpc"))
+            from dpc_protocol.paths import dpc_home
+            _dpc_dir_env = os.getenv("DPC_DIR")
+            dpc_dir = Path(_dpc_dir_env) if _dpc_dir_env else dpc_home()
             key_path = dpc_dir / "node.key"
 
             with open(key_path, "rb") as f:
@@ -382,7 +384,9 @@ class GossipManager:
             import os
             from cryptography.hazmat.primitives import serialization
 
-            dpc_dir = Path(os.getenv("DPC_DIR", Path.home() / ".dpc"))
+            from dpc_protocol.paths import dpc_home
+            _dpc_dir_env = os.getenv("DPC_DIR")
+            dpc_dir = Path(_dpc_dir_env) if _dpc_dir_env else dpc_home()
             cert_path = dpc_dir / "node.crt"
 
             if not cert_path.exists():
@@ -541,7 +545,8 @@ class GossipManager:
         if signer is None:
             return None, None
         try:
-            cert_pem = (Path.home() / ".dpc" / "node.crt").read_text(encoding="utf-8")
+            from dpc_protocol.paths import dpc_home
+            cert_pem = (dpc_home() / "node.crt").read_text(encoding="utf-8")
         except OSError as e:
             logger.warning("Cannot read node certificate for gossip signing: %s", e)
             return None, None

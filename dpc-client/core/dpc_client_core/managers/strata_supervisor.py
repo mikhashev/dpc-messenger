@@ -1173,10 +1173,13 @@ class StrataSupervisor(LlamaServerSupervisor):
         super().__init__(alias, config)
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", alias).strip("._") or "alias"
         self._safe_alias = safe
-        self._log_path = _base.DPC_HOME / "logs" / f"strata-{safe}.log"
+        from dpc_protocol.paths import resolve_module_home
+        from . import local_engine_pin_fetcher as _pin_base
+        _home = resolve_module_home(_base.DPC_HOME, _pin_base._INITIAL_DPC_HOME)
+        self._log_path = _home / "logs" / f"strata-{safe}.log"
         # The engine's own log (the start config's "log"): the launcher opens
         # it itself, so it cannot share the file this process captures.
-        self._engine_log_path = _base.DPC_HOME / "logs" / f"strata-{safe}-engine.log"
+        self._engine_log_path = _home / "logs" / f"strata-{safe}-engine.log"
         # Where the cache-loss scan stopped in that file; None until primed.
         self._engine_scan_offset: Optional[int] = None
         # Where this launch began in that file: the failed start's text is read from here.
@@ -1308,7 +1311,9 @@ class StrataSupervisor(LlamaServerSupervisor):
 
     def start_config_path(self) -> Path:
         """DPC's own start config for this alias, under ~/.dpc, never in the install."""
-        return _base.DPC_HOME / "strata" / f"{self._safe_alias}.json"
+        from dpc_protocol.paths import resolve_module_home
+        from . import local_engine_pin_fetcher as _pin_base
+        return resolve_module_home(_base.DPC_HOME, _pin_base._INITIAL_DPC_HOME) / "strata" / f"{self._safe_alias}.json"
 
     # --- the start config (ADR-044 point 6) -------------------------------------
 

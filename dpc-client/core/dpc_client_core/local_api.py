@@ -31,7 +31,10 @@ _DEBUG_WS = os.environ.get("DPC_DEBUG_WS") == "1"
 # Tauri command and presents the token as the first message on each WebSocket
 # connection. Without this, any local process could connect to ws://127.0.0.1:9999
 # and invoke backend commands.
-WS_TOKEN_PATH = Path.home() / ".dpc" / ".ws_token"
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
+_INITIAL_WS_TOKEN_PATH = dpc_home() / ".ws_token"
+WS_TOKEN_PATH = _INITIAL_WS_TOKEN_PATH
 AUTH_TIMEOUT_SECONDS = 5.0
 
 # The largest message the server reads from the UI (websockets' max_size). A
@@ -491,20 +494,21 @@ class LocalApiServer:
         command and sends the token as the first WebSocket message.
         """
         self._auth_token = secrets.token_urlsafe(32)
+        token_path = resolve_module_home(WS_TOKEN_PATH, _INITIAL_WS_TOKEN_PATH, child=".ws_token")
         try:
-            WS_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-            WS_TOKEN_PATH.write_text(self._auth_token, encoding="utf-8")
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            token_path.write_text(self._auth_token, encoding="utf-8")
             # Restrict to user-only read/write. On Linux/macOS this prevents
             # other local users from reading the token. On Windows the mode
             # bits are largely advisory; NTFS ACLs inherited from the user's
             # home directory already restrict access to the same user.
             try:
-                os.chmod(WS_TOKEN_PATH, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+                os.chmod(token_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
             except OSError as chmod_err:
-                logger.debug("chmod 0o600 on %s skipped: %s", WS_TOKEN_PATH, chmod_err)
-            logger.info("Local API auth token written to %s", WS_TOKEN_PATH)
+                logger.debug("chmod 0o600 on %s skipped: %s", token_path, chmod_err)
+            logger.info("Local API auth token written to %s", token_path)
         except OSError as e:
-            logger.error("Failed to write auth token to %s: %s", WS_TOKEN_PATH, e)
+            logger.error("Failed to write auth token to %s: %s", token_path, e)
             raise
 
     async def _authenticate(self, websocket: WebSocketServerProtocol) -> bool:

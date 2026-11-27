@@ -32,9 +32,16 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
 logger = logging.getLogger(__name__)
 
-DPC_HOME_DIR = Path.home() / ".dpc"
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME_DIR = _INITIAL_DPC_HOME
+
+
+def _dpc_home() -> Path:
+    return resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME)
 
 
 class TelegramService:
@@ -341,14 +348,15 @@ class TelegramService:
             removed = self.telegram_bridge.remove_conversation_link(telegram_chat_id)
 
             import shutil
-            conversation_folder = Path.home() / ".dpc" / "conversations" / conversation_id
+            home = _dpc_home()
+            conversation_folder = home / "conversations" / conversation_id
             if conversation_folder.exists():
                 shutil.rmtree(conversation_folder)
                 logger.info("Deleted conversation folder: %s", conversation_folder)
             else:
                 logger.debug("Conversation folder not found (already clean): %s", conversation_folder)
 
-            history_file = Path.home() / ".dpc" / "groups" / f"{conversation_id}_history.json"
+            history_file = home / "groups" / f"{conversation_id}_history.json"
             if history_file.exists():
                 history_file.unlink()
                 logger.info("Deleted conversation history file: %s", history_file)

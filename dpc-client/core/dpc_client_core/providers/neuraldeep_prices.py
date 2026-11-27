@@ -31,8 +31,8 @@ CACHE_FILE_NAME = "neuraldeep_wallet_prices.json"
 
 def cache_path() -> Path:
     """Where the last fetched list is kept; `DPC_HOME` is honoured as elsewhere."""
-    home = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
-    return home / "cache" / CACHE_FILE_NAME
+    from dpc_protocol.paths import dpc_home
+    return dpc_home() / "cache" / CACHE_FILE_NAME
 
 
 class PriceListShapeError(ValueError):

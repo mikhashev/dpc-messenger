@@ -441,7 +441,8 @@ def _component(idx: _Index, seeds: Sequence[str]) -> List[str]:
 
 
 def _default_dpc_home() -> Path:
-    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+    from dpc_protocol.paths import dpc_home
+    return dpc_home()
 
 
 def _read_json_mapping(path: Path) -> Optional[Mapping[str, Any]]:

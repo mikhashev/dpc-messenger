@@ -25,9 +25,16 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, Optional
 
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
 logger = logging.getLogger(__name__)
 
-DPC_HOME_DIR = Path.home() / ".dpc"
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME_DIR = _INITIAL_DPC_HOME
+
+
+def _dpc_home() -> Path:
+    return resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME)
 
 
 class VoiceService:
@@ -384,7 +391,7 @@ class VoiceService:
             ...
         }
         """
-        settings_file = DPC_HOME_DIR / "voice_transcription_settings.json"
+        settings_file = _dpc_home() / "voice_transcription_settings.json"
         if settings_file.exists():
             try:
                 import json
@@ -400,7 +407,7 @@ class VoiceService:
 
     def _save_voice_transcription_settings(self) -> None:
         """Save per-conversation voice transcription settings to disk."""
-        settings_file = DPC_HOME_DIR / "voice_transcription_settings.json"
+        settings_file = _dpc_home() / "voice_transcription_settings.json"
         try:
             import json
             with open(settings_file, 'w') as f:

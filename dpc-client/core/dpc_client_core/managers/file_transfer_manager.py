@@ -756,7 +756,8 @@ class FileTransferManager:
 
         # Storage path: ~/.dpc/conversations/{peer_id}/files/
         if storage_base_path is None:
-            storage_base_path = Path.home() / ".dpc"
+            from dpc_protocol.paths import dpc_home
+            storage_base_path = dpc_home()
         self.storage_base_path = storage_base_path / "conversations"
         self.storage_base_path.mkdir(parents=True, exist_ok=True)
 

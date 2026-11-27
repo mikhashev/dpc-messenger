@@ -221,7 +221,8 @@ VAULT_DIRNAME = "web_credentials"
 
 
 def _dpc_home() -> Path:
-    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+    from dpc_protocol.paths import dpc_home
+    return dpc_home()
 
 
 def _agent_dir(agent_id: str) -> Path:

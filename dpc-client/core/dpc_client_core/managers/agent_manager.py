@@ -434,7 +434,8 @@ class DpcAgentManager:
         # Check for unconsumed morning brief from sleep pipeline (ADR-014)
         try:
             import json as _json
-            _conv_dir = pathlib.Path.home() / ".dpc" / "conversations" / self.agent_id
+            from dpc_protocol.paths import dpc_home
+            _conv_dir = dpc_home() / "conversations" / self.agent_id
             _brief_path = _conv_dir / "morning_brief.json"
             if _brief_path.exists():
                 _brief = _json.loads(_brief_path.read_text(encoding="utf-8"))
@@ -577,7 +578,8 @@ class DpcAgentManager:
                                     l5_count += 1
 
                             if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
-                                l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
+                                from dpc_protocol.paths import dpc_home
+                                l6_dir = dpc_home() / "knowledge"
                                 if l6_dir.is_dir():
                                     for f in sorted(l6_dir.iterdir()):
                                         if self._stop_event.is_set():
@@ -810,10 +812,12 @@ class DpcAgentManager:
                                 from dpc_client_core.dpc_agent.knowledge_graph import KnowledgeGraph
                                 _kg = KnowledgeGraph(agent_root)
                                 _kg.bulk_import_knowledge_files(knowledge_dir, source_layer="L5")
+                                from dpc_protocol.paths import dpc_home
+                                _dpc_home = dpc_home()
                                 if self.firewall and self.firewall.can_agent_access_context('knowledge', profile_name=self.agent_id):
-                                    _l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
+                                    _l6_dir = _dpc_home / "knowledge"
                                     _kg.bulk_import_knowledge_files(_l6_dir, source_layer="L6")
-                                _archive_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "conversations" / (self.agent_id or "agent_001") / "archive"
+                                _archive_dir = _dpc_home / "conversations" / (self.agent_id or "agent_001") / "archive"
                                 _kg.extract_structural_edges(knowledge_dir, _archive_dir if _archive_dir.exists() else None)
                                 log.info("Knowledge graph built: %d nodes, %d edges", _kg.backend.node_count(), _kg.backend.edge_count())
                                 # The other half of the pair: this is what the pass left
@@ -2236,8 +2240,9 @@ class DpcAgentManager:
         """
         monitor = self._agent_monitors.get(conversation_id)
         if not monitor:
+            from dpc_protocol.paths import dpc_home
             history_path = (
-                pathlib.Path.home() / ".dpc" / "conversations"
+                dpc_home() / "conversations"
                 / conversation_id / "history.json"
             )
             if history_path.exists():

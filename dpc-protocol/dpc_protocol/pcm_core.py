@@ -3,7 +3,10 @@
 import json
 import logging
 from pathlib import Path
-from .crypto import DPC_HOME_DIR
+from .paths import dpc_home, resolve_module_home
+
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME_DIR = _INITIAL_DPC_HOME
 from dataclasses import dataclass, field, fields, asdict
 from typing import List, Dict, Any, Optional, Literal
 from datetime import datetime, timezone
@@ -407,7 +410,7 @@ class PCMCore:
         else:
             # Default to the main context file in the user's DPC dir
             # We will manage multiple contexts later, for now, one main file.
-            self.file_path = DPC_HOME_DIR / "personal.json"
+            self.file_path = resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME) / "personal.json"
 
     def ensure_context_file_exists(self):
         """
@@ -492,7 +495,7 @@ class InstructionSetManager:
             config_dir: Directory containing instructions.json. Defaults to ~/.dpc/
         """
         if config_dir is None:
-            config_dir = DPC_HOME_DIR
+            config_dir = resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME)
         else:
             config_dir = Path(config_dir)
 

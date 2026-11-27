@@ -51,16 +51,25 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
-CONFIG_PATH = DPC_HOME / "config.ini"
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME = _INITIAL_DPC_HOME
+_INITIAL_CONFIG_PATH = DPC_HOME / "config.ini"
+CONFIG_PATH = _INITIAL_CONFIG_PATH
+
+
+def _dpc_home() -> Path:
+    return resolve_module_home(DPC_HOME, _INITIAL_DPC_HOME)
 
 
 def _read_config():
     """Read config.ini once, return configparser object."""
     import configparser
     config = configparser.ConfigParser()
-    if CONFIG_PATH.exists():
-        config.read(CONFIG_PATH, encoding="utf-8")
+    cfg_path = CONFIG_PATH if CONFIG_PATH != _INITIAL_CONFIG_PATH else _dpc_home() / "config.ini"
+    if cfg_path.exists():
+        config.read(cfg_path, encoding="utf-8")
     return config
 
 
@@ -90,7 +99,7 @@ def _mentions_banner(names: list, n: int) -> str:
 def _get_node_id() -> str:
     """This node's id from ~/.dpc/node.id, "" if absent."""
     try:
-        return (DPC_HOME / "node.id").read_text(encoding="utf-8").strip()
+        return (_dpc_home() / "node.id").read_text(encoding="utf-8").strip()
     except OSError:
         return ""
 
@@ -160,7 +169,7 @@ def list_groups(with_chat_context: bool = False) -> list:
     with_chat_context adds each group's block from the backend under
     "chat_context" (None when the backend has none for it or is not reached).
     """
-    conversations_dir = DPC_HOME / "conversations"
+    conversations_dir = _dpc_home() / "conversations"
     if not conversations_dir.exists():
         return []
     groups, canonical_ids = [], []
@@ -198,7 +207,7 @@ def _find_group_dir(group_id: str) -> Path:
     Prefer the slugged directory (backend's active write target). metadata.json is
     the group's identity and exists from the join; history.json only after a message.
     """
-    base = DPC_HOME / "conversations"
+    base = _dpc_home() / "conversations"
     if base.is_dir():
         for d in sorted(base.iterdir()):
             if d.is_dir() and d.name.startswith(group_id + "-") and (
@@ -340,7 +349,7 @@ MENTION_DEPTH_TTL_S = 3600
 
 def _depth_state_path() -> Path:
     """Beside .ws_token, under DPC_HOME."""
-    return DPC_HOME / MENTION_DEPTH_STATE_FILE
+    return _dpc_home() / MENTION_DEPTH_STATE_FILE
 
 
 def _is_depth(value) -> bool:
@@ -554,7 +563,7 @@ async def send_group_message(group_id: str, text: str, name: str = None,
         print(f"[INFO] posting as {name}")
     command = _build_send_command(canonical_id, name, text, mention_depth)
 
-    ws_token_path = DPC_HOME / ".ws_token"
+    ws_token_path = _dpc_home() / ".ws_token"
     try:
         auth_token = ws_token_path.read_text(encoding="utf-8").strip()
     except OSError as e:
@@ -601,7 +610,7 @@ async def send_group_message(group_id: str, text: str, name: str = None,
 async def _backend_commands(commands: list) -> list:
     """Run local API commands over one authenticated connection; a reply or None per command."""
     import websockets
-    auth_token = (DPC_HOME / ".ws_token").read_text(encoding="utf-8").strip()
+    auth_token = (_dpc_home() / ".ws_token").read_text(encoding="utf-8").strip()
     replies = []
     async with websockets.connect(_get_ws_url()) as ws:
         await ws.send(json.dumps({"id": "group-bridge-auth", "command": "auth", "token": auth_token}))
@@ -776,7 +785,7 @@ async def listen_for_mentions(group_id: str, names: list, all_tags: bool = False
     while True:
         try:
             # Re-read per connect: the backend rotates the token on every start.
-            auth_token = (DPC_HOME / ".ws_token").read_text(encoding="utf-8").strip()
+            auth_token = (_dpc_home() / ".ws_token").read_text(encoding="utf-8").strip()
             async with websockets.connect(_get_ws_url()) as ws:
                 await ws.send(json.dumps({
                     "id": "group-bridge-auth",
@@ -956,7 +965,7 @@ CARD_STALE_AFTER_S = 60  # the backend refreshes the file every 15 s while it ru
 
 def _card_file_path() -> Path:
     """`<DPC_HOME>/state/card_lease.json`, which the backend rewrites on every change of the card."""
-    return DPC_HOME / "state" / "card_lease.json"
+    return _dpc_home() / "state" / "card_lease.json"
 
 
 def read_card_file(path: Path = None):

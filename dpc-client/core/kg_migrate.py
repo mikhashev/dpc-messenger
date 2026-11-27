@@ -36,9 +36,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from dpc_protocol.paths import dpc_home  # noqa: E402
 from dpc_client_core.dpc_agent.knowledge_graph import KnowledgeGraph  # noqa: E402
 
-DPC_HOME = Path.home() / ".dpc"
+DPC_HOME = dpc_home()
 STORE_FILE = {"sqlite": "knowledge_graph.db", "grafeo": "knowledge_graph.grafeo"}
 
 

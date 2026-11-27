@@ -1212,7 +1212,8 @@ def _dpc_home_for(agent_root: Path) -> Path:
     root = Path(agent_root).resolve()
     if root.parent.name == "agents":
         return root.parent.parent
-    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+    from dpc_protocol.paths import dpc_home
+    return dpc_home()
 
 
 class KnowledgeGraph:

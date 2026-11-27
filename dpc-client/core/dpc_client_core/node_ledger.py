@@ -136,7 +136,8 @@ LOCK_SLEEP_S = 0.01
 
 def ledger_dir() -> Path:
     """Where this node keeps its ledger; `DPC_HOME` is honoured as elsewhere."""
-    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "ledger"
+    from dpc_protocol.paths import dpc_home
+    return dpc_home() / "ledger"
 
 
 def _count(value: Any) -> Optional[int]:

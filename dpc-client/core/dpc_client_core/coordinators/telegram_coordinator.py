@@ -601,7 +601,8 @@ class TelegramBridge:
 
             # Download voice file
             voice_filename = f"telegram_voice_{message.message_id}.ogg"
-            voice_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "files"
+            from dpc_protocol.paths import dpc_home
+            voice_dir = dpc_home() / "conversations" / conversation_id / "files"
             voice_dir.mkdir(parents=True, exist_ok=True)
             voice_path = voice_dir / voice_filename
 
@@ -797,7 +798,8 @@ class TelegramBridge:
 
             # Download photo
             photo_filename = f"telegram_photo_{message.message_id}.jpg"
-            photo_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "files"
+            from dpc_protocol.paths import dpc_home
+            photo_dir = dpc_home() / "conversations" / conversation_id / "files"
             photo_dir.mkdir(parents=True, exist_ok=True)
             photo_path = photo_dir / photo_filename
 
@@ -905,7 +907,8 @@ class TelegramBridge:
             mime_type = document.mime_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
             # Download document
-            file_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "files"
+            from dpc_protocol.paths import dpc_home
+            file_dir = dpc_home() / "conversations" / conversation_id / "files"
             file_dir.mkdir(parents=True, exist_ok=True)
             file_path = file_dir / filename
 
@@ -1014,7 +1017,8 @@ class TelegramBridge:
             mime_type = video.mime_type or "video/mp4"
 
             # Download video
-            file_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "files"
+            from dpc_protocol.paths import dpc_home
+            file_dir = dpc_home() / "conversations" / conversation_id / "files"
             file_dir.mkdir(parents=True, exist_ok=True)
             file_path = file_dir / filename
 

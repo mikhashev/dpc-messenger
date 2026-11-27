@@ -31,13 +31,15 @@ def node_signer():
     try:
         from cryptography.hazmat.primitives import serialization
         from dpc_protocol.commit_integrity import CommitSigner
+        from dpc_protocol.paths import dpc_home
 
-        key_path = Path.home() / ".dpc" / "node.key"
+        home = dpc_home()
+        key_path = home / "node.key"
         if not key_path.exists():
             return None
         with open(key_path, "rb") as f:
             private_key = serialization.load_pem_private_key(f.read(), password=None)
-        node_id_path = Path.home() / ".dpc" / "node.id"
+        node_id_path = home / "node.id"
         node_id = node_id_path.read_text().strip() if node_id_path.exists() else ""
         return CommitSigner(node_id, private_key)
     except Exception as e:  # noqa: BLE001 — an unusable key is not a crash

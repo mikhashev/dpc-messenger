@@ -76,8 +76,8 @@ def _paginate_content(content: str, path: str, offset: int | None, limit: int | 
 def _dpc_home() -> Path:
     """$DPC_HOME, else ~/.dpc: the home the shared-knowledge read gate and
     get_dpc_context both resolve (2026-09-18: one answer, not two)."""
-    import os
-    return Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+    from dpc_protocol.paths import dpc_home
+    return dpc_home()
 
 
 # ---------------------------------------------------------------------------

@@ -21,9 +21,12 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Hashable, Iterator, Optional
 
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
 from . import MessageHandler
 
-DPC_HOME_DIR = Path.home() / ".dpc"
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME_DIR = _INITIAL_DPC_HOME
 
 # How long a CERT_REQUEST is waited for before the same node may be asked about
 # again: the answer wait of a requested file (file_request.REQUEST_ANSWER_TIMEOUT_S),
@@ -108,12 +111,13 @@ def _read_local_certificate(node_id: str, own_node_id: str) -> Optional[str]:
     from dpc_protocol.crypto import is_valid_node_id
     if not isinstance(node_id, str) or not is_valid_node_id(node_id):
         return None
+    home = resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME)
     if node_id == own_node_id:
-        own = DPC_HOME_DIR / "node.crt"
+        own = home / "node.crt"
         if own.exists():
             return own.read_text(encoding="utf-8")
         return None
-    cached = DPC_HOME_DIR / "peers" / f"{node_id}.crt"
+    cached = home / "peers" / f"{node_id}.crt"
     if cached.exists():
         return cached.read_text(encoding="utf-8")
     return None

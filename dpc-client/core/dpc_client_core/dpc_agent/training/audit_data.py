@@ -36,7 +36,9 @@ from typing import Dict, Tuple
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+from dpc_protocol.paths import dpc_home
+
+DPC_HOME = dpc_home()
 
 
 def _estimate_tokens(byte_count: int) -> int:

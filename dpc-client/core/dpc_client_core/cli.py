@@ -41,7 +41,8 @@ class CliError(Exception):
 
 
 def dpc_home() -> Path:
-    return Path.home() / ".dpc"
+    from dpc_protocol.paths import dpc_home as _resolve_dpc_home
+    return _resolve_dpc_home()
 
 
 def _setting(home: Path, section: str, key: str, fallback: str) -> str:

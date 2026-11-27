@@ -1597,11 +1597,12 @@ class ContextFirewall:
         restricted_enabled = sorted(allowed_tools & RESTRICTED_TOOL_NAMES)
         other_enabled = sorted(allowed_tools - CORE_TOOL_NAMES - RESTRICTED_TOOL_NAMES)
 
+        from dpc_protocol.paths import dpc_home
         return {
             "agent_id": agent_id,
             "enabled": self.dpc_agent_enabled,
             "sandbox_paths": {
-                "agent_root": str(Path.home() / ".dpc" / "agents" / agent_id),
+                "agent_root": str(dpc_home() / "agents" / agent_id),
                 "read_only": self.sandbox_read_only_paths,
                 "read_write": self.sandbox_read_write_paths,
             },

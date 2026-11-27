@@ -67,7 +67,8 @@ _TELEGRAM_CHAT_ID = re.compile(r"^telegram--?[0-9]{1,20}$")
 
 
 def conversations_dir() -> Path:
-    return Path.home() / ".dpc" / "conversations"
+    from dpc_protocol.paths import dpc_home
+    return dpc_home() / "conversations"
 
 
 def is_ai_chat_id(conversation_id: Any) -> bool:

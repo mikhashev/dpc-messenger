@@ -182,11 +182,18 @@ from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock, InstructionSet,
     InstructionSetManager, load_instructions, save_instructions
 )
+from dpc_protocol.paths import dpc_home, resolve_module_home
 from dpc_protocol.utils import parse_dpc_uri
 from datetime import datetime, timezone
 
 # Define the path to the user's D-PC configuration directory
-DPC_HOME_DIR = Path.home() / ".dpc"
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME_DIR = _INITIAL_DPC_HOME
+
+
+def _dpc_home() -> Path:
+    """Resolve the active DPC home directory, honoring DPC_HOME and test patches."""
+    return resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME)
 
 # Configuration file names
 PROVIDERS_CONFIG = "providers.json"
@@ -986,10 +993,11 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         # CC<->agent chain depth per agent conversation; a human message resets it.
         self._cc_ark_chain_depths: Dict[str, int] = {}
 
-        DPC_HOME_DIR.mkdir(parents=True, exist_ok=True)  # a test's stand-in home has no parent yet
+        home = _dpc_home()
+        home.mkdir(parents=True, exist_ok=True)  # a test's stand-in home has no parent yet
 
         # Load settings (supports environment variables and config file)
-        self.settings = Settings(DPC_HOME_DIR)
+        self.settings = Settings(home)
         # Before any agent builds the embedding model: its device belongs to the
         # node ([memory] embedding_device), and the first build fixes it.
         from .dpc_agent.memory import set_node_embedding_device
@@ -997,8 +1005,8 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
 
         # Initialize offline mode components
         self.token_cache = TokenCache(
-            cache_dir=DPC_HOME_DIR,
-            node_key_path=DPC_HOME_DIR / NODE_KEY
+            cache_dir=home,
+            node_key_path=home / NODE_KEY
         )
         self.connection_status = ConnectionStatus()
 
@@ -1006,8 +1014,8 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         self.connection_status.set_on_status_change(self._on_connection_status_changed)
 
         # Initialize all major components
-        self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
-        self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
+        self.firewall = ContextFirewall(home / PRIVACY_RULES)
+        self.llm_manager = LLMManager(home / PROVIDERS_CONFIG)
         from .providers.whisper_provider import (set_cpu_route_source, set_idle_unload_source,
                                                  set_unloaded_listener)
         set_idle_unload_source(self.settings.get_local_transcription_idle_unload_s)
@@ -1030,7 +1038,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         self.cache = ContextCache()
 
         self.local_api = LocalApiServer(core_service=self)
-        self.file_server = FileServer(dpc_home_dir=DPC_HOME_DIR, host="127.0.0.1", port=9998)
+        self.file_server = FileServer(dpc_home_dir=home, host="127.0.0.1", port=9998)
 
         # A provider that is waiting out a backoff says so on screen instead of
         # looking hung for up to its whole budget. Registered here because the
@@ -1039,11 +1047,11 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         set_retry_observer(self._announce_provider_retry)
 
         # Knowledge Architecture components (Phase 1-6)
-        self.pcm_core = PCMCore(DPC_HOME_DIR / PERSONAL_CONTEXT)
+        self.pcm_core = PCMCore(home / PERSONAL_CONTEXT)
 
         # Load AI instruction sets from instructions.json (v2.0)
         self.instruction_manager = InstructionManager(
-            config_dir=DPC_HOME_DIR,
+            config_dir=home,
             event_broadcaster=None  # Will be set after LocalApiServer is initialized
         )
         self.instruction_set = self.instruction_manager.instruction_set
@@ -1135,7 +1143,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 settings=self.settings,
                 llm_manager=self.llm_manager,
                 p2p_manager=self.p2p_manager,
-                dpc_home_dir=DPC_HOME_DIR,
+                dpc_home_dir=home,
             )
         except Exception as e:
             logger.error("TelegramService init failed, continuing without Telegram: %s", e)
@@ -1155,7 +1163,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             self.discord_service = None
 
         # Group chat manager (v0.19.0)
-        self.group_manager = GroupManager(Path.home() / ".dpc", self.p2p_manager.node_id)
+        self.group_manager = GroupManager(home, self.p2p_manager.node_id)
         self.group_manager.load_from_disk()
 
         # Conversation monitors (per conversation/peer for knowledge extraction)
@@ -1234,7 +1242,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 local_api=self.local_api,
                 p2p_manager=self.p2p_manager,
                 settings=self.settings,
-                dpc_home_dir=DPC_HOME_DIR,
+                dpc_home_dir=home,
                 conversation_monitors=self.conversation_monitors,
                 peer_metadata=self.peer_metadata,
                 group_manager=self.group_manager,
@@ -1497,9 +1505,10 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
     async def _startup_integrity_check(self):
         """Verify all knowledge commits on startup."""
         from dpc_protocol.commit_integrity import verify_markdown_integrity
-        from dpc_protocol.crypto import DPC_HOME_DIR
+        from dpc_protocol.crypto import dpc_home_dir as _crypto_dpc_home
 
-        knowledge_dir = DPC_HOME_DIR / "knowledge"
+        crypto_home = _crypto_dpc_home()
+        knowledge_dir = crypto_home / "knowledge"
         warnings = []
         verified_count = 0
 
@@ -1519,7 +1528,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
 
         for topic_name, topic in context.knowledge.items():
             if topic.markdown_file:
-                markdown_path = DPC_HOME_DIR / topic.markdown_file
+                markdown_path = crypto_home / topic.markdown_file
 
                 if not markdown_path.exists():
                     orphaned_count += 1
@@ -1591,7 +1600,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             return
         from pathlib import Path
         import json as _json
-        agents_dir = Path.home() / ".dpc" / "agents"
+        agents_dir = _dpc_home() / "agents"
         if not agents_dir.is_dir():
             logger.debug("Eager index rebuild: agents dir %s not found", agents_dir)
             return
@@ -1692,7 +1701,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         thread (temp_sweeper). Never raises: a failure is one WARNING."""
         from .temp_sweeper import sweep_abandoned_recordings
         try:
-            await asyncio.to_thread(sweep_abandoned_recordings, DPC_HOME_DIR / "temp")
+            await asyncio.to_thread(sweep_abandoned_recordings, _dpc_home() / "temp")
         except Exception as e:
             logger.warning("Sweeping abandoned recordings from the temp folder failed: %s", e)
 
@@ -2247,7 +2256,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 self,
                 host=self.settings.get_gateway_host(),
                 port=self.settings.get_gateway_port(),
-                key_path=DPC_HOME_DIR / GATEWAY_KEY_NAME,
+                key_path=_dpc_home() / GATEWAY_KEY_NAME,
                 inference_lock=coordinator._peer_inference_lock if coordinator is not None else None,
             )
         except GatewayConfigError as e:
@@ -4616,7 +4625,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             filename = f"screenshot_{timestamp}.{extension}"
 
         # 6. Create screenshots directory
-        peer_files_dir = DPC_HOME_DIR / "conversations" / node_id / "files" / "screenshots"
+        peer_files_dir = _dpc_home() / "conversations" / node_id / "files" / "screenshots"
         peer_files_dir.mkdir(parents=True, exist_ok=True)
 
         # 7. Save image file
@@ -4768,7 +4777,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         filename = f"voice_{timestamp}.{extension}"
 
         # 9. Create voice messages directory
-        peer_files_dir = DPC_HOME_DIR / "conversations" / node_id / "files"
+        peer_files_dir = _dpc_home() / "conversations" / node_id / "files"
         peer_files_dir.mkdir(parents=True, exist_ok=True)
 
         # 10. Save voice file
@@ -6890,7 +6899,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             serving_absent = [alias for _, alias in lists.absent]
         except ValueError as e:
             serving_error = str(e)
-        key_path = server.key_path if server is not None else DPC_HOME_DIR / GATEWAY_KEY_NAME
+        key_path = server.key_path if server is not None else _dpc_home() / GATEWAY_KEY_NAME
         if server is not None:
             key_masked = server.key_masked
         else:
@@ -6923,7 +6932,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 key = server.rotate_key()
                 key_file = str(server.key_path)
             else:
-                key_file = str(DPC_HOME_DIR / GATEWAY_KEY_NAME)
+                key_file = str(_dpc_home() / GATEWAY_KEY_NAME)
                 key = rotate_gateway_key(Path(key_file))
         except OSError as e:
             logger.error("Gateway key rotation failed: %s", e, exc_info=True)
@@ -6949,7 +6958,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         """
         server = self.gateway
         port = server.port if server is not None else self.settings.get_gateway_port()
-        key_path = server.key_path if server is not None else DPC_HOME_DIR / GATEWAY_KEY_NAME
+        key_path = server.key_path if server is not None else _dpc_home() / GATEWAY_KEY_NAME
         key = getattr(server, "_key", "") if server is not None else ""
         if not key:
             try:
@@ -7132,7 +7141,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             # sleep pipeline). Multiple monitor instances exist (service.conversation_monitors
             # vs agent_manager._get_or_create_agent_monitor) — disk is the only consistent source.
             if conversation_id.startswith("agent_"):
-                agent_dir = DPC_HOME_DIR / "conversations" / conversation_id
+                agent_dir = _dpc_home() / "conversations" / conversation_id
                 history_path = agent_dir / "history.json"
                 if history_path.exists():
                     try:
@@ -7182,7 +7191,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             if conversation_id.startswith("discord-user-"):
                 try:
                     conv_dir = conversation_paths.resolve_store_dir(
-                        DPC_HOME_DIR / "conversations", conversation_id
+                        _dpc_home() / "conversations", conversation_id
                     )
                 except ValueError as e:
                     raise history_page.HistoryPageError(str(e))
@@ -7442,7 +7451,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                         # No live monitor to ask: a throwaway one reads the file,
                         # archives it as every reset does, and is dropped, so it
                         # never competes with the agent manager's own monitor.
-                        history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
+                        history_path = _dpc_home() / "conversations" / conversation_id / "history.json"
                         if not history_path.exists():
                             return
                         scratch = ConversationMonitor(
@@ -10298,7 +10307,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 thumbnail_base64 = generate_thumbnail(tmp_path)
 
                 # Move file to peer-specific storage
-                peer_storage = DPC_HOME_DIR / "conversations" / conversation_id / "files"
+                peer_storage = _dpc_home() / "conversations" / conversation_id / "files"
                 peer_storage.mkdir(parents=True, exist_ok=True)
                 final_path = peer_storage / filename
 
@@ -10863,7 +10872,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         return await asyncio.to_thread(
             keep_agent_chat_attachment, files_dir, attachment,
             voice_mime_types=voice_mime_types, max_voice_seconds=max_voice_seconds,
-            temp_dir=DPC_HOME_DIR / "temp", max_file_mb=max_file_mb,
+            temp_dir=_dpc_home() / "temp", max_file_mb=max_file_mb,
             measure_seconds=measure_recording_seconds,
         )
 
@@ -11144,7 +11153,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 # Kept, then the record failed: a recording goes back to the
                 # recorder's temp folder, a copy is removed.
                 await asyncio.to_thread(
-                    release_agent_chat_attachment, attachments[0], attachment, DPC_HOME_DIR / "temp")
+                    release_agent_chat_attachment, attachments[0], attachment, _dpc_home() / "temp")
             await self.local_api.send_response_to_all(
                 command_id=command_id,
                 command="execute_ai_query",
@@ -12061,7 +12070,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         if agent_id is None:
             agent_id = self._get_default_agent_id()
         try:
-            config_path = Path.home() / ".dpc" / "agents" / agent_id / "config.json"
+            config_path = _dpc_home() / "agents" / agent_id / "config.json"
             if config_path.exists():
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
@@ -12181,7 +12190,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             agent_id = self._get_default_agent_id()
         try:
             from dpc_client_core.dpc_agent.context import _get_knowledge_graph
-            agent_root = DPC_HOME_DIR / "agents" / agent_id
+            agent_root = _dpc_home() / "agents" / agent_id
             if not agent_root.is_dir():
                 return {"status": "error", "message": f"No such agent: {agent_id}"}
             kg = _get_knowledge_graph(agent_root)
@@ -12217,7 +12226,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             agent_id = self._get_default_agent_id()
         try:
             from dpc_client_core.dpc_agent.context import _get_knowledge_graph
-            agent_root = DPC_HOME_DIR / "agents" / agent_id
+            agent_root = _dpc_home() / "agents" / agent_id
             if not agent_root.is_dir():
                 return {"status": "error", "message": f"No such agent: {agent_id}"}
             kg = _get_knowledge_graph(agent_root)
@@ -12249,13 +12258,14 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         """
         try:
             from dpc_client_core.dpc_agent.corpus_stats import corpus_stats
-            agents_dir = DPC_HOME_DIR / "agents"
+            home = _dpc_home()
+            agents_dir = home / "agents"
             if agent_id:
                 roots = [agents_dir / agent_id]
             else:
                 roots = sorted(p for p in agents_dir.iterdir() if p.is_dir())
             reports = [
-                corpus_stats(root, self.firewall, root.name, dpc_home=DPC_HOME_DIR)
+                corpus_stats(root, self.firewall, root.name, dpc_home=home)
                 for root in roots
                 if (root / "state" / "memory_index" / "index_meta.json").exists()
             ]
@@ -12283,12 +12293,13 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             from dpc_client_core.dpc_agent.index_keys import l6_key
             from dpc_client_core.dpc_agent.index_writer import write_index_async
             from dpc_client_core.dpc_agent.retrieval import make_backend_for_agent
-            l6_dir = DPC_HOME_DIR / "knowledge"
+            home = _dpc_home()
+            l6_dir = home / "knowledge"
             keys = [l6_key(p, l6_dir) for p in sorted(l6_dir.glob("*.md")) if p.is_file()]
             if not keys:
                 return {"status": "error", "message": "shared layer is empty"}
             report = []
-            for root in sorted(p for p in (DPC_HOME_DIR / "agents").iterdir() if p.is_dir()):
+            for root in sorted(p for p in (home / "agents").iterdir() if p.is_dir()):
                 if not (root / "state" / "memory_index").is_dir():
                     continue
                 allowed = self.firewall is not None and self.firewall.can_agent_access_context(
@@ -12917,7 +12928,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         if agent_id is None:
             agent_id = self._get_default_agent_id()
 
-        conversation_dir = Path.home() / ".dpc" / "conversations" / agent_id
+        conversation_dir = _dpc_home() / "conversations" / agent_id
         if not conversation_dir.exists():
             return {"status": "error", "message": f"Agent {agent_id} not found"}
 
@@ -12984,7 +12995,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                         monitor.add_message("assistant", chat_text, sender_name=agent_id, timestamp=datetime.now(timezone.utc).isoformat())
                         monitor.save_history()
                         brief["consumed"] = True
-                        brief_path = Path.home() / ".dpc" / "conversations" / agent_id / "morning_brief.json"
+                        brief_path = _dpc_home() / "conversations" / agent_id / "morning_brief.json"
                         brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
                     done_data = {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0), "morning_brief": brief}
                     await self.local_api.broadcast_event("sleep_state_changed", done_data)
@@ -13020,7 +13031,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         one is how two code paths came to read two different histories of the
         same group. Both now go through `conversation_paths`.
         """
-        conversations_dir = Path.home() / ".dpc" / "conversations"
+        conversations_dir = _dpc_home() / "conversations"
         dirs = conversation_paths.existing_store_dirs(conversations_dir, group_id)
         return conversation_paths.canonical_store_dir(dirs)
 
@@ -13045,7 +13056,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
     @slow_command
     async def trigger_group_sleep(self, group_id: str) -> Dict[str, Any]:
         """Trigger sleep pipeline for all agents in a group, using group archives only."""
-        conversations_dir = Path.home() / ".dpc" / "conversations"
+        conversations_dir = _dpc_home() / "conversations"
         group_dir = self._find_group_dir(group_id)
         if not group_dir:
             return {"status": "error", "message": f"Group {group_id} not found"}
@@ -13184,7 +13195,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
 
     async def activate_group_chat(self, group_id: str) -> Dict[str, Any]:
         """Called when user opens a group chat. Posts pending morning briefs."""
-        conversations_dir = Path.home() / ".dpc" / "conversations"
+        conversations_dir = _dpc_home() / "conversations"
         group_dir = self._find_group_dir(group_id)
         if not group_dir:
             return {"status": "ok", "briefs_posted": 0}

@@ -23,9 +23,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
 logger = logging.getLogger(__name__)
 
-DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME = _INITIAL_DPC_HOME
+
+
+def current_dpc_home() -> Path:
+    return resolve_module_home(DPC_HOME, _INITIAL_DPC_HOME)
 
 _MARKER_LOCK = threading.Lock()
 

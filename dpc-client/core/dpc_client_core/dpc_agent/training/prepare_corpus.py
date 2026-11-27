@@ -32,7 +32,9 @@ from typing import Iterator
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+from dpc_protocol.paths import dpc_home
+
+DPC_HOME = dpc_home()
 
 # KG EdgeType enum → verb phrase (S130 consensus, Ark note: skip
 # TEMPORAL_NEXT and SHARED_WITH because corpus has 0 edges of each).

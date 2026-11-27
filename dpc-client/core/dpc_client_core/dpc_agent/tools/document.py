@@ -726,9 +726,10 @@ def _ascii_staging_root() -> Optional[Path]:
     non-ASCII user name needs a way to say where instead, and `~/.dpc/tmp` is
     no better when the profile itself carries the non-ASCII component.
     """
+    from dpc_protocol.paths import dpc_home
     override = os.environ.get(ASCII_TMP_ENV)
     candidates: List[Path] = [Path(override)] if override else []
-    candidates += [Path(tempfile.gettempdir()), Path.home() / ".dpc" / "tmp"]
+    candidates += [Path(tempfile.gettempdir()), dpc_home() / "tmp"]
     for candidate in candidates:
         if not str(candidate).isascii():
             continue
@@ -1023,7 +1024,8 @@ def _cache_path(
     An unknown limit adds nothing to the key, so entries written before the
     limit existed still hold.
     """
-    root = getattr(ctx, "agent_root", None) or Path.home() / ".dpc"
+    from dpc_protocol.paths import dpc_home
+    root = getattr(ctx, "agent_root", None) or dpc_home()
     folder = Path(root) / "state" / "doc_cache"
     folder.mkdir(parents=True, exist_ok=True)
     stamp = f"{digest[:16]}-p{page}-{model}-{dpi}-v{VISION_PROMPT_VERSION}"

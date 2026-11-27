@@ -67,14 +67,16 @@ def get_agent_root(agent_id: str) -> pathlib.Path:
             "~/.dpc/agents, so it takes letters, digits, underscore and hyphen — "
             "an external agent's tag or a display name does not belong here."
         )
-    agent_root = pathlib.Path.home() / ".dpc" / "agents" / agent_id
+    from dpc_protocol.paths import dpc_home
+    agent_root = dpc_home() / "agents" / agent_id
     agent_root.mkdir(parents=True, exist_ok=True)
     return agent_root
 
 
 def get_agents_base_dir() -> pathlib.Path:
     """Get the base directory for all agents (~/.dpc/agents/)."""
-    base_dir = pathlib.Path.home() / ".dpc" / "agents"
+    from dpc_protocol.paths import dpc_home
+    base_dir = dpc_home() / "agents"
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir
 
@@ -638,10 +640,10 @@ def migrate_global_telegram_to_agents() -> Dict[str, Any]:
     """
     try:
         # Import Settings here to avoid circular import
+        from dpc_protocol.paths import dpc_home
         from ..settings import Settings
-        from pathlib import Path
 
-        settings = Settings(Path.home() / ".dpc")
+        settings = Settings(dpc_home())
         global_config = settings.get_dpc_agent_telegram_config()
 
         # Check if global config is enabled

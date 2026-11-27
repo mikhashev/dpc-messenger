@@ -44,8 +44,8 @@ class WebRTCPeerConnection:
         self.connection_type = "webrtc"
 
         # Load TURN credentials from Settings (environment variables or config file)
-        dpc_home = Path.home() / ".dpc"
-        settings = Settings(dpc_home)
+        from dpc_protocol.paths import dpc_home
+        settings = Settings(dpc_home())
         turn_username = settings.get_turn_username()
         turn_credential = settings.get_turn_credential()
 

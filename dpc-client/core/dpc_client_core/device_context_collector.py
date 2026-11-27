@@ -22,7 +22,10 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
-from dpc_protocol.crypto import DPC_HOME_DIR
+from dpc_protocol.paths import dpc_home, resolve_module_home
+
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME_DIR = _INITIAL_DPC_HOME
 from dpc_protocol.pcm_core import (
     PersonalContext,
     Topic,
@@ -48,7 +51,7 @@ class DeviceContextCollector:
 
     def __init__(self, settings=None, stop_event=None):
         self.settings = settings
-        self.device_file = DPC_HOME_DIR / "device_context.json"
+        self.device_file = resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME) / "device_context.json"
         # The backend's stop, when the collection runs beside a live backend:
         # once set, the probes left are skipped and nothing is written.
         self._stop_event = stop_event

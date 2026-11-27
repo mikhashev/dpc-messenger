@@ -55,8 +55,9 @@ os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "true")
 # defense-in-depth where they exist (whisper_provider, token_count_manager).
 import configparser as _hf_configparser
 from pathlib import Path as _HFPath
+from dpc_protocol.paths import dpc_home as _hf_dpc_home
 _hf_cfg = _hf_configparser.ConfigParser(inline_comment_prefixes=('#',))
-_hf_cfg_path = _HFPath.home() / ".dpc" / "config.ini"
+_hf_cfg_path = _hf_dpc_home() / "config.ini"
 if _hf_cfg_path.exists():
     try:
         _hf_cfg.read(_hf_cfg_path, encoding="utf-8")
@@ -94,7 +95,7 @@ def _hf_required_models() -> set:
         pass
 
     # Agents may point memory at a different embedding model than the default.
-    agents_dir = _HFPath.home() / ".dpc" / "agents"
+    agents_dir = _hf_dpc_home() / "agents"
     if agents_dir.is_dir():
         for cfg in agents_dir.glob("*/config.json"):
             try:
@@ -114,7 +115,7 @@ def _hf_required_models() -> set:
     try:
         from dpc_client_core.managers.token_count_manager import TokenCountManager
 
-        providers_path = _HFPath.home() / ".dpc" / "providers.json"
+        providers_path = _hf_dpc_home() / "providers.json"
         providers = _hf_json.loads(providers_path.read_text(encoding="utf-8"))
         for entry in providers.get("providers", []):
             if entry.get("type") != "ollama":
@@ -132,7 +133,7 @@ def _hf_required_models() -> set:
     try:
         from dpc_client_core.dpc_agent.tools.transcribe import _WHISPER_PROVIDER_TYPE
 
-        providers_path = _HFPath.home() / ".dpc" / "providers.json"
+        providers_path = _hf_dpc_home() / "providers.json"
         providers = _hf_json.loads(providers_path.read_text(encoding="utf-8"))
 
         def _walk(node):

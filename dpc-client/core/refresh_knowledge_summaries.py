@@ -20,9 +20,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from dpc_protocol.paths import dpc_home  # noqa: E402
 from dpc_client_core.dpc_agent.memory import refresh_summaries  # noqa: E402
 
-AGENTS_DIR = Path.home() / ".dpc" / "agents"
+AGENTS_DIR = dpc_home() / "agents"
 BACKUP_SUFFIX = ".bak-2026-10-05"
 
 

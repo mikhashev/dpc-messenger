@@ -20,7 +20,10 @@ from .pcm_core import (
     KnowledgeEntry,
     KnowledgeSource
 )
-from .crypto import DPC_HOME_DIR
+from .paths import dpc_home, resolve_module_home
+
+_INITIAL_DPC_HOME = dpc_home()
+DPC_HOME_DIR = _INITIAL_DPC_HOME
 
 
 class MarkdownKnowledgeManager:
@@ -35,7 +38,7 @@ class MarkdownKnowledgeManager:
         if knowledge_dir:
             self.knowledge_dir = Path(knowledge_dir)
         else:
-            self.knowledge_dir = DPC_HOME_DIR / "knowledge"
+            self.knowledge_dir = resolve_module_home(DPC_HOME_DIR, _INITIAL_DPC_HOME) / "knowledge"
 
         self.knowledge_dir.mkdir(parents=True, exist_ok=True)
 

@@ -319,7 +319,8 @@ def repair_before_embedding(
     plan = plan_index_repair(vector_rows, text_rows, backend.text.sources_missing_full_text(),
                              current, reembedding)
     if plan.needed:
-        home = dpc_home or pathlib.Path(os.environ.get("DPC_HOME", pathlib.Path.home() / ".dpc"))
+        from dpc_protocol.paths import dpc_home as _resolve_dpc_home
+        home = dpc_home or _resolve_dpc_home()
         try:
             dest = back_up_index_once(index_dir, home,
                                       with_grafeo="grafeo" in (backend.backend_id or ""))

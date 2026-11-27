@@ -457,7 +457,8 @@ def get_embedding_provider(model_name: str = DEFAULT_EMBEDDING_MODEL, **kwargs) 
 
 def _embedding_cache_root() -> pathlib.Path:
     """``~/.dpc/cache/embeddings`` (under DPC_HOME when set). Tests point it at tmp_path."""
-    return pathlib.Path(os.environ.get("DPC_HOME", pathlib.Path.home() / ".dpc")) / "cache" / "embeddings"
+    from dpc_protocol.paths import dpc_home
+    return dpc_home() / "cache" / "embeddings"
 
 
 #: Cache files already reported for a wrong length, so each is logged once.

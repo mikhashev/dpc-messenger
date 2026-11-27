@@ -188,7 +188,9 @@ class RelayedPeerConnection:
         """Load own RSA private key for decryption (cached after first load)."""
         if self._own_private_key is not None:
             return self._own_private_key
-        dpc_dir = Path(os.getenv("DPC_DIR", Path.home() / ".dpc"))
+        from dpc_protocol.paths import dpc_home
+        _dpc_dir_env = os.getenv("DPC_DIR")
+        dpc_dir = Path(_dpc_dir_env) if _dpc_dir_env else dpc_home()
         with open(dpc_dir / "node.key", "rb") as f:
             self._own_private_key = serialization.load_pem_private_key(
                 f.read(), password=None

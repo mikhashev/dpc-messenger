@@ -253,7 +253,10 @@ def platform_tag() -> str:
 
 def pins_dir() -> Path:
     """The folder every Strata pin lives in: ~/.dpc/bin/strata/."""
-    return DPC_HOME / "bin" / "strata"
+    from dpc_protocol.paths import resolve_module_home
+    from . import local_engine_pin_fetcher as _base
+    home = resolve_module_home(DPC_HOME, _base._INITIAL_DPC_HOME)
+    return home / "bin" / "strata"
 
 
 def install_root(tag: str = STRATA_RELEASE_TAG, plat: Optional[str] = None) -> Path:
