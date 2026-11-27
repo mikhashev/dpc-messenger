@@ -238,7 +238,16 @@ needs another backbone or adapter set waits until the first use ends, so an engi
 swapped mid-generation (today `use()` re-enters under `music:yue2`); (c) the anti-starvation
 budget and the ETA live in CardLease too, one place for every client. This is Q7-A carried
 to Q7-B's rules; the owner asked Zcode, Ark and Johnny for comments (#124) before it is
-final. S1 does not depend on Q7;
+final. **Zcode agrees (#125)** — it closes his #96 blocker (point a) and Anti's #103 swap
+crash (point b) in the right place, and makes the separate music-compute lock of #103
+unnecessary — with two refinements, adopted: (1) the waiter's **compatibility key** (engine
++ backbone + adapter set) is computed by the door from the typed, owner-rebuilt parameters,
+never from raw call fields (else Anti's #103 injection returns); the same key may stay
+re-entrant, a different key waits; (2) CardLease stays **generic**: guest classes, each with
+its own admission policy, and a compat key on the waiter, with no music names inside the
+lease, so Whisper, llama-server and Strata inherit no music logic. A coarse ETA is enough:
+the position in line plus the running item's estimate (acestep and edits have none, and
+admission is by load, not by ETA). S1 does not depend on Q7;
 S2-S4 do (an amendment to ADR-052 L13 adding the music guest class).
 - **The peer mark must cover the whole trip** (Johnny #111): the mark is a context variable
   set inside `with serving_a_peer(...)` (`managers/llama_server_supervisor.py:228-243`); the
