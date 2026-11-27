@@ -55,6 +55,7 @@ from .card_lease_commands import CardLeaseCommandsMixin
 from .music.commands import (
     MusicCommandsMixin,
     evaluate_local_transcription_limit,
+    read_local_transcription_max_duration_seconds,
 )
 from .music.qc_commands import MusicQcCommandsMixin
 from .gateway import (
@@ -4903,6 +4904,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         # them a second time (Zcode #29-3, Ark F4).
         _fallback_providers_asked: list = []
         _fallback_peers_asked: list = []
+        _limit_exceeded: bool = False
 
         # 0. Check if this is a remote transcription request
         if provider_alias and provider_alias.startswith("remote:"):
@@ -4951,6 +4953,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
 
         # 1. Resolve audio to a local file path
         max_size_mb = int(self.settings.get("voice_messages", "max_size_mb", "10"))
+        max_duration_s = read_local_transcription_max_duration_seconds(self.settings)
         _temp_path_to_delete = None  # track temp files we created so we can clean up
 
         if file_path:
@@ -4959,6 +4962,8 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             if not resolved.exists():
                 raise ValueError(f"Audio file not found: {file_path}")
             size_mb = resolved.stat().st_size / (1024 * 1024)
+            if max_duration_s is None and size_mb > max_size_mb:
+                raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
             temp_path = str(resolved)
         else:
             # Decode base64 payload
@@ -4970,6 +4975,8 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 raise ValueError(f"Failed to decode base64 audio data: {e}")
 
             size_mb = len(audio_data) / (1024 * 1024)
+            if max_duration_s is None and size_mb > max_size_mb:
+                raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
 
             with tempfile.NamedTemporaryFile(
                 delete=False,
@@ -4978,6 +4985,18 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 temp_file.write(audio_data)
                 temp_path = temp_file.name
             _temp_path_to_delete = temp_path
+
+        async def _eval_local_limit() -> Dict[str, Any]:
+            checker = getattr(self, "_check_voice_local_transcription_limit", None)
+            if callable(checker):
+                return await asyncio.to_thread(checker, temp_path, size_mb, duration_seconds)
+            return await asyncio.to_thread(
+                evaluate_local_transcription_limit,
+                self.settings,
+                Path(temp_path),
+                size_mb,
+                declared_s=duration_seconds,
+            )
 
         try:
             # 4. Determine transcription method (local vs cloud)
@@ -4994,6 +5013,20 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
 
                 if provider_type == "local_whisper":
                     transcription_method = "local_whisper"
+                    if max_duration_s is not None:
+                        limit_decision = await _eval_local_limit()
+                        if not limit_decision["allowed"]:
+                            _limit_exceeded = True
+                            if limit_decision["mode"] == "duration":
+                                raise ValueError(
+                                    f"Audio too long ({round(limit_decision['duration_s'], 1):g}s > "
+                                    f"{limit_decision['limit']:g}s local transcription limit, "
+                                    f"[local_transcription] max_duration_seconds)"
+                                )
+                            raise ValueError(
+                                f"Audio too large ({size_mb:.2f} MB > {limit_decision['limit']:g} MB "
+                                f"local transcription limit, [local_transcription] max_file_size_mb)"
+                            )
                 elif provider_type == "openai" or provider_type == "openai_compatible":
                     transcription_method = "openai"
                 else:
@@ -5009,12 +5042,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                     for provider in self.llm_manager.providers.values():
                         if provider.config.get("type") == "local_whisper":
                             if limit_decision is None:
-                                limit_decision = await asyncio.to_thread(
-                                    self._check_voice_local_transcription_limit,
-                                    temp_path,
-                                    size_mb,
-                                    duration_seconds,
-                                )
+                                limit_decision = await _eval_local_limit()
                             if not limit_decision["allowed"]:
                                 if limit_decision["mode"] == "duration":
                                     logger.warning(
@@ -5222,6 +5250,8 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                     "providers": [alias for alias in _fallback_providers_asked if alias],
                     "peers": list(_fallback_peers_asked),
                 }
+            if _limit_exceeded:
+                result_dict["limit_exceeded"] = True
             return result_dict
         finally:
             # Only delete the temp file if we created it (not if the caller passed file_path)
@@ -5556,6 +5586,15 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                             asked = result.get("already_asked") or {}
                             asked_providers.update(asked.get("providers") or [])
                             asked_peers.update(asked.get("peers") or [])
+                            result = None
+                            continue
+                        if isinstance(result, dict) and result.get("limit_exceeded"):
+                            logger.info(
+                                "Skipping %s for %s: %s",
+                                provider_alias,
+                                transfer_id,
+                                result.get("error"),
+                            )
                             result = None
                             continue
                         break  # A result: stop trying providers

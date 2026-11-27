@@ -11,6 +11,7 @@ with `[local_transcription] max_duration_seconds`:
 - Invalid/negative values: warn and fall back safely to legacy behavior without crashing.
 """
 
+import base64
 import configparser
 import struct
 import wave
@@ -468,3 +469,173 @@ class TestVoiceTranscriptionDurationSwitch:
         assert result["status"] == "success"
         assert len(probes) == 1
         assert whisper.asks[0]["expected_s"] == pytest.approx(12.0)
+
+
+# -- 4. Voice legacy fallback & explicit local_whisper provider_alias -----------------------
+
+
+class TestVoiceLegacyAndExplicitProviderDuration:
+    @pytest.mark.asyncio
+    async def test_unset_max_duration_rejects_12mb_voice_in_auto_mode(self, tmp_path):
+        settings = Settings(tmp_path)
+        assert settings.get_local_transcription_max_duration_seconds() is None
+        flac_12mb = _write_fake_flac_with_size(
+            tmp_path / "voice_12mb.flac", size_bytes=12 * 1024 * 1024, duration_s=60.0
+        )
+        whisper = _FakeLocalWhisper("local_whisper")
+        cloud = _FakeCloudProvider("openai")
+        svc, cloud_mock = _voice_service(settings, {"local_whisper": whisper, "openai": cloud})
+
+        with pytest.raises(ValueError, match="Audio too large"):
+            await svc.transcribe_audio(file_path=str(flac_12mb))
+
+        payload_b64 = base64.b64encode(b"\x00" * (12 * 1024 * 1024)).decode("ascii")
+        with pytest.raises(ValueError, match="Audio too large"):
+            await svc.transcribe_audio(audio_base64=payload_b64, mime_type="audio/webm")
+
+        assert whisper.calls == []
+        cloud_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unset_max_duration_rejects_explicit_local_whisper_over_10mb_and_25mb(
+        self, tmp_path, large_3min_wav
+    ):
+        settings = Settings(tmp_path)
+        assert settings.get_local_transcription_max_duration_seconds() is None
+        flac_12mb = _write_fake_flac_with_size(
+            tmp_path / "voice_12mb.flac", size_bytes=12 * 1024 * 1024, duration_s=60.0
+        )
+        whisper = _FakeLocalWhisper("local_whisper")
+        cloud = _FakeCloudProvider("openai")
+        svc, cloud_mock = _voice_service(settings, {"local_whisper": whisper, "openai": cloud})
+
+        for path in (flac_12mb, large_3min_wav):
+            for alias in ("local_whisper", "local:local_whisper"):
+                with pytest.raises(ValueError, match="Audio too large"):
+                    await svc.transcribe_audio(file_path=str(path), provider_alias=alias)
+
+        assert whisper.calls == []
+        cloud_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_explicit_positive_max_duration_allows_15mb_short_recording_on_explicit_local_whisper(
+        self, tmp_path, monkeypatch
+    ):
+        settings = Settings(tmp_path)
+        settings._config.set("local_transcription", "max_duration_seconds", "120")
+        flac_15mb = _write_fake_flac_with_size(
+            tmp_path / "voice_15mb_60s.flac", size_bytes=15 * 1024 * 1024, duration_s=60.0
+        )
+        probes = []
+        monkeypatch.setattr(wp, "audio_seconds", lambda p: probes.append(p) or 60.0)
+        whisper = _FakeLocalWhisper("local_whisper")
+        cloud = _FakeCloudProvider("openai")
+        svc, cloud_mock = _voice_service(settings, {"local_whisper": whisper, "openai": cloud})
+
+        result = await svc.transcribe_audio(
+            file_path=str(flac_15mb), provider_alias="local_whisper"
+        )
+
+        assert result["status"] == "success"
+        assert result["provider"] == "local_whisper"
+        assert whisper.calls == [str(flac_15mb)]
+        assert len(probes) == 1
+        assert whisper.asks[0]["expected_s"] == pytest.approx(6.0)
+        cloud_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_explicit_positive_max_duration_rejects_180s_recording_on_explicit_local_whisper(
+        self, tmp_path, monkeypatch
+    ):
+        settings = Settings(tmp_path)
+        settings._config.set("local_transcription", "max_duration_seconds", "120")
+        flac_15mb = _write_fake_flac_with_size(
+            tmp_path / "voice_15mb_180s.flac", size_bytes=15 * 1024 * 1024, duration_s=180.0
+        )
+        monkeypatch.setattr(wp, "audio_seconds", lambda p: 180.0)
+        whisper = _FakeLocalWhisper("local_whisper")
+        cloud = _FakeCloudProvider("openai")
+        svc, cloud_mock = _voice_service(settings, {"local_whisper": whisper, "openai": cloud})
+
+        for alias in ("local_whisper", "local:local_whisper"):
+            result = await svc.transcribe_audio(
+                file_path=str(flac_15mb), provider_alias=alias
+            )
+            assert result["status"] == "error"
+            assert "180" in result["error"]
+            assert "120" in result["error"]
+            assert "max_duration_seconds" in result["error"]
+
+        assert whisper.calls == []
+        cloud_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_explicit_zero_max_duration_allows_explicit_local_whisper_regardless_of_size_or_duration(
+        self, tmp_path, large_3min_wav, monkeypatch
+    ):
+        settings = Settings(tmp_path)
+        settings._config.set("local_transcription", "max_duration_seconds", "0")
+        probes = []
+        monkeypatch.setattr(wp, "audio_seconds", lambda p: probes.append(p) or 3600.0)
+        whisper = _FakeLocalWhisper("local_whisper")
+        cloud = _FakeCloudProvider("openai")
+        svc, cloud_mock = _voice_service(settings, {"local_whisper": whisper, "openai": cloud})
+
+        result = await svc.transcribe_audio(
+            file_path=str(large_3min_wav), provider_alias="local_whisper"
+        )
+
+        assert result["status"] == "success"
+        assert result["provider"] == "local_whisper"
+        assert whisper.calls == [str(large_3min_wav)]
+        cloud_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_explicit_openai_provider_still_enforces_byte_limit_when_max_duration_set(
+        self, tmp_path
+    ):
+        flac_15mb = _write_fake_flac_with_size(
+            tmp_path / "voice_15mb_60s.flac", size_bytes=15 * 1024 * 1024, duration_s=60.0
+        )
+        for setting in ("120", "0"):
+            settings = Settings(tmp_path / setting)
+            settings._config.set("local_transcription", "max_duration_seconds", setting)
+            whisper = _FakeLocalWhisper("local_whisper")
+            cloud = _FakeCloudProvider("openai")
+            svc, cloud_mock = _voice_service(settings, {"local_whisper": whisper, "openai": cloud})
+
+            result = await svc.transcribe_audio(
+                file_path=str(flac_15mb), provider_alias="openai"
+            )
+
+            assert result["status"] == "error"
+            assert "Audio too large" in result["error"]
+            cloud_mock.assert_not_awaited()
+            assert whisper.calls == []
+
+    @pytest.mark.asyncio
+    async def test_voice_metadata_cascade_falls_back_to_cloud_when_named_local_alias_exceeds_duration(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(wp, "audio_seconds", lambda path: None)
+        webm = tmp_path / "voice.webm"
+        webm.write_bytes(b"\x1aE\xdf\xa3" + b"\x00" * 1024)
+        settings = Settings(tmp_path)
+        settings._config.set("local_transcription", "max_duration_seconds", "120")
+        settings._config.set("voice_transcription", "sender_transcribes", "true")
+        settings._config.set("voice_transcription", "provider_priority", "local_whisper,openai")
+        whisper = _FakeLocalWhisper("local_whisper")
+        cloud = _FakeCloudProvider("openai")
+        svc, cloud_mock = _voice_service(settings, {"local_whisper": whisper, "openai": cloud})
+
+        await svc._maybe_transcribe_voice_message(
+            transfer_id="t-named-long",
+            node_id="dpc-node-" + "b" * 32,
+            file_path=webm,
+            voice_metadata={"mime_type": "audio/webm", "duration_seconds": 180.0},
+            is_sender=True,
+        )
+
+        assert whisper.calls == []
+        cloud_mock.assert_awaited_once()
+        assert svc._voice_transcriptions["t-named-long"]["provider"] == "openai"

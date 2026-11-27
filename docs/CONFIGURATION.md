@@ -960,7 +960,8 @@ An empty default means the key is written blank and the feature stays off until 
 | `language` | `auto` | Language: 'auto' (detect) or ISO 639-1 code (e.g., 'en', 'es') |
 | `task` | `transcribe` | Task: 'transcribe' or 'translate' (to English) |
 | `fallback_to_openai` | `true` | Fallback to OpenAI API if local fails |
-| `max_file_size_mb` | `25` | Max audio file size for local transcription (VRAM limit) |
+| `max_file_size_mb` | `25` | Deprecated legacy fallback when `max_duration_seconds` is empty: max audio file size in MB for local transcription (25 MB is the OpenAI Whisper API upload limit, not a local VRAM limit) |
+| `max_duration_seconds` | *(empty)* | Max audio duration in seconds for local Whisper; empty = legacy byte-size limit (`max_file_size_mb` / `[voice_messages] max_size_mb`), `0` = unlimited, positive seconds = duration cap |
 | `lazy_loading` | `true` | Load model on first use (faster startup) |
 
 #### `[logging]`
