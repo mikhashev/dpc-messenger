@@ -43,6 +43,7 @@ on every change, which writes it to `~/.dpc/state/card_lease.json` for CC and pu
 
 import asyncio
 import collections
+import concurrent.futures
 import contextlib
 import contextvars
 import logging
@@ -85,6 +86,9 @@ PEER_TRIP_S = 120.0
 # go, when the owner's `swap_wait_s` is not longer (Mike, 2026-11-24: anything idle with no queue may be
 # unloaded for a start by hand). A Whisper model goes in about a second, a local LLM engine in its stop.
 BY_HAND_YIELD_S = 30.0
+# How much longer than its own `wait_s` a thread client (`use_blocking`) waits for the owner loop's
+# answer before it gives up on a loop that no longer answers.
+THREAD_ANSWER_MARGIN_S = 10.0
 
 # Every lease, by holder name, granted or not. Registered when built.
 _CARD_LEASES: Dict[str, "CardLease"] = {}
@@ -644,22 +648,61 @@ class CardLease:
         if not kept:
             self._release_now(why)
 
-    def acquire_blocking(self, what: str, **acquire_kw: Any) -> None:
-        """`acquire` for a thread client (L9): waits on the owner loop. On the owner loop's own
-        thread it raises at once instead of deadlocking."""
+    def _owner_loop_for_a_thread(self, called: str) -> asyncio.AbstractEventLoop:
+        """The owner loop a thread client waits on, or RuntimeError: none runs, or this is its own
+        thread, which the wait would block (L9)."""
         owner = _sup._OWNER_LOOP
         if owner is None or owner.is_closed() or not owner.is_running():
-            raise RuntimeError("card: acquire_blocking needs the owner loop running (bind_owner_loop)")
+            raise RuntimeError(f"card: {called} needs the owner loop running (bind_owner_loop)")
         try:
             here: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
         except RuntimeError:
             here = None
         if here is owner:
             raise RuntimeError(
-                f"card: {self.display} called acquire_blocking on the owner loop, which it would block "
-                "while it waits there; await acquire() instead"
+                f"card: {self.display} called {called} on the owner loop, which it would block "
+                "while it waits there; await the async form instead"
             )
+        return owner
+
+    def acquire_blocking(self, what: str, **acquire_kw: Any) -> None:
+        """`acquire` for a thread client (L9): waits on the owner loop. On the owner loop's own
+        thread it raises at once instead of deadlocking."""
+        owner = self._owner_loop_for_a_thread("acquire_blocking")
         asyncio.run_coroutine_threadsafe(self.acquire(what, **acquire_kw), owner).result()
+
+    @contextlib.contextmanager
+    def use_blocking(self, what: str, **acquire_kw: Any):
+        """`use` for a thread client (L9; section 3.4, the embedder and GLiNER): the use is opened on
+        the owner loop while this thread waits, and closed there however the body ends. Raises
+        RuntimeError at once when no owner loop runs or on its own thread, as `acquire_blocking`.
+
+        The thread's wait for the answer is bounded when the line's is: `wait_s` plus
+        `THREAD_ANSWER_MARGIN_S`, so an owner loop that stops answering (the backend going down) does
+        not leave the thread waiting for good (Zcode #54, known debt 4). Past it the request is
+        cancelled on the owner loop, anything opened for it is closed, and `LeaseWaitedTooLong` is
+        raised."""
+        owner = self._owner_loop_for_a_thread("use_blocking")
+        ticket = _Ticket()
+        future = asyncio.run_coroutine_threadsafe(self._open_a_use(what, ticket, **acquire_kw), owner)
+        wait_s = acquire_kw.get("wait_s")
+        timeout = None if wait_s is None else max(0.0, float(wait_s)) + THREAD_ANSWER_MARGIN_S
+        try:
+            future.result(timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            _on_the_owner_loop_now(self._close_ticket_now, ticket)
+            raise LeaseWaitedTooLong(
+                f"{self.display} ({what}): the card's owner loop gave no answer within {timeout:g} s",
+                wait=None,
+            ) from None
+        except BaseException:
+            _on_the_owner_loop_now(self._close_ticket_now, ticket)
+            raise
+        try:
+            yield
+        finally:
+            _on_the_owner_loop_now(self._close_ticket_now, ticket)
 
     def rebind(self, on_yield: Callable[[str], Awaitable[YieldOutcome]]) -> None:
         """A new client object takes over the same standing (Whisper's providers-reload hand-over):
@@ -699,6 +742,22 @@ class CardLease:
 def lease_named(holder: str) -> Optional[CardLease]:
     """The lease registered under `holder`, or None."""
     return _CARD_LEASES.get(holder)
+
+
+def an_owner_waits_for_the_card(lease: Optional[CardLease] = None) -> bool:
+    """Whether an owner's request stands in either line now: a place in the card queue (every place
+    there is an owner's) or a lease waiter that is not a peer's and not `lease`'s own. Synchronous and
+    read-only, and safe from any thread (it reads copies of the two lists; a reading a moment old is
+    the most it can be off by).
+
+    For a holder that keeps a use open through bulk work (the embedder's index pass, GLiNER's entity
+    pass, section 3.4): a busy holder is never asked to let go (L6), so it reads this between its
+    batches and lets go of its own accord. A peer's waiter does not count: the owner's own work does
+    not give way to a guest (ADR-044 point 3)."""
+    if list(_sup._CARD_QUEUE):
+        return True
+    return any(not waiter.granted and waiter.out is None and not waiter.for_a_peer
+               and waiter.lease is not lease for waiter in list(_LEASE_LINE))
 
 
 def holders_in_the_way(lease: CardLease) -> List[Dict[str, Any]]:
