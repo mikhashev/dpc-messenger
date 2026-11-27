@@ -361,7 +361,7 @@ def test_the_files_are_written_beside_the_job_and_replaced_whole(tmp_path):
     doc = build(track_id="trk_one")
     folder = tmp_path / "generated" / A
     out = lineage.write_lineage_files(doc, folder)
-    assert json.loads((folder / "lineage.json").read_text(encoding="utf-8")) == doc
+    assert json.loads((folder / "lineage.json").read_text(encoding="utf-8")) == lineage.redact_lineage_for_export(doc)
     assert (folder / "lineage.html").read_text(encoding="utf-8").startswith("<!doctype html>")
     assert out == {"json": str(folder / "lineage.json"), "html": str(folder / "lineage.html")}
     lineage.write_lineage_files(doc, folder)                         # again: replaced, no temp files left
@@ -659,3 +659,154 @@ def test_shareable_lineage_html_keeps_shape_only_lyrics_and_omits_private_chat_a
         "Private personal request message",
     ):
         assert forbidden not in page
+
+
+def test_write_lineage_files_redacts_lineage_json_like_html_without_mutating_live_doc(tmp_path):
+    """CC #51: on-disk lineage.json beside lineage.html must redact the same private fields as
+    lineage.html (no lyrics_text, conversation_id/name, turn_id, message_id, or request.text),
+    while keeping shape-only lyrics, safe provenance, and the caller's live doc unmutated."""
+    home = tmp_path / "dpc_home"
+    agent_id = "agent_studio_01"
+    conv_id = "group-f1e2d3c4b5a6"
+    (home / "agents" / agent_id).mkdir(parents=True)
+    (home / "agents" / agent_id / "config.json").write_text(
+        json.dumps({"agent_id": agent_id, "name": "StudioBot"}), encoding="utf-8"
+    )
+    (home / "conversations" / conv_id).mkdir(parents=True)
+    (home / "conversations" / conv_id / "metadata.json").write_text(
+        json.dumps({"group_id": conv_id, "name": "Private Group Title"}), encoding="utf-8"
+    )
+
+    J = "job_" + "6" * 16
+    T = "tak_" + "6" * 16
+    lyrics_body = "[verse]\nSecret private stanza one\nSecret private stanza two\n"
+    j = job(
+        J,
+        takes=[T],
+        params={
+            "lyrics": lyrics_body,
+            "style": "acoustic folk",
+            "variants": 1,
+            "duration_s": 120,
+            "seed": None,
+            "engine": "yue2",
+            "adapters": [{"name": "voice-demo-bass", "music": 0.45, "sound": 0.35}],
+        },
+    )
+    j["requested_by"] = {
+        "kind": "agent",
+        "agent_id": agent_id,
+        "conversation_id": conv_id,
+        "turn_id": "turn-secret-99",
+    }
+    j["request"] = {
+        "message_id": "msg-secret-77",
+        "title": "Acoustic Demo",
+        "text": "Private personal request message that must stay local",
+        "asked": {"duration_s": 90},
+        "changes": ["duration_s: 90 -> 120"],
+    }
+    t = take(T, J, 1, lib="trk_priv")
+    t["seed"] = 3555429983
+
+    doc = lineage.build_lineage([j], [t], job_id=J, dpc_home_dir=home)
+    snapshot = copy.deepcopy(doc)
+    out = lineage.write_lineage_files(doc, tmp_path / "out")
+
+    # Caller's in-memory live doc is untouched
+    assert doc == snapshot
+    assert doc["nodes"][0]["params"]["lyrics_text"] == lyrics_body
+
+    raw_json = (tmp_path / "out" / "lineage.json").read_text(encoding="utf-8")
+    exported = json.loads(raw_json)
+    assert out["json"].endswith("lineage.json")
+    lineage.validate_lineage(exported)
+
+    for forbidden in (
+        "Secret private stanza",
+        conv_id,
+        "Private Group Title",
+        "turn-secret-99",
+        "msg-secret-77",
+        "Private personal request message",
+    ):
+        assert forbidden not in raw_json
+
+    exp_intent = {n["id"]: n for n in exported["nodes"]}[f"intent:{J}"]
+    assert exp_intent["params"]["lyrics"] == {"instrumental": False, "lines": 2}
+    assert "lyrics_text" not in exp_intent["params"]
+    assert exp_intent["params"]["seed"] == "random (3555429983 on v1)"
+    assert exp_intent["requested_by"] == {
+        "kind": "agent",
+        "agent_id": agent_id,
+        "agent_name": "StudioBot",
+        "label": "asked by StudioBot",
+    }
+    assert exp_intent["request"] == {
+        "title": "Acoustic Demo",
+        "asked": {"duration_s": 90},
+        "changes": ["duration_s: 90 -> 120"],
+    }
+
+    exp_job = {x["id"]: x for x in exported["jobs"]}[J]
+    assert exp_job["requested_by"] == exp_intent["requested_by"]
+    assert exp_job["request"] == exp_intent["request"]
+
+
+@pytest.mark.asyncio
+async def test_music_commands_pass_dpc_home_dir_to_build_lineage_and_redact_written_json(tmp_path):
+    """CC #51: MusicCommandsMixin._music_lineage passes dpc_home_dir so requested_by resolves
+    from settings.dpc_home_dir, live API keeps full fields, and written lineage.json is redacted."""
+    home = tmp_path / "dpc_home"
+    agent_id = "agent_studio_02"
+    conv_id = "group-001122334455"
+    (home / "agents" / agent_id).mkdir(parents=True)
+    (home / "agents" / agent_id / "config.json").write_text(
+        json.dumps({"agent_id": agent_id, "name": "MixerBot"}), encoding="utf-8"
+    )
+    (home / "conversations" / conv_id).mkdir(parents=True)
+    (home / "conversations" / conv_id / "metadata.json").write_text(
+        json.dumps({"group_id": conv_id, "name": "Studio Room"}), encoding="utf-8"
+    )
+
+    J = "job_" + "7" * 16
+    T = "tak_" + "7" * 16
+    j = job(J, takes=[T], params={"lyrics": "[verse]\nPrivate lyric line\n", "style": "lo-fi", "engine": "yue2"})
+    j["requested_by"] = {
+        "kind": "agent",
+        "agent_id": agent_id,
+        "conversation_id": conv_id,
+        "turn_id": "turn-88",
+    }
+    j["request"] = {
+        "message_id": "msg-88",
+        "title": "Lo-Fi Sketch",
+        "text": "Private chat prompt text",
+    }
+    t = take(T, J, 1, lib="trk_one")
+
+    service = _Service(home)
+    service._music_jobs_instance.jobs = [j]
+    service._music_jobs_instance.takes = [t]
+
+    live = await service.get_music_lineage(job_id=J)
+    assert live["status"] == "ok"
+    live_intent = {n["id"]: n for n in live["lineage"]["nodes"]}[f"intent:{J}"]
+    assert live_intent["requested_by"]["agent_name"] == "MixerBot"
+    assert live_intent["requested_by"]["conversation_name"] == "Studio Room"
+    assert live_intent["requested_by"]["label"] == "asked by MixerBot in Studio Room"
+    assert live_intent["params"]["lyrics_text"] == "[verse]\nPrivate lyric line\n"
+    assert live_intent["request"]["text"] == "Private chat prompt text"
+
+    written = await service.write_music_lineage_files(job_id=J)
+    assert written["status"] == "ok"
+    # Live response returned to UI still has full fields
+    written_live_intent = {n["id"]: n for n in written["lineage"]["nodes"]}[f"intent:{J}"]
+    assert written_live_intent["params"]["lyrics_text"] == "[verse]\nPrivate lyric line\n"
+    assert written_live_intent["requested_by"]["label"] == "asked by MixerBot in Studio Room"
+
+    # On-disk lineage.json is redacted
+    from pathlib import Path
+    disk_json = Path(written["files"]["json"]).read_text(encoding="utf-8")
+    for forbidden in ("Private lyric line", conv_id, "Studio Room", "turn-88", "msg-88", "Private chat prompt text"):
+        assert forbidden not in disk_json

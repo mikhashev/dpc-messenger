@@ -1632,7 +1632,14 @@ class MusicCommandsMixin:
         def build() -> Dict[str, Any]:
             jobs = store.list_jobs()
             takes = [t for j in jobs for t in store.list_takes(j["id"])]
-            return build_lineage(jobs, takes, track_id=tid, job_id=jid, entry_of=entry_of)
+            return build_lineage(
+                jobs,
+                takes,
+                track_id=tid,
+                job_id=jid,
+                entry_of=entry_of,
+                dpc_home_dir=self.settings.dpc_home_dir,
+            )
         try:
             doc = await asyncio.to_thread(build)
         except LineageError as exc:

@@ -1131,15 +1131,74 @@ body{{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.4 s
 """
 
 
+def _redact_requested_by(rb: Any) -> Any:
+    """Return a shareable copy of `requested_by`, stripping private chat ids, names, and turn ids."""
+    if not isinstance(rb, Mapping):
+        return rb
+    out = copy.deepcopy(dict(rb))
+    for key in ("conversation_id", "conversation_name", "turn_id"):
+        out.pop(key, None)
+    if out.get("kind") == "agent":
+        out["label"] = _safe_requester_label(out)
+    return out
+
+
+def _redact_request(req: Any) -> Optional[Dict[str, Any]]:
+    """Return a shareable copy of `request` without `message_id` or `text`, or None if empty."""
+    if not isinstance(req, Mapping):
+        return None
+    out = copy.deepcopy(dict(req))
+    for key in ("message_id", "text"):
+        out.pop(key, None)
+    return out or None
+
+
+def redact_lineage_for_export(doc: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return a deep copy of `doc` safe for on-disk `lineage.json` export alongside `lineage.html`:
+    removes `params.lyrics_text`, `requested_by.conversation_id` / `conversation_name` / `turn_id`
+    (and removes the conversation suffix from agent `requested_by.label`), and `request.message_id` /
+    `request.text`, while keeping shape-only lyrics and non-sensitive provenance fields."""
+    out = copy.deepcopy(dict(doc))
+    for node in out.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        params = node.get("params")
+        if isinstance(params, dict):
+            params.pop("lyrics_text", None)
+        if "requested_by" in node:
+            node["requested_by"] = _redact_requested_by(node["requested_by"])
+        if "request" in node:
+            redacted_req = _redact_request(node["request"])
+            if redacted_req is None:
+                node.pop("request", None)
+            else:
+                node["request"] = redacted_req
+    for job in out.get("jobs") or []:
+        if not isinstance(job, dict):
+            continue
+        if "requested_by" in job:
+            job["requested_by"] = _redact_requested_by(job["requested_by"])
+        if "request" in job:
+            redacted_req = _redact_request(job["request"])
+            if redacted_req is None:
+                job.pop("request", None)
+            else:
+                job["request"] = redacted_req
+    return out
+
+
 def write_lineage_files(doc: Mapping[str, Any], folder: Path) -> Dict[str, str]:
-    """Write `lineage.json` and `lineage.html` for `doc` into `folder` (created if missing), each in one
-    step (temp file, then replace). Answers `{json, html}` paths. `OSError` is the caller's."""
+    """Write shareable `lineage.json` and `lineage.html` for `doc` into `folder` (created if missing),
+    each in one step (temp file, then replace). Both files redact private fields (`lyrics_text`,
+    `conversation_id`, `conversation_name`, `turn_id`, `message_id`, `request.text`) without mutating
+    `doc`. Answers `{json, html}` paths. `OSError` is the caller's."""
     validate_lineage(doc)
+    exported = redact_lineage_for_export(doc)
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     out = {}
-    for name, text in ((LINEAGE_JSON, json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=False) + "\n"),
-                       (LINEAGE_HTML, render_html(doc))):
+    for name, text in ((LINEAGE_JSON, json.dumps(exported, ensure_ascii=False, indent=2, sort_keys=False) + "\n"),
+                       (LINEAGE_HTML, render_html(exported))):
         target = folder / name
         tmp = folder / f".{name}.tmp"
         tmp.write_bytes(text.encode("utf-8"))
