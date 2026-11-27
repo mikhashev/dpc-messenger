@@ -51,6 +51,24 @@ def _words_from_timed_text(pairs: list[tuple[str, float, float]]) -> list[dict]:
     return [{"word": w, "start": s, "end": e} for w, s, e in pairs]
 
 
+def _make_realistic_fake_flac(min_duration_s: float = 20.0):
+    """Fake FLAC converter keeping WAV PCM MD5 while reporting realistic song duration in STREAMINFO."""
+    import struct
+    from dpc_client_core.music.runner import pcm_md5_and_sha256, read_wav_info
+
+    def _convert(wav: Path, flac: Path, tags) -> None:
+        info = read_wav_info(wav)
+        md5, _ = pcm_md5_and_sha256(wav, info)
+        frame = info.channels * ((info.bits + 7) // 8)
+        total = max(info.data_size // frame, int(round(min_duration_s * info.sample_rate)))
+        packed = (info.sample_rate << 44) | ((info.channels - 1) << 41) | ((info.bits - 1) << 36) | total
+        si = struct.pack(">HH", 4096, 4096) + (0).to_bytes(3, "big") * 2 + packed.to_bytes(8, "big") + bytes.fromhex(md5)
+        flac.write_bytes(b"fLaC" + bytes([0x80]) + len(si).to_bytes(3, "big") + si)
+        fake_flac.calls.append(dict(tags))
+
+    return _convert
+
+
 class _FakeFfmpegExport:
     def __call__(self, cmd, *, timeout):
         cmd = list(cmd)
@@ -548,7 +566,7 @@ async def test_generated_take_auto_aligns_when_enabled_and_degrades_gracefully(t
     cmd_svc = _CmdSvc(home)
 
     # 3a. ACE-Step vocal take: job enters review immediately; auto-align finishes in background with .lrc + SYNCEDLYRICS
-    async with Rig(home) as rig:
+    async with Rig(home, converter=_make_realistic_fake_flac(20.0)) as rig:
         rig.runner._auto_align = cmd_svc._music_auto_align_take
         job = rig.store.create_job("generate_from_text", {
             "style": "indie rock", "lyrics": vocal_lyrics, "variants": 1, "duration_s": 20, "seed": 42, "engine": "acestep",
@@ -616,6 +634,7 @@ async def test_generated_take_auto_aligns_when_enabled_and_degrades_gracefully(t
     Settings(home2)
     cmd_svc2 = _CmdSvc(home2)
     async with DualRig(home2) as drig:
+        drig.runner._convert = _make_realistic_fake_flac(20.0)
         cmd_svc2._music_library_instance = drig.library
         async def _lib2():
             return drig.library
@@ -1036,7 +1055,7 @@ async def test_cc59_auto_align_nonblocking_skips_queued_and_never_evicts_warm_en
             return self._lib
 
     svc = _Svc()
-    async with Rig(home) as rig:
+    async with Rig(home, converter=_make_realistic_fake_flac(20.0)) as rig:
         svc._lib = rig.library
         svc._music_runner_instance = rig.runner
         rig.runner._auto_align = svc._music_auto_align_take
@@ -1143,6 +1162,7 @@ async def test_cc59_yue2_song_job_auto_aligns_and_embeds_syncedlyrics(tmp_path, 
             return self._lib
 
     async with DualRig(home) as drig:
+        drig.runner._convert = _make_realistic_fake_flac(20.0)
         svc = _Svc(drig.library)
         svc._music_runner_instance = drig.runner
         drig.runner._auto_align = svc._music_auto_align_take
@@ -1192,3 +1212,455 @@ async def test_cc59_yue2_song_job_auto_aligns_and_embeds_syncedlyrics(tmp_path, 
         tags = at.flac_read_comments(flac_path, max_block_bytes=1 << 20)
         assert "SYNCEDLYRICS" in tags
         assert parse_lrc(tags["SYNCEDLYRICS"]).lines[1]["t_start"] == pytest.approx(1.5)
+
+
+# -- 5. CC #87 Fixes: Important #1 + 5 Nits ---------------------------------------------------
+
+
+def _make_fake_gpu_whisper(monkeypatch, *, alias: str = "wg"):
+    from dpc_client_core.providers import model_sizes
+    from dpc_client_core.providers.whisper_provider import LocalWhisperProvider
+
+    monkeypatch.setattr(model_sizes, "is_model_cached", lambda _model: True)
+    p = LocalWhisperProvider(
+        alias,
+        {
+            "type": "local_whisper",
+            "model": "openai/whisper-large-v3-turbo",
+            "device": "cuda",
+            "idle_unload_s": 0,
+        },
+    )
+    p.loads = 0
+    p.unloads = 0
+    p.ran = []
+
+    def load():
+        p.loads += 1
+        p.pipeline = object()
+        p.model_loaded = True
+        p._note_load("cuda", 0.05)
+
+    def unload():
+        p.unloads += 1
+        p.pipeline = None
+        p.model_loaded = False
+        return True
+
+    async def run(path, **_kw):
+        p.ran.append(Path(path).name)
+        return {
+            "text": "Hello brave morning Sing across the night",
+            "language": "en",
+            "duration": 20.0,
+            "provider": "local_whisper",
+            "words": _words_from_timed_text([
+                ("Hello", 1.5, 1.8), ("brave", 1.85, 2.2), ("morning", 2.25, 2.7),
+                ("Sing", 5.0, 5.3), ("across", 5.35, 5.7), ("the", 5.75, 5.9), ("night", 5.95, 6.5),
+            ]),
+        }
+
+    monkeypatch.setattr(p, "_load_model", load)
+    monkeypatch.setattr(p, "_unload_model", unload)
+    monkeypatch.setattr(p, "_transcribe_loaded", run)
+    return p
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine_name", ["acestep", "yue2"])
+async def test_cc87_important1_auto_align_runs_with_real_card_lease_after_warm_engine_idle_stop(
+    tmp_path, monkeypatch, engine_name,
+):
+    from dpc_client_core.managers import card_lease
+    from dpc_client_core.music import audio_tags as at
+
+    home = tmp_path / f"dpc_{engine_name}"
+    if engine_name == "acestep":
+        free_env(monkeypatch)
+        install_fake_engine(home)
+        rig_ctx = Rig(home, converter=_make_realistic_fake_flac(20.0), engine_settings={"acestep_idle_stop_s": "0.2"})
+    else:
+        yue2_env(monkeypatch)
+        install_both(home)
+        rig_ctx = DualRig(home, yue2_settings={"yue2_idle_stop_s": "0.2"})
+
+    Settings(home)
+    whisper = _make_fake_gpu_whisper(monkeypatch)
+    vocal_lyrics = "[verse]\nHello brave morning\nSing across the night\n"
+
+    class _Svc(MusicCommandsMixin):
+        def __init__(self, lib):
+            self.settings = Settings(home)
+            self.llm_manager = SimpleNamespace(providers={"wg": whisper}, voice_provider="wg")
+            self._lib = lib
+
+        async def _music(self):
+            return self._lib
+
+    async with rig_ctx as rig:
+        if engine_name == "yue2":
+            rig.runner._convert = _make_realistic_fake_flac(20.0)
+        engine = rig.engine if engine_name == "acestep" else rig.yue2
+        svc = _Svc(rig.library)
+        svc._music_runner_instance = rig.runner
+        rig.runner._auto_align = svc._music_auto_align_take
+
+        yield_calls = []
+        orig_yield = engine._yield_card
+
+        async def spy_yield(why):
+            yield_calls.append(why)
+            return await orig_yield(why)
+
+        engine.card_lease._on_yield = spy_yield
+
+        params = {
+            "style": "indie rock",
+            "lyrics": vocal_lyrics,
+            "variants": 1,
+            "duration_s": 30 if engine_name == "yue2" else 20,
+            "seed": 42,
+            "engine": engine_name,
+        }
+        j1 = rig.store.create_job("generate_from_text", params)
+        rig.runner.wake()
+        d1 = await asyncio.wait_for(rig.wait_for(j1["id"], ("review",)), timeout=15.0)
+        assert d1["state"] == "review"
+        assert engine.alive() and engine.card_lease.granted
+        assert yield_calls == []
+        pid_1 = engine._proc.pid
+
+        # A second job while the engine is still warm reuses the same warm child without eviction.
+        j2 = rig.store.create_job("generate_from_text", {**params, "seed": 43})
+        rig.runner.wake()
+        d2 = await asyncio.wait_for(rig.wait_for(j2["id"], ("review",)), timeout=15.0)
+        assert d2["state"] == "review"
+        assert engine.alive() and engine._proc.pid == pid_1
+        assert yield_calls == []
+
+        # Once the warm engine idle-stops and frees the real CardLease, GPU Whisper auto-aligns both takes.
+        await rig.runner.wait_auto_align(timeout_s=10.0)
+        assert not engine.alive()
+        assert (engine._last_exit or {}).get("why") == "idle_unload"
+        assert yield_calls == []
+        assert whisper.loads >= 1
+        assert whisper.unloads == whisper.loads
+        assert len(whisper.ran) == 2
+
+        for jid in (j1["id"], j2["id"]):
+            take = rig.store.list_takes(jid)[0]
+            tid = take["library_track_id"]
+            flac_path = rig.library.get_track_path(tid)
+            assert flac_path is not None and flac_path.with_suffix(".lrc").is_file()
+            got = await (await svc._music_lyrics()).get(tid)
+            assert got["lyrics"]["source"] == "aligned"
+            assert got["lyrics"]["lines"][1]["t_start"] == pytest.approx(1.5)
+            tags = at.flac_read_comments(flac_path, max_block_bytes=1 << 20)
+            assert "SYNCEDLYRICS" in tags
+
+        snap = card_lease.queue_snapshot()
+        assert snap["free"] is True and snap["waiters"] == []
+
+
+@pytest.mark.asyncio
+async def test_cc87_important1_auto_align_stays_out_of_way_while_card_busy_or_waited(tmp_path, monkeypatch):
+    from dpc_client_core.managers import card_lease
+    from tests._card_lease_helpers import BOUND, hold_open, whisper as lease_whisper
+
+    free_env(monkeypatch)
+    home = tmp_path / "dpc"
+    install_fake_engine(home)
+    Settings(home)
+    gpu_w = _make_fake_gpu_whisper(monkeypatch)
+    vocal_lyrics = "[verse]\nHello brave morning\nSing across the night\n"
+
+    class _Svc(MusicCommandsMixin):
+        def __init__(self, lib):
+            self.settings = Settings(home)
+            self.llm_manager = SimpleNamespace(providers={"wg": gpu_w}, voice_provider="wg")
+            self._lib = lib
+
+        async def _music(self):
+            return self._lib
+
+    async with Rig(home, converter=_make_realistic_fake_flac(20.0), engine_settings={"acestep_idle_stop_s": "0.15"}) as rig:
+        svc = _Svc(rig.library)
+        svc._music_runner_instance = rig.runner
+
+        # 1. While engine is actively busy in_use() (uses > 0), auto-align skips and does not run/evict.
+        async with rig.engine.in_use("active music job", wait_s=BOUND):
+            await rig.engine.start()
+            assert rig.engine.card_lease._uses
+            dummy_flac = tmp_path / "dummy.flac"
+            dummy_flac.write_bytes(b"fake")
+            await svc._music_auto_align_take(
+                track_id="trk_0000000000000001",
+                path=dummy_flac,
+                lyrics=vocal_lyrics,
+                duration_s=20.0,
+            )
+            assert gpu_w.ran == []
+            assert rig.engine.alive() and rig.engine.card_lease.granted
+
+        await rig.engine.stop("ui_stop")
+        assert card_lease.queue_snapshot()["free"] is True
+
+        # 2. While another CardLease client holds an active use, auto-align stays out of the way.
+        other = lease_whisper("other")
+        release = asyncio.Event()
+        holder = asyncio.create_task(hold_open(other.lease, "dictation", release))
+        while not other.lease.granted:
+            await asyncio.sleep(0.01)
+        try:
+            await svc._music_auto_align_take(
+                track_id="trk_0000000000000001",
+                path=tmp_path / "dummy.flac",
+                lyrics=vocal_lyrics,
+                duration_s=20.0,
+            )
+            assert gpu_w.ran == []
+            assert other.yields == []
+        finally:
+            release.set()
+            await asyncio.wait_for(holder, BOUND)
+            other.lease.release("test")
+
+
+@pytest.mark.asyncio
+async def test_cc87_nit1_background_align_does_not_retry_internal_typeerror(tmp_path):
+    store = MusicJobStore(tmp_path)
+    store.open()
+    lib = MusicLibrary(tmp_path, tools=MediaTools(ffmpeg=None, ffprobe=None), save_delay_s=0.01)
+    runner = MusicJobRunner(store, [], lambda: asyncio.sleep(0, result=lib), dpc_home=tmp_path)
+
+    calls_with_bug = []
+
+    async def broken_align(*, track_id, path, lyrics, duration_s=None, replay=None, job_id=None):
+        calls_with_bug.append((track_id, job_id))
+        raise TypeError("internal type error inside aligner")
+
+    item = {"track_id": "trk_a1b2c3d4e5f60001", "path": tmp_path / "a.flac", "lyrics": "hi", "duration_s": 10.0, "replay": None}
+    runner._auto_align = broken_align
+    await runner._run_background_align("job_1", [item])
+    assert calls_with_bug == [("trk_a1b2c3d4e5f60001", "job_1")]
+
+    calls_no_job_id = []
+
+    async def legacy_align(*, track_id, path, lyrics, duration_s=None, replay=None):
+        calls_no_job_id.append(track_id)
+
+    runner._auto_align = legacy_align
+    await runner._run_background_align("job_2", [item])
+    assert calls_no_job_id == ["trk_a1b2c3d4e5f60001"]
+
+    calls_kwargs = []
+
+    async def kwargs_align(**kw):
+        calls_kwargs.append(kw.get("job_id"))
+
+    runner._auto_align = kwargs_align
+    await runner._run_background_align("job_3", [item])
+    assert calls_kwargs == ["job_3"]
+
+
+@pytest.mark.asyncio
+async def test_cc87_nit2_pending_align_cleared_on_failed_or_cancelled_job(tmp_path, monkeypatch):
+    free_env(monkeypatch)
+    home = tmp_path / "dpc"
+    install_fake_engine(home)
+    Settings(home)
+
+    async def noop_align(**_kw):
+        return None
+
+    async with Rig(home, converter=_make_realistic_fake_flac(20.0)) as rig:
+        rig.runner._auto_align = noop_align
+
+        # 1. Unexpected exception in _complete_generation after variant 1 populated _pending_align
+        async def boom_complete(_jid):
+            raise RuntimeError("unexpected failure after store_take")
+
+        monkeypatch.setattr(rig.runner, "_complete_generation", boom_complete)
+        j1 = rig.store.create_job("generate_from_text", {
+            "style": "indie rock", "lyrics": "[verse]\nHello brave morning\n", "variants": 1,
+            "duration_s": 20, "seed": 42, "engine": "acestep",
+        })
+        rig.runner.wake()
+        d1 = await rig.wait_for(j1["id"], ("failed",))
+        assert d1["state"] == "failed"
+        assert j1["id"] not in rig.runner._pending_align
+        assert rig.runner._pending_align == {}
+
+        # 2. asyncio.CancelledError raised inside run_job after variant 1 populated _pending_align
+        await rig.runner.stop()
+
+        async def cancel_complete(_jid):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(rig.runner, "_complete_generation", cancel_complete)
+        j2 = rig.store.create_job("generate_from_text", {
+            "style": "indie rock", "lyrics": "[verse]\nHello brave morning\n", "variants": 1,
+            "duration_s": 20, "seed": 43, "engine": "acestep",
+        })
+        with pytest.raises(asyncio.CancelledError):
+            await rig.runner.run_job(j2["id"])
+        assert j2["id"] not in rig.runner._pending_align
+        assert rig.runner._pending_align == {}
+
+
+def test_cc87_nit3_bg_align_lock_recreated_on_runner_restart_across_event_loops(tmp_path):
+    store = MusicJobStore(tmp_path)
+    store.open()
+    lib = MusicLibrary(tmp_path, tools=MediaTools(ffmpeg=None, ffprobe=None), save_delay_s=0.01)
+
+    async def slow_align(**_kw):
+        await asyncio.sleep(0.02)
+
+    runner = MusicJobRunner(store, [], lambda: asyncio.sleep(0, result=lib), dpc_home=tmp_path, auto_align=slow_align)
+    item = {"track_id": "trk_a1b2c3d4e5f60001", "path": tmp_path / "a.flac", "lyrics": "hi", "duration_s": 10.0, "replay": None}
+
+    async def run_phase():
+        runner.start()
+        try:
+            await asyncio.gather(
+                runner._run_background_align("job_a", [item]),
+                runner._run_background_align("job_b", [item]),
+            )
+            return runner._bg_align_lock
+        finally:
+            await runner.stop()
+
+    loop1 = asyncio.new_event_loop()
+    try:
+        lock1 = loop1.run_until_complete(run_phase())
+    finally:
+        loop1.close()
+
+    loop2 = asyncio.new_event_loop()
+    try:
+        lock2 = loop2.run_until_complete(run_phase())
+    finally:
+        loop2.close()
+
+    assert lock1 is not None and lock2 is not None
+    assert lock2 is not lock1
+
+
+@pytest.mark.asyncio
+async def test_cc87_nit4_lyrics_align_respects_real_short_track_duration(tmp_path):
+    dpc_home = tmp_path / "dpc"
+    music_dir = tmp_path / "Music"
+    music_dir.mkdir(parents=True)
+    short_flac = music_dir / "Artist - Short Clip.flac"
+    wav = make_wav(tmp_path / "short.wav", seconds=0.3)
+    fake_flac(wav, short_flac, {})
+
+    lib = MusicLibrary(dpc_home, tools=MediaTools(ffmpeg=None, ffprobe=None), save_delay_s=0.01)
+    await lib.open()
+    try:
+        folder = await lib.add_folder(str(music_dir), watch=False, scan=False)
+        await lib.rescan_folder(folder["id"])
+        await lib.wait_hashed()
+        [entry] = lib.list_entries()
+
+        async def short_whisper(_path):
+            return {
+                "text": "Alpha Beta",
+                "language": "en",
+                "duration": 5.0,
+                "words": _words_from_timed_text([
+                    ("Alpha", 0.1, 0.2),
+                    ("Beta", 2.0, 2.4),
+                ]),
+            }
+
+        lyr = MusicLyrics(
+            dpc_home,
+            lib,
+            lrclib_enabled=lambda: False,
+            tools=MediaTools(ffmpeg=None, ffprobe=None),
+            transcriber=short_whisper,
+        )
+        res = await lyr.align(entry["id"], lyrics_text="Alpha\nBeta\n")
+        assert res["applied"] is True
+        assert all(ln["t_start"] <= 0.3 for ln in res["lyrics"]["lines"])
+    finally:
+        await lib.stop()
+
+
+@pytest.mark.asyncio
+async def test_cc87_nit5_manual_align_finds_local_whisper_regardless_of_voice_provider(tmp_path):
+    flac = tmp_path / "Music" / "Voice Provider Fallback.flac"
+    flac.parent.mkdir(parents=True, exist_ok=True)
+    wav = make_wav(tmp_path / "src.wav", seconds=1.0)
+    fake_flac(wav, flac, {})
+    lib = _TrackLib(flac)
+
+    remote_calls = []
+
+    async def remote_transcribe(**kw):
+        remote_calls.append(kw)
+        return {"status": "success", "text": "Hello world today", "provider": "remote"}
+
+    local_calls = []
+
+    class _LocalW:
+        alias = "w"
+        config = {"type": "local_whisper"}
+        model_name = "openai/whisper-large-v3-turbo"
+        model_loaded = True
+
+        async def transcribe(self, path, **kw):
+            local_calls.append(Path(path).name)
+            return {
+                "text": "Hello world today Sing it loud",
+                "language": "en",
+                "duration": 20.0,
+                "provider": "local_whisper",
+                "words": _words_from_timed_text([
+                    ("Hello", 1.0, 1.3), ("world", 1.4, 1.7), ("today", 1.8, 2.2),
+                    ("Sing", 5.0, 5.3), ("it", 5.4, 5.6), ("loud", 5.7, 6.1),
+                ]),
+            }
+
+    class _AlignSvc(MusicCommandsMixin):
+        def __init__(self, providers, voice_provider):
+            self.settings = SimpleNamespace(
+                dpc_home_dir=tmp_path / "dpc",
+                get=lambda s, k, f=None: f,
+                get_local_transcription_enabled=lambda: True,
+                get_local_transcription_max_file_size_mb=lambda: 25,
+                get_local_transcription_max_duration_seconds=lambda: None,
+            )
+            self.llm_manager = SimpleNamespace(providers=providers, voice_provider=voice_provider)
+            self.transcribe_audio = remote_transcribe
+            self._lib = lib
+
+        async def _music(self):
+            return self._lib
+
+    from dpc_client_core.music.lyrics import make_lyrics, plain_lines
+
+    for vp, providers in (
+        ("remote:peer1/whisper", {"w": _LocalW()}),
+        ("oa", {"oa": SimpleNamespace(alias="oa", config={"type": "openai"}), "w": _LocalW()}),
+    ):
+        local_calls.clear()
+        svc = _AlignSvc(providers=providers, voice_provider=vp)
+        lyr = await svc._music_lyrics()
+        lyr._tools = MediaTools(ffmpeg=None, ffprobe=None)
+        await lyr._store(lib.entry["id"], make_lyrics(lib.entry["source_hash"], "tags", plain_lines("Hello world today\nSing it loud"), synced=False))
+        ans = await svc.align_music_lyrics(track_id=lib.entry["id"])
+        assert ans["status"] == "ok", (vp, ans)
+        assert ans["lyrics"]["source"] == "aligned"
+        assert local_calls == ["Voice Provider Fallback.flac"]
+        assert remote_calls == []
+
+    # Still refuses with transcription_unavailable when no local_whisper exists anywhere
+    svc_none = _AlignSvc(providers={"oa": SimpleNamespace(alias="oa", config={"type": "openai"})}, voice_provider="remote:peer1/whisper")
+    lyr_none = await svc_none._music_lyrics()
+    lyr_none._tools = MediaTools(ffmpeg=None, ffprobe=None)
+    await lyr_none._store(lib.entry["id"], make_lyrics(lib.entry["source_hash"], "tags", plain_lines("Hello world today\nSing it loud"), synced=False))
+    ans_none = await svc_none.align_music_lyrics(track_id=lib.entry["id"])
+    assert ans_none["status"] == "error" and ans_none["code"] == "transcription_unavailable"
+    assert remote_calls == []

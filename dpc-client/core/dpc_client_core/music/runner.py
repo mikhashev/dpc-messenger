@@ -133,6 +133,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import logging
 import mmap
@@ -177,6 +178,7 @@ YUE2_BATCH_NOTE = ("batch 1 per variant: the CUDA flash-attention mask bug at ba
 DEFAULT_CARD_POLL_S = 3.0
 DEFAULT_ENGINE_POLL_S = 0.5
 DEFAULT_ENGINE_JOB_TIMEOUT_S = 1800.0
+MAX_IDLE_ALIGN_JOBS = 64
 _COPY_CHUNK = 4 * 1024 * 1024
 
 Converter = Callable[[Path, Path, Mapping[str, str]], None]
@@ -584,6 +586,7 @@ class MusicJobRunner:
         lyrics_save: Optional[LyricsSave] = None,
         describer: Optional[Callable[[Path, Optional[str], float, Path], Awaitable[Dict[str, Any]]]] = None,
         auto_align: Optional[Callable[..., Awaitable[Any]]] = None,
+        auto_align_needs_card: Optional[Callable[[], Any]] = None,
     ):
         self.store = store
         # A `MusicEngines`, a mapping of engine word to supervisor, or one supervisor.
@@ -602,6 +605,7 @@ class MusicJobRunner:
         self._lyrics_get = lyrics_get
         self._lyrics_save = lyrics_save
         self._auto_align = auto_align
+        self._auto_align_needs_card = auto_align_needs_card
         # A same-style song's describer (`similar._describe_for_job`, `describe.py`): `(source, content hash, seconds,
         # work dir)` to a description record; None runs none (the record says so).
         self._describer = describer
@@ -622,6 +626,9 @@ class MusicJobRunner:
         # job id -> `similar.SongDress` while a song job's takes are made (`_store_take` wears it)
         self._song_dress: Dict[str, Any] = {}
         self._pending_align: Dict[str, List[Dict[str, Any]]] = {}
+        self._idle_align: List[Tuple[str, List[Dict[str, Any]]]] = []
+        self._card_listener: Optional[Callable[[], None]] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._bg_align_tasks: set[asyncio.Task] = set()
         self._bg_align_lock: Optional[asyncio.Lock] = None
         self._stopping = False
@@ -641,7 +648,10 @@ class MusicJobRunner:
         if self.running:
             return
         self._stopping = False
+        self._loop = asyncio.get_running_loop()
+        self._bg_align_lock = asyncio.Lock()
         self._wake = asyncio.Event()
+        self._ensure_card_listener()
         self._task = asyncio.ensure_future(self._work())
 
     def wake(self) -> None:
@@ -653,6 +663,11 @@ class MusicJobRunner:
 
     async def stop(self) -> None:
         self._stopping = True
+        self._remove_card_listener()
+        self._pending_align.clear()
+        self._idle_align.clear()
+        self._bg_align_lock = None
+        self._loop = None
         task, self._task = self._task, None
         if task is not None and not task.done():
             task.cancel()
@@ -672,7 +687,7 @@ class MusicJobRunner:
                 pass
 
     async def wait_auto_align(self, timeout_s: float = 5.0) -> None:
-        """Await any pending or in-flight detached background auto-align tasks (primarily for tests)."""
+        """Await any pending, idle-deferred, or in-flight detached background auto-align tasks (primarily for tests)."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, float(timeout_s))
         while True:
@@ -680,7 +695,7 @@ class MusicJobRunner:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
                 continue
-            if self._pending_align and not self._stopping and loop.time() < deadline:
+            if (self._pending_align or self._idle_align) and not self._stopping and loop.time() < deadline:
                 await asyncio.sleep(0.01)
                 continue
             return
@@ -735,6 +750,7 @@ class MusicJobRunner:
                 logger.exception("music: the runner failed on job %s", job_id)
                 await self._fail(job_id, f"internal error in the runner: {type(exc).__name__}: {exc}")
             finally:
+                self._clear_deferred_align(job_id)
                 self.current_job_id = None
                 self.current_engine = None
             job = await self._get(job_id)
@@ -815,65 +831,68 @@ class MusicJobRunner:
             await song_jobs.run_song_job(self, job)
             return
         started = False
-        while True:
-            fell: Optional[_FallBack] = None
-            key = js.engine_of(job["params"])
-            engine = self.engines.find(key)
-            if engine is None:
-                logger.error("music: job %s names engine %s, which this DPC has not set up", job_id, key)
-                reason = f"engine {key!r} is not set up in this DPC; install or configure it and propose the job again"
-                await (self._fail(job_id, reason) if started else self._refuse(job_id, reason))
-                return
-            if key == js.ENGINE_YUE2:
-                try:
-                    seed = await self._yue2_payloads(job)
-                except (MusicEngineError, MusicJobError) as exc:
-                    # The adapter went missing between the proposal and the run, or a payload
-                    # cannot be written (too large, or an unrecorded earlier file that differs).
-                    why = self._fall_back_why(job, exc, "is no longer offered by the adapters folders")
-                    moved = await self._fall_back(job_id, why, exc.message) if why else None
-                    if moved is None:
-                        await self._refuse(job_id, exc.message)
-                        return
-                    job = moved
-                    continue
-                lm_body = b""
-            else:
-                try:
-                    lm_body, seed = await self._lm_payload(job)
-                except MusicJobError as exc:
-                    await (self._fail(job_id, exc.message) if started else self._refuse(job_id, exc.message))
+        try:
+            while True:
+                fell: Optional[_FallBack] = None
+                key = js.engine_of(job["params"])
+                engine = self.engines.find(key)
+                if engine is None:
+                    logger.error("music: job %s names engine %s, which this DPC has not set up", job_id, key)
+                    reason = f"engine {key!r} is not set up in this DPC; install or configure it and propose the job again"
+                    await (self._fail(job_id, reason) if started else self._refuse(job_id, reason))
                     return
-            shown = _CardWait(self, job_id, engine.card_lease)
-            try:
-                # The card first (ADR-052 section 3.2): one lease use for the whole job, asked for while
-                # the job is queued; no deadline of its own, only the person's cancel ends the wait.
-                async with engine.in_use(f"music job {job_id}", wait_s=None, check=self._card_check(job_id),
-                                         on_wait=shown, expected_s=js.music_expected_s(job["params"])):
+                if key == js.ENGINE_YUE2:
+                    try:
+                        seed = await self._yue2_payloads(job)
+                    except (MusicEngineError, MusicJobError) as exc:
+                        # The adapter went missing between the proposal and the run, or a payload
+                        # cannot be written (too large, or an unrecorded earlier file that differs).
+                        why = self._fall_back_why(job, exc, "is no longer offered by the adapters folders")
+                        moved = await self._fall_back(job_id, why, exc.message) if why else None
+                        if moved is None:
+                            await self._refuse(job_id, exc.message)
+                            return
+                        job = moved
+                        continue
+                    lm_body = b""
+                else:
+                    try:
+                        lm_body, seed = await self._lm_payload(job)
+                    except MusicJobError as exc:
+                        await (self._fail(job_id, exc.message) if started else self._refuse(job_id, exc.message))
+                        return
+                shown = _CardWait(self, job_id, engine.card_lease)
+                try:
+                    # The card first (ADR-052 section 3.2): one lease use for the whole job, asked for while
+                    # the job is queued; no deadline of its own, only the person's cancel ends the wait.
+                    async with engine.in_use(f"music job {job_id}", wait_s=None, check=self._card_check(job_id),
+                                             on_wait=shown, expected_s=js.music_expected_s(job["params"])):
+                        await shown.settled()
+                        await self._run_on_the_card(job_id, job, key, engine, lm_body, seed, started=started)
+                except _Cancelled:
+                    # Cancelled while it waited in the lease line: the wait left the line (`_leaves`).
                     await shown.settled()
-                    await self._run_on_the_card(job_id, job, key, engine, lm_body, seed, started=started)
-            except _Cancelled:
-                # Cancelled while it waited in the lease line: the wait left the line (`_leaves`).
-                await shown.settled()
-                self._clear_deferred_align(job_id)
-                logger.info("music: job %s cancelled while it waited for the card", job_id)
-            except _FallBack as exc:
-                self._clear_deferred_align(job_id)
-                fell = exc   # handled once this engine's lease use has ended
-            finally:
-                # A grant with nothing on the card (the job ended before its engine came up) goes back.
-                engine.card_lease.release_when_empty("its job ended with no engine running", holds=engine.alive)
-            if fell is None:
-                await self._finalize_deferred(job_id)
-                return
-            # The running job moves to the fallback engine, which asks for the card through its own
-            # lease use; the idle engine left behind is let go by the usual exclusive start.
-            moved = None if await self._cancelled(job_id) else await self._fall_back(job_id, fell.why, fell.detail)
-            if moved is None:
-                if not await self._cancelled(job_id):
-                    await self._fail(job_id, fell.detail)
-                return
-            job, started = moved, True
+                    self._clear_deferred_align(job_id)
+                    logger.info("music: job %s cancelled while it waited for the card", job_id)
+                except _FallBack as exc:
+                    self._clear_deferred_align(job_id)
+                    fell = exc   # handled once this engine's lease use has ended
+                finally:
+                    # A grant with nothing on the card (the job ended before its engine came up) goes back.
+                    engine.card_lease.release_when_empty("its job ended with no engine running", holds=engine.alive)
+                if fell is None:
+                    await self._finalize_deferred(job_id)
+                    return
+                # The running job moves to the fallback engine, which asks for the card through its own
+                # lease use; the idle engine left behind is let go by the usual exclusive start.
+                moved = None if await self._cancelled(job_id) else await self._fall_back(job_id, fell.why, fell.detail)
+                if moved is None:
+                    if not await self._cancelled(job_id):
+                        await self._fail(job_id, fell.detail)
+                    return
+                job, started = moved, True
+        finally:
+            self._clear_deferred_align(job_id)
 
     @staticmethod
     def _fall_back_why(job: Mapping[str, Any], exc: Exception, what: str) -> Optional[str]:
@@ -1688,25 +1707,141 @@ class MusicJobRunner:
     def _clear_deferred_align(self, job_id: str) -> None:
         self._pending_align.pop(job_id, None)
 
+    def _card_listener_fn(self) -> None:
+        """Schedule idle-align drain on the runner loop when a card lease changes."""
+        if self._stopping or not self._idle_align:
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed() or not loop.is_running():
+            return
+        try:
+            here = asyncio.get_running_loop()
+        except RuntimeError:
+            here = None
+        if here is loop:
+            loop.call_soon(self._drain_idle_align)
+        else:
+            try:
+                loop.call_soon_threadsafe(self._drain_idle_align)
+            except RuntimeError:
+                pass
+
+    def _ensure_card_listener(self) -> None:
+        if self._card_listener is not None:
+            return
+        from ..managers import card_lease
+
+        self._card_listener = self._card_listener_fn
+        card_lease.add_change_listener(self._card_listener)
+
+    def _remove_card_listener(self) -> None:
+        listener, self._card_listener = self._card_listener, None
+        if listener is not None:
+            from ..managers import card_lease
+
+            card_lease.remove_change_listener(listener)
+
+    async def _check_auto_align_needs_card(self) -> bool:
+        """True when background auto-align requires the GPU card lease."""
+        probe = self._auto_align_needs_card
+        if probe is None and self._auto_align is not None:
+            probe = getattr(getattr(self._auto_align, "__self__", None), "_music_auto_align_needs_card", None)
+        if not callable(probe):
+            return False
+        try:
+            if inspect.iscoroutinefunction(probe):
+                return bool(await probe())
+            res = await asyncio.to_thread(probe)
+            if inspect.isawaitable(res):
+                return bool(await res)
+            return bool(res)
+        except Exception:
+            logger.debug("music: checking whether auto-align needs the card failed", exc_info=True)
+            return False
+
+    def _card_and_engines_idle(self) -> bool:
+        """True when no supervised music engine is alive and the card lease has no holders or waiters."""
+        from ..managers import card_lease
+
+        if any(e.alive() for _k, e in self.engines.items()):
+            return False
+        snap = card_lease.queue_snapshot()
+        return bool(snap.get("free")) and not snap.get("waiters")
+
+    def _park_idle_align(self, job_id: str, pending: List[Dict[str, Any]]) -> None:
+        """Park vocal takes until the warm engine idle-stops and frees the card lease."""
+        if self._stopping or not pending:
+            return
+        self._loop = asyncio.get_running_loop()
+        self._ensure_card_listener()
+        for existing_id, existing_items in self._idle_align:
+            if existing_id == job_id:
+                existing_items.extend(pending)
+                return
+        self._idle_align.append((job_id, list(pending)))
+        if len(self._idle_align) > MAX_IDLE_ALIGN_JOBS:
+            del self._idle_align[: len(self._idle_align) - MAX_IDLE_ALIGN_JOBS]
+
+    def _spawn_background_align(self, job_id: str, pending: List[Dict[str, Any]]) -> None:
+        if self._stopping or self._auto_align is None or not pending:
+            return
+        task = asyncio.get_running_loop().create_task(self._run_background_align(job_id, pending))
+        self._bg_align_tasks.add(task)
+        task.add_done_callback(self._bg_align_tasks.discard)
+
+    def _drain_idle_align(self) -> None:
+        """Start parked background auto-alignment once engines have stopped and the card is free."""
+        if self._stopping or self._auto_align is None or not self._idle_align:
+            return
+        if self.current_job_id is not None or not self._card_and_engines_idle():
+            return
+        items = list(self._idle_align)
+        self._idle_align.clear()
+        for job_id, pending in items:
+            self._spawn_background_align(job_id, pending)
+
+    @staticmethod
+    def _auto_align_accepts_job_id(fn: Any) -> bool:
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            return False
+        if "job_id" in params:
+            return True
+        return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
     async def _complete_generation(self, job_id: str) -> None:
         """Move `job_id` to `review` immediately once takes are stored (never blocked on auto-align)."""
         await self._change(self.store.finish_job, job_id)
 
     async def _finalize_deferred(self, job_id: str) -> None:
-        """Spawn detached background auto-alignment outside the runner loop after `finish_job` and lease release."""
+        """Spawn or idle-defer background auto-alignment outside the runner loop after `finish_job` and lease release."""
         if job_id not in self._pending_align or self._auto_align is None or self._stopping:
             self._pending_align.pop(job_id, None)
             return
         try:
             job = await self._get(job_id)
-            if job is None or job["state"] != js.REVIEW:
+            if job is None or job["state"] != js.REVIEW or self._auto_align is None or self._stopping:
                 return
-            pending = self._pending_align.get(job_id)
-            if not pending or self._auto_align is None or self._stopping:
+            if not self._pending_align.get(job_id):
                 return
-            task = asyncio.get_running_loop().create_task(self._run_background_align(job_id, pending))
-            self._bg_align_tasks.add(task)
-            task.add_done_callback(self._bg_align_tasks.discard)
+            if await self._check_auto_align_needs_card():
+                try:
+                    busy = await asyncio.to_thread(self.has_pending_jobs, exclude_job_id=job_id)
+                except Exception:
+                    busy = False
+                if busy or not self._card_and_engines_idle():
+                    pending = self._pending_align.pop(job_id, None)
+                    if pending:
+                        self._park_idle_align(job_id, pending)
+                        if not busy and self._card_and_engines_idle():
+                            asyncio.get_running_loop().call_soon(self._drain_idle_align)
+                    return
+            if self._auto_align is None or self._stopping:
+                return
+            pending = self._pending_align.pop(job_id, None)
+            if pending:
+                self._spawn_background_align(job_id, pending)
         finally:
             self._pending_align.pop(job_id, None)
 
@@ -1714,8 +1849,9 @@ class MusicJobRunner:
         if self._bg_align_lock is None:
             self._bg_align_lock = asyncio.Lock()
         async with self._bg_align_lock:
-            for item in pending:
-                if self._stopping or self._auto_align is None:
+            for idx, item in enumerate(pending):
+                fn = self._auto_align
+                if self._stopping or fn is None:
                     return
                 try:
                     busy = await asyncio.to_thread(self.has_pending_jobs, exclude_job_id=job_id)
@@ -1723,11 +1859,13 @@ class MusicJobRunner:
                     busy = False
                 if busy:
                     logger.info("music: skipping background auto-align for job %s (queued/running jobs present)", job_id)
+                    if await self._check_auto_align_needs_card():
+                        self._park_idle_align(job_id, pending[idx:])
                     return
+                accepts_job_id = self._auto_align_accepts_job_id(fn)
+                kwargs = {**item, "job_id": job_id} if accepts_job_id else dict(item)
                 try:
-                    await self._auto_align(**item, job_id=job_id)
-                except TypeError:
-                    await self._auto_align(**item)
+                    await fn(**kwargs)
                 except asyncio.CancelledError:
                     raise
                 except Exception:

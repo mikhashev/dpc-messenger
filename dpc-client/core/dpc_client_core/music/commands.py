@@ -525,6 +525,31 @@ class MusicCommandsMixin:
                     return provider, None
         return None, None
 
+    def _music_pick_local_whisper(self) -> Any:
+        """Pick a configured `local_whisper` provider for alignment: prefer `voice_provider`
+        when it names one, otherwise search all configured providers in `llm_manager.providers`.
+        Never returns a remote or cloud provider."""
+        llm = getattr(self, "llm_manager", None)
+        providers = dict(getattr(llm, "providers", None) or {})
+        chosen = getattr(llm, "voice_provider", None)
+        chosen = chosen.strip() if isinstance(chosen, str) and chosen.strip() else None
+        if chosen and chosen.startswith("local:"):
+            chosen = chosen[len("local:"):]
+        if chosen and not chosen.startswith("remote:") and chosen in providers:
+            provider = providers[chosen]
+            if (
+                (getattr(provider, "config", None) or {}).get("type") == LOCAL_WHISPER_TYPE
+                and not getattr(provider, "is_cpu_twin", False)
+            ):
+                return provider
+        for provider in providers.values():
+            if (
+                (getattr(provider, "config", None) or {}).get("type") == LOCAL_WHISPER_TYPE
+                and not getattr(provider, "is_cpu_twin", False)
+            ):
+                return provider
+        return None
+
     async def _music_transcribe_audio(self, path: Path) -> Dict[str, Any]:
         """One transcription of a track's file, for `MusicLyrics.transcribe`."""
         whisper, alias = self._music_pick_transcriber()
@@ -600,7 +625,13 @@ class MusicCommandsMixin:
                 from ..managers import card_lease
 
                 snap = card_lease.queue_snapshot()
-                if not snap.get("free") or snap.get("waiters"):
+                self_client = f"whisper:{alias}"
+                holders = snap.get("holders") or []
+                other_or_busy = any(
+                    h.get("client") != self_client or h.get("busy")
+                    for h in holders
+                )
+                if other_or_busy or snap.get("waiters"):
                     raise MusicLibraryError(
                         "card_busy",
                         "the GPU card is held or waited on; skipping background auto-align to avoid evicting warm engines",
@@ -650,7 +681,7 @@ class MusicCommandsMixin:
     async def _music_transcribe_for_align(self, path: Path) -> Dict[str, Any]:
         """Local-Whisper-only transcription for manual `align_music_lyrics`: never uploads to a
         remote or cloud provider, and bypasses the 25 MB cloud-API file size gate."""
-        whisper, _alias = self._music_pick_transcriber()
+        whisper = self._music_pick_local_whisper()
         if whisper is None:
             raise MusicLibraryError(
                 "transcription_unavailable",
@@ -676,6 +707,19 @@ class MusicCommandsMixin:
         raw = str(self._music_config_value("auto_align_lyrics", "true")).strip().lower()
         return raw not in _FALSE
 
+    def _music_auto_align_needs_card(self) -> bool:
+        """True when background auto-align is enabled and would require the GPU card lease."""
+        if not self._music_auto_align_enabled():
+            return False
+        whisper = self._music_pick_local_whisper()
+        if whisper is None:
+            return False
+        from ..providers.whisper_provider import LocalWhisperProvider, asks_for_the_card
+
+        if not isinstance(whisper, LocalWhisperProvider):
+            return False
+        return asks_for_the_card(whisper)
+
     async def _music_auto_align_take(
         self,
         *,
@@ -698,7 +742,7 @@ class MusicCommandsMixin:
             lines = MusicLyrics._known_lines_from_input(lyrics)
             if not lyrics_align.has_alignable_words(lines):
                 return
-            whisper, _alias = self._music_pick_transcriber()
+            whisper = self._music_pick_local_whisper()
             if whisper is None:
                 logger.debug("music: auto-align skipped for %s (no local Whisper provider)", track_id)
                 return
@@ -983,7 +1027,8 @@ class MusicCommandsMixin:
                     store, self._music_engine_set(), self._music, dpc_home=self.settings.dpc_home_dir,
                     on_job_change=self._music_job_changed, lyrics_get=self._music_stored_lyrics,
                     lyrics_save=self._music_save_take_lyrics, describer=self._music_describe_for_job,
-                    auto_align=self._music_auto_align_take)
+                    auto_align=self._music_auto_align_take,
+                    auto_align_needs_card=self._music_auto_align_needs_card)
             self._music_runner_instance.start()
         except Exception:
             logger.exception("music: the job runner did not start")

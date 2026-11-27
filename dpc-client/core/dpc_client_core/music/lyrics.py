@@ -1432,11 +1432,7 @@ class MusicLyrics:
         if not isinstance(result, dict):
             raise MusicLibraryError("transcription_failed", "the transcription gave no result")
         res_dur = _finite(result.get("duration"))
-        # Use real track duration when known and positive; if track_dur is absent/non-positive or a tiny
-        # test stub (<0.5s) paired with a full Whisper result duration, prefer the Whisper audio duration.
-        if track_dur is not None and track_dur > 0 and not (
-            track_dur < 0.5 and res_dur is not None and res_dur >= 1.0
-        ):
+        if track_dur is not None and track_dur > 0:
             effective_dur: Optional[float] = float(track_dur)
         else:
             effective_dur = res_dur if (res_dur is not None and res_dur > 0) else None
