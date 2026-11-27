@@ -436,6 +436,7 @@
     onOpenInstructionsEditor,
     onOpenFirewallEditor,
     onOpenProvidersEditor,
+    onOpenVoiceSettings,
     onOpenAgentBoard,
     onOpenAgentMap,
     onOpenMusicPlayer,
@@ -475,6 +476,7 @@
     onOpenInstructionsEditor: () => void;
     onOpenFirewallEditor: () => void;
     onOpenProvidersEditor: () => void;
+    onOpenVoiceSettings?: () => void;
     onOpenAgentBoard?: () => void;
     onOpenAgentMap?: () => void;
     onOpenMusicPlayer?: () => void;
@@ -890,6 +892,13 @@
       <button class="btn-context" onclick={onOpenProvidersEditor}>
         AI Providers
       </button>
+
+      {#if onOpenVoiceSettings}
+        <button class="btn-context" onclick={onOpenVoiceSettings}
+          title="Voice transcription, local transcription and voice message settings">
+          Voice and Transcription
+        </button>
+      {/if}
 
       {#if onOpenAgentBoard}
         <button class="btn-context" onclick={onOpenAgentBoard}>

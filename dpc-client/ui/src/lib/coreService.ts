@@ -1789,6 +1789,24 @@ export async function saveVoiceTranscriptionConfig(config: any): Promise<any> {
     return sendCommand('save_voice_transcription_config', { config });
 }
 
+// Local transcription and voice message config commands (the live config.ini keys,
+// editable from the voice settings form)
+export async function getLocalTranscriptionConfig(): Promise<any> {
+    return sendCommand('get_local_transcription_config', {});
+}
+
+export async function saveLocalTranscriptionConfig(config: any): Promise<any> {
+    return sendCommand('save_local_transcription_config', { config });
+}
+
+export async function getVoiceMessagesConfig(): Promise<any> {
+    return sendCommand('get_voice_messages_config', {});
+}
+
+export async function saveVoiceMessagesConfig(config: any): Promise<any> {
+    return sendCommand('save_voice_messages_config', { config });
+}
+
 // Per-conversation transcription control (v0.13.2+ checkbox)
 export async function setConversationTranscription(nodeId: string, enabled: boolean): Promise<any> {
     return sendCommand('set_conversation_transcription', { node_id: nodeId, enabled });

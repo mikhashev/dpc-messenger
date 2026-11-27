@@ -496,6 +496,7 @@ class VoiceService:
                 "enabled": self.settings.get_voice_transcription_enabled(),
                 "sender_transcribes": self.settings.get_voice_transcription_sender_transcribes(),
                 "recipient_delay_seconds": self.settings.get_voice_transcription_recipient_delay_seconds(),
+                "timeout_seconds": self.settings.get_voice_transcription_timeout_seconds(),
                 "provider_priority": self.settings.get_voice_transcription_provider_priority(),
                 "show_transcriber_name": self.settings.get_voice_transcription_show_transcriber_name(),
                 "cache_enabled": self.settings.get_voice_transcription_cache_enabled(),
@@ -528,8 +529,10 @@ class VoiceService:
                 config_value = str(value) if not isinstance(value, list) else ",".join(value)
                 self.settings.set('voice_transcription', key, config_value)
 
-            # Persist to disk
-            self.settings.save()
+            # Persist to disk (each set() already writes; this names the intent — the
+            # method was `save()` until the first caller, the voice settings form,
+            # found there is no such method on Settings, only save_config())
+            self.settings.save_config()
 
             # Broadcast update event to UI
             await self.local_api.broadcast_event("voice_transcription_config_updated", config)
@@ -541,6 +544,133 @@ class VoiceService:
 
         except Exception as e:
             logger.error("Error saving voice transcription config: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_local_transcription_config(self) -> Dict[str, Any]:
+        """
+        Get local transcription configuration (the nine live [local_transcription] keys).
+
+        UI Integration: Called when user opens the local transcription section of the
+        voice settings form. Every key is read live, so a value just saved is in force.
+
+        Returns:
+            Dict with the local transcription settings
+        """
+        try:
+            config = self.settings.get_local_transcription_settings()
+            return {"status": "success", **config}
+        except Exception as e:
+            logger.error("Error getting local transcription config: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def save_local_transcription_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Save local transcription configuration (the nine live [local_transcription] keys).
+
+        UI Integration: Called when user saves the local transcription section of the
+        voice settings form. The config dict's keys are the config.ini keys; a key left
+        out keeps its stored value. An invalid value is refused with its reason and
+        nothing is written; the readers pick a saved value up without a restart.
+
+        Args:
+            config: Local transcription configuration dict
+
+        Returns:
+            Dict with status and message
+        """
+        known = {"enabled", "fallback_to_openai", "max_file_size_mb", "max_duration_seconds",
+                 "idle_unload_s", "queue_wait_s", "cpu_max_s", "cpu_max_audio_s",
+                 "cpu_contention_factor"}
+        try:
+            unknown = set(config) - known - {"status"}
+            if unknown:
+                return {
+                    "status": "error",
+                    "message": f"Unknown local transcription key(s): {', '.join(sorted(unknown))}"
+                }
+            self.settings.set_local_transcription_settings(**{k: v for k, v in config.items() if k != "status"})
+            stored = self.settings.get_local_transcription_settings()
+            await self.local_api.broadcast_event("local_transcription_config_updated", stored)
+            return {
+                "status": "success",
+                "message": "Local transcription settings saved successfully"
+            }
+        except ValueError as e:
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+        except Exception as e:
+            logger.error("Error saving local transcription config: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_voice_messages_config(self) -> Dict[str, Any]:
+        """
+        Get voice message configuration (the seven live [voice_messages] keys).
+
+        UI Integration: Called when user opens the voice messages section of the
+        voice settings form. Every key is read live at each record and send.
+
+        Returns:
+            Dict with the voice message settings
+        """
+        try:
+            config = self.settings.get_voice_messages_settings()
+            return {"status": "success", **config}
+        except Exception as e:
+            logger.error("Error getting voice messages config: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def save_voice_messages_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Save voice message configuration (the seven live [voice_messages] keys).
+
+        UI Integration: Called when user saves the voice messages section of the
+        voice settings form. The config dict's keys are the config.ini keys; a key left
+        out keeps its stored value. An invalid value is refused with its reason and
+        nothing is written; the readers pick a saved value up without a restart.
+
+        Args:
+            config: Voice message configuration dict
+
+        Returns:
+            Dict with status and message
+        """
+        known = {"max_duration_seconds", "max_size_mb", "mime_types", "default_sample_rate",
+                 "default_channels", "default_codec", "auto_transcribe"}
+        try:
+            unknown = set(config) - known - {"status"}
+            if unknown:
+                return {
+                    "status": "error",
+                    "message": f"Unknown voice message key(s): {', '.join(sorted(unknown))}"
+                }
+            self.settings.set_voice_messages_settings(**{k: v for k, v in config.items() if k != "status"})
+            stored = self.settings.get_voice_messages_settings()
+            await self.local_api.broadcast_event("voice_messages_config_updated", stored)
+            return {
+                "status": "success",
+                "message": "Voice message settings saved successfully"
+            }
+        except ValueError as e:
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+        except Exception as e:
+            logger.error("Error saving voice messages config: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)

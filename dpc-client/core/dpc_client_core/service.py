@@ -7015,6 +7015,22 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         """Delegated to VoiceService."""
         return await self.voice_service.save_voice_transcription_config(config)
 
+    async def get_local_transcription_config(self) -> dict:
+        """Delegated to VoiceService."""
+        return await self.voice_service.get_local_transcription_config()
+
+    async def save_local_transcription_config(self, config: dict) -> dict:
+        """Delegated to VoiceService."""
+        return await self.voice_service.save_local_transcription_config(config)
+
+    async def get_voice_messages_config(self) -> dict:
+        """Delegated to VoiceService."""
+        return await self.voice_service.get_voice_messages_config()
+
+    async def save_voice_messages_config(self, config: dict) -> dict:
+        """Delegated to VoiceService."""
+        return await self.voice_service.save_voice_messages_config(config)
+
     async def set_conversation_transcription(self, node_id: str, enabled: bool) -> dict:
         """Delegated to VoiceService."""
         return await self.voice_service.set_conversation_transcription(node_id, enabled)

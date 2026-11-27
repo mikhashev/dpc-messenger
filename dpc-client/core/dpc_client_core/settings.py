@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import Any, List, Optional, Dict
 import configparser
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,13 @@ def _probe_writable(folder: Path) -> None:
     fd, name = tempfile.mkstemp(prefix=".dpc-write-test-", dir=folder)
     os.close(fd)
     os.unlink(name)
+
+
+def _figure_text(value: float) -> str:
+    """A figure as config.ini text: a whole number drops its `.0` (300.0 -> '300'), the rest
+    keeps its decimals (300.5 -> '300.5'). Both read back through `float()` unchanged."""
+    number = float(value)
+    return str(int(number)) if number.is_integer() else str(number)
 
 
 def _check_model_files_dir(raw: str) -> Path:
@@ -1549,6 +1556,175 @@ class Settings:
         return {"cpu_max_s": self.get_local_transcription_cpu_max_s(),
                 "cpu_max_audio_s": self.get_local_transcription_cpu_max_audio_s(),
                 "cpu_contention_factor": self.get_local_transcription_cpu_contention_factor()}
+
+    def get_local_transcription_settings(self) -> Dict[str, Any]:
+        """The nine live `[local_transcription]` keys in one read, as the settings form shows them
+        (THE-VOICE-AND-TRANSCRIPTION-SETTINGS-ARE-EDITABLE-ONLY-BY-HAND-IN-CONFIG-INI). The other
+        nine keys of the section are dead (their getter has no caller) and are not here; every key
+        here is read live, so a value written through `set_local_transcription_settings` is in force
+        without a restart. `max_duration_seconds` is None for the empty legacy fallback."""
+        return {
+            "enabled": self.get_local_transcription_enabled(),
+            "fallback_to_openai": self.get_local_transcription_fallback_to_openai(),
+            "max_file_size_mb": self.get_local_transcription_max_file_size_mb(),
+            "max_duration_seconds": self.get_local_transcription_max_duration_seconds(),
+            "idle_unload_s": self.get_local_transcription_idle_unload_s(),
+            "queue_wait_s": self.get_local_transcription_queue_wait_s(),
+            "cpu_max_s": self.get_local_transcription_cpu_max_s(),
+            "cpu_max_audio_s": self.get_local_transcription_cpu_max_audio_s(),
+            "cpu_contention_factor": self.get_local_transcription_cpu_contention_factor(),
+        }
+
+    def set_local_transcription_settings(
+        self, enabled: Optional[bool] = None, fallback_to_openai: Optional[bool] = None,
+        max_file_size_mb: Optional[int] = None, max_duration_seconds: Any = None,
+        idle_unload_s: Optional[float] = None, queue_wait_s: Optional[int] = None,
+        cpu_max_s: Optional[float] = None, cpu_max_audio_s: Optional[float] = None,
+        cpu_contention_factor: Optional[float] = None,
+    ) -> None:
+        """Write the nine live `[local_transcription]` keys; a left-out key keeps its stored value.
+
+        ValueError, one sentence, and nothing written, unless each given value is of its kind:
+        `enabled` and `fallback_to_openai` bools; `max_file_size_mb` and `queue_wait_s` whole
+        numbers >= 0; `idle_unload_s`, `cpu_max_s` and `cpu_max_audio_s` figures >= 0 (0 = never /
+        the CPU route off); `cpu_contention_factor` a figure above 0 (a multiplier, not a switch);
+        `max_duration_seconds` a figure >= 0 (0 = unlimited), or empty (None or '') for the legacy
+        `max_file_size_mb` fallback. Every reader of these keys reads them live."""
+        values: Dict[str, str] = {}
+        if enabled is not None:
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled must be true or false.")
+            values['enabled'] = 'true' if enabled else 'false'
+        if fallback_to_openai is not None:
+            if not isinstance(fallback_to_openai, bool):
+                raise ValueError("fallback_to_openai must be true or false.")
+            values['fallback_to_openai'] = 'true' if fallback_to_openai else 'false'
+        if max_file_size_mb is not None:
+            if isinstance(max_file_size_mb, bool) or not isinstance(max_file_size_mb, int) or max_file_size_mb < 0:
+                raise ValueError("max_file_size_mb must be a whole number of MB, 0 or more.")
+            values['max_file_size_mb'] = str(max_file_size_mb)
+        if max_duration_seconds is not None:
+            if isinstance(max_duration_seconds, str) and not max_duration_seconds.strip():
+                values['max_duration_seconds'] = ''  # the cleared field asks for the legacy fallback
+            else:
+                if (isinstance(max_duration_seconds, bool) or not isinstance(max_duration_seconds, (int, float))
+                        or not math.isfinite(max_duration_seconds) or max_duration_seconds < 0):
+                    raise ValueError("max_duration_seconds must be a number of seconds, 0 or more "
+                                     "(0 = unlimited), or empty for the legacy max_file_size_mb.")
+                values['max_duration_seconds'] = _figure_text(max_duration_seconds)
+        if idle_unload_s is not None:
+            if (isinstance(idle_unload_s, bool) or not isinstance(idle_unload_s, (int, float))
+                    or not math.isfinite(idle_unload_s) or idle_unload_s < 0):
+                raise ValueError("idle_unload_s must be a number of seconds, 0 or more (0 = never unload).")
+            values['idle_unload_s'] = _figure_text(idle_unload_s)
+        if queue_wait_s is not None:
+            if isinstance(queue_wait_s, bool) or not isinstance(queue_wait_s, int) or queue_wait_s < 0:
+                raise ValueError("queue_wait_s must be a whole number of seconds, 0 or more.")
+            values['queue_wait_s'] = str(queue_wait_s)
+        if cpu_max_s is not None:
+            if (isinstance(cpu_max_s, bool) or not isinstance(cpu_max_s, (int, float))
+                    or not math.isfinite(cpu_max_s) or cpu_max_s < 0):
+                raise ValueError("cpu_max_s must be a number of seconds, 0 or more (0 = the CPU route off).")
+            values['cpu_max_s'] = _figure_text(cpu_max_s)
+        if cpu_max_audio_s is not None:
+            if (isinstance(cpu_max_audio_s, bool) or not isinstance(cpu_max_audio_s, (int, float))
+                    or not math.isfinite(cpu_max_audio_s) or cpu_max_audio_s < 0):
+                raise ValueError("cpu_max_audio_s must be a number of seconds, 0 or more (0 = the CPU route off).")
+            values['cpu_max_audio_s'] = _figure_text(cpu_max_audio_s)
+        if cpu_contention_factor is not None:
+            if (isinstance(cpu_contention_factor, bool) or not isinstance(cpu_contention_factor, (int, float))
+                    or not math.isfinite(cpu_contention_factor) or cpu_contention_factor <= 0):
+                raise ValueError("cpu_contention_factor must be a multiplier above 0.")
+            values['cpu_contention_factor'] = _figure_text(cpu_contention_factor)
+        for key, text in values.items():
+            self.set('local_transcription', key, text)
+
+    def get_voice_messages_settings(self) -> Dict[str, Any]:
+        """The seven live `[voice_messages]` keys in one read, as the settings form shows them.
+        The defaults mirror the inline readers (service.py, telegram_service.py), which read the
+        same keys live at each record and send; `enabled` is dead (no reader) and is not here."""
+        try:
+            max_duration = float(self.get('voice_messages', 'max_duration_seconds', '300'))
+        except (TypeError, ValueError):
+            max_duration = 300.0
+        if not math.isfinite(max_duration) or max_duration <= 0:
+            max_duration = 300.0  # a hand-edited "nan"/"inf" must not mean "no limit"
+        try:
+            max_size_mb = int(self.get('voice_messages', 'max_size_mb', '10'))
+        except (TypeError, ValueError):
+            max_size_mb = 10
+        mime_types = [m.strip() for m in self.get(
+            'voice_messages', 'mime_types',
+            'audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav').split(',') if m.strip()]
+        try:
+            sample_rate = int(self.get('voice_messages', 'default_sample_rate', '48000'))
+        except (TypeError, ValueError):
+            sample_rate = 48000
+        try:
+            channels = int(self.get('voice_messages', 'default_channels', '1'))
+        except (TypeError, ValueError):
+            channels = 1
+        codec = self.get('voice_messages', 'default_codec', 'opus').strip() or 'opus'
+        raw_auto = self.get('voice_messages', 'auto_transcribe', 'true')
+        return {
+            "max_duration_seconds": max_duration,
+            "max_size_mb": max_size_mb,
+            "mime_types": mime_types,
+            "default_sample_rate": sample_rate,
+            "default_channels": channels,
+            "default_codec": codec,
+            "auto_transcribe": raw_auto.lower() in ('true', '1', 'yes'),
+        }
+
+    def set_voice_messages_settings(
+        self, max_duration_seconds: Optional[float] = None, max_size_mb: Optional[int] = None,
+        mime_types: Any = None, default_sample_rate: Optional[int] = None,
+        default_channels: Optional[int] = None, default_codec: Optional[str] = None,
+        auto_transcribe: Optional[bool] = None,
+    ) -> None:
+        """Write the seven live `[voice_messages]` keys; a left-out key keeps its stored value.
+
+        ValueError, one sentence, and nothing written, unless each given value is of its kind:
+        `max_duration_seconds` a figure above 0, `max_size_mb`, `default_sample_rate` and
+        `default_channels` whole numbers above 0, `mime_types` a list of mime types (or one
+        comma-separated string) with at least one entry, `default_codec` a non-empty name, and
+        `auto_transcribe` a bool. Every reader of these keys reads them live."""
+        values: Dict[str, str] = {}
+        if max_duration_seconds is not None:
+            if (isinstance(max_duration_seconds, bool) or not isinstance(max_duration_seconds, (int, float))
+                    or not math.isfinite(max_duration_seconds) or max_duration_seconds <= 0):
+                raise ValueError("max_duration_seconds must be a number of seconds above 0.")
+            values['max_duration_seconds'] = _figure_text(max_duration_seconds)
+        if max_size_mb is not None:
+            if isinstance(max_size_mb, bool) or not isinstance(max_size_mb, int) or max_size_mb <= 0:
+                raise ValueError("max_size_mb must be a whole number of MB above 0.")
+            values['max_size_mb'] = str(max_size_mb)
+        if mime_types is not None:
+            if isinstance(mime_types, str):
+                mime_types = mime_types.split(',')
+            if (not isinstance(mime_types, list)
+                    or not all(isinstance(m, str) for m in mime_types)
+                    or not [m for m in (str(m).strip() for m in mime_types) if m]):
+                raise ValueError("mime_types must be a list of audio mime types, at least one.")
+            values['mime_types'] = ','.join(m.strip() for m in mime_types if m.strip())
+        if default_sample_rate is not None:
+            if isinstance(default_sample_rate, bool) or not isinstance(default_sample_rate, int) or default_sample_rate <= 0:
+                raise ValueError("default_sample_rate must be a whole number of Hz above 0.")
+            values['default_sample_rate'] = str(default_sample_rate)
+        if default_channels is not None:
+            if isinstance(default_channels, bool) or not isinstance(default_channels, int) or default_channels <= 0:
+                raise ValueError("default_channels must be a whole number of channels above 0 (1 = mono, 2 = stereo).")
+            values['default_channels'] = str(default_channels)
+        if default_codec is not None:
+            if not isinstance(default_codec, str) or not default_codec.strip():
+                raise ValueError("default_codec must be a codec name, e.g. opus.")
+            values['default_codec'] = default_codec.strip()
+        if auto_transcribe is not None:
+            if not isinstance(auto_transcribe, bool):
+                raise ValueError("auto_transcribe must be true or false.")
+            values['auto_transcribe'] = 'true' if auto_transcribe else 'false'
+        for key, text in values.items():
+            self.set('voice_messages', key, text)
 
     # Telegram Bot Integration Settings (v0.14.0+)
 

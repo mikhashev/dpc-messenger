@@ -246,6 +246,12 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "get_model_download_status",
     "get_voice_transcription_config",
     "save_voice_transcription_config",
+    # The live [local_transcription] and [voice_messages] keys (config-parity card,
+    # audit/config_ui_parity_2026-11-27.md) — editable from the voice settings form
+    "get_local_transcription_config",
+    "save_local_transcription_config",
+    "get_voice_messages_config",
+    "save_voice_messages_config",
     "set_conversation_transcription",
     "get_conversation_transcription",
     "transcribe_audio",
