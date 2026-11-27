@@ -261,6 +261,11 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # audit) — editable from the privacy and logging form
     "get_privacy_logging_config",
     "save_privacy_logging_config",
+    # The [telegram]/[discord] switches and bot tokens, and the live
+    # [discord.guardrails]/[discord.conversations] limits (same audit) —
+    # editable from the Telegram and Discord form
+    "get_telegram_discord_config",
+    "save_telegram_discord_config",
     "set_conversation_transcription",
     "get_conversation_transcription",
     "transcribe_audio",

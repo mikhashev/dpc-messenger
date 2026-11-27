@@ -1827,6 +1827,18 @@ export async function savePrivacyLoggingConfig(config: any): Promise<any> {
     return sendCommand('save_privacy_logging_config', { config });
 }
 
+// Telegram/Discord config commands (the [telegram]/[discord] enable switches
+// and bot tokens, and the live Discord guardrail and conversation limits,
+// editable from the Telegram and Discord form; a stored token is answered
+// only as token_set, never as text)
+export async function getTelegramDiscordConfig(): Promise<any> {
+    return sendCommand('get_telegram_discord_config', {});
+}
+
+export async function saveTelegramDiscordConfig(config: any): Promise<any> {
+    return sendCommand('save_telegram_discord_config', { config });
+}
+
 // Per-conversation transcription control (v0.13.2+ checkbox)
 export async function setConversationTranscription(nodeId: string, enabled: boolean): Promise<any> {
     return sendCommand('set_conversation_transcription', { node_id: nodeId, enabled });

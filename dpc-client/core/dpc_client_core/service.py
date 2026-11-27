@@ -172,6 +172,7 @@ from .utils.image_utils import screenshot_attachment, screenshot_target
 from .voice_service import VoiceService
 from .background_models_service import BackgroundModelsService
 from .privacy_logging_service import PrivacyLoggingService
+from .telegram_discord_service import TelegramDiscordService
 from .knowledge_service import KnowledgeService
 from .telegram_service import TelegramService
 from .agent_service import AgentService
@@ -1234,6 +1235,13 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         # unowned (the device-context reader is service start's own code, the
         # levels are run_service's), so they get the same small shape.
         self.privacy_logging_service = PrivacyLoggingService(
+            settings=self.settings,
+            local_api=self.local_api,
+        )
+        # The [telegram]/[discord] switches, tokens and Discord limits — the
+        # readers belong to TelegramService/DiscordService/DiscordCoordinator,
+        # so the writers get the same small shape here.
+        self.telegram_discord_service = TelegramDiscordService(
             settings=self.settings,
             local_api=self.local_api,
         )
@@ -7046,6 +7054,14 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
     async def save_privacy_logging_config(self, config: dict) -> dict:
         """Delegated to PrivacyLoggingService."""
         return await self.privacy_logging_service.save_privacy_logging_config(config)
+
+    async def get_telegram_discord_config(self) -> dict:
+        """Delegated to TelegramDiscordService."""
+        return await self.telegram_discord_service.get_telegram_discord_config()
+
+    async def save_telegram_discord_config(self, config: dict) -> dict:
+        """Delegated to TelegramDiscordService."""
+        return await self.telegram_discord_service.save_telegram_discord_config(config)
 
     async def get_local_transcription_config(self) -> dict:
         """Delegated to VoiceService."""

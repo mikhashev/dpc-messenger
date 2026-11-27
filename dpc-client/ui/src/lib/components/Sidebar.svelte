@@ -439,6 +439,7 @@
     onOpenVoiceSettings,
     onOpenBackgroundModels,
     onOpenPrivacyLogging,
+    onOpenTelegramDiscord,
     onOpenAgentBoard,
     onOpenAgentMap,
     onOpenMusicPlayer,
@@ -481,6 +482,7 @@
     onOpenVoiceSettings?: () => void;
     onOpenBackgroundModels?: () => void;
     onOpenPrivacyLogging?: () => void;
+    onOpenTelegramDiscord?: () => void;
     onOpenAgentBoard?: () => void;
     onOpenAgentMap?: () => void;
     onOpenMusicPlayer?: () => void;
@@ -915,6 +917,13 @@
         <button class="btn-context" onclick={onOpenPrivacyLogging}
           title="What this node collects about the device it runs on, and its log levels">
           Privacy and Logging
+        </button>
+      {/if}
+
+      {#if onOpenTelegramDiscord}
+        <button class="btn-context" onclick={onOpenTelegramDiscord}
+          title="The Telegram and Discord enable switches, their bot tokens and the Discord limits">
+          Telegram and Discord
         </button>
       {/if}
 

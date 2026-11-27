@@ -1856,6 +1856,114 @@ class Settings:
             'ark_channel_id': self.get_discord_ark_channel_id(),
         }
 
+    def get_telegram_discord_settings(self) -> Dict[str, Any]:
+        """The keys of the Telegram and Discord form in one read
+        (THE-TELEGRAM-AND-DISCORD-SETTINGS-CAN-ONLY-BE-TYPED-INTO-CONFIG-INI):
+        per integration the enable switch and whether a bot token is stored,
+        plus the live [discord.guardrails] and [discord.conversations] limits.
+        A stored token is answered only as `token_set` — never its value, a
+        prefix or a length — and it is read from the stored config, not through
+        get(), so an overriding DPC_TELEGRAM_BOT_TOKEN-style variable cannot
+        make the form claim a token it cannot clear. `bot_token_env` is the
+        environment variable *name* (not a secret) the Discord reader prefers
+        when it is set. When a written value is in force, per key: the two
+        switches and the tokens are read once, when the backend builds the
+        Telegram service (telegram_service.py) and starts the Discord one
+        (discord_service.py), so they apply from the next backend start — and
+        with no token the Telegram bot logs an error and the Discord one skips
+        starting, however the switch is set; the guardrail and conversation
+        limits are read as each Discord message arrives
+        (discord_coordinator.py), so they apply to the next message."""
+        return {
+            "telegram": {
+                "enabled": self.get_telegram_enabled(),
+                "token_set": bool(self._config.get('telegram', 'bot_token', fallback='').strip()),
+            },
+            "discord": {
+                "enabled": self.get_discord_enabled(),
+                "token_set": bool(self._config.get('discord', 'bot_token', fallback='').strip()),
+                "bot_token_env": self.get('discord', 'bot_token_env', ''),
+                "rate_limit_per_user_max": int(self.get(
+                    'discord.guardrails', 'rate_limit_per_user_max', '10')),
+                "rate_limit_per_user_window": int(self.get(
+                    'discord.guardrails', 'rate_limit_per_user_window', '600')),
+                "rate_limit_global_max": int(self.get(
+                    'discord.guardrails', 'rate_limit_global_max', '60')),
+                "rate_limit_global_window": int(self.get(
+                    'discord.guardrails', 'rate_limit_global_window', '3600')),
+                "response_delay_seconds": int(self.get(
+                    'discord.guardrails', 'response_delay_seconds', '3')),
+                "ttl_minutes": int(self.get(
+                    'discord.conversations', 'ttl_minutes', '30')),
+                "max_messages": int(self.get(
+                    'discord.conversations', 'max_messages', '50')),
+            },
+        }
+
+    def set_telegram_discord_settings(
+        self, telegram: Optional[Dict[str, Any]] = None,
+        discord: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Write the Telegram and Discord form's keys; a key left out keeps its
+        stored value. A token is never overwritten by accident: `bot_token`
+        left out or empty *keeps* the stored token, only a non-empty string
+        sets it, and only `clear_bot_token: true` (with no new token in the
+        same section) removes it.
+
+        ValueError, one sentence naming the key, and nothing written, unless
+        each given value is one its reader knows: the switches must be a real
+        bool (their readers test a true set and read everything else as false,
+        so a typo would silently turn a bot off — the writer is where that
+        stops); a token must be a string (the bots pass it to their libraries
+        verbatim); the limits must be a whole number a reader can mean — the
+        maxes, windows and conversation limits 1 or more (0 would deny every
+        message or reset every conversation at once), the response delay 0 or
+        more (0 is an honest "answer at once")."""
+        writes: List[tuple] = []
+        for section, given in (('telegram', telegram), ('discord', discord)):
+            if given is None:
+                continue
+            if given.get('enabled') is not None:
+                if not isinstance(given.get('enabled'), bool):
+                    raise ValueError(f"{section}.enabled must be true or false.")
+                writes.append((section, 'enabled',
+                               'true' if given['enabled'] else 'false'))
+            token = given.get('bot_token')
+            clearing = given.get('clear_bot_token', False)
+            if not isinstance(clearing, bool):
+                raise ValueError(f"{section}.clear_bot_token must be true or false.")
+            if token is not None and not isinstance(token, str):
+                raise ValueError(f"{section}.bot_token must be a string.")
+            stripped = token.strip() if isinstance(token, str) else ''
+            if clearing and stripped:
+                raise ValueError(
+                    f"{section}.bot_token cannot be set and cleared in one save.")
+            if clearing:
+                writes.append((section, 'bot_token', ''))
+            elif stripped:
+                writes.append((section, 'bot_token', stripped))
+        if discord:
+            limits = (
+                ('discord.guardrails', 'rate_limit_per_user_max', 1),
+                ('discord.guardrails', 'rate_limit_per_user_window', 1),
+                ('discord.guardrails', 'rate_limit_global_max', 1),
+                ('discord.guardrails', 'rate_limit_global_window', 1),
+                ('discord.guardrails', 'response_delay_seconds', 0),
+                ('discord.conversations', 'ttl_minutes', 1),
+                ('discord.conversations', 'max_messages', 1),
+            )
+            for section_name, key, at_least in limits:
+                value = discord.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, int) or value < at_least:
+                    raise ValueError(
+                        f"{section_name}.{key} must be a whole number "
+                        f"of {at_least} or more.")
+                writes.append((section_name, key, str(value)))
+        for section, key, text in writes:
+            self.set(section, key, text)
+
     def save_config(self):
         """Save configuration to file."""
         with open(self.config_file, 'w') as f:

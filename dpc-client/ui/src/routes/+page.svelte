@@ -27,6 +27,7 @@
   import VoiceSettingsEditor from "$lib/components/VoiceSettingsEditor.svelte";
   import BackgroundModelsSettingsEditor from "$lib/components/BackgroundModelsSettingsEditor.svelte";
   import PrivacyLoggingSettingsEditor from "$lib/components/PrivacyLoggingSettingsEditor.svelte";
+  import TelegramDiscordSettingsEditor from "$lib/components/TelegramDiscordSettingsEditor.svelte";
   import AgentMap from "$lib/components/AgentMap.svelte";
   import MusicPlayer from "$lib/components/music/MusicPlayer.svelte";
   import { musicWindowRequests } from "$lib/services/music";
@@ -183,6 +184,7 @@
   let showVoiceSettingsEditor = $state(false);
   let showBackgroundModelsEditor = $state(false);
   let showPrivacyLoggingEditor = $state(false);
+  let showTelegramDiscordEditor = $state(false);
   let showAgentBoard = $state(false);
   let showAgentMap = $state(false);
   // The Music Player window (ADR-051 D1); its audio lives in services/music.ts, so
@@ -868,6 +870,10 @@
     showPrivacyLoggingEditor = true;
   }
 
+  function openTelegramDiscord() {
+    showTelegramDiscordEditor = true;
+  }
+
   async function handleCommitVote(event: CustomEvent) {
     const { proposal_id, vote, comment, entries, summary } = event.detail;
     // The dialog used to close on click, before the backend answered. When a
@@ -1134,6 +1140,7 @@
       onOpenVoiceSettings={openVoiceSettings}
       onOpenBackgroundModels={openBackgroundModels}
       onOpenPrivacyLogging={openPrivacyLogging}
+      onOpenTelegramDiscord={openTelegramDiscord}
       onOpenAgentBoard={openAgentBoard}
       onOpenAgentMap={() => showAgentMap = true}
       onOpenMusicPlayer={() => { showMusicPlayer = true; musicPlayerMinimised = false; }}
@@ -1662,6 +1669,11 @@
 <PrivacyLoggingSettingsEditor
   bind:open={showPrivacyLoggingEditor}
   on:close={() => showPrivacyLoggingEditor = false}
+/>
+
+<TelegramDiscordSettingsEditor
+  bind:open={showTelegramDiscordEditor}
+  on:close={() => showTelegramDiscordEditor = false}
 />
 
 <AgentMap bind:open={showAgentMap} />
