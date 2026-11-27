@@ -296,7 +296,9 @@ in code at `7f5f02c1`; the probes he names are S1/S2 tests):
    the ADR promises no anti-starvation (a peer may wait out its limit and be refused).
 6. A guest's `expected_s` will count in the owner's own `card_wait` line, labelled with the
    guest's lease display (~991); design it like `LeaseRefusedForPeer` (no alias, agent or
-   chat named), not as a side effect. S1 does not depend on Q7;
+   chat named), not as a side effect.
+   *(Point 5 decided by the owner, #129: no anti-starvation; refuse with "busy, free in
+   about Y".)* S1 does not depend on Q7;
 S2-S4 do (an amendment to ADR-052 L13 adding the music guest class).
 - **The peer mark must cover the whole trip** (Johnny #111): the mark is a context variable
   set inside `with serving_a_peer(...)` (`managers/llama_server_supervisor.py:228-243`); the
@@ -572,10 +574,12 @@ Each slice runs the full core suite before it is called green.
 - ~~Q5. Adapters~~ **Decided (#89):** "Share to peers" per adapter plus `music.adapters`;
   voice adapters unticked with their note.
 - ~~Q6. ADR-051 D17~~ **Decided (#90, `e54c6b74`):** a licence is a warning, never a block.
-- **Q8. Anti-starvation vs the 2026-11-24 swap rules: Open (owner decides)** (Johnny #126):
-  give a waiting guest swap rights after the budget (changes ADR-044 rule 7 and the owner's
-  swap rules), or promise no anti-starvation (a guest may wait out its limit and be refused
-  "owner's GPU is busy"). CC recommends the second for S2-S4 and revisiting after live use.
+- ~~Q8. Anti-starvation~~ **Decided 2026-11-27 (the owner, #129, #130):** no anti-starvation
+  is promised and the owner's swap rules (ADR-044 rule 7) stay as they are: "the owner is
+  free to use his own resources as he wants". A guest waits up to its limit and is then
+  refused "the owner's GPU is busy", **with the estimate of when it will be free** ("busy for
+  about X, free in about Y") — which needs the lease ETA above. The peer can always write to
+  the owner and ask. The 15 min budget is dropped from Q1 and S4.
 - **Q7. Queue and scheduler: Open (owner decides)** (#102). **Q7.0 decided (#115):** music is
   a separate guest class, admitted by the load of the owner's queue, with music-class peer
   quotas in the settings; the 120 s trip stays for transcription and text. Still open: the
