@@ -248,15 +248,23 @@ def probe_audio_duration_seconds(path: Path) -> Optional[float]:
 
 
 def evaluate_local_transcription_limit(
-    settings: Any, path: Path, size_mb: float, *, declared_s: Any = None
+    settings: Any,
+    path: Path,
+    size_mb: float,
+    *,
+    declared_s: Any = None,
+    respect_size_limit: bool = True,
 ) -> Dict[str, Any]:
     """Decide whether `path` fits the local Whisper limit configured on `settings`.
 
     When `[local_transcription] max_duration_seconds` is set:
     - `0`: unlimited (no file-size or duration gate).
     - `> 0`: compares probed duration (falling back to `declared_s` if unprobeable) against the
-      duration cap; falls back to legacy `max_file_size_mb` only if duration cannot be determined.
-    When unset/empty/invalid: applies the legacy `max_file_size_mb` (default 25 MB) check."""
+      duration cap; falls back to legacy `max_file_size_mb` only if duration cannot be determined
+      and `respect_size_limit` is true.
+    When unset/empty/invalid: applies the legacy `max_file_size_mb` (default 25 MB) check unless
+    `respect_size_limit` is false (alignment paths bypass the 25 MB cloud-API ceiling while still
+    enforcing an explicit positive `max_duration_seconds`)."""
     max_duration_s = read_local_transcription_max_duration_seconds(settings)
     probed_once = False
     probed_s: Optional[float] = None
@@ -301,10 +309,33 @@ def evaluate_local_transcription_limit(
                 "code": None,
                 "message": None,
             }
+        if not respect_size_limit:
+            return {
+                "allowed": True,
+                "mode": "duration",
+                "probed_once": True,
+                "probed_s": None,
+                "duration_s": None,
+                "limit": max_duration_s,
+                "code": None,
+                "message": None,
+            }
         logger.warning(
             "Could not probe audio duration for %s; falling back to [local_transcription] max_file_size_mb",
             path,
         )
+
+    if not respect_size_limit:
+        return {
+            "allowed": True,
+            "mode": "size_limit_bypassed",
+            "probed_once": False,
+            "probed_s": None,
+            "duration_s": None,
+            "limit": None,
+            "code": None,
+            "message": None,
+        }
 
     limit_mb = read_local_transcription_max_file_size_mb(settings)
     if size_mb > limit_mb:
@@ -581,23 +612,29 @@ class MusicCommandsMixin:
         trigger_download: bool = True,
         respect_size_limit: bool = True,
         non_evicting: bool = False,
+        declared_s: Optional[float] = None,
     ) -> Dict[str, Any]:
         alias = getattr(provider, "alias", None) or LOCAL_WHISPER_TYPE
         try:
             size_mb = path.stat().st_size / (1024 * 1024)
         except OSError as exc:
             raise MusicLibraryError("no_file", f"the track's file cannot be read: {exc}") from exc
-        ask_audio_s: Optional[float] = None
-        if respect_size_limit:
-            decision = await asyncio.to_thread(evaluate_local_transcription_limit, self.settings, path, size_mb)
-            if not decision["allowed"]:
-                raise MusicLibraryError(decision["code"], decision["message"])
-            # Reuse the probe from `evaluate_local_transcription_limit` so `audio_seconds` runs at most once.
-            ask_audio_s = (
-                (decision["probed_s"] if decision["probed_s"] is not None else 0.0)
-                if decision["probed_once"]
-                else None
-            )
+        decision = await asyncio.to_thread(
+            evaluate_local_transcription_limit,
+            self.settings,
+            path,
+            size_mb,
+            declared_s=declared_s,
+            respect_size_limit=respect_size_limit,
+        )
+        if not decision["allowed"]:
+            raise MusicLibraryError(decision["code"], decision["message"])
+        # Reuse the probe from `evaluate_local_transcription_limit` so `audio_seconds` runs at most once.
+        ask_audio_s: Optional[float] = (
+            (decision["probed_s"] if decision["probed_s"] is not None else 0.0)
+            if decision["probed_once"]
+            else None
+        )
         from ..providers.whisper_provider import (
             LocalWhisperProvider,
             asks_for_the_card,
@@ -641,7 +678,7 @@ class MusicCommandsMixin:
 
         # ADR-052 L4: explicit click (`bound_s=None`) waits until cancelled; background auto-align uses zero wait.
         ask = await asyncio.to_thread(
-            card_ask, provider, purpose, str(path), bound_s=bound_s, audio_s=ask_audio_s
+            card_ask, provider, purpose, str(path), bound_s=bound_s, audio_s=ask_audio_s, declared_s=declared_s
         )
         ask["on_wait"] = lambda estimate: show_card_wait({
             "text": card_wait_words(estimate), "behind": list(estimate.get("behind") or []),
@@ -680,7 +717,8 @@ class MusicCommandsMixin:
 
     async def _music_transcribe_for_align(self, path: Path) -> Dict[str, Any]:
         """Local-Whisper-only transcription for manual `align_music_lyrics`: never uploads to a
-        remote or cloud provider, and bypasses the 25 MB cloud-API file size gate."""
+        remote or cloud provider, and bypasses the 25 MB cloud-API file size gate while still
+        enforcing an explicit positive `[local_transcription] max_duration_seconds`."""
         whisper = self._music_pick_local_whisper()
         if whisper is None:
             raise MusicLibraryError(
@@ -757,6 +795,7 @@ class MusicCommandsMixin:
                     trigger_download=False,
                     respect_size_limit=False,
                     non_evicting=True,
+                    declared_s=duration_s,
                 )
 
             lyr = await self._music_lyrics()

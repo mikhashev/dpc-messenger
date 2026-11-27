@@ -1,8 +1,10 @@
 """Deterministic forced alignment of known lyric lines against Whisper word timestamps.
 
-Pure Python, standard library only, no I/O or model loading. Never edits the lyric text:
-line order, wording, stress marks (`U+0301`), capitalization, and section headers like
-`[Verse 1]` / `[Chorus]` are preserved verbatim.
+Pure Python, standard library only, no I/O or model loading. Never edits non-empty lyric
+line text: line order, wording, stress marks (`U+0301`), capitalization, and section headers
+like `[Verse 1]` / `[Chorus]` are preserved verbatim (blank stanza-separator lines are omitted
+from timed `mp.lyrics/1`, `.lrc`, and `SYLT` output, while plain `USLT` / `LYRICS` tags
+preserve them on export).
 
 How alignment works:
 1. Extract timed words from Whisper results (top-level `words` from HF pipelines, nested
@@ -56,9 +58,52 @@ _BAND_HALF = 64
 _MIN_COVERAGE = 0.30
 _MIN_COVERAGE_SHORT = 0.50
 _MIN_LINE_COVERAGE = 0.30
+_MIN_CONTENT_COVERAGE = 0.25
+_MIN_LINE_SPAN = 0.25
 _MIN_MATCHED_WORDS_LONG = 2
 _MIN_AVG_CONFIDENCE = 0.80
 _FUZZY_SIM_THRESHOLD = 0.72
+
+# Ultra-common EN/RU function/stop words (normalized: lowercase, no apostrophes, ё -> е)
+# excluded from content-word confirmation so random stop-word overlaps cannot pass `sufficient`.
+_STOP_WORDS = frozenset({
+    # English pronouns, determiners, conjunctions, prepositions, auxiliaries, interjections
+    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was",
+    "our", "out", "has", "his", "how", "its", "may", "now", "who", "did", "get", "got", "let",
+    "put", "she", "too", "way", "why", "that", "this", "with", "from", "they", "them", "their",
+    "there", "these", "those", "then", "than", "have", "were", "been", "will", "would", "could",
+    "should", "what", "when", "where", "which", "while", "whom", "whose", "your", "yours",
+    "mine", "ours", "hers", "theirs", "into", "onto", "over", "under", "about", "after",
+    "before", "between", "through", "during", "above", "below", "just", "like", "more", "most",
+    "some", "such", "only", "very", "even", "also", "back", "here", "much", "many", "each",
+    "other", "being", "does", "doing", "done", "dont", "didnt", "cant", "wont", "isnt", "arent",
+    "aint", "wasnt", "werent", "hasnt", "havent", "hadnt", "wouldnt", "couldnt", "shouldnt",
+    "youre", "theyre", "youve", "theyve", "youll", "theyll", "youd", "theyd", "thats", "whats",
+    "heres", "theres", "whos", "hes", "shes", "ive", "weve", "yeah", "ooh", "oooh", "whoa",
+    # Russian pronouns, particles, conjunctions, prepositions, auxiliaries (normalized ё -> е)
+    "что", "как", "где", "кто", "все", "так", "там", "тут", "вот", "уже", "еще", "для", "при",
+    "под", "над", "без", "про", "или", "они", "она", "оно", "вас", "нас", "вам", "нам", "ней",
+    "ним", "них", "том", "той", "тех", "тем", "мой", "мои", "мою", "мое", "нет", "это", "был",
+    "раз", "меня", "тебя", "себя", "мне", "тебе", "себе", "мной", "тобой", "собой",
+    "него", "нее", "нему", "ними", "нами", "вами", "свой", "своя", "свое", "свои", "свою",
+    "своих", "своим", "своем", "моя", "моей", "моем", "моим", "моих", "твой", "твоя", "твое",
+    "твои", "твою", "твоей", "твоем", "наш", "наша", "наше", "наши", "нашу", "нашей", "наших",
+    "ваш", "ваша", "ваше", "ваши", "вашу", "вашей", "ваших", "этот", "эта", "эти", "эту",
+    "этого", "этой", "этим", "этих", "тот", "того", "теми", "быть", "была", "было", "были",
+    "буду", "будешь", "будет", "будем", "будете", "будут", "есть", "чтобы", "чтоб", "если",
+    "когда", "тогда", "потом", "затем", "даже", "только", "лишь", "очень", "просто", "более",
+    "менее", "больше", "меньше", "через", "после", "перед", "между", "около", "вокруг", "вдоль",
+    "здесь", "туда", "сюда", "куда", "откуда", "почему", "зачем", "нибудь", "какой", "какая",
+    "какое", "какие", "который", "которая", "которое", "которые", "такой", "такая", "такое",
+    "такие", "весь", "вся", "всех", "всем", "всеми", "всего", "может", "могу", "можешь",
+    "можем", "можете", "могут", "надо", "нужно", "можно", "нельзя", "ведь", "хотя", "пусть",
+    "пока",
+})
+
+
+def _is_content_token(token: str) -> bool:
+    """True when `token` is a meaningful content word (not short <=2-char or EN/RU stop word)."""
+    return len(token) >= 3 and token not in _STOP_WORDS
 
 
 @dataclass(frozen=True)
@@ -595,10 +640,7 @@ def _banded_align(
         dp_rows.append(cur)
         bp_rows.append(cur_bp)
 
-    i, j = m, min(n, row_ends[m])
-    # Snap to best end column in last row if j < n
-    if j < row_ends[m]:
-        j = row_ends[m]
+    i, j = m, row_ends[m]
     pairs: List[Tuple[int, int]] = []
     while i > 0 or j > 0:
         j_lo = row_starts[i]
@@ -694,9 +736,11 @@ def align_lyrics(
 ) -> AlignmentResult:
     """Align known lyric lines to Whisper timed words and return `AlignmentResult`.
 
-    Never alters lyric wording or formatting on any non-empty line. Recognizes `[Verse]`-style
-    section header lines, skips them during token alignment, preserves them in `lines`, and
-    assigns valid monotonic timestamps in `[0, duration_s]`.
+    Never alters lyric wording or formatting on any non-empty line; blank stanza-separator
+    lines are omitted from timed `mp.lyrics/1`, `.lrc`, and `SYLT` output (while plain `USLT` /
+    `LYRICS` tags preserve them on export). Recognizes `[Verse]`-style section header lines,
+    skips them during token alignment, preserves them in `lines`, and assigns valid monotonic
+    timestamps in `[0, duration_s]`.
     """
     parsed = parse_lyric_lines(lyrics)
     sung_lines = [ln for ln in parsed if (not ln.is_header) and ln.tokens]
@@ -803,19 +847,49 @@ def align_lyrics(
     coverage = matched_words / max(1, total_lyric_words)
     avg_confidence = (sum(pair_confidences) / len(pair_confidences)) if pair_confidences else 0.0
     total_sung_with_words = len(sung_lines)
+
+    content_indices = [idx for idx, tok in enumerate(l_tokens) if _is_content_token(tok)]
+    distinct_lyric_content = {l_tokens[idx] for idx in content_indices}
+    matched_content_indices = [idx for idx in matched_word_set if _is_content_token(l_tokens[idx])]
+    matched_content_words = len(matched_content_indices)
+    distinct_matched_content = len({l_tokens[idx] for idx in matched_content_indices})
+    content_coverage = (matched_content_words / len(content_indices)) if content_indices else coverage
+
+    sung_pos_by_line = {ln.index: pos for pos, ln in enumerate(sung_lines)}
+    matched_sung_positions = sorted(
+        sung_pos_by_line[line_i] for line_i in first_match_for_line if line_i in sung_pos_by_line
+    )
+    if len(matched_sung_positions) >= 2 and total_sung_with_words >= 2:
+        line_span = (matched_sung_positions[-1] - matched_sung_positions[0]) / max(1, total_sung_with_words - 1)
+    else:
+        line_span = 1.0 if (matched_lines >= 1 and total_sung_with_words <= 1) else 0.0
+
     if total_lyric_words <= 4:
+        content_ok = (not content_indices) or (matched_content_words >= 1)
         sufficient = (
             matched_words >= 1
             and coverage >= _MIN_COVERAGE_SHORT
             and avg_confidence >= _MIN_AVG_CONFIDENCE
+            and content_ok
         )
     else:
         min_lines = 1 if total_sung_with_words <= 1 else max(2, math.ceil(_MIN_LINE_COVERAGE * total_sung_with_words))
+        if content_indices:
+            min_distinct = min(2, len(distinct_lyric_content))
+            content_ok = (
+                content_coverage >= _MIN_CONTENT_COVERAGE
+                and distinct_matched_content >= min_distinct
+            )
+        else:
+            content_ok = coverage >= _MIN_COVERAGE_SHORT
+        span_ok = True if total_sung_with_words < 4 else (line_span >= _MIN_LINE_SPAN)
         sufficient = (
             matched_words >= _MIN_MATCHED_WORDS_LONG
             and coverage >= _MIN_COVERAGE
             and matched_lines >= min_lines
             and avg_confidence >= _MIN_AVG_CONFIDENCE
+            and content_ok
+            and span_ok
         )
 
     if not matched_lines:

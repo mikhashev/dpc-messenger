@@ -942,6 +942,54 @@ def test_fit_size_evicts_request_before_reproducibility_fields():
     assert tight_rec["audio_codes"] == prog_rec["audio_codes"]
 
 
+def test_zcode109_probe23a_fit_size_evicts_request_text_while_keeping_small_fields_and_codes():
+    small_fields = {
+        "title": "Keep Small Fields",
+        "asked": {"style": "chamber jazz", "duration_s": 90},
+        "surface": "player",
+        "form": {"mode": "lyrics", "preset": "standard"},
+    }
+
+    # Case A: acestep with audio_codes (~59 KB) + request.text (~7 KB) -> evicting `text` brings record <= MAX_BYTES
+    # while `title`, `asked`, `surface`, `form`, and `audio_codes` all survive.
+    codes_59k = ",".join(str(10000 + (i % 9000)) for i in range(9800))
+    assert 57 * 1024 < len(codes_59k.encode("utf-8")) < 60 * 1024
+    ace_rec = acestep(
+        lm_result={"caption": "chamber jazz", "audio_codes": codes_59k, "lyrics": "la\n"},
+        job_request={**small_fields, "text": "Prompt detail " + ("p" * 7000)},
+    )
+    assert len(pv.serialize(ace_rec).encode("utf-8")) > pv.MAX_BYTES
+    ace_done, ace_text = pv.finalize(ace_rec)
+    assert len(ace_text.encode("utf-8")) <= pv.MAX_BYTES
+    assert "text" not in ace_done["request"]
+    assert "text" in ace_done["omitted_for_size"]["request"]["dropped"]
+    for key, val in small_fields.items():
+        assert ace_done["request"][key] == val
+    assert ace_done["audio_codes"] == codes_59k
+    assert "audio_codes" not in ace_done["omitted_for_size"]
+    pv.validate_embedded(ace_done)
+
+    # Case B: yue2 with semantic_tokens + score_abc + request.text -> evicting `text` keeps small fields + tokens + score_abc
+    tokens_50k = ",".join(str(20000 + (i % 9000)) for i in range(8400))
+    abc_7k = "X:1\nT:Test\nK:C\n" + ("CDEF GABc |\n" * 520)
+    y_rec = yue2(
+        replay={"style": "chamber jazz", "abc": abc_7k, "semantic_tokens": tokens_50k, "seed": 42, "lm_seed": 42},
+        job_request={**small_fields, "text": "Prompt detail " + ("q" * 7000)},
+    )
+    assert len(pv.serialize(y_rec).encode("utf-8")) > pv.MAX_BYTES
+    y_done, y_text = pv.finalize(y_rec)
+    assert len(y_text.encode("utf-8")) <= pv.MAX_BYTES
+    assert "text" not in y_done["request"]
+    assert "text" in y_done["omitted_for_size"]["request"]["dropped"]
+    for key, val in small_fields.items():
+        assert y_done["request"][key] == val
+    assert y_done["semantic_tokens"] == tokens_50k
+    assert y_done["score_abc"] == abc_7k
+    assert "semantic_tokens" not in y_done["omitted_for_size"]
+    assert "score_abc" not in y_done["omitted_for_size"]
+    pv.validate_embedded(y_done)
+
+
 def test_music_propose_job_schema_omits_message_id_and_marks_asked_changes_as_summaries():
     entry = next(e for e in music_tools.get_tools() if e.name == "music_propose_job")
     req_schema = entry.schema["parameters"]["properties"]["request"]

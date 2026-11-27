@@ -226,10 +226,11 @@ def parse_lrc(text: str) -> ParsedLrc:
             if not m:
                 break
             times.append(_seconds(m.group(1), m.group(2)))
-            rest = rest[m.end():].lstrip()
+            rest = rest[m.end():]
         if not times:
             untimed.append(s)
             continue
+        rest = rest.lstrip()
         t_end: Optional[float] = None
         end = _END.search(rest)
         if end:
@@ -269,7 +270,8 @@ def lrc_stamp(t: Optional[float]) -> str:
 
 def format_lrc(lyrics: Optional[dict]) -> str:
     """LRC text for `mp.lyrics/1` (the prototype's `toLrc`): unsynced lines are written
-    without a stamp, so an edit can time them."""
+    without a stamp, so an edit can time them. Blank stanza-separator lines are omitted
+    from `mp.lyrics/1` / `.lrc` / `SYLT` (while plain `USLT` / `LYRICS` tags keep them)."""
     if not lyrics:
         return ""
     out: List[str] = []
@@ -1351,6 +1353,15 @@ class MusicLyrics:
         audio_tags.flac_upsert_comments(flac_path, {"SYNCEDLYRICS": lrc_text})
         return True
 
+    @staticmethod
+    def _has_timed_sidecar(audio_path: Path) -> bool:
+        """True when a readable `<stem>.lrc` sidecar next to `audio_path` holds timed lines."""
+        try:
+            sidecar = read_sidecar(audio_path)
+        except (OSError, ValueError):
+            return False
+        return sidecar is not None and bool(parse_lrc(sidecar[1]).lines)
+
     async def align(
         self,
         track_id: str,
@@ -1363,9 +1374,11 @@ class MusicLyrics:
         min_matches_required: bool = True,
     ) -> Dict[str, Any]:
         """Force-align existing unsynced (or explicit known) lyrics against audio using Whisper word
-        timestamps, preserving exact verbatim text, saving `source: "aligned"` in `music/lyrics/`
-        and writing a synced `.lrc` sidecar (and FLAC `SYNCEDLYRICS` tag) only for DPC-owned
-        generated tracks under `library._generated_root()` (ADR-051 Q4)."""
+        timestamps, preserving exact verbatim text on non-empty lines (blank stanza-separator
+        lines are omitted from timed `mp.lyrics/1`, `.lrc`, and `SYLT` output, while plain `USLT` /
+        `LYRICS` tags preserve them on export), saving `source: "aligned"` in `music/lyrics/` and
+        writing a synced `.lrc` sidecar (and FLAC `SYNCEDLYRICS` tag) only for DPC-owned generated
+        tracks under `library._generated_root()` (ADR-051 Q4)."""
         lyrics_file = self.lyrics_path(track_id)
         async with self._lock(track_id):
             entry = self.library.get_entry(track_id)
@@ -1382,22 +1395,11 @@ class MusicLyrics:
             if lyrics_text is not None:
                 raw_lines = self._known_lines_from_input(lyrics_text)
                 existing_lang: Optional[str] = stored.get("language") if stored else None
-                if not overwrite_manual:
-                    if self._is_protected_synced(stored):
-                        raise MusicLibraryError(
-                            "overwrite_manual_required",
-                            "the track already has synced lyrics; replacing their times needs overwrite_manual",
-                        )
-                    if stored is None:
-                        try:
-                            sidecar = await asyncio.to_thread(read_sidecar, Path(path))
-                        except (OSError, ValueError):
-                            sidecar = None
-                        if sidecar is not None and parse_lrc(sidecar[1]).lines:
-                            raise MusicLibraryError(
-                                "overwrite_manual_required",
-                                "the track already has a synced .lrc sidecar; replacing its times needs overwrite_manual",
-                            )
+                if not overwrite_manual and self._is_protected_synced(stored):
+                    raise MusicLibraryError(
+                        "overwrite_manual_required",
+                        "the track already has synced lyrics; replacing their times needs overwrite_manual",
+                    )
             else:
                 source_rec = stored
                 if source_rec is None:
@@ -1416,6 +1418,14 @@ class MusicLyrics:
                     )
                 raw_lines = self._known_lines_from_input(source_rec.get("lines") or [])
                 existing_lang = source_rec.get("language")
+
+            if not overwrite_manual:
+                is_generated = await asyncio.to_thread(self._generated_audio_target, Path(path)) is not None
+                if (stored is None or is_generated) and await asyncio.to_thread(self._has_timed_sidecar, Path(path)):
+                    raise MusicLibraryError(
+                        "overwrite_manual_required",
+                        "the track already has a synced .lrc sidecar; replacing its times needs overwrite_manual",
+                    )
 
             if not raw_lines or not lyrics_align.has_alignable_words(raw_lines):
                 raise MusicLibraryError("no_lyrics", "lyrics have no sung words to align")
@@ -1462,7 +1472,11 @@ class MusicLyrics:
             stored_now = await asyncio.to_thread(self._read_stored, lyrics_file)
             record = make_lyrics(entry["source_hash"], ALIGNED_SOURCE, aligned.lines, synced=True, language=lang)
             lrc_text = format_lrc(record)
-            if not overwrite_manual and self._is_protected_synced(stored_now):
+            gen_target = await asyncio.to_thread(self._generated_audio_target, Path(path))
+            if not overwrite_manual and (
+                self._is_protected_synced(stored_now)
+                or (gen_target is not None and await asyncio.to_thread(self._has_timed_sidecar, gen_target))
+            ):
                 return {
                     "lyrics": stored_now,
                     "applied": False,
@@ -1475,7 +1489,6 @@ class MusicLyrics:
             sidecar_written = False
             sidecar_path: Optional[Path] = None
             synced_tag_written = False
-            gen_target = await asyncio.to_thread(self._generated_audio_target, Path(path))
             if gen_target is not None:
                 try:
                     sidecar_path = await asyncio.to_thread(write_lrc, gen_target, record)

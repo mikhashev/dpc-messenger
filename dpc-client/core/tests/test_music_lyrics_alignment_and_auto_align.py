@@ -1664,3 +1664,427 @@ async def test_cc87_nit5_manual_align_finds_local_whisper_regardless_of_voice_pr
     ans_none = await svc_none.align_music_lyrics(track_id=lib.entry["id"])
     assert ans_none["status"] == "error" and ans_none["code"] == "transcription_unavailable"
     assert remote_calls == []
+
+
+# -- 6. Zcode #109 / CC #110 Findings & Nits --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_zcode109_align_and_auto_align_respect_max_duration_seconds_while_bypassing_25mb_limit(tmp_path):
+    from dpc_client_core.music.lyrics import make_lyrics, plain_lines
+
+    long_flac = tmp_path / "Music" / "Long Track.flac"
+    long_flac.parent.mkdir(parents=True, exist_ok=True)
+    wav_long = make_wav(tmp_path / "long_src.wav", seconds=0.5)
+    _make_realistic_fake_flac(180.0)(wav_long, long_flac, {})
+
+    big_long_flac = tmp_path / "Music" / "Big Long Track.flac"
+    _make_realistic_fake_flac(180.0)(wav_long, big_long_flac, {})
+    with open(big_long_flac, "ab") as f:
+        f.write(b"\x00" * (31 * 1024 * 1024))
+    assert big_long_flac.stat().st_size > 30 * 1024 * 1024
+
+    big_short_flac = tmp_path / "Music" / "Big Short Track.flac"
+    _make_realistic_fake_flac(60.0)(wav_long, big_short_flac, {})
+    with open(big_short_flac, "ab") as f:
+        f.write(b"\x00" * (31 * 1024 * 1024))
+    assert big_short_flac.stat().st_size > 30 * 1024 * 1024
+
+    whisper_calls = []
+
+    class _CountingWhisper:
+        alias = "w"
+        config = {"type": "local_whisper"}
+        model_name = "openai/whisper-large-v3-turbo"
+        model_loaded = True
+
+        async def transcribe(self, path, **kw):
+            whisper_calls.append(Path(path).name)
+            return {
+                "text": "Hello world today Sing it loud",
+                "language": "en",
+                "duration": 60.0,
+                "provider": "local_whisper",
+                "words": _words_from_timed_text([
+                    ("Hello", 1.0, 1.3), ("world", 1.4, 1.7), ("today", 1.8, 2.2),
+                    ("Sing", 5.0, 5.3), ("it", 5.4, 5.6), ("loud", 5.7, 6.1),
+                ]),
+            }
+
+    class _Svc(MusicCommandsMixin):
+        def __init__(self, dpc_home: Path, lib: _TrackLib):
+            self.settings = Settings(dpc_home)
+            self.llm_manager = SimpleNamespace(providers={"w": _CountingWhisper()}, voice_provider=None)
+            self._lib = lib
+
+        async def _music(self):
+            return self._lib
+
+    # 1a. max_duration_seconds = 120 rejects 180s track in manual align_music_lyrics without calling Whisper
+    home_120 = tmp_path / "dpc_120"
+    lib_long = _TrackLib(long_flac)
+    lib_long.entry["duration_s"] = 180.0
+    svc_120 = _Svc(home_120, lib_long)
+    svc_120.settings._config.set("local_transcription", "max_duration_seconds", "120")
+    lyr_120 = await svc_120._music_lyrics()
+    lyr_120._tools = MediaTools(ffmpeg=None, ffprobe=None)
+    await lyr_120._store(
+        lib_long.entry["id"],
+        make_lyrics(lib_long.entry["source_hash"], "tags", plain_lines("Hello world today\nSing it loud"), synced=False),
+    )
+    ans_120 = await svc_120.align_music_lyrics(track_id=lib_long.entry["id"])
+    assert ans_120["status"] == "error" and ans_120["code"] == "too_long"
+    assert "max_duration_seconds" in ans_120["message"]
+    assert whisper_calls == []
+
+    # 1b. max_duration_seconds = 120 skips 180s track cleanly in _music_auto_align_take without calling Whisper
+    await svc_120._music_auto_align_take(
+        track_id=lib_long.entry["id"],
+        path=long_flac,
+        lyrics="Hello world today\nSing it loud",
+        duration_s=180.0,
+    )
+    assert whisper_calls == []
+    assert not long_flac.with_suffix(".lrc").exists()
+
+    # 1c. max_duration_seconds = 120 allows 60s track even when > 30 MB (bypasses legacy 25 MB limit)
+    lib_big_short = _TrackLib(big_short_flac)
+    lib_big_short.entry["duration_s"] = 60.0
+    svc_120._lib = lib_big_short
+    svc_120._music_lyrics_instance = None
+    lyr_bs = await svc_120._music_lyrics()
+    lyr_bs._tools = MediaTools(ffmpeg=None, ffprobe=None)
+    await lyr_bs._store(
+        lib_big_short.entry["id"],
+        make_lyrics(lib_big_short.entry["source_hash"], "tags", plain_lines("Hello world today\nSing it loud"), synced=False),
+    )
+    ans_bs = await svc_120.align_music_lyrics(track_id=lib_big_short.entry["id"])
+    assert ans_bs["status"] == "ok", ans_bs
+    assert whisper_calls == ["Big Short Track.flac"]
+
+    # 1d. max_duration_seconds = "" (empty) on 30.6 MB / 180s track still succeeds
+    whisper_calls.clear()
+    home_empty = tmp_path / "dpc_empty"
+    lib_big_long = _TrackLib(big_long_flac)
+    lib_big_long.entry["duration_s"] = 180.0
+    svc_empty = _Svc(home_empty, lib_big_long)
+    svc_empty.settings._config.set("local_transcription", "max_duration_seconds", "")
+    assert svc_empty.settings.get_local_transcription_max_duration_seconds() is None
+    lyr_empty = await svc_empty._music_lyrics()
+    lyr_empty._tools = MediaTools(ffmpeg=None, ffprobe=None)
+    await lyr_empty._store(
+        lib_big_long.entry["id"],
+        make_lyrics(lib_big_long.entry["source_hash"], "tags", plain_lines("Hello world today\nSing it loud"), synced=False),
+    )
+    ans_empty = await svc_empty.align_music_lyrics(track_id=lib_big_long.entry["id"])
+    assert ans_empty["status"] == "ok", ans_empty
+    assert whisper_calls == ["Big Long Track.flac"]
+
+    # 1e. max_duration_seconds = 0 (unlimited) on 180s / 30.6 MB track succeeds
+    whisper_calls.clear()
+    home_zero = tmp_path / "dpc_zero"
+    svc_zero = _Svc(home_zero, lib_big_long)
+    svc_zero.settings._config.set("local_transcription", "max_duration_seconds", "0")
+    lyr_zero = await svc_zero._music_lyrics()
+    lyr_zero._tools = MediaTools(ffmpeg=None, ffprobe=None)
+    await lyr_zero._store(
+        lib_big_long.entry["id"],
+        make_lyrics(lib_big_long.entry["source_hash"], "tags", plain_lines("Hello world today\nSing it loud"), synced=False),
+    )
+    ans_zero = await svc_zero.align_music_lyrics(track_id=lib_big_long.entry["id"])
+    assert ans_zero["status"] == "ok", ans_zero
+    assert whisper_calls == ["Big Long Track.flac"]
+
+
+@pytest.mark.asyncio
+async def test_zcode109_generated_track_sidecar_overwrite_guard_runs_with_unsynced_stored_json(tmp_path):
+    dpc_home = tmp_path / "dpc"
+    lib = MusicLibrary(dpc_home, tools=MediaTools(ffmpeg=None, ffprobe=None), save_delay_s=0.01)
+    await lib.open()
+    try:
+        gen_dir = lib._generated_root() / "job_guard1"
+        gen_dir.mkdir(parents=True, exist_ok=True)
+        gen_flac = gen_dir / "take_v1.flac"
+        wav = make_wav(tmp_path / "guard.wav", seconds=12.0)
+        _make_realistic_fake_flac(20.0)(wav, gen_flac, {})
+        lrc_path = gen_flac.with_suffix(".lrc")
+        original_lrc = "[00:02.00] Existing timed sidecar line\n"
+        lrc_path.write_text(original_lrc, encoding="utf-8")
+
+        entry = await lib.register_generated(str(gen_flac), job_id="job_guard1", title="Guard Track")
+        whisper_calls = []
+
+        async def _whisper(_path):
+            whisper_calls.append(_path)
+            return {
+                "text": "Alpha bravo charlie Delta echo foxtrot",
+                "language": "en",
+                "duration": 20.0,
+                "words": _words_from_timed_text([
+                    ("Alpha", 3.0, 3.4), ("bravo", 3.5, 3.9), ("charlie", 4.0, 4.4),
+                    ("Delta", 8.0, 8.4), ("echo", 8.5, 8.9), ("foxtrot", 9.0, 9.5),
+                ]),
+            }
+
+        lyr = MusicLyrics(
+            dpc_home,
+            lib,
+            lrclib_enabled=lambda: False,
+            tools=MediaTools(ffmpeg=None, ffprobe=None),
+            transcriber=_whisper,
+        )
+        # Pre-existing unsynced stored JSON record (source="tags", synced=False)
+        unsynced = lyrics_mod.make_lyrics(
+            entry["source_hash"],
+            "tags",
+            lyrics_mod.plain_lines("Alpha bravo charlie\nDelta echo foxtrot"),
+            synced=False,
+        )
+        await lyr._store(entry["id"], unsynced)
+
+        # Both lyrics_text=None and explicit lyrics_text="..." must refuse overwrite_manual=False
+        for explicit in (None, "Alpha bravo charlie\nDelta echo foxtrot"):
+            with pytest.raises(MusicLibraryError) as exc:
+                await lyr.align(entry["id"], lyrics_text=explicit, overwrite_manual=False)
+            assert exc.value.code == "overwrite_manual_required"
+            assert lrc_path.read_text(encoding="utf-8") == original_lrc
+            assert whisper_calls == []
+
+        # overwrite_manual=True succeeds and overwrites the sidecar cleanly
+        res = await lyr.align(entry["id"], overwrite_manual=True)
+        assert res["applied"] is True
+        assert res["sidecar_written"] is True
+        assert len(whisper_calls) == 1
+        assert parse_lrc(lrc_path.read_text(encoding="utf-8")).lines[0]["t_start"] == pytest.approx(3.0)
+    finally:
+        await lib.stop()
+
+
+@pytest.mark.asyncio
+async def test_zcode109_runner_stop_bounds_wait_on_blocked_to_thread_background_align(tmp_path):
+    import threading
+
+    store = MusicJobStore(tmp_path)
+    store.open()
+    lib = MusicLibrary(tmp_path, tools=MediaTools(ffmpeg=None, ffprobe=None), save_delay_s=0.01)
+    runner = MusicJobRunner(store, [], lambda: asyncio.sleep(0, result=lib), dpc_home=tmp_path)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def blocked_align(**_kw):
+        def _blocking_whisper():
+            entered.set()
+            release.wait(timeout=15.0)
+
+        # Mirror LocalWhisperProvider._finish_thread: once a blocking thread is running,
+        # it cannot be interrupted and keeps awaiting thread completion across CancelledError.
+        worker = asyncio.ensure_future(asyncio.to_thread(_blocking_whisper))
+        cancelled = False
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    runner._auto_align = blocked_align
+    runner.start()
+    item = {
+        "track_id": "trk_a1b2c3d4e5f60001",
+        "path": tmp_path / "a.flac",
+        "lyrics": "Alpha\nBeta",
+        "duration_s": 10.0,
+        "replay": None,
+    }
+    try:
+        runner._spawn_background_align("job_stop_bound", [item])
+        for _ in range(100):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert entered.is_set()
+
+        t0 = time.monotonic()
+        await asyncio.wait_for(runner.stop(), timeout=3.5)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 3.5
+    finally:
+        release.set()
+        await asyncio.sleep(0.05)
+
+
+def test_zcode109_sufficient_rejects_stopword_heavy_unrelated_en_and_ru_transcripts():
+    from dpc_client_core.music import lyrics_align
+
+    # 1. Stop-word-heavy unrelated English transcript against real English lyrics
+    en_lyrics = "\n".join([
+        "I walk in the night and I look at the sky",
+        "You are on my mind and I don't know why",
+        "We go to the edge of the world in the rain",
+        "It is all in my head and it is all in vain",
+        "Through the dark and the cold we are trying to see",
+        "What is left for the two of us now to be",
+        "In the light of the morning I hear your call",
+        "When the shadows are gone we will stand so tall",
+    ])
+    en_unrelated = (
+        "i walk in the store and i look at the shelf you are on my list "
+        "and i dont know what we go to the end of the line in the rain "
+        "it is all in my bag and it is all in the cart through the door "
+        "and the hall we are going to see what is there for the two of us "
+        "just to be in the middle of the day i get your text when the "
+        "meetings are done we will go to lunch"
+    ).split()
+    en_words = [{"word": w, "start": round(1.0 + i * 0.3, 2), "end": round(1.2 + i * 0.3, 2)} for i, w in enumerate(en_unrelated)]
+    # Construct a second pure stop-word transcript matching >30% of tokens purely on function words
+    en_stop_only = (
+        "i in the and i at the you are on my and i dont know "
+        "we to the of the in the it is all in my and it is all in "
+        "the and the we are to what is for the of us to be "
+        "in the of the i your when the are we will so"
+    ).split()
+    en_stop_words = [{"word": w, "start": round(1.0 + i * 0.3, 2), "end": round(1.2 + i * 0.3, 2)} for i, w in enumerate(en_stop_only)]
+    res_en_stop = lyrics_align.align_lyrics(en_lyrics, en_stop_words, duration_s=40.0)
+    assert res_en_stop.coverage >= 0.30
+    assert res_en_stop.sufficient is False
+
+    # Unrelated prose with mostly function words + 1 accidental content match ("rain")
+    en_mostly_stop = (
+        "i was in the room and i looked at the door you are on my phone "
+        "and i dont think we went to the corner of the street in the rain "
+        "it is all in my notes and it is all in order through the hall "
+        "and the stairs we are waiting to see what is left for us to do "
+        "in the end when the clouds are gone we will leave"
+    ).split()
+    en_mostly_stop_words = [{"word": w, "start": round(1.0 + i * 0.3, 2), "end": round(1.2 + i * 0.3, 2)} for i, w in enumerate(en_mostly_stop)]
+    res_en_unrelated = lyrics_align.align_lyrics(en_lyrics, en_mostly_stop_words, duration_s=40.0)
+    assert res_en_unrelated.sufficient is False
+
+    # 2. Stop-word-heavy unrelated Russian transcript against real Russian lyrics
+    ru_lyrics = "\n".join([
+        "Я иду́ по ти́хой у́лице в ночно́м тума́не",
+        "Ты стои́шь у ста́рого окна́ в своём карма́не",
+        "Мы не зна́ем что нас ждёт за э́тим поворо́том",
+        "И лети́т холо́дный ве́тер над высо́ким сво́дом",
+        "На земле́ лежи́т сере́бряный пуши́стый снег",
+        "И не слы́шно бо́льше на́ших голосо́в и смех",
+        "Но когда́ рассве́т придёт и разойду́тся ту́чи",
+        "Мы поймём что э́тот мир стано́вится всё лу́чше",
+    ])
+    ru_stop_only = (
+        "я по в ты у в мы не что нас за этим "
+        "и над на и не больше наших и но когда "
+        "и мы что этот все"
+    ).split()
+    ru_stop_words = [{"word": w, "start": round(1.0 + i * 0.4, 2), "end": round(1.3 + i * 0.4, 2)} for i, w in enumerate(ru_stop_only)]
+    res_ru_stop = lyrics_align.align_lyrics(ru_lyrics, ru_stop_words, duration_s=45.0)
+    assert res_ru_stop.coverage >= 0.30
+    assert res_ru_stop.sufficient is False
+
+    # 3. Clustered corner hits (only first 3 lines out of 12 match -> narrow span < 25%)
+    twelve_lines = "\n".join(f"Line {i} uniqueAlpha{i} uniqueBeta{i} uniqueGamma{i}" for i in range(12))
+    corner_words = []
+    t = 1.0
+    for i in range(3):
+        for tok in ("Line", str(i), f"uniqueAlpha{i}", f"uniqueBeta{i}", f"uniqueGamma{i}"):
+            corner_words.append({"word": tok, "start": round(t, 2), "end": round(t + 0.2, 2)})
+            t += 0.3
+    res_corner = lyrics_align.align_lyrics(twelve_lines, corner_words, duration_s=40.0)
+    assert res_corner.sufficient is False
+
+    # 4. Positive control: real Russian lyrics with stress marks & ё and ~45% Whisper coverage still succeed
+    ru_real = _words_from_timed_text([
+        ("я", 1.0, 1.2), ("иду", 1.3, 1.6), ("тихой", 1.7, 2.0), ("улице", 2.1, 2.5), ("тумане", 2.6, 3.0),
+        ("ты", 5.0, 5.2), ("стоишь", 5.3, 5.6), ("старого", 5.7, 6.1), ("окна", 6.2, 6.6),
+        ("летит", 12.0, 12.4), ("холодный", 12.5, 13.0), ("ветер", 13.1, 13.5),
+        ("земле", 18.0, 18.4), ("лежит", 18.5, 18.9), ("пушистый", 19.0, 19.5), ("снег", 19.6, 20.0),
+        ("поймем", 28.0, 28.5), ("мир", 28.6, 29.0), ("лучше", 29.1, 29.5),
+    ])
+    res_ru_real = lyrics_align.align_lyrics(ru_lyrics, ru_real, duration_s=35.0)
+    assert res_ru_real.sufficient is True
+
+
+def test_zcode109_nit_a_lrc_round_trip_preserves_literal_bracketed_timestamps():
+    lines = [
+        {"t_start": 5.0, "text": "[00:99]"},
+        {"t_start": 10.0, "text": "[00:99] hello"},
+        {"t_start": 15.0, "text": "[01:23.45] literal stamp"},
+    ]
+    formatted = lyrics_mod.format_lrc({"language": "en", "lines": lines})
+    reparsed = parse_lrc(formatted)
+    assert reparsed.language == "en"
+    assert reparsed.lines == lines
+
+    # Standard contiguous multi-timestamp LRC still repeats cleanly
+    multi = parse_lrc("[00:10.00][01:10.00] Chorus")
+    assert multi.lines == [
+        {"t_start": 10.0, "text": "Chorus"},
+        {"t_start": 70.0, "text": "Chorus"},
+    ]
+
+
+def test_zcode109_nit_b_banded_align_long_sequence_and_fallback():
+    from dpc_client_core.music import lyrics_align
+
+    # Direct unit test of _banded_align on a long sequence (m=400, n=420) with deletions, insertions, and fuzzy matches
+    l_tokens = [f"tok{i:04d}alpha" for i in range(400)]
+    w_tokens = []
+    expected_matched = 0
+    for i, tok in enumerate(l_tokens):
+        if i % 20 == 5:
+            continue  # deleted lyric word
+        if i % 25 == 7:
+            w_tokens.append("adlib")  # inserted whisper filler
+        if i % 15 == 3:
+            w_tokens.append(f"tok{i:04d}alphb")  # fuzzy 1-char mismatch
+        else:
+            w_tokens.append(tok)
+        expected_matched += 1
+
+    pairs = lyrics_align._banded_align(l_tokens, w_tokens, l_offset=10, w_offset=20, band_half=64)
+    assert len(pairs) >= expected_matched - 2
+    assert all(10 <= li < 410 and 20 <= wi < 20 + len(w_tokens) for li, wi in pairs)
+    # Strictly monotonic and reaches both head and tail of the 400-token interval
+    assert all(pairs[k][0] < pairs[k + 1][0] and pairs[k][1] <= pairs[k + 1][1] for k in range(len(pairs) - 1))
+    assert pairs[0][0] <= 12
+    assert pairs[-1][0] >= 407
+
+    # Also verify align_lyrics hits _banded_align when an unanchored >100k-cell interval has no size>=2 SequenceMatcher blocks
+    # (every token in l_tokens and w_tokens has length-1 fuzzy changes or alternating tokens so no 2-token exact block exists)
+    lyrics_lines = [f"unique{i:04d}aaaa shared" for i in range(200)]  # 400 tokens
+    w_list = []
+    t = 1.0
+    for i in range(200):
+        # Fuzzy match on first token (1 char diff -> no exact 2-token SequenceMatcher block!), exact on "shared"
+        w_list.append({"word": f"unique{i:04d}aaab", "start": round(t, 2), "end": round(t + 0.2, 2)})
+        t += 0.25
+        w_list.append({"word": "shared", "start": round(t, 2), "end": round(t + 0.2, 2)})
+        t += 0.25
+    res = lyrics_align.align_lyrics("\n".join(lyrics_lines), w_list, duration_s=t + 2.0)
+    assert res.sufficient is True
+    assert res.matched_words >= 380
+
+
+def test_zcode109_nit_c_blank_lines_omitted_from_lrc_and_sylt_documented(tmp_path):
+    from dpc_client_core.music import id3, lyrics_align
+
+    known = "[Verse 1]\nLine one\n\n[Chorus]\nLine two\n"
+    words = _words_from_timed_text([
+        ("line", 1.0, 1.3), ("one", 1.4, 1.7),
+        ("line", 5.0, 5.3), ("two", 5.4, 5.7),
+    ])
+    aligned = lyrics_align.align_lyrics(known, words, duration_s=10.0)
+    assert [ln["text"] for ln in aligned.lines] == ["[Verse 1]", "Line one", "[Chorus]", "Line two"]
+    lrc = lyrics_mod.format_lrc({"language": "en", "lines": aligned.lines})
+    assert "\n\n" not in lrc
+    sylt_bytes = id3.sylt_frame(aligned.lines, language="en")
+    parsed_sylt = id3_sylt.parse_id3_sylt(id3.build_id3v24([sylt_bytes]))
+    assert parsed_sylt is not None
+    assert [ln["text"] for ln in parsed_sylt.lines] == ["[Verse 1]", "Line one", "[Chorus]", "Line two"]
+
+    # Docstrings explicitly document blank-line omission in timed LRC/SYLT output
+    assert "blank" in (lyrics_align.align_lyrics.__doc__ or "").lower()
+    assert "blank" in (lyrics_mod.format_lrc.__doc__ or "").lower()
+    assert "blank" in (MusicLyrics.align.__doc__ or "").lower()

@@ -680,11 +680,31 @@ class MusicJobRunner:
         for t in bg:
             if not t.done():
                 t.cancel()
-        for t in bg:
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
+        if bg:
+            timeout = max(0.0, float(getattr(self, "bg_align_stop_timeout_s", 2.0)))
+            done, pending = await asyncio.wait(bg, timeout=timeout)
+            for t in done:
+                if not t.cancelled():
+                    try:
+                        t.exception()
+                    except Exception:
+                        pass
+            if pending:
+                logger.warning(
+                    "music: %d background auto-align task(s) did not stop within %.2f s; continuing shutdown",
+                    len(pending),
+                    timeout,
+                )
+
+                def _consume_bg_align(done_task: asyncio.Task) -> None:
+                    if not done_task.cancelled():
+                        try:
+                            done_task.exception()
+                        except Exception:
+                            pass
+
+                for t in pending:
+                    t.add_done_callback(_consume_bg_align)
 
     async def wait_auto_align(self, timeout_s: float = 5.0) -> None:
         """Await any pending, idle-deferred, or in-flight detached background auto-align tasks (primarily for tests)."""
