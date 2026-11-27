@@ -136,6 +136,7 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import mmap
 import os
 import re
@@ -1002,6 +1003,50 @@ class MusicJobRunner:
         self._emit(await self._get(job_id))
         return body, seed
 
+    async def _read_stored_yue2_body(self, job_id: str, name: str) -> Dict[str, Any]:
+        """Read and validate a stored yue2.cpp `/synth` body on resume, raising a named
+        `MusicJobError('invalid_payload', ...)` when missing or corrupt."""
+        try:
+            raw = await self._call(self.store.read_payload, job_id, name)
+        except OSError as exc:
+            raise MusicJobError(
+                "invalid_payload",
+                f"invalid_payload: stored payload {name!r} could not be read: {exc}",
+            ) from exc
+        try:
+            stored = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise MusicJobError(
+                "invalid_payload",
+                f"invalid_payload: stored payload {name!r} is not valid UTF-8 JSON: {exc}",
+            ) from exc
+        if not isinstance(stored, dict):
+            raise MusicJobError(
+                "invalid_payload",
+                f"invalid_payload: stored payload {name!r} must be a JSON object",
+            )
+        style = stored.get("style")
+        if style is not None and not isinstance(style, str):
+            raise MusicJobError(
+                "invalid_payload",
+                f"invalid_payload: stored payload {name!r} has non-string style",
+            )
+        lyrics = stored.get("lyrics")
+        if lyrics is not None and not isinstance(lyrics, str):
+            raise MusicJobError(
+                "invalid_payload",
+                f"invalid_payload: stored payload {name!r} has non-string lyrics",
+            )
+        duration = stored.get("duration")
+        if duration is not None:
+            if (isinstance(duration, bool) or not isinstance(duration, (int, float))
+                    or not math.isfinite(float(duration)) or float(duration) <= 0):
+                raise MusicJobError(
+                    "invalid_payload",
+                    f"invalid_payload: stored payload {name!r} has invalid duration",
+                )
+        return stored
+
     async def _yue2_payloads(self, job: dict) -> int:
         """Every variant's yue2.cpp `/synth` body on disk before anything is sent (one per
         variant, batch 1, seed and lm_seed `seed + i`), written now or reused from an
@@ -1009,9 +1054,18 @@ class MusicJobRunner:
         job_id, params = job["id"], job["params"]
         names = [yue2_request_name(v) for v in range(1, int(params["variants"]) + 1)]
         have = {p["name"] for p in job.get("payloads") or []}
-        if names[0] in have:
-            first = await self._call(self.store.read_payload, job_id, names[0])
-            seed = int(json.loads(first.decode("utf-8"))["seed"])
+        stored_bodies: Dict[str, Dict[str, Any]] = {}
+        for name in names:
+            if name in have:
+                stored_bodies[name] = await self._read_stored_yue2_body(job_id, name)
+        if names[0] in stored_bodies:
+            raw_seed = stored_bodies[names[0]].get("seed")
+            if isinstance(raw_seed, bool) or not isinstance(raw_seed, int):
+                raise MusicJobError(
+                    "invalid_payload",
+                    f"invalid_payload: stored payload {names[0]!r} has invalid seed",
+                )
+            seed = raw_seed
         else:
             seed = params["seed"] if params.get("seed") is not None else int(self._draw_seed())
         engine = self.engines.get(js.ENGINE_YUE2)
@@ -1020,12 +1074,9 @@ class MusicJobRunner:
         # Bodies written before the ceiling existed (or changed on disk) are read back and counted the way the
         # check below counts a new one: the style and lyrics the stored body carries, its own duration. The
         # stored payloads are write-once and stay as they are; the job is refused before anything is sent
-        # (follow-up 23, Zcode #214).
-        for name in names:
-            if name not in have:
-                continue
-            stored = json.loads((await self._call(self.store.read_payload, job_id, name)).decode("utf-8"))
-            why = js.yue2_text_overflow(str(stored.get("style") or ""), stored.get("lyrics"),
+        # (follow-up 23, Zcode #214; corrupt/missing bodies refused cleanly, follow-up 24, Zcode #217).
+        for stored in stored_bodies.values():
+            why = js.yue2_text_overflow(stored.get("style") or "", stored.get("lyrics"),
                                         float(stored.get("duration") or params["duration_s"]))
             if why is not None:
                 raise MusicJobError("context_exceeded", f"context_exceeded: {why}")

@@ -773,7 +773,8 @@ def song_caption_sent(caption: Any, theme: Optional[str]) -> str:
 
 # What a yue2.cpp request sends as its lyrics for an Instrumental job that runs the instrumental adapter (its README's
 # bare form: the model picks the structure). One source: `yue2.INSTRUMENTAL_LYRICS` (the request body) and the door's
-# count (`yue2_instrumental_text_overflow`) both read it, so they cannot drift (follow-up 23, Zcode #214).
+# count (`normalize_params_from_text` via `yue2_text_overflow`) both read it, so they cannot drift (follow-up 23,
+# Zcode #214).
 YUE2_INSTRUMENTAL_LYRICS = "[instrumental]"
 
 

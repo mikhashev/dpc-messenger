@@ -8,7 +8,10 @@
 """
 
 import asyncio
+import gc
 import json
+import threading
+import time
 
 import pytest
 
@@ -152,3 +155,155 @@ async def test_a_resume_with_bodies_that_fit_reuses_them_and_the_seed(tmp_path, 
         seed = await rig.runner._yue2_payloads(job)
         again = await rig.runner._yue2_payloads(rig.store.get_job(job["id"]))
         assert again == seed
+
+
+# -- 4: follow-up 24 (Zcode #217): finalizer wakes loop & resume refuses corrupt /synth bodies ---------------
+
+
+@pytest.mark.asyncio
+async def test_a_scan_coroutine_dropped_on_a_worker_thread_wakes_wait_hashed_immediately(tmp_path):
+    lib = _library(tmp_path / "dpc")
+    await lib.open()
+    loop = asyncio.get_running_loop()
+    thread_ids = []
+    real_call_soon_threadsafe = loop.call_soon_threadsafe
+    threadsafe_calls = []
+
+    def spy_threadsafe(callback, *args, **kwargs):
+        threadsafe_calls.append(threading.get_ident())
+        return real_call_soon_threadsafe(callback, *args, **kwargs)
+
+    loop.call_soon_threadsafe = spy_threadsafe
+    try:
+        coro = lib.rescan_all()
+        [marker] = list(lib._scans_running)
+        real_set_result = marker.set_result
+
+        def spy_set_result(value):
+            thread_ids.append(threading.get_ident())
+            return real_set_result(value)
+
+        marker.set_result = spy_set_result
+        holder = [coro]
+        del coro
+
+        wait_task = asyncio.create_task(lib.wait_hashed(timeout=0.6))
+        await asyncio.sleep(0.02)  # wait_hashed is now blocked waiting on marker
+
+        def drop_off_loop():
+            time.sleep(0.05)
+            c = holder.pop()
+            c.close()
+            del c
+            gc.collect()
+
+        t = threading.Thread(target=drop_off_loop)
+        started = time.monotonic()
+        t.start()
+        try:
+            await wait_task
+            elapsed = time.monotonic() - started
+        finally:
+            t.join(timeout=1.0)
+        assert elapsed < 0.4
+        assert thread_ids == [threading.get_ident()], "marker.set_result must run on the event loop thread"
+        assert threadsafe_calls, "off-loop finalizer must wake the loop via call_soon_threadsafe"
+        assert not lib._scans_running
+    finally:
+        loop.call_soon_threadsafe = real_call_soon_threadsafe
+        await lib.stop()
+
+
+def test_a_scan_coroutine_dropped_after_loop_closes_does_not_raise(tmp_path, monkeypatch):
+    import sys
+
+    lib = _library(tmp_path / "dpc")
+    coro = None
+    loop = asyncio.new_event_loop()
+    try:
+        async def setup():
+            nonlocal coro
+            await lib.open()
+            coro = lib.rescan_all()
+            [marker] = list(lib._scans_running)
+            marker.add_done_callback(lambda _fut: None)
+            assert lib._scans_running
+            await lib.stop()
+
+        loop.run_until_complete(setup())
+    finally:
+        loop.close()
+
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    coro.close()
+    del coro
+    gc.collect()
+    assert not unraisable
+    assert not lib._scans_running
+
+
+def _write_corrupt_resume_payload(rig, job_id, name, content):
+    path = rig.store.payload_path(job_id, name)
+    if content is None:
+        path.unlink()
+    else:
+        path.write_bytes(content)
+
+
+@pytest.mark.parametrize("case, content", [
+    ("missing_file", None),
+    ("bad_json", b"{not valid json"),
+    ("invalid_utf8", b"\xff\xfe\xfd"),
+    ("non_object_list", b"[]"),
+    ("non_object_str", b'"just a string"'),
+    ("non_object_int", b"123"),
+    ("non_object_null", b"null"),
+    ("non_string_lyrics_int", json.dumps({"style": "indie", "lyrics": 123, "duration": 60, "seed": 42}).encode()),
+    ("non_string_lyrics_list", json.dumps({"style": "indie", "lyrics": ["a"], "duration": 60, "seed": 42}).encode()),
+    ("missing_seed", json.dumps({"style": "indie", "lyrics": "la", "duration": 60}).encode()),
+    ("bad_duration", json.dumps({"style": "indie", "lyrics": "la", "duration": "bad", "seed": 42}).encode()),
+])
+@pytest.mark.asyncio
+async def test_a_resume_with_missing_or_corrupt_stored_synth_body_is_refused_cleanly(tmp_path, monkeypatch, case, content):
+    yue2_env(monkeypatch)
+    home = tmp_path / "dpc"
+    install_both(home)
+    async with DualRig(home, start_runner=False) as rig:
+        job = rig.store.create_job("generate_from_text", yue2_params(variants=1))
+        name = yue2_request_name(1)
+        await rig.runner._call(rig.store.write_payload, job["id"], name,
+                               build_yue2_body(job["params"], 42, None, None), endpoint="/synth")
+        _write_corrupt_resume_payload(rig, job["id"], name, content)
+        resumed = rig.store.get_job(job["id"])
+        with pytest.raises(MusicJobError) as err:
+            await rig.runner._yue2_payloads(resumed)
+        assert err.value.code == "invalid_payload", case
+        assert err.value.message.startswith("invalid_payload:"), case
+
+        await rig.runner.run_job(job["id"])
+        refused = rig.store.get_job(job["id"])
+        assert refused["state"] == js.UNSUPPORTED, case
+        assert "invalid_payload" in (refused.get("state_reason") or ""), case
+        assert "internal error" not in (refused.get("state_reason") or "").lower(), case
+
+
+@pytest.mark.asyncio
+async def test_a_resume_checks_second_variant_stored_body_too(tmp_path, monkeypatch):
+    yue2_env(monkeypatch)
+    home = tmp_path / "dpc"
+    install_both(home)
+    async with DualRig(home, start_runner=False) as rig:
+        job = rig.store.create_job("generate_from_text", yue2_params(variants=2))
+        for v in (1, 2):
+            await rig.runner._call(rig.store.write_payload, job["id"], yue2_request_name(v),
+                                   build_yue2_body(job["params"], 41 + v, None, None), endpoint="/synth")
+        _write_corrupt_resume_payload(
+            rig, job["id"], yue2_request_name(2),
+            json.dumps({"style": "indie", "lyrics": ["not", "a", "string"], "duration": 60, "seed": 43}).encode(),
+        )
+        await rig.runner.run_job(job["id"])
+        refused = rig.store.get_job(job["id"])
+        assert refused["state"] == js.UNSUPPORTED
+        assert "invalid_payload" in (refused.get("state_reason") or "")
+        assert "internal error" not in (refused.get("state_reason") or "").lower()

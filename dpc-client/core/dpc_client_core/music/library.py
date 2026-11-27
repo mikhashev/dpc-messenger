@@ -639,13 +639,32 @@ class MusicLibrary:
         its coroutine: a scan task that is created but not yet run is seen too (the shape of the old `add_folder`
         bug; follow-up 23, Zcode #214). The marker is let go when the walk ends, raises or is cancelled, and when
         the returned coroutine is dropped without ever running."""
-        marker = asyncio.get_running_loop().create_future()
+        loop = asyncio.get_running_loop()
+        marker = loop.create_future()
         self._scans_running.add(marker)
+        finalizer: Optional[weakref.finalize] = None
 
-        def release() -> None:
+        def finish() -> None:
+            if finalizer is not None:
+                finalizer.detach()
             self._scans_running.discard(marker)
             if not marker.done():
                 marker.set_result(None)
+
+        def release() -> None:
+            target = marker.get_loop()
+            try:
+                here: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+            except RuntimeError:
+                here = None
+            if here is target:
+                finish()
+                return
+            try:
+                target.call_soon_threadsafe(finish)
+            except RuntimeError:
+                # The loop closed before the finalizer ran (e.g. teardown): drop the marker without waking.
+                self._scans_running.discard(marker)
 
         async def run() -> Any:
             try:
@@ -654,7 +673,7 @@ class MusicLibrary:
                 release()
 
         coro = run()
-        weakref.finalize(coro, release)
+        finalizer = weakref.finalize(coro, release)
         return coro
 
     def _poll_pass(self) -> Awaitable[None]:
