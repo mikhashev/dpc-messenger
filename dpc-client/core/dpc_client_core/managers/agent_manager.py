@@ -730,7 +730,7 @@ class DpcAgentManager:
                                                       for t, m in text_only_docs])
                                     # One card lease use for the whole pass on a lease-gated model
                                     # (ADR-052 3.4): the card when it is free, the CPU otherwise.
-                                    with bulk_embedding(provider, len(to_embed),
+                                    with bulk_embedding(provider, [t for _, t, _ in to_embed],
                                                         "index rebuild" if needs_full_rebuild else "index update"):
                                         for batch_start in range(0, len(to_embed), BATCH_SIZE):
                                             if self._stop_event.is_set():

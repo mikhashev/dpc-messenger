@@ -36,14 +36,14 @@ _last_index_time: Dict[str, float] = {}
 
 
 
-def bulk_embedding(embedding_provider, items: int, what: str = "index rebuild"):
-    """The card lease stint for a bulk pass of `items` documents (ADR-052 3.4): one lease use for the
-    pass on a lease-gated `EmbeddingProvider`, which lets go when an owner's request waits and when the
-    pass ends; nothing for any other provider (a CPU setting, a fake, a remote one). `what` names the
-    use in the card queue."""
+def bulk_embedding(embedding_provider, texts: List[str], what: str = "index rebuild"):
+    """The card lease stint for a bulk pass over `texts` (ADR-052 3.4): one lease use for the pass on a
+    lease-gated `EmbeddingProvider` when the card is free and enough of the texts are not cached, let
+    go when an owner's request waits and when the pass ends; nothing for any other provider (a CPU
+    setting, a fake, a remote one). `what` names the use in the card queue."""
     from .memory import EmbeddingProvider
     if isinstance(embedding_provider, EmbeddingProvider):
-        return embedding_provider.card_stint(what, items)
+        return embedding_provider.card_stint(what, texts)
     return contextlib.nullcontext()
 
 
@@ -541,7 +541,7 @@ def full_rebuild(
 
     BATCH_SIZE = 4
     indexed_count = 0
-    with bulk_embedding(embedding_provider, len(all_doc_texts)):
+    with bulk_embedding(embedding_provider, all_doc_texts):
         for batch_start in range(0, len(all_doc_texts), BATCH_SIZE):
             if stop_event and stop_event.is_set():
                 log.info("Indexing interrupted by shutdown at batch %d/%d", batch_start, len(all_doc_texts))

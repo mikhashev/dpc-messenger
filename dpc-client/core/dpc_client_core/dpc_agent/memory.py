@@ -503,6 +503,10 @@ class _EmbeddingDiskCache:
             return None
         return vector
 
+    def has(self, text: str, model_name: str, max_tokens: int) -> bool:
+        """Whether a vector is stored for `text` (its length is checked only when it is read)."""
+        return self._path(text, model_name, max_tokens).is_file()
+
     def put(self, text: str, model_name: str, max_tokens: int, vector) -> None:
         path = self._path(text, model_name, max_tokens)
         tmp = path.with_name(f"{path.stem}.{threading.get_ident()}.tmp")
@@ -572,12 +576,12 @@ def _release_device_memory() -> None:
 #: text, up to max_tokens): on the card 523 documents took 4.2 s (2026-08-18, about 0.008 s each), so
 #: 0.05 is a conservative start that each compute call on the card replaces with what it measures; on
 #: the CPU 37-100 ms per 800-token chunk and up to ~7 s for a long document, so 1.0 s. A move of bge-m3
-#: (~1.1 GB in half precision) to or from the card: 3 s, conservative.
+#: (1.1-2.2 GB) to or from the card: 3 s, conservative.
 _EMBEDDER_GPU_S_PER_ITEM = 0.05
 _EMBEDDER_CPU_S_PER_ITEM = 1.0
 _EMBEDDER_MOVE_S = 3.0
-#: What bge-m3 held on the card at start on the Old PC (2026-10-27, A-NODE-HAS-NO-ONE-SWITCH-...): 1.3 GB.
-_EMBEDDER_VRAM_MIB = {"BAAI/bge-m3": 1400}
+#: bge-m3 on the card in fp32, the larger of its two card dtypes (`_card_dtype`): 2.2 GB of weights.
+_EMBEDDER_VRAM_MIB = {"BAAI/bge-m3": 2600}
 
 
 class EmbeddingProvider:
@@ -705,22 +709,49 @@ class EmbeddingProvider:
                     )
         return self._card
 
+    def _card_dtype(self):
+        """The dtype on the card: the CPU weights' own bfloat16 when the card computes in it, else
+        float32. Both round trips are exact (bf16 -> fp32 -> bf16 loses nothing), so the CPU weights
+        after a stint are bit for bit the weights before it, and a vector does not depend on whether a
+        stint ran: the cache key carries no device. fp16, a third cast, would round the weights for
+        good on the way back."""
+        import torch
+        if self._dtype_for("cpu") is not torch.bfloat16:
+            return torch.float32
+        try:
+            card_bf16 = bool(torch.cuda.is_bf16_supported())
+        except Exception:
+            card_bf16 = False
+        return torch.bfloat16 if card_bf16 else torch.float32
+
     def _move_to_gpu(self) -> None:
         """Called by the stint client under its device lock, inside a granted lease use."""
-        self._model.to(device="cuda", dtype=self._dtype_for("cuda"))
-        log.info("Embedding model %s moved to the card (FP16) under the card lease", self.model_name)
+        dtype = self._card_dtype()
+        self._model.to(device="cuda", dtype=dtype)
+        log.info("Embedding model %s moved to the card (%s) under the card lease",
+                 self.model_name, str(dtype).replace("torch.", "").upper())
 
     def _move_to_cpu(self) -> None:
-        """Called by the stint client under its device lock, before its use closes. A model unloaded
-        meanwhile has nothing left on the card."""
+        """Called by the stint client under its device lock, before its use closes: back in the dtype
+        it was loaded in. A model unloaded meanwhile has nothing left on the card."""
         if self._model is not None:
             import torch
             self._model.to(device="cpu", dtype=self._dtype_for("cpu") or torch.float32)
         _release_device_memory()
 
+    def uncached(self, texts) -> int:
+        """How many of `texts` the disk cache does not hold: what a bulk pass will really encode."""
+        cache = _get_disk_cache()
+        has = getattr(cache, "has", None)
+        if has is None:
+            return len(texts)
+        window = int(self.max_tokens)
+        return sum(1 for text in texts if not has(text, self.model_name, window))
+
     @contextlib.contextmanager
-    def card_stint(self, what: str, items: int):
-        """Bulk work of `items` texts (an index pass, a reindex of many files), from a worker thread.
+    def card_stint(self, what: str, texts):
+        """Bulk work over `texts` (an index pass, a reindex of many files), from a worker thread; only
+        the texts the disk cache does not hold count (a fully cached rebuild never takes the card).
         A lease-gated model takes one card lease use for the batch when the card is free and the batch
         is worth it, and is moved off again, and the card let go, when the batch ends or an owner's
         request waits; the rest of the batch runs on the CPU. Any other device: nothing happens.
@@ -731,19 +762,22 @@ class EmbeddingProvider:
             yield self.device
             return
         self._load_model()
-        with card.stint(what, items) as device:
+        with card.stint(what, self.uncached(texts)) as device:
             yield device
 
     @contextlib.contextmanager
     def _compute(self, items: int):
         """Around one encode call: a lease-gated model's device lock (no encode mid-move), then the
-        one-at-a-time semaphore. Yields the device the call runs on."""
+        one-at-a-time semaphore, with the model loaded under them (an `unload` takes the same lock, so
+        none lands between the load and the encode). Yields the device the call runs on."""
         card = self._card_client()
         if card is None:
             with self._gpu_semaphore:
+                self._load_model()
                 yield self.device
             return
         with card.compute(items) as device, self._gpu_semaphore:
+            self._load_model()
             yield device
 
     def _load_model(self):
@@ -915,10 +949,14 @@ class EmbeddingProvider:
 
     def unload(self):
         """Drop the model and hand its device memory back (ADR-052 new card (c): dropping the reference
-        alone freed nothing). Under a lease-gated model's device lock, so no encode runs on it."""
+        alone freed nothing). Under the lock every encode takes (a lease-gated model's device lock,
+        else the semaphore), so no encode runs on it; a stint that held the card computes on the CPU
+        from here and keeps its use until it ends."""
         card = self._card
-        with card.device_lock if card is not None else contextlib.nullcontext():
+        with card.device_lock if card is not None else self._gpu_semaphore:
             self._model = None
+            if card is not None:
+                card.model_dropped()
             import gc
             gc.collect()
             _release_device_memory()
