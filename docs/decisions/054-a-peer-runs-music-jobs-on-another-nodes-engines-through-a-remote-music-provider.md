@@ -229,7 +229,16 @@ within N minutes (proposed N = 5, a setting); (2) otherwise the call waits in li
 every owner job, no longer than the peer's wait limit from the firewall `music` section;
 (3) if the line would hold it longer than that limit, refuse with the honest reason "the
 owner's GPU is busy" (no alias, chat or holder named). The choice among Q7-A/B/C below
-(the scheduler that enforces this) remains open. S1 does not depend on Q7;
+(the scheduler that enforces this): **the owner chose (#122-#124, 2026-11-27) that CardLease
+itself is the scheduler, with no second queue above it** ("if I am generating something, it
+must take a place in CardLease, the lease for all GPU clients"). So: (a) a **music guest
+class** in CardLease, exempt from the 120 s trip and admitted by the load rule above; (b)
+CardLease **serializes music users of one engine**: a second use under the same holder that
+needs another backbone or adapter set waits until the first use ends, so an engine is never
+swapped mid-generation (today `use()` re-enters under `music:yue2`); (c) the anti-starvation
+budget and the ETA live in CardLease too, one place for every client. This is Q7-A carried
+to Q7-B's rules; the owner asked Zcode, Ark and Johnny for comments (#124) before it is
+final. S1 does not depend on Q7;
 S2-S4 do (an amendment to ADR-052 L13 adding the music guest class).
 - **The peer mark must cover the whole trip** (Johnny #111): the mark is a context variable
   set inside `with serving_a_peer(...)` (`managers/llama_server_supervisor.py:228-243`); the
@@ -508,7 +517,8 @@ Each slice runs the full core suite before it is called green.
 - **Q7. Queue and scheduler: Open (owner decides)** (#102). **Q7.0 decided (#115):** music is
   a separate guest class, admitted by the load of the owner's queue, with music-class peer
   quotas in the settings; the 120 s trip stays for transcription and text. Still open: the
-  scheduler shape (Q7-A, Q7-B, Q7-C in D2; CC recommends Q7-B on Q7-A's lease class). The
+  scheduler shape: **the owner chose CardLease as the one scheduler (#124)**, comments asked
+  from Zcode, Ark, Johnny before final (D2). The
   load rule is decided (#119): admit at once if no owner job is queued and the running one
   ends within N minutes; else wait behind owner jobs up to the peer's limit; else refuse
   "owner's GPU is busy". S2-S4 wait for the scheduler choice.
