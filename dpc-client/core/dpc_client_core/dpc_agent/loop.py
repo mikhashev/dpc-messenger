@@ -256,6 +256,35 @@ def unmeasured_task_cost() -> Dict[str, Any]:
     return {name: None for name in task_cost_fields({})}
 
 
+# From this share of the window the per-round context line warns the model, so it hears of
+# the edge before ContextLimitGuard stops the turn at CONTEXT_LIMIT_RATIO (0.95, guards.py).
+# The 95 % stop is unchanged; this only speaks earlier.
+CONTEXT_BUDGET_WARN_RATIO = 0.80
+
+
+def context_budget_line(after_round: int, tokens: int, window: int) -> Optional[str]:
+    """The one line the model reads after each tool round: what the context of this turn
+    holds now, by the loop's own projection (the last measured prompt plus what was appended
+    since, less a cut), against the window the guard enforces. None when either number is
+    unknown: nothing is said rather than a guess.
+
+    It is appended as a message of its own after the round's tool results and never edited
+    afterwards, so every earlier message of the next request is byte for byte the one the
+    engine already holds (ADR-045). The turn-start runtime section carries the figure from
+    before the turn; this one is the live number, and it says so in words."""
+    if after_round <= 0 or tokens <= 0 or window <= 0:
+        return None
+    # Rounded half up, and the warning reads the rounded figure, so a line that says 80% warns.
+    percent = int(tokens * 100 / window + 0.5)
+    warn_at = int(CONTEXT_BUDGET_WARN_RATIO * 100 + 0.5)
+    line = (f"[Context budget, this turn, after round {after_round}: "
+            f"{tokens:,} of {window:,} tokens in use ({percent}%).]")
+    if percent >= warn_at:
+        line += (f" Nearing the limit ({warn_at}% or more): "
+                 f"finish the task or summarise before reading more.")
+    return line
+
+
 def round_progress_payload(
     speed: Optional[Dict[str, Any]],
     *,
@@ -2774,6 +2803,9 @@ async def run_llm_loop(
     # ... and, from this index on, the messages appended after the last request went out (its
     # reply, the tool results it asked for, a retry's request), which are estimated.
     messages_sent = 0
+    # A tool round's results are in `messages` and the next request gets the context line
+    # (`context_budget_line`). Not after a retry or a continue: no tool ran there.
+    budget_line_due = False
     # A local engine's own numbers (ADR-033 amendment, 2026-11-11). The window is read from the
     # engine once it has answered a request of this loop (the child is up, so asking starts
     # nothing), never before; until then, and for any provider that does not count on its
@@ -2949,6 +2981,21 @@ async def run_llm_loop(
                     kill_event=kill_event,
                     window=ctx.state.context_window,
                 ))
+
+            # The context line for the model, after the tool results of the round just run: the
+            # size the guard has just read (after the cut) against the window it enforces. A
+            # window nobody resolved (the compaction state's generic fallback, no engine, no
+            # caller's figure) says nothing. Appended, never edited later: the earlier messages
+            # stay the prefix the engine holds, and the line is counted in the measured prompt.
+            if budget_line_due:
+                budget_line_due = False
+                _line = context_budget_line(
+                    round_idx - 1, next_prompt_tokens,
+                    ctx.state.context_window if (on_the_engine or _compaction_cfg.get("context_window"))
+                    else int(context_window or 0))
+                if _line:
+                    messages.append({"role": "user", "content": _line,
+                                     "_runtime_note": True, "_context_budget": True})
 
             # --- LLM call ---
             messages_sent = len(messages)
@@ -3452,6 +3499,7 @@ async def run_llm_loop(
                                                ran_earlier=_names_that_ran(_names, llm_trace)))
             if _told:
                 messages.append({"role": "user", "content": "\n\n".join(_told), "_runtime_note": True})
+            budget_line_due = True
 
             # Snapshot this round's tool results so LoopGuard can tell a
             # genuinely-stuck poll (identical output) from a long-running one

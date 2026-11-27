@@ -131,7 +131,10 @@ def test_the_projection_is_the_measured_size_plus_what_the_round_appended(tmp_pa
     _, _, events = _run(tmp_path, monkeypatch, llm, tools)
 
     cuts = [e[1] for e in events if e[0] == "cut"]
-    appended = llm.requests[1][len(llm.requests[0]):]  # the reply and the result of round one
+    # The reply and the result of round one; the context line after them is appended once the
+    # projection is made (it is counted in the next measured prompt).
+    appended = llm.requests[1][len(llm.requests[0]):-1]
+    assert llm.requests[1][-1].get("_context_budget")
     assert cuts[0] == 0, "round one has no measured size and is not projected"
     assert cuts[1] == MEASURED + estimate_messages_tokens(appended)
     assert cuts[1] > MEASURED

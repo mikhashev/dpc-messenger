@@ -235,7 +235,10 @@ def test_the_projection_adds_what_the_engine_counts_of_the_appended_messages(tmp
     _, _, cut_reads, _ = _run(tmp_path, monkeypatch, llm, _Tools([100] * 3))
 
     assert cut_reads[0][0] == 0, "round one has no measured size and is not projected"
-    appended = llm.requests[1][len(llm.requests[0]):]  # the reply and the result of round one
+    # The reply and the result of round one; the context line after them is appended once the
+    # projection is made (it is counted in the next measured prompt).
+    appended = llm.requests[1][len(llm.requests[0]):-1]
+    assert llm.requests[1][-1].get("_context_budget")
     text = text_of_messages(appended)
     assert cut_reads[1][0] == MEASURED + len(text)
     assert cut_reads[1][0] > MEASURED + estimate_messages_tokens(appended), "chars/4 would have said less"
@@ -258,7 +261,7 @@ def test_a_count_that_fails_falls_back_to_the_estimate_and_is_said_once(tmp_path
     with caplog.at_level(logging.WARNING, logger=loop_module.log.name):
         _, _, cut_reads, _ = _run(tmp_path, monkeypatch, llm, _Tools([100] * 4))
 
-    appended = llm.requests[1][len(llm.requests[0]):]
+    appended = llm.requests[1][len(llm.requests[0]):-1]  # less the context line, appended after the projection
     assert cut_reads[1][0] == MEASURED + estimate_messages_tokens(appended)
     said = [r for r in caplog.records if "to count what the round appended" in r.getMessage()]
     assert len(said) == 1

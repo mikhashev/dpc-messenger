@@ -439,6 +439,10 @@ def _build_budget(
     return budget
 
 
+# Beside a turn-start context figure in the runtime section: it is never the current one.
+STALE_TURN_START_NOTE = "measured before this turn; the per-round context line is the live number"
+
+
 def _build_runtime_section(
     agent_root: pathlib.Path,
     task: Dict[str, Any],
@@ -506,6 +510,13 @@ def _build_runtime_section(
                 session_state.get("context_usage_percent")
                 if tokens_after_last_response else None),
         }
+        if tokens_after_last_response:
+            # This section is built once, at turn start, and the figure above was measured
+            # after the previous response, possibly days ago in an idle chat. It is said in
+            # words so the model does not plan a long turn on it; the loop adds the live
+            # figure after each tool round (loop.context_budget_line).
+            runtime_data["session"]["measured_before_this_turn"] = True
+            runtime_data["session"]["note"] = STALE_TURN_START_NOTE
         breakdown = session_state.get("context_breakdown")
         if breakdown:
             runtime_data["session"]["context_breakdown"] = breakdown
