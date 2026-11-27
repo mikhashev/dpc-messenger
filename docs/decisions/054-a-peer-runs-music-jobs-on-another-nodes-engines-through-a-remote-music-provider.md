@@ -223,7 +223,13 @@ settings** (the Q1 limits become real settings, not hidden constants), kept **in
 firewall settings** (#117): the `music` section of `privacy_rules.json`, beside its
 allow-lists, as `vendor_quotas` sit in `compute` today. A measured estimate
 for acestep and edits (a fit like YuE2's) is still wanted, for an honest ETA, but it does not
-gate admission. The choice among Q7-A/B/C below remains open. S1 does not depend on Q7;
+gate admission. **Admission rule, decided (#118 proposed, #119 "yes, a logical rule"):**
+(1) admit a music call at once when no owner job is queued and the running one (if any) ends
+within N minutes (proposed N = 5, a setting); (2) otherwise the call waits in line behind
+every owner job, no longer than the peer's wait limit from the firewall `music` section;
+(3) if the line would hold it longer than that limit, refuse with the honest reason "the
+owner's GPU is busy" (no alias, chat or holder named). The choice among Q7-A/B/C below
+(the scheduler that enforces this) remains open. S1 does not depend on Q7;
 S2-S4 do (an amendment to ADR-052 L13 adding the music guest class).
 - **The peer mark must cover the whole trip** (Johnny #111): the mark is a context variable
   set inside `with serving_a_peer(...)` (`managers/llama_server_supervisor.py:228-243`); the
@@ -502,9 +508,10 @@ Each slice runs the full core suite before it is called green.
 - **Q7. Queue and scheduler: Open (owner decides)** (#102). **Q7.0 decided (#115):** music is
   a separate guest class, admitted by the load of the owner's queue, with music-class peer
   quotas in the settings; the 120 s trip stays for transcription and text. Still open: the
-  scheduler shape (Q7-A, Q7-B, Q7-C in D2; CC recommends Q7-B on Q7-A's lease class) and what
-  "load" means in numbers (e.g. admit when no owner job is queued and the running one ends
-  within N minutes). S2-S4 wait for it.
+  scheduler shape (Q7-A, Q7-B, Q7-C in D2; CC recommends Q7-B on Q7-A's lease class). The
+  load rule is decided (#119): admit at once if no owner job is queued and the running one
+  ends within N minutes; else wait behind owner jobs up to the peer's limit; else refuse
+  "owner's GPU is busy". S2-S4 wait for the scheduler choice.
 
 ## Authors
 
