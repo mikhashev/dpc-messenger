@@ -170,6 +170,10 @@ export interface EngineAdapter {
 /** One engine in the capability report (`engines.<key>`). */
 export interface EngineInfo extends MusicEngine {
     default?: boolean;
+    configured_default?: boolean;
+    licence_key?: string;
+    non_commercial?: boolean | null;
+    licence_summary?: string;
     limits?: Record<string, any>;
     backbones?: Record<string, { present: boolean; file?: string; reason?: string | null }>;
     backbone_default?: string;
@@ -181,6 +185,8 @@ export interface MusicCapabilities {
     engine?: MusicEngine;
     engines?: Record<string, EngineInfo>;
     default_engine?: string;
+    configured_default_engine?: string;
+    default_engine_fallback_reason?: string | null;
     /** What each rule would choose now (core `MusicCapabilities.engine_choice_rules`). */
     engine_choice_rules?: Record<string, Omit<EngineChoice, 'at' | 'fell_back'> | null>;
     job_types?: Record<string, { status: string; reason: string }>;
@@ -400,10 +406,47 @@ export const ADAPTER_MUSIC_DEFAULT = 0.45;
 export const ADAPTER_SOUND_DEFAULT = 0.35;
 export const VOICE_NOTE = "Voice adapters are trained on real readers' voices without stated consent: for local listening only.";
 
-/** The engine the panel starts on: the report's default, else yue2. */
+export const ENGINE_LICENCES: Record<EngineKey, string> = {
+    yue2: 'CC BY-NC 4.0 (non-commercial)',
+    acestep: 'MIT (commercial OK)',
+};
+
+/** The engine the panel starts on: the report's effective default, else yue2. */
 export function defaultEngineOf(caps: MusicCapabilities | null | undefined): EngineKey {
     const d = caps?.default_engine;
     return d === 'acestep' || d === 'yue2' ? d : DEFAULT_ENGINE;
+}
+
+/** The configured default engine from the capability report, falling back to `defaultEngineOf(caps)`. */
+export function configuredDefaultEngineOf(caps: MusicCapabilities | null | undefined): EngineKey {
+    const c = caps?.configured_default_engine;
+    if (c === 'acestep' || c === 'yue2') return c;
+    return defaultEngineOf(caps);
+}
+
+/** Human-readable licence summary for `key`, preferring the capability report's metadata. */
+export function engineLicenceLabel(caps: MusicCapabilities | null | undefined, key: EngineKey): string {
+    const fromCaps = caps?.engines?.[key]?.licence_summary;
+    if (typeof fromCaps === 'string' && fromCaps.trim()) return fromCaps.trim();
+    return ENGINE_LICENCES[key];
+}
+
+/** Explicit notice when the configured default engine is not installed and fell back to another engine, or ''. */
+export function defaultEngineFallbackNotice(caps: MusicCapabilities | null | undefined): string {
+    const reason = caps?.default_engine_fallback_reason;
+    return typeof reason === 'string' && reason.trim() ? reason.trim() : '';
+}
+
+/** Sync an untouched draft's engine and default duration to the capability report's effective default. */
+export function syncDraftDefaultEngine(
+    form: FromTextForm,
+    caps: MusicCapabilities | null | undefined,
+    userPickedEngine: boolean,
+): FromTextForm {
+    if (userPickedEngine || !caps) return form;
+    const nextEngine = defaultEngineOf(caps);
+    if ((form.engine ?? DEFAULT_ENGINE) === nextEngine) return form;
+    return formForEngine(form, nextEngine, caps);
 }
 
 /** The adapters the person can pick in the Voice select, voices first: what yue2.cpp offers

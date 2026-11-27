@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from . import job_schemas as js
+from . import provenance as mp_provenance
 from . import region_edit as re_
 from . import web_sources
 from .qa import THRESHOLDS as QA_THRESHOLDS
@@ -67,6 +68,23 @@ YUE2_ENGINE_NAME = "yue2.cpp (YuE2 3B, GGML)"
 
 ENGINE_STATES = ("not_built", "not_installed", "stopped", "starting", "running", "error")
 AVAILABLE_ENGINE_STATES = frozenset({"stopped", "starting", "running"})
+
+ENGINE_LICENCE_SUMMARIES: Dict[str, str] = {
+    js.ENGINE_ACESTEP: "MIT (commercial OK)",
+    js.ENGINE_YUE2: "CC BY-NC 4.0 (non-commercial)",
+}
+
+
+def _engine_licence_info(key: str) -> Dict[str, Any]:
+    """Return `{licence_key, non_commercial, licence_summary}` for engine key `key`."""
+    engine_id = js.ENGINE_IDS.get(key, key)
+    backbone = js.YUE2_BACKBONE_DEFAULT if key == js.ENGINE_YUE2 else None
+    rec = mp_provenance.licence_record(engine_id, backbone=backbone)
+    return {
+        "licence_key": rec["key"],
+        "non_commercial": rec["non_commercial"],
+        "licence_summary": ENGINE_LICENCE_SUMMARIES.get(key, rec["key"]),
+    }
 
 SUPPORTED, PLANNED, UNSUPPORTED = "supported", "planned", "unsupported"
 
@@ -209,15 +227,67 @@ class MusicCapabilities:
     def __init__(self, engine_probe: Optional[EngineProbe] = None, *,
                  engines: Optional[Mapping[str, Any]] = None,
                  default_engine: str = js.DEFAULT_FROM_TEXT_ENGINE,
+                 default_engine_source: Optional[Callable[[], str]] = None,
                  ffmpeg_probe: Optional[Callable[[], bool]] = None,
                  describer_probe: Optional[Callable[[], Mapping[str, Any]]] = None):
         self._probe: EngineProbe = engine_probe or adapter_not_built_probe
         # The describer of a same-style song (`describe.py`): `{status, alias, reason}`; none without a probe.
         self._describer_probe = describer_probe
         self._engines: Dict[str, Any] = dict(engines or {})
-        self.default_engine = default_engine
+        self._configured_default_engine = (
+            default_engine if default_engine in js.FROM_TEXT_ENGINES else js.DEFAULT_FROM_TEXT_ENGINE
+        )
+        self._default_engine_source = default_engine_source
         # Every edit decodes the track with ffmpeg (the control, region_edit.py).
         self._ffmpeg_probe = ffmpeg_probe or (lambda: bool(shutil.which("ffmpeg")))
+
+    @property
+    def configured_default_engine(self) -> str:
+        """Configured default engine (`'yue2'` or `'acestep'`), read live from `default_engine_source` when set."""
+        if self._default_engine_source is not None:
+            try:
+                value = self._default_engine_source()
+                if value in js.FROM_TEXT_ENGINES:
+                    return value
+            except Exception:
+                logger.warning("music: reading default_engine_source failed", exc_info=True)
+        return self._configured_default_engine
+
+    @property
+    def default_engine(self) -> str:
+        return self.configured_default_engine
+
+    @default_engine.setter
+    def default_engine(self, value: str) -> None:
+        if value in js.FROM_TEXT_ENGINES:
+            self._configured_default_engine = value
+
+    def resolve_default_engine(
+        self, statuses: Optional[Mapping[str, EngineStatus]] = None
+    ) -> Tuple[str, str, Optional[str]]:
+        """Return `(effective_default, configured_default, fallback_reason)`.
+
+        An engine that is not installed is never silently chosen: if the configured
+        default is not available, fall back to the next installed engine in
+        `FROM_TEXT_ENGINES` and return a clear reason explaining why.
+        """
+        configured = self.configured_default_engine
+        st_map = dict(statuses) if statuses is not None else self.engine_statuses()
+        cfg_status = st_map.get(configured)
+        if cfg_status is not None and cfg_status.available:
+            return configured, configured, None
+        for candidate in js.FROM_TEXT_ENGINES:
+            if candidate == configured:
+                continue
+            cand_status = st_map.get(candidate)
+            if cand_status is not None and cand_status.available:
+                why = cfg_status.reason if cfg_status is not None else "not available"
+                reason = (
+                    f"Configured default engine '{configured}' is not available ({why}); "
+                    f"falling back to installed engine '{candidate}'."
+                )
+                return candidate, configured, reason
+        return configured, configured, None
 
     # -- probes ------------------------------------------------------------------
 
@@ -273,11 +343,13 @@ class MusicCapabilities:
             return {"status": SUPPORTED, "reason": f"{engine.name}: {engine.reason}"}
         return {"status": UNSUPPORTED, "reason": engine.reason}
 
-    def _from_text_any(self, statuses: Mapping[str, EngineStatus]) -> Dict[str, str]:
+    def _from_text_any(self, statuses: Mapping[str, EngineStatus], *,
+                       default_key: Optional[str] = None) -> Dict[str, str]:
         """Supported when an engine is available (the default one first in the reason)."""
         if not self._engines:  # one probe answers for every engine: its own words
             return self._from_text_status(next(iter(statuses.values())))
-        order = [self.default_engine] + [k for k in statuses if k != self.default_engine]
+        first = default_key or self.default_engine
+        order = [first] + [k for k in statuses if k != first]
         for k in order:
             if k in statuses and statuses[k].available:
                 return self._from_text_status(statuses[k])
@@ -399,17 +471,19 @@ class MusicCapabilities:
             reasons.append(st["reason"])
         return {"status": UNSUPPORTED, "reason": "; ".join(reasons)}
 
-    def song_features(self, statuses: Optional[Mapping[str, EngineStatus]] = None) -> Dict[str, Dict[str, Any]]:
+    def song_features(self, statuses: Optional[Mapping[str, EngineStatus]] = None, *,
+                      default_engine: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         """`features.audio_reference` (a same-style song with the source as acestep.cpp's timbre
         reference), `features.cover`, per engine for the cover (`cover_engines`, the default and the fallback
         engine with why), `features.same_style` in the same shape (`same_style_engines`: yue2 needs the audio
         tokenizer, and says whether a describer is set up), `features.describe` (the describer, `describe.py`)
         and `features.web_source_audio` (planned: the streaming integration)."""
+        configured = default_engine or self.configured_default_engine
         ref = self.song_engine_status(js.GENERATE_SIMILAR, js.ENGINE_ACESTEP, needs_audio=True, statuses=statuses)
         cover = {k: self.song_engine_status(js.COVER, k, needs_audio=True, statuses=statuses)
                  for k in js.SONG_ENGINES[js.COVER]}
         any_cover = next((v for v in cover.values() if v["status"] == SUPPORTED), None)
-        default = js.SONG_DEFAULT_ENGINE[js.COVER]
+        default = configured if configured in js.SONG_ENGINES[js.COVER] else js.SONG_DEFAULT_ENGINE[js.COVER]
         fallback = None
         if cover[default]["status"] != SUPPORTED:
             fallback = next((k for k in js.SONG_ENGINES[js.COVER] if k != default
@@ -417,7 +491,8 @@ class MusicCapabilities:
         same = {k: self.song_engine_status(js.GENERATE_SIMILAR, k, needs_audio=False, statuses=statuses)
                 for k in js.SONG_ENGINES[js.GENERATE_SIMILAR]}
         any_same = next((v for v in same.values() if v["status"] == SUPPORTED), None)
-        same_default = js.SONG_DEFAULT_ENGINE[js.GENERATE_SIMILAR]
+        same_default = (configured if configured in js.SONG_ENGINES[js.GENERATE_SIMILAR]
+                        else js.SONG_DEFAULT_ENGINE[js.GENERATE_SIMILAR])
         same_fallback = None
         if same[same_default]["status"] != SUPPORTED:
             same_fallback = next((k for k in js.SONG_ENGINES[js.GENERATE_SIMILAR] if k != same_default
@@ -578,16 +653,24 @@ class MusicCapabilities:
     def report(self) -> Dict[str, Any]:
         """The `mp.capabilities/1` report."""
         statuses = self.engine_statuses()
-        default = statuses.get(self.default_engine) or self.engine_status()
-        from_text = self._from_text_any(statuses)
+        effective_default, configured_default, fallback_reason = self.resolve_default_engine(statuses)
+        default = statuses.get(effective_default) or self.engine_status(effective_default)
+        from_text = self._from_text_any(statuses, default_key=effective_default)
         features = copy.deepcopy(_FEATURES)
         features["text2music"] = dict(from_text)
-        features.update(self.song_features(statuses))
+        features.update(self.song_features(statuses, default_engine=configured_default))
         engines: Dict[str, Any] = {}
         for k, st in statuses.items():
-            engines[k] = {**st.as_dict(), "key": k, "default": k == self.default_engine,
-                          "limits": self._engine_limits(k), **self._form_info(k)}
-        dmin, dmax, ddefault = js.DURATION_LIMITS[self.default_engine]
+            engines[k] = {
+                **st.as_dict(),
+                "key": k,
+                "default": k == effective_default,
+                "configured_default": k == configured_default,
+                "limits": self._engine_limits(k),
+                **_engine_licence_info(k),
+                **self._form_info(k),
+            }
+        dmin, dmax, ddefault = js.DURATION_LIMITS[effective_default]
         actions = self.action_statuses(statuses.get(js.ENGINE_ACESTEP))
         job_types = {t: dict(from_text) if t == js.GENERATE_FROM_TEXT
                      else self._edit_status(None, actions) if t == "edit"
@@ -598,7 +681,9 @@ class MusicCapabilities:
             "backend": {"id": BACKEND_ID, "connected": True, "simulated": False},
             "engine": default.as_dict(),
             "engines": engines,
-            "default_engine": self.default_engine,
+            "default_engine": effective_default,
+            "configured_default_engine": configured_default,
+            "default_engine_fallback_reason": fallback_reason,
             "engine_choice_rules": self.engine_choice_rules(statuses.get(js.ENGINE_YUE2)),
             "job_types": job_types,
             "actions": actions,
@@ -623,7 +708,7 @@ class MusicCapabilities:
                     "variants": {"min": js.VARIANTS_MIN, "max": js.VARIANTS_MAX, "default": js.VARIANTS_DEFAULT},
                     "duration_s": {"min": dmin, "max": dmax, "default": ddefault},
                     "seed": {"min": js.SEED_MIN, "max": js.SEED_MAX, "null": "the runner draws one"},
-                    "engine": self.default_engine,
+                    "engine": effective_default,
                     "engine_choices": list(js.FROM_TEXT_ENGINES),
                     "engines": {k: self._engine_limits(k) for k in js.FROM_TEXT_ENGINES},
                     "engine_output": js.ENGINE_OUTPUT_FORMAT,
@@ -631,7 +716,7 @@ class MusicCapabilities:
                 },
                 "song": {
                     "engines": {t: list(js.SONG_ENGINES[t]) for t in js.SONG_TYPES},
-                    "default_engine": dict(js.SONG_DEFAULT_ENGINE),
+                    "default_engine": {t: effective_default for t in js.SONG_TYPES},
                     "lyrics_modes": {t: list(js.SONG_LYRICS_MODES[t]) for t in js.SONG_TYPES},
                     "relations": dict(js.SONG_RELATIONS),
                     "keep": list(js.KEEP_KEYS),

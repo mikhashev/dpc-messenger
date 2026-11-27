@@ -38,10 +38,13 @@
     backbonePresent,
     buildCreateRequest,
     cardHolders,
+    configuredDefaultEngineOf,
+    defaultEngineFallbackNotice,
     defaultEngineOf,
     engineCanStart,
     engineCanStop,
     engineKeyOf,
+    engineLicenceLabel,
     engineStatusText,
     formFieldOf,
     formForEngine,
@@ -66,7 +69,9 @@
     musicCreateDraft,
     musicJobs,
     musicReviewJobId,
+    noteDraftEngineChosen,
     proposeFromText,
+    setDefaultEngine,
     startEngine,
     startJobWatch,
     stopCardHolder,
@@ -81,6 +86,8 @@
 
   let jobsState = $derived($musicJobs);
   let caps = $derived(jobsState.capabilities);
+  let configuredDefault = $derived<EngineKey>(configuredDefaultEngineOf(caps));
+  let fallbackNotice = $derived(defaultEngineFallbackNotice(caps));
   let selectedEngine = $derived<EngineKey>($musicCreateDraft.engine ?? defaultEngineOf(caps));
   let engineChoice = $derived(ENGINE_CHOICES.find(e => e.key === selectedEngine) ?? ENGINE_CHOICES[0]);
   let engine = $derived<MusicEngine | null>(
@@ -118,6 +125,20 @@
 
   let engineBusy = $state(false);
   let engineError = $state('');
+  let defaultEngineBusy = $state(false);
+  let defaultEngineError = $state('');
+
+  async function changeDefaultEngine(value: string) {
+    const key: EngineKey = value === 'acestep' ? 'acestep' : 'yue2';
+    defaultEngineBusy = true;
+    defaultEngineError = '';
+    try {
+      const a = await setDefaultEngine(key);
+      if (!a.ok) defaultEngineError = a.message;
+    } finally {
+      defaultEngineBusy = false;
+    }
+  }
 
   async function engineAction(start: boolean) {
     engineBusy = true;
@@ -145,6 +166,7 @@
 
   function pickEngine(value: string) {
     const key: EngineKey = value === 'acestep' ? 'acestep' : 'yue2';
+    noteDraftEngineChosen(true);
     musicCreateDraft.update(f => formForEngine(f, key, caps));
     errors = {};
     engineError = '';
@@ -274,6 +296,27 @@
       {/if}
     </div>
     {#if engineError}<p class="field-error" role="alert">{engineError}</p>{/if}
+    <div class="form-row default-engine-row">
+      <label class="field-label" for="mc-default-engine">Default engine</label>
+      <select
+        id="mc-default-engine"
+        class="list-select"
+        value={configuredDefault}
+        onchange={(e) => changeDefaultEngine((e.currentTarget as HTMLSelectElement).value)}
+        disabled={defaultEngineBusy || !caps}
+        aria-describedby="mc-default-engine-licences mc-default-engine-error"
+      >
+        {#each ENGINE_CHOICES as choice (choice.key)}
+          <option value={choice.key}>{choice.label} — {engineLicenceLabel(caps, choice.key)}</option>
+        {/each}
+      </select>
+      {#if defaultEngineBusy}<span class="muted tiny">Saving…</span>{/if}
+      <span id="mc-default-engine-licences" class="muted tiny">
+        {ENGINE_CHOICES.map(c => `${c.key === 'acestep' ? 'ACE-Step 1.5' : 'YuE2'}: ${engineLicenceLabel(caps, c.key)}`).join(' · ')}
+      </span>
+    </div>
+    {#if fallbackNotice}<p class="warn-text" role="status">{fallbackNotice}</p>{/if}
+    <p id="mc-default-engine-error" class="field-error" role="alert">{defaultEngineError}</p>
   </section>
 
   {#if reviewJob}
@@ -292,7 +335,7 @@
         <select id="mc-engine" class="list-select" value={selectedEngine} onchange={(e) => pickEngine((e.currentTarget as HTMLSelectElement).value)}
           aria-invalid={!!errors.engine} aria-describedby="mc-engine-error">
           {#each ENGINE_CHOICES as choice (choice.key)}
-            <option value={choice.key}>{choice.label}{choice.key === defaultEngineOf(caps) ? ' (default)' : ''}</option>
+            <option value={choice.key}>{choice.label} — {engineLicenceLabel(caps, choice.key)}{choice.key === defaultEngineOf(caps) ? ' (default)' : ''}</option>
           {/each}
         </select>
         <p id="mc-engine-error" class="field-error" role="alert">{errors.engine ?? ''}</p>

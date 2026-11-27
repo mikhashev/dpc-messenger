@@ -88,6 +88,8 @@ _SEEDED_KEYS: Dict[tuple, tuple] = {
         '', 'Max audio duration in seconds for local Whisper; 0 = unlimited, empty = legacy max_file_size_mb'),
     ('music', 'auto_align_lyrics'): (
         'true', 'Align generated vocal takes\' known lyrics to audio with local Whisper to create timed .lrc lyrics'),
+    ('music', 'default_engine'): (
+        'yue2', 'Default music generation engine for new jobs (yue2 or acestep)'),
 }
 
 
@@ -403,6 +405,7 @@ class Settings:
             'stream_port': '9996',  # The loopback port the player reads track bytes from (ADR-051 N8, 127.0.0.1 only, token-guarded). The app's CSP media-src names 9996, so another port also needs tauri.conf.json changed and the app rebuilt
             'stream_ranges_linux': 'false',  # Whether the Linux player asks the track stream for HTTP Range (true) or a plain whole-file 200 (false, default). WebKitGTK 2.50 reports no duration and refuses forward seeks on a Range source and handles the plain one; turn on only to test. Windows and macOS always use Range
             'lrclib_enabled': 'true',  # Allow the explicit "Find on LRCLIB" lookup (sends artist, title, album and duration to lrclib.net); false hides it. The automatic lyrics chain never goes online
+            'default_engine': _SEEDED_KEYS[('music', 'default_engine')][0],  # Default music generation engine for new jobs (yue2 or acestep)
             'auto_align_lyrics': _SEEDED_KEYS[('music', 'auto_align_lyrics')][0],  # Align generated vocal takes' known lyrics to audio with local Whisper when available (writes synced .lrc + library lyrics)
             'acestep_binary': '',  # The acestep.cpp server DPC starts for music jobs (ADR-051 D30). Empty = <DPC home>/engines/acestep.cpp/build/ace-server(.exe), or the first one found a few folders down in that build folder
             'acestep_models_dir': '',  # The ACE-Step GGUF folder. Empty = <DPC home>/models/music/ace-step. Needs acestep-5Hz-lm-4B-Q8_0, acestep-v15-turbo-Q8_0, Qwen3-Embedding-0.6B-Q8_0 and vae-BF16 (.gguf)
@@ -1435,6 +1438,38 @@ class Settings:
             return False
         logger.warning("[music] auto_align_lyrics %r is not a boolean; using true", raw)
         return True
+
+    def get_music_default_engine(self) -> str:
+        """`[music] default_engine`: configured default engine for new music jobs
+        (``'yue2'`` or ``'acestep'``). Invalid or unreadable values fall back to
+        ``'yue2'`` with a logged warning."""
+        from .music.job_schemas import DEFAULT_FROM_TEXT_ENGINE, FROM_TEXT_ENGINES
+        default = _SEEDED_KEYS[('music', 'default_engine')][0]
+        try:
+            raw = self.get('music', 'default_engine', default)
+        except configparser.Error as e:
+            logger.warning("[music] default_engine is unreadable (%s); using %s", e, default)
+            return DEFAULT_FROM_TEXT_ENGINE
+        text = str(raw).strip().lower() if raw is not None else default
+        if text in FROM_TEXT_ENGINES:
+            return text
+        logger.warning("[music] default_engine %r is unknown (expected one of %s); using %s",
+                       raw, ", ".join(FROM_TEXT_ENGINES), DEFAULT_FROM_TEXT_ENGINE)
+        return DEFAULT_FROM_TEXT_ENGINE
+
+    def set_music_default_engine(self, engine: str) -> str:
+        """Write `[music] default_engine` after validating against `FROM_TEXT_ENGINES`.
+        Raises ValueError on an invalid value without modifying config.ini."""
+        from .music.job_schemas import FROM_TEXT_ENGINES
+        if not isinstance(engine, str):
+            raise ValueError(f"default_engine must be one of {', '.join(FROM_TEXT_ENGINES)}.")
+        chosen = engine.strip().lower()
+        if chosen not in FROM_TEXT_ENGINES:
+            raise ValueError(
+                f"default_engine must be one of {', '.join(FROM_TEXT_ENGINES)}, got {engine!r}."
+            )
+        self.set('music', 'default_engine', chosen)
+        return chosen
 
     def get_local_transcription_idle_unload_s(self) -> float:
         """`[local_transcription] idle_unload_s`: seconds after the last transcription

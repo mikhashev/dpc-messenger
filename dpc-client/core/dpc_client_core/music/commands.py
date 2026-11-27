@@ -975,6 +975,36 @@ class MusicCommandsMixin:
 
     # -- jobs and takes (no agent tool: ADR-051 Q1) ----------------------------------
 
+    def _music_default_engine(self) -> str:
+        """Configured `[music] default_engine`, validated against `FROM_TEXT_ENGINES`."""
+        getter = getattr(self.settings, "get_music_default_engine", None)
+        if callable(getter):
+            try:
+                val = getter()
+                if val in js.FROM_TEXT_ENGINES:
+                    return val
+            except Exception:
+                logger.warning("music: reading get_music_default_engine failed; using %s", js.DEFAULT_FROM_TEXT_ENGINE)
+                return js.DEFAULT_FROM_TEXT_ENGINE
+        raw = str(self._music_config_value("default_engine", js.DEFAULT_FROM_TEXT_ENGINE)).strip().lower()
+        if raw in js.FROM_TEXT_ENGINES:
+            return raw
+        logger.warning("[music] default_engine %r is unknown; using %s", raw, js.DEFAULT_FROM_TEXT_ENGINE)
+        return js.DEFAULT_FROM_TEXT_ENGINE
+
+    async def _resolve_omitted_engine(
+        self, store: MusicJobStore, params: Mapping[str, Any]
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        """When `engine` is omitted from `params`, resolve the effective default engine via
+        `store.capabilities.resolve_default_engine()` so an uninstalled configured engine is
+        never silently chosen."""
+        if "engine" in params:
+            return dict(params), None
+        effective, _configured, fallback_reason = await asyncio.to_thread(store.capabilities.resolve_default_engine)
+        if fallback_reason:
+            logger.info("music: %s", fallback_reason)
+        return {**params, "engine": effective}, fallback_reason
+
     async def _music_jobs(self) -> MusicJobStore:
         """The lazily built job store; two first calls open it once."""
         if self._music_jobs_instance is not None:
@@ -987,6 +1017,7 @@ class MusicCommandsMixin:
                 store = MusicJobStore(self.settings.dpc_home_dir,
                                       capabilities=MusicCapabilities(engines=dict(engines.items()),
                                                                      default_engine=engines.default,
+                                                                     default_engine_source=self._music_default_engine,
                                                                      describer_probe=self._music_describer_status))
                 await asyncio.to_thread(store.open)
                 self._music_jobs_instance = store
@@ -1010,7 +1041,7 @@ class MusicCommandsMixin:
                                            on_change=self._music_engine_changed),
                 js.ENGINE_ACESTEP: AceStepServer(ace_config(), dpc_home=home, config_source=ace_config,
                                                  on_change=self._music_engine_changed),
-            }, default=js.DEFAULT_FROM_TEXT_ENGINE)
+            }, default=self._music_default_engine())
         return self._music_engines_instance
 
     def _music_engine(self, engine: Any = None) -> Any:
@@ -1107,8 +1138,9 @@ class MusicCommandsMixin:
         holds the GPU card is the local-engine status command's (owner-only) answer, and a
         waiting job's `card_wait` names the holder."""
         try:
-            chosen = self._music_engine(engine)
             engines = self._music_engine_set()
+            engines.default = self._music_default_engine()
+            chosen = self._music_engine(engine)
             runner = self._music_runner_instance
             return {"status": "ok", "engine": chosen.details(),
                     "engines": {k: e.details() for k, e in engines.items()},
@@ -1116,6 +1148,48 @@ class MusicCommandsMixin:
                     "runner": {"running": bool(runner and runner.running),
                                "current_job_id": runner.current_job_id if runner else None,
                                "current_engine": runner.current_engine if runner else None}}
+        except Exception as exc:
+            return _error(exc)
+
+    @slow_command
+    async def set_music_default_engine(self, engine: Any = None) -> Dict[str, Any]:
+        """Set `[music] default_engine` (`'yue2'` or `'acestep'`), persist it to `config.ini`,
+        update the live engine registry, and return the refreshed capability report."""
+        try:
+            if not isinstance(engine, str):
+                raise MusicJobError(
+                    "invalid_params",
+                    f"engine must be one of {', '.join(js.FROM_TEXT_ENGINES)}",
+                    field="engine",
+                )
+            setter = getattr(self.settings, "set_music_default_engine", None)
+            if callable(setter):
+                try:
+                    chosen = await asyncio.to_thread(setter, engine)
+                except ValueError as exc:
+                    raise MusicJobError("invalid_params", str(exc), field="engine") from exc
+            else:
+                chosen = engine.strip().lower()
+                if chosen not in js.FROM_TEXT_ENGINES:
+                    raise MusicJobError(
+                        "invalid_params",
+                        f"engine must be one of {', '.join(js.FROM_TEXT_ENGINES)}, got {engine!r}",
+                        field="engine",
+                    )
+                if hasattr(self.settings, "set"):
+                    await asyncio.to_thread(self.settings.set, "music", "default_engine", chosen)
+            if self._music_engines_instance is not None:
+                self._music_engines_instance.default = chosen
+            store = await self._music_jobs()
+            store.capabilities.default_engine = chosen
+            report = await asyncio.to_thread(store.capabilities.report)
+            return {
+                "status": "ok",
+                "configured_default_engine": chosen,
+                "default_engine": report["default_engine"],
+                "default_engine_fallback_reason": report.get("default_engine_fallback_reason"),
+                "capabilities": report,
+            }
         except Exception as exc:
             return _error(exc)
 
@@ -1538,6 +1612,7 @@ class MusicCommandsMixin:
             store = await self._music_jobs()
             queue_max, turn_max = self._music_agent_queue_max(), self._music_turn_jobs_max()
             source = None
+            fallback_reason: Optional[str] = None
             if job_type == "edit":
                 source = await self._music_edit_source(strs.get("track_id"))
                 if strs.get("comment_id") is None:
@@ -1552,7 +1627,10 @@ class MusicCommandsMixin:
                     if checked.get("repeat"):
                         return {"status": "ok", "job": checked["repeat"]}
                 await self._music_edit_comment(strs, region, requested_by)
+            elif job_type == js.GENERATE_FROM_TEXT:
+                params, fallback_reason = await self._resolve_omitted_engine(store, params)
             elif job_type in js.SONG_TYPES:
+                params, fallback_reason = await self._resolve_omitted_engine(store, params)
                 source = await self._music_edit_source(strs.get("track_id"))
                 strs["base_version_id"] = strs.get("base_version_id") or ORIGINAL_VERSION_ID
                 params = await self._music_song_params(job_type, params, strs.get("track_id"))
@@ -1562,7 +1640,10 @@ class MusicCommandsMixin:
             if job.get("state") == "queued":
                 self._music_wake_runner()
             self._music_job_changed(job)
-            return {"status": "ok", "job": job}
+            out: Dict[str, Any] = {"status": "ok", "job": job}
+            if fallback_reason:
+                out["default_engine_fallback_reason"] = fallback_reason
+            return out
         except Exception as exc:
             return _error(exc)
 
@@ -1601,7 +1682,11 @@ class MusicCommandsMixin:
                 ))
                 return {"status": "ok", **answer}
             edit: Dict[str, Any] = {}
-            if job_type in js.SONG_TYPES:
+            fallback_reason: Optional[str] = None
+            if job_type == js.GENERATE_FROM_TEXT:
+                params, fallback_reason = await self._resolve_omitted_engine(store, params)
+            elif job_type in js.SONG_TYPES:
+                params, fallback_reason = await self._resolve_omitted_engine(store, params)
                 tid = _opt_str(track_id, "track_id", "invalid_params")
                 edit = {"track_id": tid, "base_version_id": ORIGINAL_VERSION_ID,
                         "source": await self._music_edit_source(tid)}
@@ -1609,7 +1694,10 @@ class MusicCommandsMixin:
             answer = await asyncio.to_thread(lambda: store.check_job(
                 job_type, params, idempotency_key=key, requested_by=requested_by, request=request,
                 agent_queue_max=queue_max, turn_jobs_max=turn_max, **edit))
-            return {"status": "ok", **answer}
+            out: Dict[str, Any] = {"status": "ok", **answer}
+            if fallback_reason:
+                out["default_engine_fallback_reason"] = fallback_reason
+            return out
         except Exception as exc:
             return _error(exc)
 
@@ -2365,6 +2453,7 @@ MUSIC_COMMANDS = (
     "delete_generated_music_file",
     "get_music_capabilities",
     "get_music_engine_status",
+    "set_music_default_engine",
     "start_music_engine",
     "stop_music_engine",
     "propose_music_job",

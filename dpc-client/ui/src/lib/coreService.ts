@@ -2238,6 +2238,16 @@ export function getMusicCapabilities(): Promise<MusicAnswer<{ capabilities: Musi
     return callMusic(sendCommand, 'get_music_capabilities', {});
 }
 
+/** Set `[music] default_engine` ('yue2' or 'acestep') and return the refreshed capability report. */
+export function setMusicDefaultEngine(engine: string): Promise<MusicAnswer<{
+    configured_default_engine: string;
+    default_engine: string;
+    default_engine_fallback_reason?: string | null;
+    capabilities: MusicCapabilities;
+}>> {
+    return callMusic(sendCommand, 'set_music_default_engine', { engine });
+}
+
 /** Queue a job (`queued`), or get it back `unsupported` with the reason. */
 export function proposeMusicJob(type: string, params: Record<string, any>, idempotencyKey?: string, request?: MusicRequest):
         Promise<MusicAnswer<{ job: MusicJob }>> {

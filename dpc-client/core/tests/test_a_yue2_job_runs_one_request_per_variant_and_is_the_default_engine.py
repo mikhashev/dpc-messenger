@@ -179,7 +179,9 @@ def test_a_job_on_an_engine_that_is_not_installed_is_unsupported_and_the_other_s
     ace = rig.propose(yue2_params(engine="acestep", duration_s=30))
     assert ace["state"] == "queued"
     report = rig.store.capabilities.report()
-    assert report["default_engine"] == "yue2" and report["engine"]["key"] == "yue2"
+    assert report["configured_default_engine"] == "yue2"
+    assert report["default_engine"] == "acestep" and report["engine"]["key"] == "acestep"
+    assert report["default_engine_fallback_reason"] and "yue2" in report["default_engine_fallback_reason"]
     assert report["engines"]["acestep"]["available"] and not report["engines"]["yue2"]["available"]
     assert report["job_types"]["generate_from_text"]["status"] == "supported"
     assert report["limits"]["generate_from_text"]["engines"]["yue2"]["duration_s"] == {"min": 30, "max": 360,

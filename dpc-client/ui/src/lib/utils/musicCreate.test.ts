@@ -41,6 +41,10 @@ import {
     validateFromTextForm,
     instrumentalChoiceText,
     jobVoiceName,
+    configuredDefaultEngineOf,
+    defaultEngineFallbackNotice,
+    engineLicenceLabel,
+    syncDraftDefaultEngine,
     type MusicCapabilities,
     type MusicJob,
     type MusicTake,
@@ -640,5 +644,49 @@ describe('askAgain', () => {
         const gone = { ok: false as const, unavailable: true, code: 'not_connected', message: 'x' };
         expect(await askAgain(async () => { calls++; return gone; }, 5, noSleep)).toBe(gone);
         expect(calls).toBe(2);
+    });
+});
+
+// -- configurable default engine, licence badges & fallback notice ----------------
+
+describe('configured default engine, licence label, and fallback notice', () => {
+    it('reads configured_default_engine and falls back to defaultEngineOf when absent', () => {
+        expect(configuredDefaultEngineOf(null)).toBe('yue2');
+        expect(configuredDefaultEngineOf({ default_engine: 'acestep' })).toBe('acestep');
+        expect(configuredDefaultEngineOf({ configured_default_engine: 'yue2', default_engine: 'acestep' })).toBe('yue2');
+    });
+
+    it('surfaces the fallback notice only when default_engine_fallback_reason is present', () => {
+        expect(defaultEngineFallbackNotice(null)).toBe('');
+        expect(defaultEngineFallbackNotice({ default_engine_fallback_reason: null })).toBe('');
+        expect(defaultEngineFallbackNotice({
+            configured_default_engine: 'yue2',
+            default_engine: 'acestep',
+            default_engine_fallback_reason: "Configured default engine 'yue2' is not available; falling back to 'acestep'.",
+        })).toContain('yue2');
+    });
+
+    it('reads engine licence summary from capabilities or falls back to known engine licences', () => {
+        expect(engineLicenceLabel(null, 'acestep')).toBe('MIT (commercial OK)');
+        expect(engineLicenceLabel(null, 'yue2')).toBe('CC BY-NC 4.0 (non-commercial)');
+        const caps: MusicCapabilities = {
+            engines: {
+                acestep: { state: 'stopped', reason: 'ok', licence_summary: 'MIT (custom)' },
+                yue2: { state: 'stopped', reason: 'ok', licence_summary: 'CC BY-NC 4.0 (non-commercial)' },
+            },
+        };
+        expect(engineLicenceLabel(caps, 'acestep')).toBe('MIT (custom)');
+    });
+
+    it('syncs untouched draft engine and default duration to capabilities default, without overwriting user pick', () => {
+        const draft = emptyFromTextForm();
+        const aceCaps: MusicCapabilities = { default_engine: 'acestep' };
+        const synced = syncDraftDefaultEngine(draft, aceCaps, false);
+        expect(synced.engine).toBe('acestep');
+        expect(synced.duration).toBe(120);
+
+        const untouchedUserPick = syncDraftDefaultEngine(draft, aceCaps, true);
+        expect(untouchedUserPick.engine).toBe('yue2');
+        expect(untouchedUserPick.duration).toBe(180);
     });
 });

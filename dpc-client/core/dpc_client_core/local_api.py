@@ -148,7 +148,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "list_music_library", "get_music_track",
     "hide_music_track", "unhide_music_track", "remove_missing_music_tracks", "delete_generated_music_file",
     # Music jobs and takes (ADR-051): propose, watch, keep / discard. No agent tool.
-    "get_music_capabilities", "get_music_engine_status", "start_music_engine", "stop_music_engine",
+    "get_music_capabilities", "get_music_engine_status", "set_music_default_engine",
+    "start_music_engine", "stop_music_engine",
     "propose_music_job", "get_music_job", "list_music_jobs", "cancel_music_job",
     "list_music_takes", "keep_music_take", "discard_music_take", "reject_all_music_takes",
     "measure_music_take_loudness",

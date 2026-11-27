@@ -34,6 +34,7 @@ import {
     proposeMusicSong,
     describeMusicTrack,
     rejectAllMusicTakes,
+    setMusicDefaultEngine,
     startMusicEngine,
     stopLocalEngine,
     stopMusicEngine,
@@ -48,8 +49,10 @@ import {
     jobsToPoll,
     mergeJobs,
     reduceMusicEvent,
+    syncDraftDefaultEngine,
     upsertJob,
     type DiscardReason,
+    type EngineKey,
     type FromTextForm,
     type MusicCapabilities,
     type MusicEngine,
@@ -91,6 +94,13 @@ export const musicJobQcError = writable<Record<string, string>>({});
 
 /** The Create form, kept while the panel or the window is closed. */
 export const musicCreateDraft = writable<FromTextForm>(emptyFromTextForm());
+
+let draftEngineChosen = false;
+
+/** Mark whether the user explicitly chose a per-job engine in the Create form. */
+export function noteDraftEngineChosen(chosen = true): void {
+    draftEngineChosen = chosen;
+}
 
 /** The job whose takes are under review in the panel, or null. */
 export const musicReviewJobId = writable<string | null>(null);
@@ -158,7 +168,26 @@ export function noteMusicEvent(event: string, payload: any): void {
 
 export async function refreshCapabilities(): Promise<void> {
     const a = await getMusicCapabilities();
-    if (a.ok) musicJobs.update(x => ({ ...x, capabilities: a.data.capabilities }));
+    if (a.ok) {
+        const nextCaps = a.data.capabilities;
+        musicJobs.update(x => ({ ...x, capabilities: nextCaps }));
+        musicCreateDraft.update(f => syncDraftDefaultEngine(f, nextCaps, draftEngineChosen));
+    }
+}
+
+export async function setDefaultEngine(engine: EngineKey): Promise<MusicAnswer<{
+    configured_default_engine: string;
+    default_engine: string;
+    default_engine_fallback_reason?: string | null;
+    capabilities: MusicCapabilities;
+}>> {
+    const a = await setMusicDefaultEngine(engine);
+    if (a.ok) {
+        const nextCaps = a.data.capabilities;
+        musicJobs.update(x => ({ ...x, capabilities: nextCaps }));
+        musicCreateDraft.update(f => syncDraftDefaultEngine(f, nextCaps, draftEngineChosen));
+    }
+    return a;
 }
 
 function failure(a: MusicAnswer<any>): { status: JobsStatus; message: string } {
@@ -177,15 +206,17 @@ export async function loadMusicJobs(): Promise<void> {
     }
     const list = ((jobs as any).data.jobs as MusicJob[]).filter(j => LISTED_TYPES.has(j.type));
     for (const j of list) seen(j.id);
+    const nextCaps = (caps as any).data.capabilities ?? null;
     musicJobs.update(x => ({
         ...x,
         status: 'ready',
         message: '',
         jobs: mergeJobs(x.jobs, list),
-        capabilities: (caps as any).data.capabilities ?? null,
+        capabilities: nextCaps,
         engine: (engine as any).data.engine ?? x.engine,
         engines: { ...x.engines, ...((engine as any).data.engines ?? {}) },
     }));
+    musicCreateDraft.update(f => syncDraftDefaultEngine(f, nextCaps, draftEngineChosen));
 }
 
 let watchTimer: ReturnType<typeof setInterval> | null = null;
