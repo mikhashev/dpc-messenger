@@ -1448,5 +1448,20 @@ def test_pre_card_refusal_for_others_does_not_label_requester_non_owner():
         assert forbidden not in text, (forbidden, music_tools.PRE_CARD_REFUSAL_FOR_OTHERS)
 
 
+@pytest.mark.asyncio
+async def test_reuse_lyrics_refusal_on_chat_scoped_turn_does_not_label_requester_non_owner(home):
+    async with Rig(home, start_runner=False) as rig:
+        entry = await base_track(rig, home)
+        person = Person(True)
+        foreign = chat_ctx(home, MusicService(home, rig, person), GROUP, asker=FRIEND)
+        out = await call(registry_for(foreign), foreign, "music_propose_job", type=js.GENERATE_SIMILAR,
+                         params={"track_id": entry["id"], "lyrics_mode": "reuse", "lyrics": "guess",
+                                 "caption": "synthwave"})
+        lowered = out.lower()
+        assert out.startswith("⚠️ music_propose_job: with lyrics_mode reuse") and "leave lyrics out" in out, out
+        for forbidden in ("non-owner", "not the owner", "other than the owner", "owner"):
+            assert forbidden not in lowered, (forbidden, out)
+
+
 
 

@@ -4851,13 +4851,19 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         )
 
     @slow_command
+    @staticmethod
+    def _is_toastable_transcription_error(error_msg: str) -> bool:
+        """Whether a transcription failure message should surface a UI error toast."""
+        return "VRAM" in error_msg or "too long" in error_msg or "CUDA out of memory" in error_msg
+
     async def transcribe_audio(
         self,
         audio_base64: str = "",
         mime_type: str = "audio/webm",
         provider_alias: str | None = None,
         file_path: str | None = None,
-        duration_seconds: float | None = None
+        duration_seconds: float | None = None,
+        emit_error_toast: bool = True,
     ) -> dict:
         """
         Transcribe audio to text using local Whisper (primary), OpenAI API (fallback), or remote peer.
@@ -5229,9 +5235,9 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
             else:
                 logger.error(f"Audio transcription failed: {e}", exc_info=True)
 
-            # Broadcast error toast to UI for OOM errors (v0.14.1+)
+            # Broadcast error toast to UI for OOM / duration limit errors (v0.14.1+)
             error_msg = str(e)
-            if "VRAM" in error_msg or "too long" in error_msg or "CUDA out of memory" in error_msg:
+            if emit_error_toast and self._is_toastable_transcription_error(error_msg):
                 await self.local_api.broadcast_event("error_toast", {
                     "title": "Transcription Failed",
                     "message": error_msg,
@@ -5549,6 +5555,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 # What the refused call's own fallback chain already asked (Zcode #29-3, Ark F4).
                 asked_providers: set = set()
                 asked_peers: set = set()
+                last_toast_error: Optional[str] = None
                 check_token = _VOICE_MESSAGE_CARD_CHECK.set(the_senders_transcript_is_in)
                 try:
                     for provider_alias in provider_priority:
@@ -5569,9 +5576,11 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                             continue
                         try:
                             logger.info(f"Attempting transcription with provider: {provider_alias}")
+                            last_toast_error = None
                             result = await self.transcribe_audio(
                                 audio_base64, mime_type, provider_alias,
-                                duration_seconds=voice_metadata.get("duration_seconds"))
+                                duration_seconds=voice_metadata.get("duration_seconds"),
+                                emit_error_toast=False)
                         except _TheSendersTranscriptArrived:
                             logger.info(f"Transcription received from peer while waiting for the card, "
                                         f"cancelling local attempt for {transfer_id}")
@@ -5589,6 +5598,9 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                             result = None
                             continue
                         if isinstance(result, dict) and result.get("limit_exceeded"):
+                            err_msg = result.get("error") or ""
+                            if self._is_toastable_transcription_error(err_msg):
+                                last_toast_error = err_msg
                             logger.info(
                                 "Skipping %s for %s: %s",
                                 provider_alias,
@@ -5597,20 +5609,33 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                             )
                             result = None
                             continue
+                        if isinstance(result, dict) and result.get("status") == "error":
+                            err_msg = result.get("error") or ""
+                            if self._is_toastable_transcription_error(err_msg):
+                                last_toast_error = err_msg
+                            break
+                        last_toast_error = None
                         break  # A result: stop trying providers
                 finally:
                     _VOICE_MESSAGE_CARD_CHECK.reset(check_token)
 
-                if result is None:
-                    if refused_by_the_card is not None:
-                        # Not a failure of every provider: the card refused, and every alias after it
-                        # was skipped or gave nothing (Zcode #29-4, Ark (4)).
-                        logger.warning(f"No transcription for transfer {transfer_id}: the card refused it "
-                                       f"({refused_by_the_card}) and no alias that does not use the card "
-                                       f"gave one")
-                    else:
-                        logger.error(f"All transcription providers failed for transfer {transfer_id}")
-                    return
+                if result is None or (isinstance(result, dict) and result.get("status") == "error"):
+                    if last_toast_error and getattr(self, "local_api", None) is not None:
+                        await self.local_api.broadcast_event("error_toast", {
+                            "title": "Transcription Failed",
+                            "message": last_toast_error,
+                            "duration": 5000,
+                        })
+                    if result is None:
+                        if refused_by_the_card is not None:
+                            # Not a failure of every provider: the card refused, and every alias after it
+                            # was skipped or gave nothing (Zcode #29-4, Ark (4)).
+                            logger.warning(f"No transcription for transfer {transfer_id}: the card refused it "
+                                           f"({refused_by_the_card}) and no alias that does not use the card "
+                                           f"gave one")
+                        else:
+                            logger.error(f"All transcription providers failed for transfer {transfer_id}")
+                        return
 
                 # 9. Validate transcription result (ensure not empty)
                 transcription_text = result.get("text", "").strip()

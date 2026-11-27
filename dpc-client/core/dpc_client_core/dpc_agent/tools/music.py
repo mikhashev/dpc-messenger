@@ -759,8 +759,8 @@ def music_propose_job(ctx: ToolContext, type: str = js.GENERATE_FROM_TEXT, param
         # `reuse_lyrics_differ`): an answer either way would tell someone other than the owner
         # what the owner's lyrics say (P2-6). Check before idempotency_key so a guessed key
         # paired with lyrics cannot distinguish a taken key from a free one.
-        return ("⚠️ music_propose_job: with lyrics_mode reuse on a request from someone other than the "
-                "owner, leave lyrics out: the track's stored lyrics are used. Nothing was asked or proposed.")
+        return ("⚠️ music_propose_job: with lyrics_mode reuse from this chat, leave lyrics out: "
+                "the track's stored lyrics are used. Nothing was asked or proposed.")
 
     # A repeat in this turn, or a cap already reached, is answered before anyone is asked:
     # a question whose "yes" cannot make a job is not put to the person (D45, D47).

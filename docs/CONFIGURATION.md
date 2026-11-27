@@ -1135,6 +1135,13 @@ An empty default means the key is written blank and the feature stays off until 
 **The gateway has no image cap of its own:** an image at either door is bounded
 by `[vision] max_image_size_mb`, the same setting the P2P door enforces.
 
+**Voice transcription caps in duration mode:** when `[local_transcription] max_duration_seconds`
+is set (`0` or positive seconds), local Whisper checks audio duration (falling back to
+`[local_transcription] max_file_size_mb` only when duration cannot be probed), while
+`[voice_messages] max_size_mb` (10 MB by default) still applies on the remote/OpenAI path
+(`openai` / `openai_compatible`, including fallback). When `max_duration_seconds` is empty,
+`[voice_messages] max_size_mb` bounds the voice transcription request before provider routing.
+
 *Anything written between the markers above is replaced by
 `tools/config_reference.py`, which builds the tables from the inline comments in
 `settings.py`. Prose about one key goes in that comment; prose about more than

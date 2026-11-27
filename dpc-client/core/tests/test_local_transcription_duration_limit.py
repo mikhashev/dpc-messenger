@@ -639,3 +639,68 @@ class TestVoiceLegacyAndExplicitProviderDuration:
         assert whisper.calls == []
         cloud_mock.assert_awaited_once()
         assert svc._voice_transcriptions["t-named-long"]["provider"] == "openai"
+
+    @pytest.mark.asyncio
+    async def test_voice_cascade_duration_fallback_emits_no_transcription_failed_toast(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(wp, "audio_seconds", lambda path: None)
+        webm = tmp_path / "voice.webm"
+        webm.write_bytes(b"\x1aE\xdf\xa3" + b"\x00" * 1024)
+        settings = Settings(tmp_path)
+        settings._config.set("local_transcription", "max_duration_seconds", "120")
+        settings._config.set("voice_transcription", "sender_transcribes", "true")
+        settings._config.set("voice_transcription", "provider_priority", "local_whisper,openai")
+        whisper = _FakeLocalWhisper("local_whisper")
+        cloud = _FakeCloudProvider("openai")
+        svc, cloud_mock = _voice_service(settings, {"local_whisper": whisper, "openai": cloud})
+
+        await svc._maybe_transcribe_voice_message(
+            transfer_id="t-cascade-no-toast",
+            node_id="dpc-node-" + "b" * 32,
+            file_path=webm,
+            voice_metadata={"mime_type": "audio/webm", "duration_seconds": 180.0},
+            is_sender=True,
+        )
+
+        assert whisper.calls == []
+        cloud_mock.assert_awaited_once()
+        assert svc._voice_transcriptions["t-cascade-no-toast"]["provider"] == "openai"
+        error_toasts = [
+            c.args[1]
+            for c in svc.local_api.broadcast_event.await_args_list
+            if c.args and c.args[0] == "error_toast"
+        ]
+        assert error_toasts == []
+
+    @pytest.mark.asyncio
+    async def test_voice_cascade_final_duration_failure_still_emits_transcription_failed_toast(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(wp, "audio_seconds", lambda path: None)
+        webm = tmp_path / "voice.webm"
+        webm.write_bytes(b"\x1aE\xdf\xa3" + b"\x00" * 1024)
+        settings = Settings(tmp_path)
+        settings._config.set("local_transcription", "max_duration_seconds", "120")
+        settings._config.set("voice_transcription", "sender_transcribes", "true")
+        settings._config.set("voice_transcription", "provider_priority", "local_whisper")
+        whisper = _FakeLocalWhisper("local_whisper")
+        svc, _ = _voice_service(settings, {"local_whisper": whisper})
+
+        await svc._maybe_transcribe_voice_message(
+            transfer_id="t-cascade-final-fail",
+            node_id="dpc-node-" + "b" * 32,
+            file_path=webm,
+            voice_metadata={"mime_type": "audio/webm", "duration_seconds": 180.0},
+            is_sender=True,
+        )
+
+        assert "t-cascade-final-fail" not in svc._voice_transcriptions
+        error_toasts = [
+            c.args[1]
+            for c in svc.local_api.broadcast_event.await_args_list
+            if c.args and c.args[0] == "error_toast"
+        ]
+        assert len(error_toasts) == 1
+        assert error_toasts[0]["title"] == "Transcription Failed"
+        assert "180" in error_toasts[0]["message"]
