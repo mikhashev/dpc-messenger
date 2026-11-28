@@ -435,14 +435,16 @@
             {/if}
           </strong>
           <!-- The signature verdict's quiet note (DPC #111): "awaiting certificate"
-               when the author's certificate has not arrived on this machine,
-               "unsigned" for a verdict this UI does not know. Only those two
-               kinds are drawn — 'verified' and an absent verdict say nothing
-               (absence on old records is not an alarm), and 'legacy', a record
-               from before signatures existed and most of the owner's history,
-               says nothing either: verdictNote keeps its words for the step
-               that needs them, but on the row the note would only repeat. The
-               note is text, not a colour or an icon, so it reads as words. -->
+               when the author's certificate has not arrived on this machine.
+               That one kind is all the row draws — 'verified' and an absent
+               verdict say nothing (absence on old records is not an alarm),
+               'legacy', a record from before signatures existed and most of the
+               owner's history, says nothing either: verdictNote keeps its words
+               for the step that needs them, but on the row the note would only
+               repeat. A verdict this build does not know, and this node's own
+               word 'own', draw nothing too: a note is drawn only for a verdict
+               whose meaning is known to be "not checked". The note is text, not
+               a colour or an icon, so it reads as words. -->
           <span class="timestamp">{#if msg.msg_index}<span class="msg-index">#{msg.msg_index}</span> {/if}{new Date(msg.timestamp).toLocaleTimeString()}{#if verdict.kind === 'awaiting-certificate'} <span class="verdict-note">{verdict.text}</span>{/if}</span>
         </div>
         <!-- Whose reasoning is shown is a property of the surface, not of the
