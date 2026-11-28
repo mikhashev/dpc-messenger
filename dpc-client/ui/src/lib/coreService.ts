@@ -141,6 +141,7 @@ import { applyRequestStatus } from './utils/attachmentRequest';
 import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded } from './services/voice';
 import { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed, modelDownloadProgress } from './services/modelDownload';
 import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated } from './services/groups';
+import { rejectedRecords, upsertRejectedRecord, replaceRejectedRecords, loadRejectedRecords } from './services/rejectedRecords';
 import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentStopNotes, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates, agentTurns, onAgentTurnUpdated, onAgentActivity, forgetAgentTurns } from './services/agents';
 import { onCardLeaseUpdated } from './services/cardLease';
 import { addStopNote, clearStopNotes, isStopNote } from './utils/stopNotes';
@@ -176,6 +177,7 @@ export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTran
 export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded };
 export { modelDownloadRequired, modelDownloadStarted, modelDownloadCompleted, modelDownloadFailed, modelDownloadProgress };
 export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, groupAccessDenied, groupMessageDeleted, tokenUsageUpdated };
+export { rejectedRecords, upsertRejectedRecord, replaceRejectedRecords, loadRejectedRecords };
 export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentLiveTools, agentLiveAgentIds, agentStopNotes, agentTextChunk, agentChatMessage, userMessageConfirmed, sleepStateChanged, sleepProgress, sleepAgentStates, agentTurns };
 export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
 export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, knowledgeVoteStatus, extractionFailure, extractionCancelled, extractionFallback, tokenWarning, integrityWarnings, votingConversationId };
@@ -1220,6 +1222,15 @@ export async function connectToCoreService() {
                     // Backend removed a message from group history (e.g. stale morning
                     // brief replaced on Sleep). +page.svelte removes from chatHistories.
                     groupMessageDeleted.set(message.payload);
+                }
+                else if (message.event === "group_record_rejected") {
+                    // A record this node refused for a wrong signature (DPC #111): kept
+                    // by the backend in its own store, never in the history. It is not a
+                    // message — no unread count, nothing sent back — only a row in the
+                    // rejectedRecords store, upserted by its stable key.
+                    if (message.payload?.conversation_id && message.payload?.key) {
+                        upsertRejectedRecord(message.payload);
+                    }
                 }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)

@@ -5,7 +5,7 @@
 
 <script lang="ts">
   import type { Writable } from 'svelte/store';
-  import { connectionStatus, sendCommand } from '$lib/coreService';
+  import { connectionStatus, sendCommand, loadRejectedRecords } from '$lib/coreService';
   import { mapBackendMessage, dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import { mergeBackfillWithLive, unconfirmedUserBubbles } from '$lib/utils/liveMessageIdentity';
   import { isAIChatId, legacyImportPending } from '$lib/utils/aiChatStore';
@@ -299,6 +299,13 @@
               // Remove from loading AFTER chatHistories update completes
               loadingHistory.delete(reqChatId);
             }
+
+            // The rejected-record rows ride along with the newest page: a refused
+            // record is in no history, so its rows are asked for separately, once
+            // the page answered — with messages or without — and only for groups.
+            // The load-older path above never asks: the rows it would place are
+            // already held.
+            if (reqChatId.startsWith('group-')) loadRejectedRecords(reqChatId);
           } catch (e) {
             console.error(`[ChatHistory] Error loading history:`, e);
             // On error, remove from loading to allow retry

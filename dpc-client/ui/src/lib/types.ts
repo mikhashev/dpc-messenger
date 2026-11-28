@@ -113,6 +113,36 @@ export interface SpeedSummary {
   median?: boolean;
 }
 
+/** A chat record this node refused because its signature is wrong (DPC #111):
+ *  the backend keeps it in a store of its own, never in the history, and the
+ *  UI shows it as a red row at the record's own place in time. Every
+ *  `claimed_*` field is the record's own say-so — untrusted by definition. */
+export type RejectedRecord = {
+  key: string;                     // stable id of the row: the UI upserts by it
+  conversation_id: string;
+  record_id: string | null;        // the refused record's own id
+  reason: 'signer_mismatch' | 'content_hash_mismatch' | 'signature_check_failed'
+        | 'invalid_signature' | 'unsigned' | 'unknown_preimage';
+  transport_node_id: string | null;       // the node that handed the record over
+  claimed_sender_node_id: string | null;  // who the record says wrote it
+  claimed_sender_name: string | null;
+  claimed_sender_type: string | null;
+  claimed_agent_owner: string | null;
+  signer_node_id: string | null;          // who the record says signed it
+  claimed_content_hash: string | null;
+  computed_content_hash: string | null;
+  signature: string | null;
+  preimage_version: string | null;
+  record_timestamp: string | null;        // the record's own time as it arrived, ISO 8601 (may be absent or garbage)
+  first_seen: string;                     // ISO 8601 UTC
+  last_seen: string;                      // ISO 8601 UTC
+  repeat_count: number;
+  live_count: number;                     // how many of the repeats came live...
+  sync_count: number;                     // ...and how many by history sync
+  text: string;
+  text_truncated: boolean;
+};
+
 // --- Provider System ---
 
 export interface ProviderInfo {

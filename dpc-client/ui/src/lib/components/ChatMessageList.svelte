@@ -8,14 +8,15 @@
   import ThinkingBlock from './ThinkingBlock.svelte';
   import { showsThinkingBlock } from '$lib/utils/thinkingVisibility';
   import AgentProgressCollapsible from './AgentProgressCollapsible.svelte';
-  import { agentLiveTools, agentLiveAgentIds, agentStopNotes, blockedNodeIds, attachmentRequests, activeFileTransfers, sendCommand } from '$lib/coreService';
+  import { agentLiveTools, agentLiveAgentIds, agentStopNotes, blockedNodeIds, attachmentRequests, activeFileTransfers, sendCommand, rejectedRecords } from '$lib/coreService';
   import {
     isMissingHere, showsRequestButton, requestKey, requestStatusText, requestFromAnswer,
   } from '$lib/utils/attachmentRequest';
   import { foldBlockedRuns, isBlockedAuthor, blockedRunLabel } from '$lib/utils/blockedRuns';
   import { dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
   import { verdictNote } from '$lib/utils/messageVerdict';
-  import type { Message, Mention } from '$lib/types.js';
+  import { rejectedReasonText, rejectedRecordTime, rejectedRowSlots } from '$lib/utils/rejectedRows';
+  import type { Message, Mention, RejectedRecord } from '$lib/types.js';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import { revealInFolder } from '$lib/utils/revealInFolder';
   import { playsInline, knownDurationSeconds, isAttachmentPlaceholderText } from '$lib/utils/pendingAttachment';
@@ -149,6 +150,45 @@
     }
     return at;
   });
+
+  // Records this node refused for a wrong signature (DPC #111), shown as red
+  // rows at their own place in time. They are not messages: displayMessages,
+  // the paging anchors and the unread counts never see them, and the rows are
+  // slotted in front of the message their time precedes (utils/rejectedRows.ts).
+  let rejectedRows = $derived($rejectedRecords.get(conversationId) ?? []);
+  let rejectedSlots = $derived(rejectedRowSlots(displayMessages, rejectedRows));
+  // The refused text is folded away until the person opens it, keyed by the
+  // row's own key as expandedRuns above is keyed by its run's.
+  let expandedRejected = $state<Record<string, boolean>>({});
+
+  // The roster's name for a node, or its full id when the roster does not know
+  // it: a rejected row exists because identities did not add up, so an id the
+  // roster cannot vouch for is never shortened and never replaced by a name
+  // the refused record itself claims.
+  function rejectedNodeName(id: string | null): string {
+    return (id && peerDisplayNames.get(id)?.split(' | ')[0]) || id || 'unknown';
+  }
+
+  function isDpcNodeId(id: string | null): id is string {
+    return !!id && id.startsWith('dpc-node-');
+  }
+
+  // "seen 1 time, seen 2 times": the count is printed right beside the word,
+  // so the plural is chosen here rather than left as a bare " times" on the row.
+  function timesWord(count: number): string {
+    return count === 1 ? 'time' : 'times';
+  }
+
+  // The claimed author: the roster's name for the claimed node when it knows
+  // it, else the claimed node's full id; the record's own `claimed_sender_name`
+  // is believed only when the record carries no node id to check it against —
+  // a look-alike id must not be laundered into a familiar name.
+  function rejectedClaimedAuthor(row: RejectedRecord): string {
+    if (row.claimed_sender_node_id) {
+      return peerDisplayNames.get(row.claimed_sender_node_id)?.split(' | ')[0] || row.claimed_sender_node_id;
+    }
+    return row.claimed_sender_name || 'unknown';
+  }
 
   let lastWarnedDropped = 0;
   $effect(() => {
@@ -385,6 +425,51 @@
   </div>
 {/snippet}
 
+<!-- A record this node refused for a wrong signature (DPC #111), at the record's
+     own place in time. The refused text is untrusted — it may carry instructions
+     for agents — so it is rendered as text only, never through the markdown
+     renderer and never as HTML, and it stays folded until the person opens it.
+     The row is not a message: no reply, quote, copy or "send to agent" action,
+     nothing the UI sends back. -->
+{#snippet rejectedRow(row: RejectedRecord)}
+  {@const ms = rejectedRecordTime(row)}
+  {@const expanded = !!expandedRejected[row.key]}
+  <div class="rejected-row">
+    <div class="message-header">
+      <strong>rejected</strong>
+      <!-- The record's own time, when it parsed; a refused record may carry a
+           garbage or absent time, and "Invalid Date" is not a fact about it. -->
+      <span class="timestamp">{#if !Number.isNaN(ms)}{new Date(ms).toLocaleTimeString()}{/if}</span>
+    </div>
+    <div class="rejected-line">
+      sent by <b>{rejectedNodeName(row.transport_node_id)}</b>{#if isDpcNodeId(row.transport_node_id)} <span class="node-id-badge" title={row.transport_node_id}>({truncateNodeId(row.transport_node_id)})</span>{/if}
+      · claimed author <b>{rejectedClaimedAuthor(row)}</b>{#if isDpcNodeId(row.claimed_sender_node_id)} <span class="node-id-badge" title={row.claimed_sender_node_id}>({truncateNodeId(row.claimed_sender_node_id)})</span>{/if}{#if row.claimed_agent_owner}, agent of {rejectedNodeName(row.claimed_agent_owner)}{/if}{#if isDpcNodeId(row.claimed_agent_owner)} <span class="node-id-badge" title={row.claimed_agent_owner}>({truncateNodeId(row.claimed_agent_owner)})</span>{/if}
+      {#if row.signer_node_id && row.signer_node_id !== row.claimed_sender_node_id}
+        · signed by <b>{rejectedNodeName(row.signer_node_id)}</b>{#if isDpcNodeId(row.signer_node_id)} <span class="node-id-badge" title={row.signer_node_id}>({truncateNodeId(row.signer_node_id)})</span>{/if}
+      {/if}
+      · {rejectedReasonText(row.reason)}
+      {#if row.live_count > 0}· live ×{row.live_count}{/if}
+      {#if row.sync_count > 0}· sync ×{row.sync_count}{/if}
+      · seen {row.repeat_count} {timesWord(row.repeat_count)}, first {new Date(row.first_seen).toLocaleTimeString()}
+      · id {row.record_id ?? 'unknown'}
+    </div>
+    <!-- A record with no text to unfold offers no toggle at all; the facts
+         above are the whole row then. -->
+    {#if row.text}
+      <button
+        type="button"
+        class="rejected-toggle"
+        aria-expanded={expanded}
+        onclick={() => { expandedRejected = { ...expandedRejected, [row.key]: !expanded }; }}
+      >{expanded ? '▼' : '▶'} text</button>
+      {#if expanded}
+        <pre class="rejected-text">{row.text}</pre>
+        {#if row.text_truncated}<span class="rejected-truncated">truncated</span>{/if}
+      {/if}
+    {/if}
+  </div>
+{/snippet}
+
 <div
   class="chat-window"
   bind:this={chatWindowElement}
@@ -397,6 +482,9 @@
     {#each displayMessages as msg, i (msg.id)}
       {@const run = runAt.get(i)}
       {@const verdict = verdictNote(msg.verification)}
+      {#each rejectedSlots.get(i) ?? [] as row (row.key)}
+        {@render rejectedRow(row)}
+      {/each}
       {#if run?.first}
         <button
           type="button"
@@ -616,6 +704,13 @@
     </div>
   {/if}
 
+  <!-- The last slot: rows after the newest message, and every row of a chat
+       that holds no message at all — a refused record needs no message to
+       precede, which is why this sits outside the condition above. -->
+  {#each rejectedSlots.get(displayMessages.length) ?? [] as row (row.key)}
+    {@render rejectedRow(row)}
+  {/each}
+
   <!-- Unified agent collapsible: tool calls + streaming text in one block (S187).
        liveToolCalls.length keeps it visible when switching INTO a chat with an active
        run (snapshot present) before the next progress event arrives. -->
@@ -729,6 +824,60 @@
 
   .message.error :global(strong) {
     color: #c53030;
+  }
+
+  /* A record this node refused for a wrong signature (DPC #111): the same reds
+     an error bubble wears, and the same margin and padding as an ordinary
+     reply — but it is not a message, only the report of one that was refused.
+     Its content is untrusted, so nothing inside it is ever rendered as markup. */
+  .rejected-row {
+    margin: 0 0 1rem 0.5rem;
+    padding: 0.75rem;
+    border-radius: 12px;
+    max-width: 80%;
+    background: #fff5f5;
+    border: 1px solid #fc8181;
+    border-left: 4px solid #e53e3e;
+    overflow-wrap: break-word;
+    word-break: break-word;
+  }
+
+  .rejected-row .message-header strong {
+    color: #c53030;
+  }
+
+  /* The facts of the refusal, as words — who delivered it, who it claims, why
+     it was refused — in the header's size, not the bubble's. */
+  .rejected-line {
+    font-size: 0.85rem;
+    color: #555;
+  }
+
+  /* The refused text, unfolded by the toggle below: plain text in the
+     surrounding font. Not the browser's monospace default — a <pre> that
+     suddenly looks like a code block is a look the record never earned. */
+  .rejected-text {
+    margin: 0.25rem 0 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: inherit;
+    font-size: inherit;
+  }
+
+  .rejected-truncated {
+    font-size: 0.7rem;
+    color: #999;
+    margin-left: 0.5rem;
+  }
+
+  /* A quiet text button: opening the refused text is the reader's choice, and
+     the only control the row offers. */
+  .rejected-toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #c53030;
+    padding: 0;
   }
 
   /* An agent turn that ended without an answer (stopped, killed, refused,
