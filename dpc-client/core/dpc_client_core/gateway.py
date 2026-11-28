@@ -2444,7 +2444,7 @@ def _log_refusal(request: web.Request, e: GatewayError, request_id: Optional[str
 
 
 class GatewayServer:
-    """The OpenAI-compatible HTTP surface over one `Gateway`."""
+    """The OpenAI- and Anthropic-compatible HTTP surface over one `Gateway`."""
 
     def __init__(
         self,
@@ -2567,7 +2567,7 @@ class GatewayServer:
         runner, self._runner, self._site = self._runner, None, None
         if runner is not None:
             await runner.cleanup()
-            logger.info("OpenAI-compatible gateway stopped")
+            logger.info("OpenAI- and Anthropic-compatible gateway stopped")
 
     def _accepted_hosts(self) -> Tuple[str, ...]:
         return tuple(f"{name}:{self.port}" for name in HOST_NAMES)

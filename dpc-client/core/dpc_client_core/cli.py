@@ -339,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     connect = sub.add_parser("connect", help="connect to a peer by dpc:// URI or node id")
     connect.add_argument("target", help="dpc://host:port?node_id=dpc-node-... or dpc-node-...")
-    gateway = sub.add_parser("gateway", help="the OpenAI-compatible gateway (IDE door)")
+    gateway = sub.add_parser("gateway", help="the OpenAI- and Anthropic-compatible gateway (IDE door)")
     gsub = gateway.add_subparsers(dest="gateway_action", required=True)
     gsub.add_parser("state", help="enabled, running, port, masked key")
     gsub.add_parser("key", help="print the gateway key in clear (reads ~/.dpc/.gateway_key)")

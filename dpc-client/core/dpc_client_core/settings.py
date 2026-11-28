@@ -298,10 +298,11 @@ class Settings:
             'host': '127.0.0.1'
         }
 
-        # The OpenAI-compatible gateway (ADR-041 D1): a second loopback listener
-        # for tools on this machine, off until asked for because it is a new port.
+        # The OpenAI- and Anthropic-compatible gateway (ADR-041 D1): a second
+        # loopback listener for tools on this machine, off until asked for
+        # because it is a new port.
         self._config['gateway'] = {
-            'enabled': 'false',  # Serve /v1/models and /v1/chat/completions to local tools (ADR-041). This node's own aliases need `compute.enabled` in privacy_rules.json too — open only when both are true — while a peer's `remote:<peer>:<alias>` needs this switch alone
+            'enabled': 'false',  # Serve /v1/models, /v1/chat/completions and /v1/messages to local tools (ADR-041). This node's own aliases need `compute.enabled` in privacy_rules.json too — open only when both are true — while a peer's `remote:<peer>:<alias>` needs this switch alone
             'port': '9997',  # 9998 is the file server, 9999 the local API
             'host': '127.0.0.1'  # Not configurable: any other value is refused at start (ADR-041 D1)
         }
@@ -685,12 +686,12 @@ class Settings:
         return self.get('api', 'host', '127.0.0.1')
 
     def get_gateway_enabled(self) -> bool:
-        """Whether the OpenAI-compatible gateway listens at all (off by default)."""
+        """Whether the OpenAI- and Anthropic-compatible gateway listens at all (off by default)."""
         value = self.get('gateway', 'enabled', 'false')
         return value.lower() in ('true', '1', 'yes')
 
     def get_gateway_port(self) -> int:
-        """Get the OpenAI-compatible gateway port."""
+        """Get the OpenAI- and Anthropic-compatible gateway port."""
         return int(self.get('gateway', 'port', '9997'))
 
     def get_gateway_host(self) -> str:

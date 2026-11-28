@@ -1125,13 +1125,14 @@
       <div class="subsection">
         <h4>5. IDE door</h4>
         <p class="help-text-small">
-          An OpenAI-compatible listener for the clients on this machine &mdash; Continue, Cursor,
-          Claude Code, curl.
+          An OpenAI- and Anthropic-compatible listener for the clients on this machine &mdash;
+          Continue, Cursor, Claude Code, curl.
         </p>
         <details class="why"><summary>why</summary>
           It is switched, bound and ported by <code>[gateway]</code> in <code>config.ini</code>, which is
           read once at start, so there is no switch here: what a restart would change is shown, not
-          offered. The serving lists close this node's own aliases only: a call to
+          offered. The switch and the port are set in the Network and Gateway form, which says they
+          apply after a restart. The serving lists close this node's own aliases only: a call to
           <code>remote:&lt;peer&gt;:&lt;alias&gt;</code> is carried to the peer that serves it whatever
           those lists hold.
         </details>

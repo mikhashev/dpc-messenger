@@ -796,7 +796,7 @@
             </span>
           </div>
 
-          <h4 class="sub-group">Gateway (OpenAI-compatible)</h4>
+          <h4 class="sub-group">Gateway (OpenAI- and Anthropic-compatible)</h4>
           <div class="form-group">
             <label for="nw-gateway-enabled">
               <input id="nw-gateway-enabled" type="checkbox" bind:checked={flags.gatewayEnabled}

@@ -1122,9 +1122,9 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         # P2P coordinator (coordinates P2P connection lifecycle)
         self.p2p_coordinator = P2PCoordinator(self)
 
-        # The OpenAI-compatible gateway follows the coordinator because a local
-        # alias queues on the coordinator's card lock (ADR-041 D1, D5). None
-        # unless [gateway] enabled: a new listener is opt-in.
+        # The OpenAI- and Anthropic-compatible gateway follows the coordinator
+        # because a local alias queues on the coordinator's card lock (ADR-041
+        # D1, D5). None unless [gateway] enabled: a new listener is opt-in.
         self.gateway: Optional[GatewayServer] = self._build_gateway()
 
         # File transfer manager (handles P2P file transfers)
@@ -2286,7 +2286,8 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         logger.info("D-PC Core Service shut down")
 
     def _build_gateway(self) -> Optional[GatewayServer]:
-        """The OpenAI-compatible gateway, or None when `[gateway] enabled` is off.
+        """The OpenAI- and Anthropic-compatible gateway, or None when
+        `[gateway] enabled` is off.
 
         A host other than 127.0.0.1 is refused here by name (ADR-041 D1) the
         same way a refused serving list is in `_start_gateway`: the door stays
@@ -2304,7 +2305,7 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 inference_lock=coordinator._peer_inference_lock if coordinator is not None else None,
             )
         except GatewayConfigError as e:
-            logger.error("OpenAI-compatible gateway refused to start: %s", e)
+            logger.error("OpenAI- and Anthropic-compatible gateway refused to start: %s", e)
             return None
 
     async def _start_gateway(self) -> None:
@@ -2315,10 +2316,10 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
         try:
             await self.gateway.start()
         except GatewayConfigError as e:
-            logger.error("OpenAI-compatible gateway refused to start: %s", e)
+            logger.error("OpenAI- and Anthropic-compatible gateway refused to start: %s", e)
             self.gateway = None
         except OSError as e:
-            logger.error("OpenAI-compatible gateway could not listen on %s:%d: %s",
+            logger.error("OpenAI- and Anthropic-compatible gateway could not listen on %s:%d: %s",
                          self.gateway.host, self.gateway.port, e)
             self.gateway = None
 

@@ -585,7 +585,7 @@ What the call cost the *host* is not on the wire. A `cost_usd` field was added h
 
   Absent means the host has no word for this refusal — a failure mid-call rather than a gate, or a host that predates the field — and is never itself a reason. A receiver reads an unknown word exactly as it reads an absent one, because a newer host may name a cause this one has no word for; no receiver refuses a message over its code. Sent on the error form only: a served call carries no code.
 
-  What a receiver does with the word is the receiver's own. The guest in this tree runs an OpenAI-compatible gateway (ADR-041) and answers its own HTTP clients with the status the cause deserves:
+  What a receiver does with the word is the receiver's own. The guest in this tree runs an OpenAI- and Anthropic-compatible gateway (ADR-041) and answers its own HTTP clients with the status the cause deserves:
 
   | code | status | what the client is being told |
   |---|---|---|
