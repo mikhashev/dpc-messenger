@@ -184,6 +184,29 @@ class TestTheTokenIsAnsweredAsPresenceOnly:
         assert sanitized["config"]["discord"]["bot_token"] == "<redacted>"
         assert sanitized["config"]["discord"]["ttl_minutes"] == 15
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section, token", [
+        ("telegram", "TEST-p%ss-NOT-REAL"), ("telegram", "TEST-%(x)s-NOT-REAL"),
+        ("discord", "TEST-%(x)s-NOT-REAL"), ("discord", "TEST-a%b-NOT-REAL"),
+    ])
+    async def test_a_token_holding_a_percent_sign_is_saved_and_leaks_nowhere(
+            self, home, host, caplog, section, token):
+        """'%' is configparser's interpolation mark. Unescaped, a token holding one
+        failed at the write: the error quoted the token and went to the UI, and the
+        '%(x)s' shape was stored and then broke every read of its section."""
+        Settings(home)
+        with caplog.at_level(logging.DEBUG):
+            out = await CoreService.save_telegram_discord_config(
+                host, config={section: {"bot_token": token}})
+            got = await CoreService.get_telegram_discord_config(host)
+        assert out["status"] == "success", out
+        assert "TEST-" not in json.dumps(out), "the reply quotes no token"
+        assert "TEST-" not in json.dumps(got), "the token is answered as presence only"
+        assert got[section]["token_set"] is True
+        assert "TEST-" not in caplog.text, "no log record carries the token"
+        # A new Settings is a fresh read of the file, and the stored token is the one typed.
+        assert Settings(home).get(section, "bot_token") == token
+
 
 class TestATelegramDiscordSave:
     @pytest.mark.asyncio

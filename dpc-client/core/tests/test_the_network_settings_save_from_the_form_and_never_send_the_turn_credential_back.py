@@ -441,6 +441,53 @@ class TestANetworkSave:
         assert file.get("dht", "port") == "8889", "the refused value"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("config, section, key", [
+        # Every free-text key of the form, secrets first. '%' is configparser's
+        # interpolation mark: unescaped, a value holding one either failed at the
+        # write (quoting the value in the error, after the keys before it had been
+        # written) or was written as '%(x)s' and then broke every later read of
+        # its section. The readers of [turn] run for each new WebRTC peer.
+        ({"turn": {"credential": "TEST-p%ss-NOT-REAL"}}, "turn", "credential"),
+        ({"turn": {"credential": "TEST-%(x)s-NOT-REAL"}}, "turn", "credential"),
+        ({"turn": {"fallback_credential": "TEST-%(x)s-NOT-REAL"}}, "turn", "fallback_credential"),
+        ({"turn": {"username": "u%(x)s"}}, "turn", "username"),
+        ({"turn": {"fallback_username": "f%x"}}, "turn", "fallback_username"),
+        ({"turn": {"servers": "turn:%(x)s.example:3478"}}, "turn", "servers"),
+        ({"webrtc": {"stun_servers": "stun:h%ss.example:3478"}}, "webrtc", "stun_servers"),
+        ({"dht": {"seed_nodes": "%(x)s.example:8888"}}, "dht", "seed_nodes"),
+        # A percent-encoded URL is a value a person legitimately types.
+        ({"hub": {"url": "https://hub.example/a%20b"}}, "hub", "url"),
+        ({"oauth": {"callback_host": "h%x"}}, "oauth", "callback_host"),
+    ])
+    async def test_a_value_holding_a_percent_sign_is_saved_and_reads_back_as_typed(
+            self, home, host, config, section, key):
+        Settings(home)
+        out = await CoreService.save_network_config(host, config=config)
+        assert out["status"] == "success", out
+        assert "%" not in json.dumps(out.get("message", "")), "the reply quotes no value"
+        # A new Settings is a fresh read of the file: nothing in [turn] and its
+        # neighbours may fail to load.
+        file = Settings(home)
+        typed = config[section][key]
+        assert file.get(section, key) == typed, "read back as typed, not doubled"
+
+    @pytest.mark.asyncio
+    async def test_a_percent_credential_leaks_into_no_error_and_writes_the_neighbour(
+            self, home, host):
+        """Before the escape the write raised mid-loop: the error text quoted the
+        credential and the keys ahead of it were already on disk."""
+        Settings(home)
+        out = await CoreService.save_network_config(
+            host, config={"p2p": {"connection_timeout": 45},
+                          "turn": {"credential": "TEST-%(x)s-NOT-REAL"}})
+        assert out["status"] == "success", out
+        assert "TEST-" not in json.dumps(out)
+        assert Settings(home).get("p2p", "connection_timeout") == "45", \
+            "the valid neighbour is written with it, not left behind by a failure"
+        got = await CoreService.get_network_config(host)
+        assert "TEST-" not in json.dumps(got), "the secret is still answered as presence only"
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("config, named", [
         # The P2P port is displayed read-only and has no writer path.
         ({"p2p": {"listen_port": 9000}}, "listen_port"),

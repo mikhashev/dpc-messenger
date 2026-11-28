@@ -86,7 +86,9 @@ def _ice_urls_text(section: str, key: str, value: Any) -> str:
                     raise ValueError(f"{section}.{key} must be a comma-separated list "
                                      f"of stun:, turn: or turns: addresses.")
             entries.append(entry)
-    return ', '.join(entries)
+    # '%' is configparser's interpolation mark: a literal one is written doubled, or
+    # an address holding one would not read back (and would break the whole section).
+    return ', '.join(entries).replace('%', '%%')
 
 
 def _seed_nodes_text(value: Any) -> str:
@@ -109,10 +111,12 @@ def _seed_nodes_text(value: Any) -> str:
                 continue
             host, _, port = entry.rpartition(':')
             if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
-                raise ValueError("dht.seed_nodes must be a comma-separated list "
-                                 "of host:port entries.")
+                raise ValueError("dht.seed_nodes must be a comma-separated list of "
+                                 "host:port entries.")
             entries.append(entry)
-    return ', '.join(entries)
+    # '%' is configparser's interpolation mark: a literal one is written doubled, or
+    # an entry holding one would not read back (and would break the whole section).
+    return ', '.join(entries).replace('%', '%%')
 
 
 def _check_model_files_dir(raw: str) -> Path:
@@ -2349,7 +2353,9 @@ class Settings:
             if clearing:
                 writes.append((section, 'bot_token', ''))
             elif stripped:
-                writes.append((section, 'bot_token', stripped))
+                # '%' is configparser's interpolation mark: a literal one is written doubled,
+                # or a token holding one would not read back (settings, local_engines).
+                writes.append((section, 'bot_token', stripped.replace('%', '%%')))
         if discord:
             limits = (
                 ('discord.guardrails', 'rate_limit_per_user_max', 1),
@@ -2644,12 +2650,15 @@ class Settings:
                 if parsed.scheme not in ('http', 'https') or not parsed.netloc:
                     raise ValueError("hub.url must be an http:// or https:// "
                                      "address.")
-                writes.append((section, key, value.strip().rstrip('/')))
+                # A URL may legitimately carry a percent-encoded character, and '%'
+                # is configparser's interpolation mark: each is written doubled.
+                writes.append((section, key,
+                               value.strip().rstrip('/').replace('%', '%%')))
             elif (section, key) == ('oauth', 'callback_host'):
                 if not isinstance(value, str) or not value.strip() or len(value.split()) > 1:
                     raise ValueError("oauth.callback_host must be a host name "
                                      "or address without spaces.")
-                writes.append((section, key, value.strip()))
+                writes.append((section, key, value.strip().replace('%', '%%')))
             elif (section, key) in (('turn', 'servers'),
                                     ('turn', 'fallback_servers'),
                                     ('webrtc', 'stun_servers')):
@@ -2670,7 +2679,8 @@ class Settings:
                                     ('turn', 'fallback_username')):
                 if not isinstance(value, str):
                     raise ValueError(f"{section}.{key} must be a string.")
-                writes.append((section, key, value.strip()))
+                # '%' is configparser's interpolation mark: a literal one is written doubled.
+                writes.append((section, key, value.strip().replace('%', '%%')))
             else:
                 raise ValueError(f"{section}.{key} is not a key "
                                  f"the Network form writes.")
@@ -2690,7 +2700,9 @@ class Settings:
             if clearing:
                 writes.append(('turn', key, ''))
             elif stripped:
-                writes.append(('turn', key, stripped))
+                # '%' is configparser's interpolation mark: a literal one is written doubled,
+                # or a credential holding one would not read back (settings, local_engines).
+                writes.append(('turn', key, stripped.replace('%', '%%')))
         for section, key, text in writes:
             self.set(section, key, text)
 
