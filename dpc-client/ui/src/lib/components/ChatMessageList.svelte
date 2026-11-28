@@ -14,6 +14,7 @@
   } from '$lib/utils/attachmentRequest';
   import { foldBlockedRuns, isBlockedAuthor, blockedRunLabel } from '$lib/utils/blockedRuns';
   import { dedupeMessagesById, formatDedupeDrop } from '$lib/utils/messageMapper';
+  import { verdictNote } from '$lib/utils/messageVerdict';
   import type { Message, Mention } from '$lib/types.js';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import { revealInFolder } from '$lib/utils/revealInFolder';
@@ -395,6 +396,7 @@
   {#if displayMessages.length > 0}
     {#each displayMessages as msg, i (msg.id)}
       {@const run = runAt.get(i)}
+      {@const verdict = verdictNote(msg.verification)}
       {#if run?.first}
         <button
           type="button"
@@ -432,7 +434,16 @@
               {/if}
             {/if}
           </strong>
-          <span class="timestamp">{#if msg.msg_index}<span class="msg-index">#{msg.msg_index}</span> {/if}{new Date(msg.timestamp).toLocaleTimeString()}</span>
+          <!-- The signature verdict's quiet note (DPC #111): "awaiting certificate"
+               when the author's certificate has not arrived on this machine,
+               "unsigned" for a verdict this UI does not know. Only those two
+               kinds are drawn — 'verified' and an absent verdict say nothing
+               (absence on old records is not an alarm), and 'legacy', a record
+               from before signatures existed and most of the owner's history,
+               says nothing either: verdictNote keeps its words for the step
+               that needs them, but on the row the note would only repeat. The
+               note is text, not a colour or an icon, so it reads as words. -->
+          <span class="timestamp">{#if msg.msg_index}<span class="msg-index">#{msg.msg_index}</span> {/if}{new Date(msg.timestamp).toLocaleTimeString()}{#if verdict.kind === 'awaiting-certificate' || verdict.kind === 'unsigned'} <span class="verdict-note">{verdict.text}</span>{/if}</span>
         </div>
         <!-- Whose reasoning is shown is a property of the surface, not of the
              sender: an agent chat renders rounds and tool calls of its own, and
@@ -749,6 +760,13 @@
     color: #aaa;
     margin-right: 0.25rem;
     user-select: all;
+  }
+
+  /* Quiet on purpose: an open request or an unknown verdict is information,
+     not an alarm — the message stays styled as an ordinary reply. */
+  .verdict-note {
+    font-size: 0.7rem;
+    color: #999;
   }
 
   :global(.msg-ref) {

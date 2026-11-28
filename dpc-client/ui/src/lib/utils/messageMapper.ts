@@ -27,6 +27,9 @@ export interface MappedMessage {
     turnEnd?: TurnEnd;
     speed_summary?: SpeedSummary;
     stop_notes?: StopNote[];
+    /** The record's signature verdict (group records, DPC #111), carried so the
+     *  row can say what verdictNote tells it to; absent on records without one. */
+    verification?: string;
 }
 
 export interface SenderIdentityOptions {
@@ -189,6 +192,7 @@ export function mapBackendMessage(msg: any, opts: MapOptions = {}): MappedMessag
         turnEnd: turnEndOf(msg.turn_end),
         speed_summary: speedSummaryOf(msg.speed_summary) ?? opts.local?.speed_summary,
         stop_notes: stopNotesOf(msg.stop_notes) ?? opts.local?.stop_notes,
+        verification: typeof msg.verification === 'string' && msg.verification ? msg.verification : undefined,
     };
 }
 

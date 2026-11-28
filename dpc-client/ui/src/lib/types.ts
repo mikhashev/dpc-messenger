@@ -91,7 +91,8 @@ export type Message = {
     round: number;
   }>;
   speed_summary?: SpeedSummary; // The finished turn's strip (history `speed_summary`, beside tool_calls)
-  stop_notes?: StopNote[];      // The Stop lines of a stopped turn (history `stop_notes`, beside tool_calls)
+  stop_notes?: StopNote[];      // The Stop lines of a stopped turn (history `stop_notes`)
+  verification?: string;        // Signature verdict of the record's author (group records, DPC #111)
 };
 
 /** The finished agent turn's strip, made by the backend (loop.py speed_summary_of)
@@ -560,10 +561,14 @@ export interface GroupMessageEvent {
     timestamp?: number;
     attachments?: MessageAttachment[];
     mentions?: Mention[];
-    is_agent?: boolean;
-    sender_type?: string;
-    agent_owner?: string | null;
-    msg_index?: number;
+  is_agent?: boolean;
+  sender_type?: string;
+  agent_owner?: string | null;
+  msg_index?: number;
+  /** The signature verdict of the record's author (DPC #111): 'verified',
+   *  'unverified', 'legacy' — a 'rejected' record never reaches the UI. Absent
+   *  on records stored before verdicts existed and on this node's own records. */
+  verification?: string;
 }
 
 export interface GroupFileEvent {
