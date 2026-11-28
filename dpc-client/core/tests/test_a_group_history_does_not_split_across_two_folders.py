@@ -182,7 +182,8 @@ def test_consolidation_is_idempotent(tmp_path):
     second = consolidate_conversation_stores(tmp_path, GROUP, "work")
 
     assert first["merged"] == 1
-    assert second == {"merged": 0, "orphans": [], "messages_added": 0, "files_moved": 0}
+    assert second == {"merged": 0, "orphans": [], "messages_added": 0, "files_moved": 0,
+                      "conflicts": 0}
 
 
 def test_consolidation_does_nothing_when_there_is_one_store(tmp_path):

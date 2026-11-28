@@ -122,7 +122,7 @@ export type RejectedRecord = {
   conversation_id: string;
   record_id: string | null;        // the refused record's own id
   reason: 'signer_mismatch' | 'content_hash_mismatch' | 'signature_check_failed'
-        | 'invalid_signature' | 'unsigned' | 'unknown_preimage';
+        | 'invalid_signature' | 'unsigned' | 'unknown_preimage' | 'conflict';
   transport_node_id: string | null;       // the node that handed the record over
   claimed_sender_node_id: string | null;  // who the record says wrote it
   claimed_sender_name: string | null;
@@ -139,6 +139,7 @@ export type RejectedRecord = {
   repeat_count: number;
   live_count: number;                     // how many of the repeats came live...
   sync_count: number;                     // ...and how many by history sync
+  repair_count: number;                   // ...and how many the split-folder repair found
   text: string;
   text_truncated: boolean;
 };

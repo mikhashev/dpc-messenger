@@ -6,10 +6,12 @@
 
 import type { RejectedRecord } from '$lib/types';
 
-// The six reasons this node refuses a record for, as words a person can read
+// The seven reasons this node refuses a record for, as words a person can read
 // on the row. The codes are the backend's; two of them (unsigned,
 // unknown_preimage) are refusals by this node's own setting, not accusations
-// against the sender, and their words say so.
+// against the sender, and their words say so. Neither is `conflict`: nothing
+// is wrong with that record on its own — what is wrong is that another content
+// is already held under its id, and which side moved is not for this node to say.
 export const REJECTED_REASON_TEXT: Record<RejectedRecord['reason'], string> = {
   signer_mismatch: 'signed by one node, attributed to another',
   content_hash_mismatch: 'content does not match its hash',
@@ -17,6 +19,7 @@ export const REJECTED_REASON_TEXT: Record<RejectedRecord['reason'], string> = {
   invalid_signature: 'invalid signature',
   unsigned: "no signature, refused by this node's setting",
   unknown_preimage: "signed over a format this node cannot check, refused by this node's setting",
+  conflict: 'the same id arrived with different content; the copy held here is kept',
 };
 
 /** The words for a reason the UI knows; an unknown code shows itself (a reason

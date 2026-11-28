@@ -34,6 +34,7 @@ function record(overrides: Partial<RejectedRecord> = {}): RejectedRecord {
     repeat_count: 1,
     live_count: 1,
     sync_count: 0,
+    repair_count: 0,
     text: 'refused',
     text_truncated: false,
     ...overrides,
@@ -53,6 +54,11 @@ describe('rejectedReasonText', () => {
 
   it.each([undefined, null, ''])('says just the row\'s word for %s', (value) => {
     expect(rejectedReasonText(value as RejectedRecord['reason'] | string | null | undefined)).toBe('rejected');
+  });
+
+  it('says what a conflict is without accusing anyone: the copy held here is kept', () => {
+    expect(rejectedReasonText('conflict')).toBe(
+      'the same id arrived with different content; the copy held here is kept');
   });
 });
 

@@ -36,7 +36,7 @@ ENTRY_KEYS = [
     "claimed_agent_owner", "signer_node_id", "claimed_content_hash",
     "computed_content_hash", "signature", "preimage_version", "record_timestamp",
     "first_seen", "last_seen", "repeat_count", "live_count", "sync_count",
-    "text", "text_truncated",
+    "repair_count", "text", "text_truncated",
 ]
 
 
@@ -122,6 +122,7 @@ def test_a_record_is_kept_with_every_field_and_only_in_its_own_folder(tmp_path):
     assert kept["repeat_count"] == 1
     assert kept["live_count"] == 1
     assert kept["sync_count"] == 0
+    assert kept["repair_count"] == 0
     assert kept["text"] == "the refused text"
     assert kept["text_truncated"] is False
     assert kept["key"] and isinstance(kept["key"], str)
@@ -166,12 +167,15 @@ def test_once_live_once_sync_from_the_same_node_is_one_row_counted_both_ways(tmp
                  now=Clock(datetime(2026, 11, 28, 12, 0, tzinfo=timezone.utc)))
     store.record(**_a_refusal(arrived="sync"),
                  now=Clock(datetime(2026, 11, 28, 12, 1, tzinfo=timezone.utc)))
+    store.record(**_a_refusal(arrived="repair"),
+                 now=Clock(datetime(2026, 11, 28, 12, 2, tzinfo=timezone.utc)))
 
     rows = _live_rows(store)
     assert len(rows) == 1
     assert rows[0]["live_count"] == 1
     assert rows[0]["sync_count"] == 1
-    assert rows[0]["repeat_count"] == 2
+    assert rows[0]["repair_count"] == 1
+    assert rows[0]["repeat_count"] == 3
 
 
 def test_the_text_is_cut_at_the_limit_and_marked_a_missing_one_is_empty(tmp_path):

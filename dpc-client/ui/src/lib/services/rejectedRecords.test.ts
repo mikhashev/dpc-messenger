@@ -52,6 +52,7 @@ function row(key: string, text = 'refused', conversation_id = 'group-a'): Reject
     repeat_count: 1,
     live_count: 1,
     sync_count: 0,
+    repair_count: 0,
     text,
     text_truncated: false,
   };
@@ -92,6 +93,20 @@ describe('upsertRejectedRecordInMap', () => {
     const snapshot = new Map(before);
     upsertRejectedRecordInMap(before, row('k2'));
     expect(before).toEqual(snapshot);
+  });
+
+  it('upserts a conflict row like any other, by its key', () => {
+    // A conflict can arrive by repair and later live: one key, one row, the
+    // counts moved onto it — the reason changes nothing about the identity.
+    const out = upsertRejectedRecordInMap(
+      new Map(),
+      row('k-conflict', 'transfer denied'));
+    const again = { ...row('k-conflict', 'transfer denied'),
+                    reason: 'conflict', repair_count: 1, repeat_count: 2 } as RejectedRecord;
+    const merged = upsertRejectedRecordInMap(out, again);
+    expect(merged.get('group-a')?.map((r) => r.key)).toEqual(['k-conflict']);
+    expect(merged.get('group-a')?.[0].reason).toBe('conflict');
+    expect(merged.get('group-a')?.[0].repair_count).toBe(1);
   });
 });
 

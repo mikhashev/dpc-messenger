@@ -562,6 +562,29 @@ def _identity(message: Dict[str, Any]):
     )
 
 
+def copies_differ(held: Dict[str, Any], arriving: Dict[str, Any]) -> bool:
+    """Whether two records of one id say different things.
+
+    The texts differ (`content`; None is ""), or both copies carry a
+    `content_hash` and the two differ. The hash half is not a false alarm:
+    a re-signed record changes the record's hash and so must be treated as a
+    new record, not an edit (ADR-042, open question 1) — same words under a
+    different hash are two records, and this node keeps the one it holds.
+    One hash alone says nothing: the other copy may predate hashes, and a
+    legacy record held beside a signed arrival of the same words is the same
+    record, not a conflict. Nothing else is compared — the id already
+    matched, and this node cannot judge any other field's right to differ.
+
+    Each side is a record dict (`content`, `content_hash`); on the live path
+    the arriving side is built from the wire payload.
+    """
+    if (held.get("content") or "") != (arriving.get("content") or ""):
+        return True
+    held_hash = held.get("content_hash")
+    arriving_hash = arriving.get("content_hash")
+    return bool(held_hash and arriving_hash and held_hash != arriving_hash)
+
+
 def consolidate_conversation_stores(
     base: Path, conversation_id: str, display_name: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -575,10 +598,15 @@ def consolidate_conversation_stores(
     re-chained locally, payload files are moved only where the canonical store
     has no file of that name, and the emptied folder is renamed rather than
     removed — it held the only copy of 66 messages for thirteen days once.
+    An orphan's record of a known id whose content differs from the canonical
+    copy is not folded in and not dropped silently either: it is kept as a
+    rejected record (reason `conflict`, arrived `repair`) and counted in the
+    summary, and the canonical copy stands.
 
     Returns a summary; `{"merged": 0}` when there was nothing to do.
     """
-    summary = {"merged": 0, "orphans": [], "messages_added": 0, "files_moved": 0}
+    summary = {"merged": 0, "orphans": [], "messages_added": 0, "files_moved": 0,
+               "conflicts": 0}
     canonical, orphans = conversation_paths.split_stores(base, conversation_id, display_name)
     if canonical is None or not orphans:
         return summary
@@ -586,7 +614,12 @@ def consolidate_conversation_stores(
     canonical_history = canonical / "history.json"
     messages = _read_messages(canonical_history)
     seen = {_identity(m) for m in messages}
+    # The id-keyed records already collected — the canonical store's first,
+    # then every orphan's as they fold in — so an orphan's copy of a known id
+    # can be compared with the one that stands.
+    by_id = {m.get("id"): m for m in messages if m.get("id")}
     added = 0
+    conflicts = 0
     files_moved = 0
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
 
@@ -594,8 +627,43 @@ def consolidate_conversation_stores(
         for m in _read_messages(orphan / "history.json"):
             key = _identity(m)
             if key in seen:
+                # A known id with a different content is named, not skipped in
+                # silence: the orphan's copy goes to the rejected-records store
+                # as a conflict arrived `repair`, and the canonical copy
+                # stands. Nothing is deleted for it — the emptied folder is
+                # renamed below, not removed — so both copies stay on disk.
+                held = by_id.get(m.get("id")) if m.get("id") else None
+                if held is not None and copies_differ(held, m):
+                    conflicts += 1
+                    try:
+                        rejected_records.get_store().record(
+                            conversation_id=conversation_id,
+                            reason="conflict",
+                            arrived="repair",
+                            transport_node_id=None,
+                            record_id=m.get("id"),
+                            claimed_content_hash=m.get("content_hash"),
+                            computed_content_hash=None,
+                            record_timestamp=m.get("timestamp"),
+                            claimed_sender_node_id=m.get("sender_node_id"),
+                            claimed_sender_name=m.get("sender_name"),
+                            claimed_sender_type=m.get("sender_type"),
+                            claimed_agent_owner=m.get("agent_owner"),
+                            signer_node_id=m.get("signer_node_id"),
+                            signature=m.get("signature"),
+                            preimage_version=m.get("preimage_version"),
+                            text=m.get("content"),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "The conflicting record %s of %s could not be kept in the "
+                            "rejected-records store", m.get("id", "?"), conversation_id,
+                            exc_info=True,
+                        )
                 continue
             seen.add(key)
+            if m.get("id"):
+                by_id[m["id"]] = m
             messages.append(m)
             added += 1
         files_moved += conversation_paths.adopt_payload(
@@ -616,10 +684,12 @@ def consolidate_conversation_stores(
     summary["merged"] = len(orphans)
     summary["messages_added"] = added
     summary["files_moved"] = files_moved
+    summary["conflicts"] = conflicts
     logger.warning(
         "Consolidated %d stray folder(s) of %s into %s: %d message(s) recovered, "
-        "%d file(s) moved; the emptied folder(s) were renamed, not deleted",
-        len(orphans), conversation_id, canonical.name, added, files_moved,
+        "%d file(s) moved, %d conflict(s) kept; the emptied folder(s) were renamed, "
+        "not deleted",
+        len(orphans), conversation_id, canonical.name, added, files_moved, conflicts,
     )
     return summary
 
@@ -803,6 +873,10 @@ class ConversationMonitor:
         # The rows the last merge_history kept in the rejected-records store
         # (rejected_records), one per refused record; the UI event's payload.
         self.last_merge_recorded: List[Dict[str, Any]] = []
+        # How many records the last merge_history kept as conflicts (a known id
+        # with a different content); the rows themselves sit in
+        # last_merge_recorded, never in last_merge_rejected (retry_votes).
+        self.last_merge_conflicts: int = 0
         self._history_dirty: bool = False  # Track unsaved changes
         self._signer = None  # Lazy-loaded CommitSigner for message signing
         self._chain_rebuilt = False  # One-time local repair of a pre-local chain
@@ -4478,7 +4552,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
     def rebuild_message_ids(self):
         self.message_ids = {m.get("id") for m in self.message_history if m.get("id")}
 
-    def add_message_with_id(self, message: Dict[str, Any]) -> bool:
+    def add_message_with_id(self, message: Dict[str, Any]) -> str:
         """Add a message to history with duplicate detection
 
         Unlike add_message(), this method:
@@ -4490,14 +4564,23 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message: Message dict with 'id', 'role', 'content', etc.
 
         Returns:
-            True if message was added, False if duplicate
+            "added", "duplicate" or "conflict". A known id whose content
+            differs from the held copy (`copies_differ`) is a "conflict":
+            nothing is added and `message_ids` is untouched, because the held
+            copy stands. The answer is a word to be compared to a word, never
+            used as a bool — "duplicate" is truthy.
         """
         msg_id = message.get("id")
 
         # Check for duplicate
         if msg_id and msg_id in self.message_ids:
+            held = next((m for m in self.message_history if m.get("id") == msg_id), None)
+            if held is not None and copies_differ(held, message):
+                logger.debug("Conflicting copy of message %s kept out: the held "
+                             "copy stands", msg_id)
+                return "conflict"
             logger.debug(f"Skipping duplicate message: {msg_id}")
-            return False
+            return "duplicate"
 
         # Track ID
         if msg_id:
@@ -4532,7 +4615,32 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self.message_history.append(self._chain_locally(message))
         self._history_dirty = True
 
-        return True
+        return "added"
+
+    def held_copy_conflicts(self, message_id, content, content_hash) -> bool:
+        """Whether the live path's arriving payload conflicts with what is held.
+
+        False when the id is not held (`message_ids`), else the first held
+        record of that id decides through `copies_differ` — no such record on
+        disk, False. The held copy is never changed by the asking; the caller
+        keeps the arriving one out and names it a conflict when this answers
+        True.
+
+        False for this node's own «Received file» note. The note carries the
+        author's message id and other words, and the sender's record of that
+        file is no conflict: a merge drops the note first, by the file
+        (`_drop_local_file_note`), and a live frame carries no file to match
+        by, so here the note only answers "not a conflict" and the frame falls
+        to the dedup, as it did before there was a conflict.
+        """
+        if not message_id or message_id not in self.message_ids:
+            return False
+        held = next((m for m in self.message_history if m.get("id") == message_id), None)
+        if held is None:
+            return False
+        if self._is_local_file_note(held):
+            return False
+        return copies_differ(held, {"content": content, "content_hash": content_hash})
 
     def merge_history(self, remote_messages: List[Dict[str, Any]],
                       *, transport_node_id: Optional[str] = None) -> int:
@@ -4555,13 +4663,19 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             will never come. Each refused record is also kept in the
             rejected-records store (`rejected_records`, arrived `sync`) and its
             row is left in `last_merge_recorded` for the caller to tell the UI.
-            Records older than this node's live-history boundary go to the
-            archive instead; their count is left in `last_merge_archived`.
+            A record of a known id whose content differs from the held copy is
+            a conflict, not a refusal: it is kept the same way (reason
+            `conflict`) but never listed in `last_merge_rejected`, which
+            `retry_votes` would ask the peer for again on every sync; its count
+            is left in `last_merge_conflicts`. Records older than this node's
+            live-history boundary go to the archive instead; their count is
+            left in `last_merge_archived`.
         """
         added = 0
         rejected = 0
         legacy = 0
         dropped = 0
+        conflicts = 0
         self.last_merge_rejected: List[Dict[str, Any]] = []
         self.last_merge_recorded: List[Dict[str, Any]] = []
         self.last_merge_archived = 0
@@ -4610,13 +4724,28 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             if checked.get("attachments"):
                 if self._drop_local_file_note(checked):
                     dropped += 1
-            if self.add_message_with_id(checked):
+            answer = self.add_message_with_id(checked)
+            if answer == "added":
                 added += 1
                 if verdict == "legacy":
                     legacy += 1
+            elif answer == "conflict":
+                # Not appended to last_merge_rejected: that list is handed to
+                # retry_votes, which would ask the peer for the record again on
+                # every sync. The row still reaches the UI through
+                # last_merge_recorded, like every refused record's.
+                conflicts += 1
+                kept = self._keep_rejected(checked, {"reason": "conflict"}, transport_node_id)
+                if kept is not None:
+                    self.last_merge_recorded.append(kept)
 
         if rejected:
             logger.warning("Merge refused %d of %d records", rejected, len(remote_messages))
+        if conflicts:
+            logger.warning(
+                "Merge kept %d record(s) of a known id with a different content as "
+                "conflicts; the copies held here stand", conflicts,
+            )
         if legacy:
             logger.warning(
                 "Merged %d unsigned record(s) into %s: stored `verification: legacy`, not checked",
@@ -4624,6 +4753,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             )
         if older:
             self.last_merge_archived = self._archive_older_arrivals(older)
+        self.last_merge_conflicts = conflicts
         if added > 0 or dropped > 0:
             self.restore_chronological_order()
             self.save_history()

@@ -445,6 +445,10 @@ class GroupTextHandler(MessageHandler):
         group_id = payload.get("group_id")
         text = payload.get("text")
         sender_name = payload.get("sender_name", sender_node_id)
+        # The node that handed this frame over, kept before `sender_node_id`
+        # is reassigned to the author a signature names further down. The
+        # refused-record row names this one, and so does the conflict check.
+        transport_node_id = sender_node_id
 
         # A group this node does not hold: dropped before anything else, so the
         # id never names a folder, a 1:1 history or a wake. The member check
@@ -469,7 +473,7 @@ class GroupTextHandler(MessageHandler):
             sender_node_id, payload, refused
         )
         if verification == "rejected":
-            await self._keep_rejected_record(sender_node_id, group_id, payload, text, refused)
+            await self._keep_rejected_record(transport_node_id, group_id, payload, text, refused)
             return None
         # A post is a member's: an author off our roster is refused before
         # dedup, relay and storage. Answered only when the author handed it
@@ -504,6 +508,22 @@ class GroupTextHandler(MessageHandler):
                 f"{group_id}:{sender_node_id}:{text}:{int(time.time() * 1000)}".encode()
             ).hexdigest()[:16]
 
+        # A record this node already holds under that id, with a different
+        # content, is not a duplicate: a node can rewrite an old record of its
+        # own, sign the new content with its own key, and every check passes —
+        # so the content is what has to be looked at, before either dedup can
+        # drop the frame in silence. The held copy stands exactly as it is; the
+        # arriving one is kept as a rejected record (reason `conflict`) and
+        # shown as the red row, stored nowhere, relayed never, answered nothing.
+        # The same id with the same content stays the duplicate it always was.
+        monitor = self.service.conversation_monitors.get(group_id)
+        held_copy_conflicts = getattr(monitor, "held_copy_conflicts", None)
+        if held_copy_conflicts is not None and held_copy_conflicts(
+                message_id, payload.get("text"), payload.get("content_hash")):
+            await self._keep_rejected_record(
+                transport_node_id, group_id, payload, text, {"reason": "conflict"})
+            return None
+
         # Deduplication: runtime set (survives within session)
         dedup_key = f"{group_id}:{message_id}"
         if dedup_key in self.service._processed_message_ids:
@@ -511,8 +531,6 @@ class GroupTextHandler(MessageHandler):
             return None
 
         # Deduplication: check history on disk (survives across restarts)
-        monitor_key = group_id
-        monitor = self.service.conversation_monitors.get(monitor_key)
         if monitor and hasattr(monitor, "message_ids") and message_id in monitor.message_ids:
             self.logger.debug("Duplicate group message %s (already in history), skipping", message_id[:8])
             self.service._processed_message_ids.add(dedup_key)

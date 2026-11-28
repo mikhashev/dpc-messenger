@@ -436,7 +436,7 @@
   {@const expanded = !!expandedRejected[row.key]}
   <div class="rejected-row">
     <div class="message-header">
-      <strong>rejected</strong>
+      <strong>{row.reason === 'conflict' ? 'conflict' : 'rejected'}</strong>
       <!-- The record's own time, when it parsed; a refused record may carry a
            garbage or absent time, and "Invalid Date" is not a fact about it. -->
       <span class="timestamp">{#if !Number.isNaN(ms)}{new Date(ms).toLocaleTimeString()}{/if}</span>
@@ -450,6 +450,7 @@
       · {rejectedReasonText(row.reason)}
       {#if row.live_count > 0}· live ×{row.live_count}{/if}
       {#if row.sync_count > 0}· sync ×{row.sync_count}{/if}
+      {#if row.repair_count > 0}· repair ×{row.repair_count}{/if}
       · seen {row.repeat_count} {timesWord(row.repeat_count)}, first {new Date(row.first_seen).toLocaleTimeString()}
       · id {row.record_id ?? 'unknown'}
     </div>

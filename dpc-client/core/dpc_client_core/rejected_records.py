@@ -26,6 +26,20 @@ A repeat of the same refusal — the same conversation, record id, reason,
 delivering node and both content hashes (`_identity_of`) — is counted on the
 row it already has, never appended again.
 
+One reason is not an accusation. `conflict` names an arriving record whose
+`id` this node already holds with a different content — its text, or its
+`content_hash` when both copies carry one, for a re-signed record is a new
+record and not an edit (ADR-042, open question 1). The held copy is kept
+exactly as it is; the row's text is the arriving copy's, the one nobody
+stored, so the two can be told apart on the screen. This node can see that
+the copies differ and cannot know which side moved, so the word blames
+nobody — it says the id now names two things.
+
+`arrived` says which of the three paths kept the row: `"live"` (a GROUP_TEXT
+this node checked itself), `"sync"` (a record a history merge refused) or
+`"repair"` (the repair that folds a split conversation folder found it on
+this disk; no node handed it over, and the row names none).
+
 This module imports nothing from `dpc_client_core` itself: both
 `conversation_monitor` and the group handler import it, and a cycle would
 break every import.
@@ -46,7 +60,7 @@ from dpc_protocol.paths import dpc_home, resolve_module_home
 logger = logging.getLogger(__name__)
 
 REASONS = ("signer_mismatch", "content_hash_mismatch", "signature_check_failed",
-           "invalid_signature", "unsigned", "unknown_preimage")
+           "invalid_signature", "unsigned", "unknown_preimage", "conflict")
 PER_NODE_CAP = 100
 TOTAL_CAP = 1000
 TEXT_LIMIT = 2000        # characters of the refused record's text that are kept
@@ -299,15 +313,20 @@ class RejectedRecordStore:
         """Keep one refusal, or count it on the row it already made.
 
         Returns `(entry, is_new)`. `arrived` is `"live"` (a GROUP_TEXT this
-        node checked itself) or `"sync"` (a record a history merge refused).
-        `now` is an injectable clock returning an aware UTC datetime. A `reason`
-        outside `REASONS` or an `arrived` outside the two words raises
-        `ValueError` before anything is written.
+        node checked itself), `"sync"` (a record a history merge refused) or
+        `"repair"` (the repair that folds a split conversation folder found
+        the record on this disk). The reason `conflict` is not an accusation:
+        the record's `id` was already held with a different content, the held
+        copy is kept exactly as it is, and the row's `text` is the arriving
+        copy's — the one nobody stored. `now` is an injectable clock returning
+        an aware UTC datetime. A `reason` outside `REASONS` or an `arrived`
+        outside the three words raises `ValueError` before anything is
+        written.
         """
         if reason not in REASONS:
             raise ValueError(f"reason={reason!r} is not one of {REASONS}")
-        if arrived not in ("live", "sync"):
-            raise ValueError(f"arrived={arrived!r} is neither 'live' nor 'sync'")
+        if arrived not in ("live", "sync", "repair"):
+            raise ValueError(f"arrived={arrived!r} is neither 'live', 'sync' nor 'repair'")
         moment = now() if now is not None else datetime.now(timezone.utc)
         seen = moment.astimezone(timezone.utc).isoformat()
         raw_text = "" if text is None else _clean(
@@ -346,6 +365,7 @@ class RejectedRecordStore:
                     "repeat_count": 1,
                     "live_count": 1 if arrived == "live" else 0,
                     "sync_count": 1 if arrived == "sync" else 0,
+                    "repair_count": 1 if arrived == "repair" else 0,
                     "text": kept_text,
                     "text_truncated": len(raw_text) > len(kept_text),
                 }

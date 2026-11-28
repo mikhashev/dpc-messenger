@@ -84,6 +84,24 @@ describe('the rejected row in ChatMessageList', () => {
     expect(timestamp).toContain('new Date(ms).toLocaleTimeString()');
   });
 
+  it('says conflict in the header only for a conflict, rejected otherwise', () => {
+    // Nothing is wrong with a conflicting record on its own — what is wrong is
+    // that another content is already held under its id — so the header names
+    // the situation, not the verdict every other row carries.
+    const row = rejectedRowSource();
+    expect(row).toMatch(/\{row\.reason === 'conflict' \? 'conflict' : 'rejected'\}/);
+  });
+
+  it('counts repair arrivals in the same shape as the live and sync counts, only when there are any', () => {
+    const row = rejectedRowSource();
+    expect(row).toMatch(/\{#if row\.repair_count > 0\}· repair ×\{row\.repair_count\}\{\/if\}/);
+    // It sits after the sync count, as the third way a row can arrive.
+    const sync = row.indexOf('{#if row.sync_count > 0}');
+    const repair = row.indexOf('{#if row.repair_count > 0}');
+    expect(sync).toBeGreaterThan(-1);
+    expect(repair).toBeGreaterThan(sync);
+  });
+
   it('renders the toggle and the text only when the record carries text', () => {
     const row = rejectedRowSource();
     const gate = row.indexOf('{#if row.text}');

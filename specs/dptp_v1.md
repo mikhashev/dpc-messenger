@@ -3254,7 +3254,10 @@ A message in a group: a human's, or an agent's.
 4. **Duplicate.** A `group_id:message_id` already seen in this session, or already in the
    group's history on disk: dropped without a trace. The session set holds at most 1000
    keys; past that, the oldest half is dropped, in the order the keys were added
-   (`processed_message_ids.py`).
+   (`processed_message_ids.py`). An id already held with a different content — its text,
+   or its `content_hash` when both copies carry one — is not a duplicate: the arriving
+   copy is kept as a **rejected record**, reason `conflict`, the held copy is not touched,
+   and nothing is answered.
 5. **Relay.** Unless the author is blocked, the receiver forwards the
    received payload **unchanged** as `GROUP_TEXT` to each member of its roster that is
    connected, except itself and the author. The transport sender is not excluded;
@@ -3503,6 +3506,8 @@ The records a `GROUP_HISTORY_REQUEST` asked for.
    - A record dated before the receiver's own live-history boundary goes to the receiver's
      archive, not its live history.
    - A record whose `id` the receiver already holds is not added; the first copy stands.
+     When the arriving copy's content differs from the one held, it is kept as a
+     **rejected record**, reason `conflict`, and the held copy is not touched.
    - A record that matches a note the receiver wrote about the same file replaces the note.
    - Added records are re-chained for this node and the history is put back into time
      order.
