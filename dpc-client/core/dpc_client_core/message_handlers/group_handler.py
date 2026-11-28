@@ -505,6 +505,14 @@ class GroupTextHandler(MessageHandler):
                 # fails its own signature on re-export. [] hashes as None.
                 tool_calls=payload.get("tool_calls") or None,
                 signature_fields=signature_fields,
+                # What `_authenticate_author` concluded above. It used to ride
+                # the broadcast below and stop there, so a record this node
+                # still held said nothing about its own check after a reload
+                # (the readers' "legacy" default is a guess, not a verdict).
+                # Stored for verified, unverified and legacy alike: `legacy`
+                # names the check that found nothing to recompute, and leaving
+                # it off would let add_message mark a peer's record "own".
+                verification=verification,
                 # Only where the author's signature covers it.
                 mention_depth=(
                     payload.get("mention_depth")

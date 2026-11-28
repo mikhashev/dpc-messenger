@@ -71,7 +71,7 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 
 **U** — [unit](#unit) · [unpriceable](#unpriceable) · [unpriced](#unpriced) · [unrated](#unrated) · [untariffed](#untariffed) · [usage row](#usage-row)
 
-**V** — [variant](#variant) · [vendor account](#vendor-account) · [vendor_request_quotas](#vendor_request_quotas) · [verdict (verified / unverified / legacy)](#verdict-verified--unverified--legacy) · [verdict block](#verdict-block) · [voice-memory](#voice-memory) · [`vram_free_mib`, `vram_total_mib`](#vram_free_mib-vram_total_mib)
+**V** — [variant](#variant) · [vendor account](#vendor-account) · [vendor_request_quotas](#vendor_request_quotas) · [verdict (verified / unverified / legacy / own)](#verdict-verified--unverified--legacy--own) · [verdict block](#verdict-block) · [voice-memory](#voice-memory) · [`vram_free_mib`, `vram_total_mib`](#vram_free_mib-vram_total_mib)
 
 **W** — [wait_reason](#wait_reason) · [waiting](#waiting) · [web_source_pending_integration](#web_source_pending_integration) · [where](#where) · [written call](#written-call)
 
@@ -1271,11 +1271,11 @@ Every term, alphabetically; a leading underscore or backtick is ignored for the 
 - **Meaning:** The number of cross-node agent mentions behind an agent's post, signed from `dptp-msg-v3` on. An agent post from another node wakes an agent here only at 0, and the reply of the agent it wakes carries one more; a hop inside one node passes the number on unchanged. Absent on a v3 agent post is 0 under the signature; an agent post signed over v1 or v2, or not `verified`, wakes nobody. An external agent's bridge is handed the number on its `cc_group_mention` event and carries it to its next post in that group itself; `--mention-depth` overrides.
 - **Defined in:** [specs/dptp_v1.md §4.3](../specs/dptp_v1.md#43-agent-mentions-across-nodes)
 
-### verdict (verified / unverified / legacy)
+### verdict (verified / unverified / legacy / own)
 
 - **Met in:** code, rules, wire
-- **Meaning:** What a receiver concludes about an arriving record: hash and signature check against a cached certificate; the same except the certificate is not yet cached; or no signature this receiver can recompute. The verdict is the receiver's, and absence of a signature is never acceptance.
-- **Defined in:** [specs/dptp_v1.md §4.2](../specs/dptp_v1.md#42-verdicts-on-receipt)
+- **Meaning:** What a receiver concludes about an arriving record: hash and signature check against a cached certificate; the same except the certificate is not yet cached; or no signature this receiver can recompute. The verdict is the receiver's, and absence of a signature is never acceptance. `own` is the fourth word and the other side of the relation: the record was written on this node, so no signature was checked — there was nothing to check. Stamped by `add_message` on every record it stores without `signature_fields`; a peer's record takes only the verdict its caller checked and is never stamped `own`. Stored outside `chain_hash` and `content_hash`, never exported, never read off the wire — every node labels its own copy. In the chat row it draws nothing (this node's own words are not a warning); where a line names the sender's verdict, the words are "written on this node" (`local_wake_sender`'s phrase, service.py). The mark's limit, stated plainly (the reviewer's point, #125): no hash covers the mark itself — whoever can edit history.json on this disk can change it unnoticed. It protects against a foreign node's record reading as this node's, not against access to this disk.
+- **Defined in:** [specs/dptp_v1.md §4.2](../specs/dptp_v1.md#42-verdicts-on-receipt), [`conversation_monitor.py`](../dpc-client/core/dpc_client_core/conversation_monitor.py) for `own`
 
 ### deferred
 

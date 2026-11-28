@@ -44,12 +44,13 @@ NOT_DONE = (
     "Here is what I found so far."
 )
 
-# The keys an answer's record had before `turn_end` existed, signed.
+# The keys an answer's record had before `turn_end` existed, signed, plus the
+# verdict mark every record this node writes now carries (`verification`).
 ANSWER_KEYS = {
     "id", "role", "content", "timestamp", "sender_node_id", "sender_name",
     "thinking", "streaming_raw", "tool_calls", "msg_index", "chain_hash",
     "content_hash", "tool_calls_digest", "signature", "signer_node_id",
-    "preimage_version",
+    "preimage_version", "verification",
 }
 
 

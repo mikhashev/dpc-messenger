@@ -683,6 +683,13 @@ class Message:
     # signs everything with the local key on the way to disk, and a checked
     # signature is replaced by the checker's own.
     signature_fields: Optional[Dict[str, Any]] = None
+    # The verdict reached on those fields by whoever checked them
+    # (verified / unverified / legacy; `legacy` is a check that found nothing
+    # to recompute, still the checker's word and not the author's). Carried
+    # beside the fields so the stored record says what was checked — the live
+    # path used to compute it, broadcast it and drop it. Outside every hash,
+    # like the record key it becomes.
+    verification: Optional[str] = None
     # Inside the signing preimage: an agent's tool calls set after signing
     # produce a record whose hash every peer recomputes differently.
     tool_calls: Optional[List[Dict[str, Any]]] = None
@@ -896,6 +903,7 @@ class ConversationMonitor:
                         sender_type=sender_type, agent_owner=agent_owner,
                         tool_calls=getattr(message, "tool_calls", None),
                         signature_fields=getattr(message, "signature_fields", None),
+                        verification=getattr(message, "verification", None),
                         mention_depth=getattr(message, "mention_depth", None),
                         speed_summary=getattr(message, "speed_summary", None),
                         stop_notes=getattr(message, "stop_notes", None))
@@ -2355,7 +2363,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     message_source: Optional[str] = None,
                     telegram_chat_id: Optional[str] = None,
                     speed_summary: Optional[Dict[str, Any]] = None,
-                    stop_notes: Optional[List[Dict[str, Any]]] = None):
+                    stop_notes: Optional[List[Dict[str, Any]]] = None,
+                    verification: Optional[str] = None):
         """Add a message to the conversation history
 
         Args:
@@ -2385,6 +2394,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 text}]` (loop.py STOP_NOTE_KINDS), shown again in the finished
                 message's progress block. Local like `speed_summary`: set after the
                 hashes and the signature, never exported, never kept from a peer
+            verification: The record's signature verdict, as the readers and the
+                UI know the word. An own record (no `signature_fields`) is marked
+                "own" — this node wrote it, so no signature was checked because
+                there was nothing to check. A peer's record takes only the
+                verdict the caller checked (verified / unverified / legacy) and
+                is never stamped "own" here; without one passed, it gets no key
+                at all rather than a guess. An explicit value wins either way.
 
         Note: This also adds to message_buffer and full_conversation for knowledge extraction.
         thinking and streaming_raw are stored in history.json but excluded from knowledge extraction.
@@ -2493,6 +2509,21 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 # hashed the old four-field way — would be re-exported, fail a
                 # verifier's recomputation, and be rejected as tampered.
                 message_dict["preimage_version"] = PREIMAGE_VERSION
+
+        # The verdict of the stored record, set after both hashes on purpose:
+        # `chain_hash_for` reads six named fields and `message_content_hash`
+        # named arguments, so this key enters neither wherever it sits — and a
+        # mark inside either would re-hash every record the day it appeared,
+        # breaking the chain on this disk and the signature on every peer's.
+        # Like the verdict the live path broadcasts, it is this node's
+        # judgement of the record, never a fact the author signed; unlike the
+        # broadcast, it survives to the next load. A peer's record keeps only
+        # what the caller checked — guessing "own" here is how a foreign
+        # record would read as this node's.
+        if verification is not None:
+            message_dict["verification"] = verification
+        elif signature_fields is None:
+            message_dict["verification"] = "own"
 
         if speed_summary:
             message_dict["speed_summary"] = dict(speed_summary)
