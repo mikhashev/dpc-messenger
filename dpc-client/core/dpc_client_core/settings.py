@@ -1695,7 +1695,8 @@ class Settings:
         if describe_alias is not None:
             if not isinstance(describe_alias, str) or not describe_alias.strip():
                 raise ValueError("music.describe_alias must be 'auto', 'none', or a provider alias.")
-            values['describe_alias'] = describe_alias.strip()
+            # '%' is configparser's interpolation mark: a literal one is written doubled.
+            values['describe_alias'] = describe_alias.strip().replace('%', '%%')
         for key, given in (('auto_align_lyrics', auto_align_lyrics), ('lrclib_enabled', lrclib_enabled),
                            ('stream_ranges_linux', stream_ranges_linux)):
             if given is not None:
@@ -2066,7 +2067,8 @@ class Settings:
                     or not all(isinstance(m, str) for m in mime_types)
                     or not [m for m in (str(m).strip() for m in mime_types) if m]):
                 raise ValueError("mime_types must be a list of audio mime types, at least one.")
-            values['mime_types'] = ','.join(m.strip() for m in mime_types if m.strip())
+            # '%' is configparser's interpolation mark: a literal one is written doubled.
+            values['mime_types'] = ','.join(m.strip() for m in mime_types if m.strip()).replace('%', '%%')
         if default_sample_rate is not None:
             if isinstance(default_sample_rate, bool) or not isinstance(default_sample_rate, int) or default_sample_rate <= 0:
                 raise ValueError("default_sample_rate must be a whole number of Hz above 0.")
@@ -2078,7 +2080,8 @@ class Settings:
         if default_codec is not None:
             if not isinstance(default_codec, str) or not default_codec.strip():
                 raise ValueError("default_codec must be a codec name, e.g. opus.")
-            values['default_codec'] = default_codec.strip()
+            # '%' is configparser's interpolation mark: a literal one is written doubled.
+            values['default_codec'] = default_codec.strip().replace('%', '%%')
         if auto_transcribe is not None:
             if not isinstance(auto_transcribe, bool):
                 raise ValueError("auto_transcribe must be true or false.")
