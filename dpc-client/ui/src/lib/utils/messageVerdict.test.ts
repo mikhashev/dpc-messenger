@@ -3,8 +3,10 @@
  * turns into on a message row (DPC #111). The classes are the owner's split:
  * nothing for a record that checked out, for one that predates verdicts, or
  * for this node's own records; a quiet ask for a certificate that has not
- * arrived; a quiet age note for the pre-signature format; "unsigned" for a
- * verdict this UI does not know — fail quiet, not silent, not alarm.
+ * arrived; a quiet age note for the pre-signature format. A verdict this UI
+ * does not know draws nothing too: a note is drawn only for a verdict whose
+ * meaning is known to be "not checked", so a word a later step stores for
+ * this node's own records is never shown as unsigned (CC #122).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -23,8 +25,11 @@ describe('verdictNote', () => {
         expect(verdictNote(value)).toEqual({ kind: 'none', text: '' });
     });
 
-    it('reads a verdict it does not know as unsigned, quietly', () => {
-        expect(verdictNote('quarantined')).toEqual({ kind: 'unsigned', text: 'unsigned' });
+    it('draws nothing for a verdict it does not know', () => {
+        // A later step stores a word for this node's own records; that word must
+        // not reach the row as "unsigned", or this node's own words look suspect.
+        expect(verdictNote('quarantined')).toEqual({ kind: 'none', text: '' });
+        expect(verdictNote('own')).toEqual({ kind: 'none', text: '' });
     });
 });
 

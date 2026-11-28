@@ -1,9 +1,11 @@
 /**
- * A message row says when a group record's signature was not, or could not be,
- * checked (DPC #111): the header carries verdictNote's text beside the time for
- * 'awaiting-certificate' and 'unsigned', and nothing for 'verified', 'legacy'
- * or an absent verdict — the absence of a verdict on old records must not be
- * drawn as an alarm, and a legacy record is age, not a threat.
+ * A message row says when a group record's signature could not be checked yet
+ * (DPC #111): the header carries verdictNote's text beside the time for
+ * 'awaiting-certificate' only, and nothing for 'verified', 'legacy', an absent
+ * verdict, or a verdict this build does not know — the absence of a verdict on
+ * old records must not be drawn as an alarm, a legacy record is age and not a
+ * threat, and a word stored for this node's own records must never be shown
+ * as unsigned (CC #122).
  *
  * Vitest runs in `environment: 'node'` here and the repo carries no DOM
  * harness, so this reads the component source, as the neighbouring guards do.
@@ -18,9 +20,9 @@ describe("the message header's verdict note", () => {
         expect(source).toMatch(/<span class="verdict-note">\{verdict\.text\}<\/span>/);
     });
 
-    it("gates the note on exactly the two kinds that must be seen", () => {
+    it("gates the note on the one kind that must be seen, and on nothing else", () => {
         const gate = source.match(/\{#if (verdict\.kind === [^}]+)\} <span class="verdict-note">/);
-        expect(gate?.[1]).toBe("verdict.kind === 'awaiting-certificate' || verdict.kind === 'unsigned'");
+        expect(gate?.[1]).toBe("verdict.kind === 'awaiting-certificate'");
     });
 
     it("is styled quiet, not as an alarm", () => {

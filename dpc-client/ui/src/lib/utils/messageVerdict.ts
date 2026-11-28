@@ -10,17 +10,17 @@
  *   quiet, neutral "awaiting certificate".
  * - 'legacy' — a record from before signatures existed (ADR-036). Age, not a
  *   threat: on the owner's machine 1432 of 1439 records are like this.
- * - anything else — a verdict this UI does not know. Fail quiet, not silent,
- *   not alarm: the "unsigned" note.
- * - 'verified', or no verdict at all — the normal case, or a record stored
- *   before verdicts existed, or this node's own record. Nothing: absence on
- *   old records must not be drawn as an alarm.
+ * - 'verified', no verdict at all, or a verdict this UI does not know — nothing.
+ *   A note is drawn only for a verdict whose meaning is known to be "not
+ *   checked". A word this build has not heard of (a later step stores one for
+ *   this node's own records) must not be shown as unsigned: that would draw
+ *   this node's own words as suspicious. Absence is never drawn as an alarm.
  *
  * 'rejected' records never reach the UI (the handler drops them), so they have
  * no class here.
  */
 
-export type VerdictNoteKind = 'none' | 'awaiting-certificate' | 'older-format' | 'unsigned';
+export type VerdictNoteKind = 'none' | 'awaiting-certificate' | 'older-format';
 
 export interface VerdictNote {
     kind: VerdictNoteKind;
@@ -35,11 +35,7 @@ export function verdictNote(verification: string | undefined): VerdictNote {
             return { kind: 'awaiting-certificate', text: 'awaiting certificate' };
         case 'legacy':
             return { kind: 'older-format', text: 'unsigned, older format' };
-        case undefined:
-        case '':
-        case 'verified':
-            return { kind: 'none', text: '' };
         default:
-            return { kind: 'unsigned', text: 'unsigned' };
+            return { kind: 'none', text: '' };
     }
 }

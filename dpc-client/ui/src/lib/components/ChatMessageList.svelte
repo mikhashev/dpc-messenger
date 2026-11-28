@@ -443,7 +443,7 @@
                says nothing either: verdictNote keeps its words for the step
                that needs them, but on the row the note would only repeat. The
                note is text, not a colour or an icon, so it reads as words. -->
-          <span class="timestamp">{#if msg.msg_index}<span class="msg-index">#{msg.msg_index}</span> {/if}{new Date(msg.timestamp).toLocaleTimeString()}{#if verdict.kind === 'awaiting-certificate' || verdict.kind === 'unsigned'} <span class="verdict-note">{verdict.text}</span>{/if}</span>
+          <span class="timestamp">{#if msg.msg_index}<span class="msg-index">#{msg.msg_index}</span> {/if}{new Date(msg.timestamp).toLocaleTimeString()}{#if verdict.kind === 'awaiting-certificate'} <span class="verdict-note">{verdict.text}</span>{/if}</span>
         </div>
         <!-- Whose reasoning is shown is a property of the surface, not of the
              sender: an agent chat renders rounds and tool calls of its own, and
