@@ -3233,8 +3233,14 @@ A message in a group: a human's, or an agent's.
    `sender_node_id`, a recomputed hash differing from `content_hash`, or a signature that
    fails or cannot be evaluated: `rejected`. No cached certificate for the signer:
    `unverified`, author as claimed. Otherwise `verified`, author as claimed
-   (`_authenticate_author`, `group_handler.py:181-273`). `rejected`: the frame is dropped,
-   not stored, not relayed, not shown, and nothing is answered. Then the **member test**: an
+   (`_authenticate_author`, `group_handler.py:181-273`). `rejected`: the frame is dropped —
+   not stored in the history, not relayed, nothing is answered — and kept as a **rejected
+   record**: a red row in the chat at the record's own time with the text folded, and a row in
+   this node's rejected-records store (`<dpc home>/state/rejected_records.json`; rows past
+   the caps of 100 per delivering node and 1000 in all move to
+   `rejected_records.archive.jsonl`, nothing is deleted) naming the node that
+   delivered it, the claimed author, the reason, the id and the time. The
+   record's text never enters `message_history`, an export or an agent's prompt. Then the **member test**: an
    author (any verdict but `rejected`) that is not on the receiver's `members` is refused
    before steps 3-8: nothing is stored, relayed, shown or woken, and no dedup key is kept.
    When the author is the transport sender it is answered `GROUP_ACCESS_DENIED` with reason
@@ -3488,9 +3494,11 @@ The records a `GROUP_HISTORY_REQUEST` asked for.
      `preimage_version` is checked: the hash is recomputed over the **receiver's own** name
      for the group, never one read from the record; `signer_node_id` must equal
      `sender_node_id`; the signature is verified. A mismatch or a bad signature: refused
-     (and listed in `last_merge_rejected`). No cached certificate: kept as `unverified`.
+     (and listed in `last_merge_rejected`). Kept as a **rejected record** too, arrived `sync`.
+     No cached certificate: kept as `unverified`.
    - A record without a signature, or signed over a preimage the receiver cannot
      recompute: kept as `legacy`, or refused when the setting `reject_unsigned` is on.
+     A refused one is kept as a **rejected record**, reason `unsigned` or `unknown_preimage`.
    - The record's `verification` field, if any, is overwritten. The receiver writes it.
    - A record dated before the receiver's own live-history boundary goes to the receiver's
      archive, not its live history.

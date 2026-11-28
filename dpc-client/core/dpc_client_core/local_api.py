@@ -221,6 +221,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Conversation history
     "get_conversation_history",
     "delete_conversation",
+    # The chat's red rows: refused records this node kept; an agent tool never reads it
+    "get_rejected_records",
     # AI chats kept in ~/.dpc rather than in the WebView (2026-10-19)
     "list_ai_chats",
     "save_ai_chat",

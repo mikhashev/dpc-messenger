@@ -19,6 +19,7 @@ from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSour
 
 from . import knowledge_routing
 from . import conversation_paths
+from . import rejected_records
 from .managers import kv_snapshots
 from .managers.llama_server_supervisor import BackgroundCallSkipped, a_background_call, card_queue_refusal_in
 from .p2p_manager import peer_proof
@@ -799,6 +800,9 @@ class ConversationMonitor:
         self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
         self.message_ids: Set[str] = set()  # Track unique message IDs for deduplication
         self.last_merge_rejected: List[Dict[str, Any]] = []  # what the last merge_history refused
+        # The rows the last merge_history kept in the rejected-records store
+        # (rejected_records), one per refused record; the UI event's payload.
+        self.last_merge_recorded: List[Dict[str, Any]] = []
         self._history_dirty: bool = False  # Track unsaved changes
         self._signer = None  # Lazy-loaded CommitSigner for message signing
         self._chain_rebuilt = False  # One-time local repair of a pre-local chain
@@ -4369,7 +4373,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 return att
         raise ValueError("record holds no attachment matching the transfer")
 
-    def _verify_incoming(self, message: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], str]:
+    def _verify_incoming(self, message: Dict[str, Any],
+                         refused: Optional[Dict[str, Any]] = None) -> tuple[Optional[Dict[str, Any]], str]:
         """Decide what an arriving record is before it can enter history.
 
         Returns the record to store and its verdict, or `(None, reason)` to
@@ -4388,7 +4393,19 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         the peer handing over a history did not write it — so a legacy record
         keeps a claimed author with nothing behind it, and `reject_unsigned`
         is what closes that.
+
+        `refused`, when the caller passes a dict, is filled at every refusal
+        site with the machine's word for why (`reason`, one of
+        `rejected_records.REASONS`, and `computed_content_hash` at the
+        hash-mismatch site) so the refusal can be kept as a rejected record.
+        The returned reason strings stay as they were; they have readers.
         """
+        def refuse(reason: str, verdict: str, **extra):
+            if refused is not None:
+                refused["reason"] = reason
+                refused.update(extra)
+            return None, verdict
+
         sig = message.get("signature")
         content_hash = message.get("content_hash")
         signer = message.get("signer_node_id")
@@ -4402,7 +4419,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # labelled, and `reject_unsigned` turns the label into a refusal
             # once the legacy records are gone.
             if self._reject_unsigned():
-                return None, "unsigned, and reject_unsigned is on"
+                return refuse("unsigned", "unsigned, and reject_unsigned is on")
             return dict(message, verification="legacy"), "legacy"
 
         if message.get("preimage_version") not in (PREIMAGE_VERSION, *LEGACY_PREIMAGE_VERSIONS):
@@ -4412,20 +4429,33 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # treats it. Versions we still know how to build are recomputed
             # rather than waved through (ADR-042).
             if self._reject_unsigned():
-                return None, "preimage %s cannot be recomputed" % message.get("preimage_version")
+                return refuse("unknown_preimage",
+                              "preimage %s cannot be recomputed" % message.get("preimage_version"))
             return dict(message, verification="legacy"), "legacy"
 
         # The hash is recomputed rather than read: a hash taken from the
         # message it describes attests nothing, and the signature over it
         # inherits that. The room name comes from us, never from the message —
         # otherwise a signed message from another room verifies happily here.
-        if not any(
-            content_hash == self._recompute_hash(message, room)
-            for room in self._room_candidates()
-        ):
-            return None, "content does not match its hash"
+        rooms = self._room_candidates()
+        try:
+            recomputed = [self._recompute_hash(message, room) for room in rooms]
+        except UnicodeEncodeError:
+            # A content utf-8 cannot hold cannot be the content the stated
+            # hash was made over — no honest signer could sign it — so it is
+            # refused as a hash mismatch and kept, not raised: an exception
+            # here used to abort the whole merge and leave every record after
+            # the poisoned one unmerged, on every sync. Only this failure is
+            # caught; anything else the recompute raises is a separate matter.
+            return refuse("content_hash_mismatch", "content does not match its hash")
+        if content_hash not in recomputed:
+            extra = {"computed_content_hash": recomputed[0]} if rooms else {}
+            return refuse("content_hash_mismatch", "content does not match its hash", **extra)
         if signer != message.get("sender_node_id"):
-            return None, f"signed by {str(signer)[:20]} but attributed to {str(message.get('sender_node_id'))[:20]}"
+            return refuse(
+                "signer_mismatch",
+                f"signed by {str(signer)[:20]} but attributed to {str(message.get('sender_node_id'))[:20]}",
+            )
 
         try:
             from dpc_protocol.commit_integrity import CommitSigner
@@ -4434,10 +4464,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # Was DEBUG-and-accept, which turned a failed check into a silent
             # pass — the opposite of what verify_signature does with the same
             # exceptions.
-            return None, f"signature check failed: {e}"
+            return refuse("signature_check_failed", f"signature check failed: {e}")
 
         if result is False:
-            return None, f"invalid signature from {str(signer)[:20]}"
+            return refuse("invalid_signature", f"invalid signature from {str(signer)[:20]}")
         if result is None:
             # Cannot check yet — the peer's certificate is not cached. Kept and
             # flagged rather than rejected: on first contact rejecting would be
@@ -4504,7 +4534,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         return True
 
-    def merge_history(self, remote_messages: List[Dict[str, Any]]) -> int:
+    def merge_history(self, remote_messages: List[Dict[str, Any]],
+                      *, transport_node_id: Optional[str] = None) -> int:
         """Merge remote messages with local history
 
         Unlike import_history(), this method:
@@ -4514,25 +4545,31 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         Args:
             remote_messages: List of message dicts from peer
+            transport_node_id: The node that handed the batch over (None when
+                the caller cannot name one, as the 1:1 path cannot)
 
         Returns:
             Count of new messages added to the live history. The records
             refused are left in `last_merge_rejected` (id, content_hash, sender,
             verdict), so a caller waiting for a specific record can learn it
-            will never come. Records older than this node's live-history
-            boundary go to the archive instead; their count is left in
-            `last_merge_archived`.
+            will never come. Each refused record is also kept in the
+            rejected-records store (`rejected_records`, arrived `sync`) and its
+            row is left in `last_merge_recorded` for the caller to tell the UI.
+            Records older than this node's live-history boundary go to the
+            archive instead; their count is left in `last_merge_archived`.
         """
         added = 0
         rejected = 0
         legacy = 0
         dropped = 0
         self.last_merge_rejected: List[Dict[str, Any]] = []
+        self.last_merge_recorded: List[Dict[str, Any]] = []
         self.last_merge_archived = 0
         boundary = self.live_history_boundary
         older: List[Dict[str, Any]] = []
         for msg in remote_messages:
-            checked, verdict = self._verify_incoming(msg)
+            refused: Dict[str, Any] = {}
+            checked, verdict = self._verify_incoming(msg, refused)
             if checked is None:
                 logger.warning("Rejected message %s: %s", msg.get("id", "?"), verdict)
                 rejected += 1
@@ -4543,6 +4580,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     "sender_name": msg.get("sender_name"),
                     "verdict": verdict,
                 })
+                kept = self._keep_rejected(msg, refused, transport_node_id)
+                if kept is not None:
+                    self.last_merge_recorded.append(kept)
                 continue
             # The strip is the storing node's own and unsigned: a peer's is not kept.
             checked.pop("speed_summary", None)
@@ -4596,6 +4636,41 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             )
 
         return added
+
+    def _keep_rejected(self, message: Dict[str, Any], refused: Dict[str, Any],
+                       transport_node_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Keep one refused merge record in the rejected-records store.
+
+        The same mapping the live path keeps (`GroupTextHandler.
+        _keep_rejected_record`), arrived `sync`, the text being the record's
+        `content`. Synchronous: `merge_history` has no loop to keep free. A
+        store that fails is logged and swallowed — the refusal stands either
+        way — and None comes back so the caller keeps no row for it.
+        """
+        try:
+            entry, _is_new = rejected_records.get_store().record(
+                conversation_id=self.conversation_id,
+                reason=refused["reason"],
+                arrived="sync",
+                transport_node_id=transport_node_id,
+                record_id=message.get("id"),
+                claimed_content_hash=message.get("content_hash"),
+                computed_content_hash=refused.get("computed_content_hash"),
+                record_timestamp=message.get("timestamp"),
+                claimed_sender_node_id=message.get("sender_node_id"),
+                claimed_sender_name=message.get("sender_name"),
+                claimed_sender_type=message.get("sender_type"),
+                claimed_agent_owner=message.get("agent_owner"),
+                signer_node_id=message.get("signer_node_id"),
+                signature=message.get("signature"),
+                preimage_version=message.get("preimage_version"),
+                text=message.get("content"),
+            )
+        except Exception:
+            logger.warning("The refused record %s could not be kept in the "
+                           "rejected-records store", message.get("id", "?"), exc_info=True)
+            return None
+        return entry
 
     def restore_chronological_order(self) -> bool:
         """Put the history back in time order, re-chaining if anything moved.

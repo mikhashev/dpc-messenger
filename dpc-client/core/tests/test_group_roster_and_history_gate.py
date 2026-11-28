@@ -318,7 +318,7 @@ def served(group_manager):
     service = _Service(manager)
     monitor = _Monitor()
     monitor.export_history = lambda authors=None: [{"id": "m-1", "content": "ours"}]
-    monitor.merge_history = lambda messages: len(messages)
+    monitor.merge_history = lambda messages, transport_node_id=None: len(messages)
     monitor.compute_history_hash = lambda: "sha256:ours"
     monitor.history_digest = lambda: {"authors": {MEMBER: "digest"}}
     service.conversation_monitors[group.group_id] = monitor
@@ -375,7 +375,8 @@ async def test_an_unknown_group_answers_exactly_like_a_refused_one(served):
 async def test_an_outsiders_history_is_not_merged(served):
     service, group, monitor = served
     merged = []
-    monitor.merge_history = lambda messages: merged.extend(messages) or len(messages)
+    monitor.merge_history = lambda messages, transport_node_id=None: (
+        merged.extend(messages) or len(messages))
 
     await GroupHistoryResponseHandler(service).handle(
         OUTSIDER,
@@ -522,7 +523,8 @@ def test_a_removed_node_stops_advertising_the_group(tmp_path):
 async def test_an_unasked_group_history_is_discarded_even_from_a_member(served):
     service, group, monitor = served
     merged = []
-    monitor.merge_history = lambda messages: merged.extend(messages) or len(messages)
+    monitor.merge_history = lambda messages, transport_node_id=None: (
+        merged.extend(messages) or len(messages))
 
     await GroupHistoryResponseHandler(service).handle(
         MEMBER,
@@ -537,7 +539,8 @@ async def test_an_unasked_group_history_is_discarded_even_from_a_member(served):
 async def test_the_answer_to_our_own_question_is_merged(served):
     service, group, monitor = served
     merged = []
-    monitor.merge_history = lambda messages: merged.extend(messages) or len(messages)
+    monitor.merge_history = lambda messages, transport_node_id=None: (
+        merged.extend(messages) or len(messages))
     service.history_requests.note(MEMBER, group.group_id, "r-1")
 
     await GroupHistoryResponseHandler(service).handle(
@@ -554,7 +557,8 @@ async def test_one_question_earns_one_answer(served):
     """A peer cannot keep rewriting by replaying the id we handed it."""
     service, group, monitor = served
     merged = []
-    monitor.merge_history = lambda messages: merged.extend(messages) or len(messages)
+    monitor.merge_history = lambda messages, transport_node_id=None: (
+        merged.extend(messages) or len(messages))
     service.history_requests.note(MEMBER, group.group_id, "r-1")
     reply = {"group_id": group.group_id, "history": [{"id": "x", "content": "again"}],
              "request_id": "r-1"}
@@ -570,7 +574,8 @@ async def test_a_peer_on_the_older_build_is_still_understood(served):
     """It answers without echoing the id; what must hold is that we asked."""
     service, group, monitor = served
     merged = []
-    monitor.merge_history = lambda messages: merged.extend(messages) or len(messages)
+    monitor.merge_history = lambda messages, transport_node_id=None: (
+        merged.extend(messages) or len(messages))
     service.history_requests.note(MEMBER, group.group_id, "r-1")
 
     await GroupHistoryResponseHandler(service).handle(

@@ -1,5 +1,6 @@
 """Handlers for group chat commands."""
 
+import asyncio
 import hashlib
 import time
 import uuid
@@ -23,6 +24,7 @@ from ..conversation_monitor import (
     parse_moment,
     same_moment,
 )
+from .. import rejected_records
 from .voice_transcription_handler import settle_parked_transcriptions
 from .group_access import may_share_group, off_the_roster, refuse_group_access
 from ..firewall import is_blocked_by
@@ -271,7 +273,7 @@ class GroupTextHandler(MessageHandler):
     def command_name(self) -> str:
         return "GROUP_TEXT"
 
-    def _authenticate_author(self, transport_node_id, payload):
+    def _authenticate_author(self, transport_node_id, payload, refused=None):
         """Decide who authored this, and how sure we are.
 
         Returns (author_node_id, verification, signature_fields), where
@@ -285,7 +287,18 @@ class GroupTextHandler(MessageHandler):
                        sender_node_id with nothing behind it is worth less than
                        the socket it came from.
           rejected   — a signature that is present and wrong.
+
+        `refused`, when the caller passes a dict, is filled at every rejection
+        site with the machine's word for why (`reason`, one of
+        `rejected_records.REASONS`, and `computed_content_hash` at the
+        hash-mismatch site) so the refusal can be kept as a rejected record.
+        The log lines say the same thing for a human; this is the row's copy.
         """
+        def reject(reason):
+            if refused is not None:
+                refused["reason"] = reason
+            return transport_node_id, "rejected", None
+
         claimed = payload.get("sender_node_id")
         content_hash = payload.get("content_hash")
         signature = payload.get("signature")
@@ -307,30 +320,44 @@ class GroupTextHandler(MessageHandler):
                 "Rejecting group message %s: signed by %s but claims %s",
                 str(payload.get("message_id"))[:8], str(signer)[:20], str(claimed)[:20]
             )
-            return transport_node_id, "rejected", None
+            return reject("signer_mismatch")
 
-        expected = message_content_hash(
-            conversation_id=payload.get("group_id"),
-            message_id=payload.get("message_id"),
-            sender_node_id=claimed,
-            sender_name=payload.get("sender_name"),
-            sender_type=payload.get("sender_type"),
-            agent_owner=payload.get("agent_owner"),
-            timestamp=payload.get("timestamp"),
-            content=payload.get("text") or "",
-            # v2 carries the digest and not the calls, so a peer verifies what
-            # it was sent rather than what it was never given (ADR-042).
-            tool_calls=payload.get("tool_calls"),
-            tool_calls_digest=payload.get("tool_calls_digest"),
-            mention_depth=payload.get("mention_depth"),
-            version=version,
-        )
+        try:
+            expected = message_content_hash(
+                conversation_id=payload.get("group_id"),
+                message_id=payload.get("message_id"),
+                sender_node_id=claimed,
+                sender_name=payload.get("sender_name"),
+                sender_type=payload.get("sender_type"),
+                agent_owner=payload.get("agent_owner"),
+                timestamp=payload.get("timestamp"),
+                content=payload.get("text") or "",
+                # v2 carries the digest and not the calls, so a peer verifies what
+                # it was sent rather than what it was never given (ADR-042).
+                tool_calls=payload.get("tool_calls"),
+                tool_calls_digest=payload.get("tool_calls_digest"),
+                mention_depth=payload.get("mention_depth"),
+                version=version,
+            )
+        except UnicodeEncodeError:
+            # A text that cannot be encoded as UTF-8 cannot be the text the
+            # stated hash was made over — the signer's own hash call raises on
+            # it, so no honestly signed record carries one — so it is refused
+            # as a hash mismatch and kept like any other refusal, rather than
+            # crashing the handler with a wire escape nobody can have signed.
+            self.logger.warning(
+                "Rejecting group message %s from %s: content does not match its hash",
+                str(payload.get("message_id"))[:8], str(claimed)[:20]
+            )
+            return reject("content_hash_mismatch")
         if expected != content_hash:
             self.logger.warning(
                 "Rejecting group message %s from %s: content does not match its hash",
                 str(payload.get("message_id"))[:8], str(claimed)[:20]
             )
-            return transport_node_id, "rejected", None
+            if refused is not None:
+                refused["computed_content_hash"] = expected
+            return reject("content_hash_mismatch")
 
         try:
             from dpc_protocol.commit_integrity import CommitSigner
@@ -340,14 +367,14 @@ class GroupTextHandler(MessageHandler):
                 "Rejecting group message %s: signature check failed: %s",
                 str(payload.get("message_id"))[:8], e
             )
-            return transport_node_id, "rejected", None
+            return reject("signature_check_failed")
 
         if result is False:
             self.logger.warning(
                 "Rejecting group message %s: invalid signature from %s",
                 str(payload.get("message_id"))[:8], str(signer)[:20]
             )
-            return transport_node_id, "rejected", None
+            return reject("invalid_signature")
 
         fields = {
             "content_hash": content_hash,
@@ -364,6 +391,45 @@ class GroupTextHandler(MessageHandler):
             return claimed, "unverified", fields
 
         return claimed, "verified", fields
+
+    async def _keep_rejected_record(self, transport_node_id, group_id, payload, text, refused) -> None:
+        """Keep a refused record in the rejected-records store and tell the UI.
+
+        The row names the node that handed the record over (`transport_node_id`,
+        which for a relayed message is not the claimed author) beside what the
+        record claims about itself. Nothing is answered to the sender and no
+        other node is told; the open chat gets one `group_record_rejected` event
+        so it can show the red row. A store that fails must not break the
+        handler — the refusal stands either way — so every failure is logged
+        and swallowed.
+        """
+        try:
+            entry, _is_new = await asyncio.to_thread(
+                rejected_records.get_store().record,
+                conversation_id=group_id,
+                reason=refused["reason"],
+                arrived="live",
+                transport_node_id=transport_node_id,
+                record_id=payload.get("message_id"),
+                claimed_content_hash=payload.get("content_hash"),
+                computed_content_hash=refused.get("computed_content_hash"),
+                record_timestamp=payload.get("timestamp"),
+                claimed_sender_node_id=payload.get("sender_node_id"),
+                claimed_sender_name=payload.get("sender_name"),
+                claimed_sender_type=payload.get("sender_type"),
+                claimed_agent_owner=payload.get("agent_owner"),
+                signer_node_id=payload.get("signer_node_id"),
+                signature=payload.get("signature"),
+                preimage_version=payload.get("preimage_version"),
+                text=text,
+            )
+        except Exception:
+            self.logger.exception(
+                "The refused group record %s could not be kept in the rejected-records store",
+                str(payload.get("message_id"))[:8],
+            )
+            return
+        await self.service.local_api.broadcast_event(rejected_records.UI_EVENT, entry)
 
     async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
         """
@@ -398,10 +464,12 @@ class GroupTextHandler(MessageHandler):
         # the author from the transport recorded seven of nine messages under
         # the wrong node on the edges (measured 2026-08-06). A signature the
         # relay cannot forge is what tells them apart.
+        refused: Dict[str, Any] = {}
         author_node_id, verification, signature_fields = self._authenticate_author(
-            sender_node_id, payload
+            sender_node_id, payload, refused
         )
         if verification == "rejected":
+            await self._keep_rejected_record(sender_node_id, group_id, payload, text, refused)
             return None
         # A post is a member's: an author off our roster is refused before
         # dedup, relay and storage. Answered only when the author handed it
@@ -1183,12 +1251,16 @@ class GroupHistoryResponseHandler(MessageHandler):
             # merge_history returns a count; which records it added is read off
             # the ids, with no await between the two reads, so a second answer
             # arriving a few ms later finds them present and adds nothing.
-            added = monitor.merge_history(history)
+            added = monitor.merge_history(history, transport_node_id=sender_node_id)
             if added:
                 incoming = {m.get("id") for m in history if isinstance(m, dict)}
                 merged = [m for m in getattr(monitor, "message_history", [])
                           if m.get("id") and m["id"] in incoming and m["id"] not in known]
             rejected = list(getattr(monitor, "last_merge_rejected", []) or [])
+            # The chat's red rows: each record this merge refused and kept is
+            # one `group_record_rejected` event, as the live path sends.
+            for entry in getattr(monitor, "last_merge_recorded", None) or []:
+                await self.service.local_api.broadcast_event(rejected_records.UI_EVENT, entry)
             self.logger.info(
                 "Merged %d new messages into group %s history (%d older than the boundary archived)",
                 added, group_id, getattr(monitor, "last_merge_archived", 0) or 0,

@@ -72,6 +72,24 @@ def test_every_module_level_copy_points_at_the_stand_in(tmp_path):
         assert paths and all(tmp_path in v.parents for v in paths), f"{function_path}: {paths}"
 
 
+def test_the_rejected_records_store_writes_under_the_stand_in(tmp_path):
+    """The refused records a test keeps must land under the stand-in too: the
+    store's default is `<home>/state/rejected_records.json`, and a refusal
+    written into the developer's real ~/.dpc/state would outlive the run."""
+    from dpc_client_core import rejected_records
+
+    real_state = REAL_HOME / "state" / rejected_records.FILE_NAME
+    before = _fingerprint(real_state)
+
+    path = rejected_records.default_path()
+    assert tmp_path in path.parents, f"the store's live file is the stand-in's, not {path}"
+    store = rejected_records.get_store()
+    store.record(conversation_id="group-guard", reason="unsigned", arrived="live")
+    assert store.file_path == path
+    assert path.exists(), "the store wrote its live file under the stand-in"
+    assert _fingerprint(real_state) == before
+
+
 def _module_level_home_copies(root: Path, package: str):
     """(module, name) for each module-level assignment whose value builds `Path.home() / ".dpc"`."""
     found = set()

@@ -84,6 +84,7 @@ _HOME_COPIES = (
     ("dpc_client_core.local_api", "WS_TOKEN_PATH", ".ws_token"),
     ("dpc_client_core.telegram_service", "DPC_HOME_DIR", ""),
     ("dpc_client_core.voice_service", "DPC_HOME_DIR", ""),
+    ("dpc_client_core.rejected_records", "DPC_HOME_DIR", ""),
     ("dpc_client_core.single_instance", "DEFAULT_LOCK", "run_service.pid"),
     ("dpc_protocol.crypto", "DPC_HOME_DIR", ""),
     ("dpc_protocol.crypto", "KEY_FILE", "node.key"),

@@ -3,6 +3,7 @@
 from typing import Dict, Any, Optional, Set, Tuple
 from . import MessageHandler
 from .group_access import may_share_group, refuse_group_access
+from .. import rejected_records
 
 
 class HistoryRequestRegistry:
@@ -213,8 +214,14 @@ class ChatHistoryResponseHandler(MessageHandler):
         # A group history is shared by several authors, so an answer adds to
         # ours; replacing it would erase whatever the answering node lacks.
         if monitor_key.startswith("group-") and hasattr(conversation_monitor, "merge_history"):
-            added = conversation_monitor.merge_history(messages)
+            # The sender is a member and the one that handed the batch over:
+            # a refusal kept on this route names it, as the group route does.
+            added = conversation_monitor.merge_history(messages, transport_node_id=sender_node_id)
             self.logger.info(f"Merged {added} new messages into {monitor_key} from {len(messages)} received")
+            # The chat's red rows, one event per record this merge refused and
+            # kept, exactly as GroupHistoryResponseHandler sends them.
+            for entry in getattr(conversation_monitor, "last_merge_recorded", None) or []:
+                await self.service.local_api.broadcast_event(rejected_records.UI_EVENT, entry)
         else:
             conversation_monitor.import_history(messages)
 

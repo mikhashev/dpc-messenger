@@ -37,6 +37,7 @@ from .__version__ import __version__
 from .firewall import KNOWLEDGE_EXTRACTION_KEY, NODE_ID_RE, VENDOR_PROVIDER_TYPES, ContextFirewall, is_blocked_by
 from .dpc_agent.pricing import vendor_ceiling_currency
 from . import node_ledger
+from . import rejected_records
 from .hub_client import HubClient
 from .p2p_manager import P2PManager, peer_proof
 from .processed_message_ids import ProcessedMessageIds
@@ -7525,6 +7526,25 @@ class CoreService(MusicCommandsMixin, MusicQcCommandsMixin, CardLeaseCommandsMix
                 "messages": [],
                 "message_count": 0
             }
+
+    @slow_command
+    async def get_rejected_records(self, conversation_id: str) -> Dict[str, Any]:
+        """The refused records kept for this conversation (rejected_records.py).
+
+        The chat's red rows: what this node refused, from whom and why. The
+        store's live file only — the archive is never read at runtime — and
+        never served to an agent tool. A slow command: the read goes to a
+        thread because it may wait on the store's lock while a refusal is
+        being written, and that wait must not hold the UI socket's read loop.
+        """
+        records = await asyncio.to_thread(
+            rejected_records.get_store().for_conversation, conversation_id
+        )
+        return {
+            "status": "success",
+            "conversation_id": conversation_id,
+            "records": records,
+        }
 
     async def propose_new_session(self, conversation_id: str) -> Dict[str, Any]:
         """Propose a new session to connected peers (mutual approval flow).
