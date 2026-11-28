@@ -1075,17 +1075,17 @@
               <div class="field">
                 <label class="field-label" for="mps-export-dir">Export folder</label>
                 <input id="mps-export-dir" class="text-input" type="text" placeholder="(<DPC home>/exports/music)" bind:value={settingsDraft.export_dir} />
-                <span class="muted tiny">where Export writes its MP3/Opus copies — an absolute path, never a drive root; empty = the default folder. Applies at once: the next export uses it</span>
+                <span class="muted tiny">Where Export puts its MP3 and Opus copies. A full path, never a drive root; empty means the default folder. Applies at once.</span>
               </div>
               <div class="field">
                 <label class="field-label" for="mps-stream-port">Stream port</label>
-                <input id="mps-stream-port" class="text-input num" type="number" min="0" max="65535" step="1" bind:value={settingsDraft.stream_port} />
-                <span class="muted tiny">the loopback port the player reads track bytes from — applies after the next backend start, and the app's CSP media-src names 9996, so another port also needs tauri.conf.json changed and the app rebuilt</span>
+                <input id="mps-stream-port" class="text-input" type="number" min="0" max="65535" step="1" bind:value={settingsDraft.stream_port} />
+                <span class="muted tiny">The port on this computer the player reads tracks from. Applies after the next backend restart. Keep 9996: another port works only after the app itself is rebuilt.</span>
               </div>
               <div class="field">
-                <label class="field-label" for="mps-poll">Library poll (s)</label>
-                <input id="mps-poll" class="text-input num" type="number" min="1" step="1" bind:value={settingsDraft.poll_interval_s} />
-                <span class="muted tiny">how often the music library re-reads its watched folders — applies after the next backend start</span>
+                <label class="field-label" for="mps-poll">Library check (seconds)</label>
+                <input id="mps-poll" class="text-input" type="number" min="1" step="1" bind:value={settingsDraft.poll_interval_s} />
+                <span class="muted tiny">How often the library looks for new files in its folders. Applies after the next backend restart.</span>
               </div>
             </div>
             <div class="form-row">
@@ -1093,12 +1093,12 @@
                 <input type="checkbox" bind:checked={settingsDraft.stream_ranges_linux} />
                 <span class="small">Track stream: byte ranges on Linux</span>
               </label>
-              <span class="muted tiny">applies at once: on, the Linux player asks the stream for HTTP Range; off (the default), a plain whole-file answer — WebKitGTK 2.50 reports no duration and refuses forward seeks on a Range source, so off is right there; turn on only to test. Windows and macOS always use Range whatever this says</span>
+              <span class="muted tiny">Applies at once. Leave it off on Linux: with it on, the Linux player there shows no track length and cannot jump forward. On is for testing only; Windows and macOS are not affected.</span>
             </div>
             {#if settingsError}
               <p class="field-error" role="alert">{settingsError}</p>
             {:else if settingsSaved}
-              <p class="muted tiny" role="status">Saved. The export folder and the Linux stream question apply at once; the stream port and the library poll after the next backend start.</p>
+              <p class="muted tiny" role="status">Saved. The export folder and the Linux stream question apply at once; the stream port and the library check after the next backend restart.</p>
             {/if}
             <div class="form-row">
               <button type="button" class="small-btn primary" onclick={savePlayerSettings} disabled={settingsBusy}>
@@ -1798,6 +1798,10 @@
   .player-settings .field-label { font-size: 13px; color: #c9d1d9; }
   .player-settings .field-error { margin: 0; font-size: 12px; color: #f5a5a5; }
   .player-settings .check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  /* The card's own inputs: the row toolbars' .text-input basis would be a height in
+     this column, and .num is the list's track-number column, not an input. */
+  .player-settings .text-input { flex: 0 0 auto; width: 100%; min-width: 0; box-sizing: border-box; }
+  .player-settings input[type='number'] { width: 9rem; color-scheme: dark; }
   .player-settings p { margin: 0; }
 
   .sr-only {
